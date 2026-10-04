@@ -373,6 +373,11 @@ pub fn describe(rows: &[ProcRow]) -> String {
 #[derive(Clone, Default)]
 pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
+    /// Held across each write to the database, from reading the registry to
+    /// committing it: writers on different threads (a leader-exit record, the
+    /// startup prune, the engine) otherwise commit in a different order than
+    /// they read, and an older picture overwrites a newer one.
+    persist: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -396,8 +401,13 @@ struct RegistryInner {
     standalone_owners: HashSet<String>,
     /// Retired sessions whose owner was a standalone agent.
     retired_standalone: HashSet<ProcessSession>,
-    /// The session database, once a removal has been recorded in it.
+    /// The session database: the whole registry is written into its own
+    /// table there on every change and read back at the next start, and
+    /// pending removals are kept current in it.
     pending_store: Option<std::path::PathBuf>,
+    /// Leader-exit recordings started and not yet written, by session: a
+    /// removal reading what was recorded for a session waits for these first.
+    recording: HashMap<ProcessSession, usize>,
     /// The pending removals being kept current, by row id, with the folder
     /// each removes. Every change to the registry in or under one of these
     /// folders is written into its row at the moment it happens (see
@@ -414,6 +424,17 @@ pub struct RegistryEntry {
     pub session: ProcessSession,
     pub folder: std::path::PathBuf,
     pub standalone: bool,
+}
+
+/// One registry entry as the registry's own table keeps it across restarts.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredSession {
+    /// The agent (or `UNOWNED_PTYS`) it belongs to; `None` once retired.
+    pub owner: Option<String>,
+    pub session: ProcessSession,
+    pub folder: std::path::PathBuf,
+    pub standalone: bool,
+    pub survivors: Vec<ProcessIdentity>,
 }
 
 /// The part of the registry a removal of one folder depends on, written into
@@ -571,6 +592,8 @@ impl AgentProcessRegistry {
     /// THE write path into pending rows: every registry change in or under a
     /// folder with a pending removal lands here, at the moment it happens.
     fn sync_pending(&self, changed: &std::path::Path) {
+        let _writing = self.persist.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_all_locked();
         let changed = crate::worktree_ops::path_key(changed);
         let (store, rows) = {
             let inner = self.lock();
@@ -599,6 +622,189 @@ impl AgentProcessRegistry {
                 "could not keep a pending removal current with what runs in {}: {err:#}",
                 changed.display()
             ));
+        }
+    }
+
+    /// Write the whole registry into its table, so a later start knows what
+    /// this run started even after a clean quit. Part of the one write path.
+    fn persist_all(&self) {
+        let _writing = self.persist.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_all_locked();
+    }
+
+    /// [`Self::persist_all`] with the write lock already held.
+    fn persist_all_locked(&self) {
+        let (store, stored) = {
+            let inner = self.lock();
+            let Some(store) = inner.pending_store.clone() else {
+                return;
+            };
+            let live = inner.sessions.iter().flat_map(|(owner, list)| {
+                list.iter().map(move |entry| (Some(owner.clone()), entry))
+            });
+            let retired = inner.retired.iter().map(|entry| (None, entry));
+            let stored: Vec<StoredSession> = live
+                .chain(retired)
+                .map(|(owner, (session, folder))| StoredSession {
+                    standalone: Self::is_standalone_entry(&inner, owner.as_deref(), session),
+                    owner,
+                    session: *session,
+                    folder: folder.clone(),
+                    survivors: inner.survivors.get(session).cloned().unwrap_or_default(),
+                })
+                .collect();
+            (store, stored)
+        };
+        let written = crate::storage::SessionStore::open(&store)
+            .and_then(|store| store.replace_process_registry(&stored));
+        if let Err(err) = written {
+            crate::logger::warn(&format!(
+                "could not save the process sessions dux started: {err:#}"
+            ));
+        }
+    }
+
+    /// Attach the session database: read back what an earlier run of dux
+    /// started in this boot (a session from another boot is void, every pid
+    /// having been handed out afresh since), write every change from now on,
+    /// and drop, off the calling thread, every session nothing of which is
+    /// still running.
+    pub fn attach_store(&self, db_path: &std::path::Path) {
+        let loaded = crate::storage::SessionStore::open(db_path)
+            .and_then(|store| store.load_process_registry());
+        {
+            let mut inner = self.lock();
+            inner.pending_store = Some(db_path.to_path_buf());
+            match loaded {
+                Ok(stored) => {
+                    for entry in stored.into_iter().filter(|e| e.session.is_this_boot()) {
+                        let known = (entry.session, entry.folder.clone());
+                        match &entry.owner {
+                            Some(owner) => {
+                                let list = inner.sessions.entry(owner.clone()).or_default();
+                                if !list.contains(&known) {
+                                    list.push(known);
+                                }
+                                if entry.standalone {
+                                    inner.standalone_owners.insert(owner.clone());
+                                }
+                            }
+                            None => {
+                                inner.retired.push_back(known);
+                                if entry.standalone {
+                                    inner.retired_standalone.insert(entry.session);
+                                }
+                            }
+                        }
+                        if !entry.survivors.is_empty() {
+                            inner.survivors.insert(entry.session, entry.survivors);
+                        }
+                    }
+                }
+                Err(err) => crate::logger::warn(&format!(
+                    "could not read back the process sessions an earlier run started: {err:#}"
+                )),
+            }
+        }
+        let registry = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("process-registry-prune".to_string())
+            .spawn(move || registry.prune_gone());
+        if let Err(err) = spawned {
+            crate::logger::debug(&format!("could not prune the process registry: {err}"));
+        }
+    }
+
+    /// Drop every session nothing of which is still running, under the one
+    /// membership rule, and save the result. Blocking: a worker thread's call.
+    pub fn prune_gone(&self) {
+        self.prune_gone_with(read_process_table);
+    }
+
+    /// [`Self::prune_gone`] against the table `read` returns.
+    fn prune_gone_with(&self, read: impl FnOnce() -> Vec<ProcRow>) {
+        // Only what was registered BEFORE the table is read can be judged by
+        // it: a session registered after the read is missing from that table
+        // because it did not exist yet, not because it ended.
+        let candidates: HashSet<ProcessSession> = {
+            let inner = self.lock();
+            inner
+                .sessions
+                .values()
+                .flatten()
+                .chain(inner.retired.iter())
+                .map(|(session, _)| *session)
+                .collect()
+        };
+        let table = read();
+        let gone: HashSet<ProcessSession> = {
+            let inner = self.lock();
+            candidates
+                .into_iter()
+                .filter(|session| {
+                    let known = inner.survivors.get(session).cloned().unwrap_or_default();
+                    members(&table, &[*session], &known, std::process::id()).is_empty()
+                        && !inner.recording.contains_key(session)
+                })
+                .collect()
+        };
+        if gone.is_empty() {
+            self.persist_all();
+            return;
+        }
+        {
+            let mut inner = self.lock();
+            for list in inner.sessions.values_mut() {
+                list.retain(|(session, _)| !gone.contains(session));
+            }
+            inner.retired.retain(|(session, _)| !gone.contains(session));
+            inner.survivors.retain(|session, _| !gone.contains(session));
+            inner
+                .retired_standalone
+                .retain(|session| !gone.contains(session));
+        }
+        self.persist_all();
+    }
+
+    /// Note that a leader-exit recording for `session` has started.
+    fn begin_recording(&self, session: ProcessSession) {
+        *self.lock().recording.entry(session).or_default() += 1;
+    }
+
+    fn end_recording(&self, session: ProcessSession) {
+        let mut inner = self.lock();
+        if let Some(count) = inner.recording.get_mut(&session) {
+            *count -= 1;
+            if *count == 0 {
+                inner.recording.remove(&session);
+            }
+        }
+    }
+
+    /// Wait, bounded, until every leader-exit recording started for one of
+    /// `sessions` has been written, so a removal never reads what was recorded
+    /// for a session before the recording of its leader's exit has landed.
+    pub fn wait_for_recordings(&self, sessions: &[ProcessSession], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let pending = {
+                let inner = self.lock();
+                sessions
+                    .iter()
+                    .any(|session| inner.recording.contains_key(session))
+            };
+            if !pending {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// [`Self::wait_for_recordings`] for every recording in flight.
+    pub fn wait_for_all_recordings(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline && !self.lock().recording.is_empty() {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -700,13 +906,19 @@ impl AgentProcessRegistry {
     pub fn leader_exit_hook(&self, session: ProcessSession) -> Box<dyn FnOnce() + Send> {
         let registry = self.clone();
         Box::new(move || {
+            // Noted before the thread starts, on the thread that saw the exit,
+            // so a removal dispatched after this point waits for the record.
+            registry.begin_recording(session);
+            let worker = registry.clone();
             let spawned = std::thread::Builder::new()
                 .name("pty-leader-exit".to_string())
                 .spawn(move || {
                     let found = survivors_at_leader_exit(session);
-                    registry.record_survivors(session, &found);
+                    worker.record_survivors(session, &found);
+                    worker.end_recording(session);
                 });
             if let Err(err) = spawned {
+                registry.end_recording(session);
                 crate::logger::debug(&format!(
                     "could not record what session {} left running: {err}",
                     session.sid
@@ -884,7 +1096,13 @@ impl Drop for StartupRunGuard {
             // The agent's own forget already ran; a session registered after
             // it moves to the retired list, still findable by its folder.
             let late = inner.sessions.remove(&self.agent_id).unwrap_or_default();
+            let folders: Vec<std::path::PathBuf> =
+                late.iter().map(|(_, folder)| folder.clone()).collect();
             inner.retired.extend(late);
+            drop(inner);
+            for folder in folders {
+                self.registry.sync_pending(&folder);
+            }
         }
     }
 }
@@ -916,6 +1134,34 @@ mod tests {
         rows.iter().map(|r| r.pid).collect()
     }
 
+    /// A session registered while the prune is reading the process table is
+    /// missing from that table because it did not exist yet: it is kept.
+    #[test]
+    fn the_prune_keeps_a_session_registered_after_its_table_was_read() {
+        let registry = AgentProcessRegistry::default();
+        let folder = std::path::PathBuf::from("/tmp/dux-prune-test");
+        let old = ProcessSession {
+            sid: 4_000_001,
+            started_at_secs: 1,
+            boot: current_boot(),
+        };
+        let fresh = ProcessSession {
+            sid: 4_000_002,
+            started_at_secs: 2,
+            boot: current_boot(),
+        };
+        registry.register("a", old, &folder);
+        registry.prune_gone_with(|| {
+            registry.register("b", fresh, &folder);
+            Vec::new()
+        });
+        let left = registry.sessions_in(&folder);
+        assert_eq!(
+            left,
+            vec![fresh],
+            "the old session is gone, the fresh one kept"
+        );
+    }
     #[test]
     fn members_are_the_session_and_everything_below_it() {
         let table = vec![

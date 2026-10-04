@@ -312,6 +312,13 @@ pub enum EngineRequest {
         delete_branch: bool,
         reply: oneshot::Sender<Option<dux_core::worktree_manager::RemovalAdmission>>,
     },
+    /// What stands in the way of deleting or moving `path` and everything
+    /// under it (see `Engine::destructive_check`); the caller evaluates the
+    /// blocking part off the engine loop.
+    DestructiveCheck(
+        std::path::PathBuf,
+        oneshot::Sender<dux_core::engine::DestructiveCheck>,
+    ),
     /// Everything the pull-request reference resolver needs: the live project list
     /// and the GitHub host policy. Instant clones, because reading a project's
     /// configured address shells to git and must not run on the engine loop or the
@@ -1654,6 +1661,23 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// See [`EngineRequest::DestructiveCheck`]. `None` when the engine is gone.
+    pub async fn destructive_check(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Option<dux_core::engine::DestructiveCheck> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::DestructiveCheck(path, reply))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
     pub async fn project_worktree_inputs(
         &self,
         project_id: String,
@@ -2006,6 +2030,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // Announces a removal in the worktree registry; no spine row changes
         // until the removal finishes and the listing is asked again.
         | EngineRequest::AdmitManagerRemoval { .. }
+        | EngineRequest::DestructiveCheck(..)
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
@@ -3955,6 +3980,9 @@ fn handle_request(
                 engine.github_host_policy(),
                 engine.pr_agent_command_available(),
             ));
+        }
+        EngineRequest::DestructiveCheck(path, reply) => {
+            let _ = reply.send(engine.destructive_check(&path));
         }
         EngineRequest::AdmitManagerRemoval {
             project_id,
@@ -7433,6 +7461,11 @@ mod tests {
                 false,
             ),
             (
+                "DestructiveCheck",
+                EngineRequest::DestructiveCheck("/tmp/wt".into(), dead_reply()),
+                false,
+            ),
+            (
                 "SessionStartupLogContext",
                 EngineRequest::SessionStartupLogContext("s1".into(), dead_reply()),
                 false,
@@ -7566,7 +7599,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            44,
+            45,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

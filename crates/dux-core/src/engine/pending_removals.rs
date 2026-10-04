@@ -587,3 +587,77 @@ impl Occupant {
         }
     }
 }
+
+/// What stands in the way of a destructive file operation on a folder (a
+/// delete, a discard of untracked files, a move), from the one occupancy
+/// question plus the registry's holds and process sessions in or under it.
+/// Built on the engine thread; [`DestructiveCheck::refusal`] does the one
+/// blocking part (a look at the process table), so call that off it.
+#[derive(Clone, Debug)]
+pub struct DestructiveCheck {
+    target: std::path::PathBuf,
+    occupant: Option<String>,
+    sessions: Vec<crate::process_sessions::ProcessSession>,
+    known: Vec<crate::process_sessions::ProcessIdentity>,
+}
+
+impl DestructiveCheck {
+    /// The sentence refusing the operation, or `None` when nothing lives in
+    /// the target. Blocking: reads the process table when dux has sessions
+    /// recorded there.
+    pub fn refusal(&self, what: &str) -> Option<String> {
+        let reason = self.occupant.clone().or_else(|| {
+            if self.sessions.is_empty() {
+                return None;
+            }
+            let running = crate::process_sessions::members(
+                &crate::process_sessions::read_process_table(),
+                &self.sessions,
+                &self.known,
+                std::process::id(),
+            );
+            (!running.is_empty()).then(|| {
+                format!(
+                    "something dux started there is still running ({})",
+                    crate::process_sessions::describe(&running)
+                )
+            })
+        })?;
+        Some(format!(
+            "dux did not {what} {}: {reason}.",
+            crate::home_path::shorten_home(&self.target)
+        ))
+    }
+}
+
+impl Engine {
+    /// Everything that would make deleting or moving `target` (and all that
+    /// is under it) destroy something in use: an agent of any kind living
+    /// there (a standalone agent's folder, another agent's worktree), an
+    /// agent being created there, a terminal or tab running there, an
+    /// operation holding a path there, or a process session dux recorded
+    /// there. The one rule every destructive file operation asks.
+    pub fn destructive_check(&self, target: &std::path::Path) -> DestructiveCheck {
+        let occupant = self
+            .folder_occupant(target, None, StoppingProcesses::Occupy)
+            .map(|occupant| occupant.reason())
+            .or_else(|| {
+                let holders = self.removal_coordination.ops.holders(target);
+                (!holders.is_empty()).then(|| {
+                    format!(
+                        "{} is running in it",
+                        crate::worktree_ops::describe_holders(&holders)
+                    )
+                })
+            });
+        let mut sessions = self.process_registry.sessions_in(target);
+        sessions.extend(self.process_registry.standalone_sessions_in(target));
+        let known = self.process_registry.survivors_of(&sessions);
+        DestructiveCheck {
+            target: target.to_path_buf(),
+            occupant,
+            sessions,
+            known,
+        }
+    }
+}

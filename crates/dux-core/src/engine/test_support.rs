@@ -22,7 +22,15 @@ use crate::storage::SessionStore;
 /// engine's workers may still be writing into it when the test ends.
 pub(crate) fn test_engine() -> (Engine, ScratchDir) {
     let tmp = ScratchDir::new();
-    let root = tmp.path().to_path_buf();
+    let engine = test_engine_at(tmp.path());
+    (engine, tmp)
+}
+
+/// An engine over the state under `root`, as [`test_engine`] builds one: a
+/// second call on the same root, once the first engine is dropped, is the
+/// next start of dux on the same config directory.
+pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
+    let root = root.to_path_buf();
     let paths = DuxPaths {
         config_path: root.join("config.toml"),
         sessions_db_path: root.join("sessions.sqlite3"),
@@ -134,7 +142,11 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         created_session_by_op: HashMap::new(),
         removal_coordination: Default::default(),
     };
-    (engine, tmp)
+    // As the real start does: the process registry saved in this database.
+    engine
+        .process_registry
+        .attach_store(&engine.paths.sessions_db_path);
+    engine
 }
 
 /// A Support-tab record (`agent_tabs` entry) owned by `session_id`.

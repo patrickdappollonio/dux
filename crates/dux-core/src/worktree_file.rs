@@ -669,9 +669,22 @@ fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// The DESTINATION keeps the following resolver, because a destination reached
 /// through a symlinked directory really would write outside the tree.
 pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
+    rename_entry_guarded(worktree, from_rel, to_rel, |_| Ok(()))
+}
+
+/// [`rename_entry`], asking `guard` once the move is otherwise valid and
+/// before anything moves. `guard` is handed the source entry's own metadata
+/// (never its symlink target's): moving a link moves nothing it points at.
+pub fn rename_entry_guarded(
+    worktree: &Path,
+    from_rel: &str,
+    to_rel: &str,
+    guard: impl FnOnce(&std::fs::Metadata) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
-    src.symlink_metadata()
+    let src_meta = src
+        .symlink_metadata()
         .map_err(|e| anyhow::anyhow!("rename source does not exist: {from_rel}: {e}"))?;
     check_entry_parent_contained(worktree, &src, from_rel)?;
     let dst_parent = dst.parent().unwrap_or(worktree);
@@ -683,6 +696,7 @@ pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Re
     if resolves_into_git_dir(worktree, dst_parent) {
         anyhow::bail!("refusing to rename into the git directory: {to_rel}");
     }
+    guard(&src_meta)?;
     rename_no_replace(&src, &dst).map_err(|e| match e {
         RenameNoReplaceError::DestinationExists => {
             anyhow::anyhow!("refusing to rename, destination already exists: {to_rel}")
@@ -850,6 +864,17 @@ fn check_entry_parent_contained(
 /// target, so an escaping-target symlink is a legitimate delete target: only
 /// the literal path and its PARENT's containment matter here.
 pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    delete_entry_guarded(worktree, rel_path, |_| Ok(()))
+}
+
+/// [`delete_entry`], asking `guard` once the delete is otherwise valid and
+/// before anything is removed. `guard` is handed the entry's own metadata
+/// (never its symlink target's): deleting a link removes nothing it points at.
+pub fn delete_entry_guarded(
+    worktree: &Path,
+    rel_path: &str,
+    guard: impl FnOnce(&std::fs::Metadata) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let path = entry_literal_path(worktree, rel_path)?;
     // No-follow stat on the literal path: existence and kind of the entry
     // ITSELF, never its symlink target.
@@ -865,6 +890,7 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     {
         anyhow::bail!("refusing to delete the worktree root");
     }
+    guard(&meta)?;
     if meta.file_type().is_symlink() || meta.is_file() {
         std::fs::remove_file(&path)
             .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;

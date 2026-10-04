@@ -26,6 +26,8 @@ mod races_review3_tests;
 #[cfg(test)]
 mod races_review4_tests;
 #[cfg(test)]
+mod races_review5_tests;
+#[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -61,6 +63,7 @@ pub use lifecycle::{
     detach_confirm_prose, detach_final, detach_not_running_message, detach_status_key,
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
+pub use pending_removals::DestructiveCheck;
 pub use pr_sync_control::PrSyncControl;
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,

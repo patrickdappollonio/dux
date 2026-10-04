@@ -296,6 +296,10 @@ impl PartialEq for RemovalProcesses {
 
 impl Eq for RemovalProcesses {}
 
+/// How long a quit waits for the record of what its stopped children left
+/// running (one process-table read per child, normally milliseconds).
+const SHUTDOWN_RECORD_WAIT: Duration = Duration::from_secs(3);
+
 /// Who a terminating PTY belonged to, recorded the moment it starts
 /// terminating. Every later question about it (does a delete wait for it, does
 /// a relaunch of the same provider) reads this, never the live tab table: a
@@ -1858,6 +1862,10 @@ impl Engine {
         // folder git can see. A managed working copy that went away while dux
         // was not running is noticed by the same sweep.
         self.probe_agent_directories();
+        // What earlier runs started and may still be running, kept across a
+        // restart so a removal can still end it (or keep a folder for it).
+        self.process_registry
+            .attach_store(&self.paths.sessions_db_path);
         // A worktree removal the last run accepted and never finished.
         self.resume_pending_worktree_removals();
     }
@@ -1973,6 +1981,9 @@ impl Engine {
         self.wait_for_shutdown_ptys(start, grace, abort, &mut on_wait);
         let tally = self.force_shutdown_survivors();
         let report = totals.report(tally, start.elapsed());
+        // After the report's clock stops: the report times how long the
+        // children took to stop, and this is bookkeeping about what they left.
+        self.record_shutdown_survivors();
         crate::logger::info(&format_shutdown_result(&report));
         self.detach_shutdown_sessions();
         // A deleted agent's worktree removal waits for the agent's processes,
@@ -2039,6 +2050,28 @@ impl Engine {
             agents_exited,
             terminals_exited,
         }
+    }
+
+    /// Record, before the quit finishes, what every stopped child left running
+    /// in its session (a job-controlled server, say). The record is what the
+    /// next start reads to know those processes are dux's; left to the
+    /// clients' drop it could be lost, since a quitting process need not drop
+    /// them. Bounded, so a wedged process table cannot hold the quit.
+    fn record_shutdown_survivors(&mut self) {
+        let clients = self.providers.values_mut().chain(
+            self.companion_terminals
+                .values_mut()
+                .map(|terminal| &mut terminal.client),
+        );
+        for client in clients {
+            // A child that outlived even the SIGKILL wait is not gone, and its
+            // session's members are still found through it.
+            if pty_has_exited(client) {
+                client.fire_leader_exit_hook();
+            }
+        }
+        self.process_registry
+            .wait_for_all_recordings(SHUTDOWN_RECORD_WAIT);
     }
 
     /// Resolve live tab IDs so sessions owned only by an extra tab are detached.

@@ -289,10 +289,11 @@ pub struct AdmittedRemoval {
     pub(crate) ops: WorktreeOps,
     pub(crate) project: Project,
     pub(crate) paths: DuxPaths,
-    /// The sessions as they were when the removal was admitted. Taken at the
-    /// same moment the removal was announced, after which no agent can be
-    /// created on this folder, so it cannot go stale in the direction that
-    /// matters.
+    /// The agents as they were when the removal was admitted. Admission
+    /// claims nothing, so an agent can still be created or attached on this
+    /// folder between admission and the claim: the re-check under the claim
+    /// therefore reads the agents again from the session store (see
+    /// [`live_sessions`]) and refuses on either answer.
     pub(crate) sessions: Vec<AgentSession>,
     pub(crate) requested: PathBuf,
     pub(crate) delete_branch: bool,
@@ -301,6 +302,28 @@ pub struct AdmittedRemoval {
     /// before git runs, and the registry for the last look after the wait.
     pub(crate) processes: crate::engine::RemovalProcesses,
     pub(crate) registry: crate::process_sessions::AgentProcessRegistry,
+}
+
+/// The agents as they are now: every row in the session store, which the
+/// engine writes on its own thread before an agent appears anywhere else and
+/// before its create releases the folder it was made in, plus the ones the
+/// removal was admitted against. Reading the store is the hop back to the
+/// engine's live state that a worker can make without the engine's thread.
+/// A store that cannot be read refuses the removal: deleting a folder on a
+/// guess about who lives in it is the direction dux cannot undo.
+fn live_sessions(paths: &DuxPaths, admitted: &[AgentSession]) -> Result<Vec<AgentSession>, String> {
+    let stored = crate::storage::SessionStore::open(&paths.sessions_db_path)
+        .and_then(|store| store.load_sessions())
+        .map_err(|e| {
+            format!("dux could not read its list of agents to confirm nothing lives in the folder ({e:#}); nothing was removed")
+        })?;
+    let mut live = admitted.to_vec();
+    for session in stored {
+        if !live.iter().any(|known| known.id == session.id) {
+            live.push(session);
+        }
+    }
+    Ok(live)
 }
 
 impl AdmittedRemoval {
@@ -355,18 +378,22 @@ impl AdmittedRemoval {
             crate::worktree_ops::RemovalClaim::Lead(lease) => lease,
             crate::worktree_ops::RemovalClaim::Join(_) => return Ok(RemovalOutcome::BeingRemoved),
         };
-        // Re-validated under the claim: the listing and any agent being
-        // created there, now that nothing new can start in the folder.
-        let reclassified = git::list_worktrees(Path::new(&project.path))
-            .map_err(|e| format!("{e:#}"))
-            .map(|worktrees| {
-                resolve_removal(
-                    crate::project_browser::classify_project_worktrees(
-                        &project, &paths, &sessions, worktrees,
-                    ),
-                    &requested,
-                )
-            });
+        // Re-validated under the claim, now that nothing new can start in the
+        // folder: the listing, the agents as they are NOW (an agent created
+        // or attached after admission has its row written before its create
+        // lets go of the folder), and any agent still being created there.
+        let reclassified = live_sessions(&paths, &sessions).and_then(|live| {
+            git::list_worktrees(Path::new(&project.path))
+                .map_err(|e| format!("{e:#}"))
+                .map(|worktrees| {
+                    resolve_removal(
+                        crate::project_browser::classify_project_worktrees(
+                            &project, &paths, &live, worktrees,
+                        ),
+                        &requested,
+                    )
+                })
+        });
         let refused = refusal(reclassified).or_else(|| {
             lease
                 .holders()

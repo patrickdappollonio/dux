@@ -239,11 +239,20 @@ impl Engine {
     /// Record an agent create ending, however it ended: release the path the
     /// create held, and wake a project deletion that was waiting for it.
     pub(crate) fn note_create_finished(&mut self, op_id: &str) {
-        self.removal_coordination
-            .ops
-            .release_owner(&HoldOwner::CreateOp(op_id.to_string()));
+        drop(self.note_create_finished_holding(op_id));
+    }
+
+    /// [`Engine::note_create_finished`], keeping the create's hold on its
+    /// folder until the returned guard drops. A create that lands writes its
+    /// agent's row AFTER this: a removal re-checking the folder under its
+    /// claim must find either the hold or the row, never neither.
+    pub(crate) fn note_create_finished_holding(&mut self, op_id: &str) -> CreateHoldRelease {
+        let release = CreateHoldRelease {
+            ops: self.removal_coordination.ops.clone(),
+            owner: HoldOwner::CreateOp(op_id.to_string()),
+        };
         let Some(Some(project_id)) = self.removal_coordination.creating.remove(op_id) else {
-            return;
+            return release;
         };
         if self
             .removal_coordination
@@ -255,6 +264,7 @@ impl Engine {
                 .worker_tx
                 .send(WorkerEvent::ProjectDeletionContinue { project_id });
         }
+        release
     }
 
     /// Whether an agent is being created in this project right now.
@@ -737,6 +747,20 @@ fn could_be_managed_worktree(
     crate::worktree_ops::folder_contains(&managed_root, requested)
         && crate::worktree_ops::path_key(requested) != crate::worktree_ops::path_key(&managed_root)
         && !crate::worktree_ops::folder_contains(requested, Path::new(&project.path))
+}
+
+/// Releases a create's hold on its folder when dropped; see
+/// [`Engine::note_create_finished_holding`].
+#[must_use = "dropping the guard releases the create's hold at once"]
+pub(crate) struct CreateHoldRelease {
+    ops: crate::worktree_ops::WorktreeOps,
+    owner: HoldOwner,
+}
+
+impl Drop for CreateHoldRelease {
+    fn drop(&mut self) {
+        self.ops.release_owner(&self.owner);
+    }
 }
 
 #[cfg(test)]

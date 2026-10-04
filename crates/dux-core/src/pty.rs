@@ -1239,6 +1239,21 @@ impl PtyClient {
         }
     }
 
+    /// Run the leader-exit hook now, once: the child is gone and what it left
+    /// running in its session is recorded without waiting for this client to
+    /// drop. A quit calls it after every child has stopped, because the
+    /// clients themselves may never drop before the process exits.
+    pub fn fire_leader_exit_hook(&self) {
+        if let Some(hook) = self
+            .leader_exit_hook
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            hook();
+        }
+    }
+
     fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: ReaderLoopState) {
         let mut buf = [0u8; 4096];
         let mut scanner = crate::attention::AttentionScanner::new();
@@ -2140,14 +2155,7 @@ impl Drop for PtyClient {
             }
         }
         // The child is dead: record what it left running in its session.
-        if let Some(hook) = self
-            .leader_exit_hook
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
-        {
-            hook();
-        }
+        self.fire_leader_exit_hook();
     }
 }
 

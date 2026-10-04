@@ -710,6 +710,14 @@ impl Engine {
                 confirmed,
             } => {
                 let _hold = self.hold_for_git_change(&worktree_path, "discard the change")?;
+                // A folder (or a nested repository) is removed whole: refused
+                // when anything lives in it, as every destructive operation is.
+                if !matches!(confirmed, crate::git::ConfirmedEntry::File) {
+                    let target = worktree_path.join(&path);
+                    if let Some(refused) = self.destructive_check(&target).refusal("delete") {
+                        anyhow::bail!(refused);
+                    }
+                }
                 // The discard refuses anything that is no longer what was
                 // confirmed, so a success is the kind the user confirmed; the
                 // number of files is what actually went, which may be fewer.

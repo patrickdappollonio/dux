@@ -968,7 +968,10 @@ pub(crate) fn end_agent_processes_before_removal(
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     // What dux saw still running in each session when it saw its leader exit:
-    // with the leader gone, the only evidence a member is dux's.
+    // with the leader gone, the only evidence a member is dux's. A recording
+    // of a leader's exit that started before this removal is waited for, so it
+    // is never read before it has been written.
+    registry.wait_for_recordings(&processes.sessions, REMOVAL_SNAPSHOT_WAIT);
     snapshot.extend(registry.survivors_of(&processes.sessions));
     match crate::process_sessions::purge(
         &mut crate::process_sessions::SystemProcesses,
@@ -1386,7 +1389,10 @@ impl Engine {
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
             self.clear_in_flight(&InFlightKey::CreateAgent);
-            self.note_create_finished(&status_op_id);
+            // The create keeps its folder held until this function returns,
+            // after the agent's row is written below: a removal re-checking
+            // the folder finds the hold or the row, never neither.
+            let _create_hold = self.note_create_finished_holding(&status_op_id);
             // The defence behind the project deletion's wait: a create that
             // outlasted it lands for a project that no longer exists. Nothing is
             // committed; the process is stopped and what this launch made is
@@ -2477,6 +2483,7 @@ impl Engine {
         processes.sessions.sort_by_key(|session| session.sid);
         processes.sessions.dedup();
         let registry = self.process_registry.clone();
+        let unwatch = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
         let handle = std::thread::spawn(move || {
             let result = perform_deferred_removal(
@@ -2494,8 +2501,9 @@ impl Engine {
             );
             // Finished one way or the other: a failure has told the user what
             // is left, and running it again at the next start would only say
-            // it twice.
+            // it twice. Nothing keeps the row current any more, on any exit.
             forget_pending_removal_in(&db_path, &session_id);
+            unwatch.unwatch_pending(&session_id);
             let _ =
                 tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted { session_id, result });
         });

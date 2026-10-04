@@ -755,6 +755,12 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         let path = folder.path.clone();
+        // A delete removes everything under the folder: what lives there (a
+        // standalone agent, another agent's worktree, something dux started)
+        // is asked about on this thread, and the one blocking part of the
+        // answer is read on the worker, before anything is deleted.
+        let destructive =
+            (op == FolderOp::Delete).then(|| self.engine.destructive_check(&worktree.join(&path)));
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
         // A folder carries the number of files the dialog said would go,
@@ -774,23 +780,29 @@ impl App {
             .name("dux-changes-folder-op".into())
             .spawn(move || {
                 let _hold = hold;
-                let outcome =
-                    match op {
-                        FolderOp::Stage => {
-                            git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
-                                report,
-                                deleted_files: 0,
-                            })
-                        }
-                        FolderOp::Unstage => {
-                            git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
-                        }
-                        FolderOp::Delete => delete_untracked_folder(&worktree, &path, confirmed)
-                            .map(|deleted_files| FolderOpDone {
+                let outcome = match op {
+                    FolderOp::Stage => {
+                        git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
+                            report,
+                            deleted_files: 0,
+                        })
+                    }
+                    FolderOp::Unstage => {
+                        git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
+                    }
+                    FolderOp::Delete => match destructive
+                        .as_ref()
+                        .and_then(|check| check.refusal("delete"))
+                    {
+                        Some(refused) => Err(anyhow::anyhow!(refused)),
+                        None => delete_untracked_folder(&worktree, &path, confirmed).map(
+                            |deleted_files| FolderOpDone {
                                 deleted_files,
                                 ..FolderOpDone::default()
-                            }),
-                    };
+                            },
+                        ),
+                    },
+                };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
         self.changes_tree.pending_ops.push(PendingFolderOp {

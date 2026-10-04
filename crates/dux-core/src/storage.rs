@@ -521,6 +521,17 @@ impl SessionStore {
             "process_registry",
             "text not null default ''",
         )?;
+        // The process sessions dux started, kept across restarts (see
+        // `crate::process_sessions::AgentProcessRegistry::attach_store`): one
+        // row holding the whole registry, replaced atomically on every change.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists process_registry (
+                id integer primary key check (id = 1),
+                body text not null
+            );
+            "#,
+        )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
@@ -808,20 +819,75 @@ impl SessionStore {
         session_id: &str,
         snapshot: &[crate::process_sessions::ProcessIdentity],
     ) -> Result<()> {
-        // A union with what is already recorded: survivors written into the
-        // row before this snapshot landed must not be lost.
-        for mut row in self.load_pending_worktree_removals()? {
-            if row.session_id != session_id {
-                continue;
-            }
-            for identity in snapshot {
-                if !row.process_snapshot.contains(identity) {
-                    row.process_snapshot.push(*identity);
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            // A union with what is already recorded: survivors written into the
+            // row before this snapshot landed must not be lost.
+            for mut row in self.load_pending_worktree_removals()? {
+                if row.session_id != session_id {
+                    continue;
                 }
+                for identity in snapshot {
+                    if !row.process_snapshot.contains(identity) {
+                        row.process_snapshot.push(*identity);
+                    }
+                }
+                self.update_pending_removal_evidence(&row)?;
             }
-            self.update_pending_removal_evidence(&row)?;
-        }
+            Ok(())
+        })
+    }
+
+    /// Replace the saved process registry with `stored`.
+    pub fn replace_process_registry(
+        &self,
+        stored: &[crate::process_sessions::StoredSession],
+    ) -> Result<()> {
+        let body =
+            serde_json::to_string(stored).context("failed to encode the process registry")?;
+        self.conn
+            .execute(
+                "insert into process_registry (id, body) values (1, ?1) \
+                 on conflict(id) do update set body = excluded.body",
+                params![body],
+            )
+            .context("failed to save the process registry")?;
         Ok(())
+    }
+
+    /// The saved process registry; empty when none was saved or it cannot
+    /// be read.
+    pub fn load_process_registry(&self) -> Result<Vec<crate::process_sessions::StoredSession>> {
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "select body from process_registry where id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(body
+            .and_then(|body| serde_json::from_str(&body).ok())
+            .unwrap_or_default())
+    }
+
+    /// Run `f` inside one `BEGIN IMMEDIATE` transaction: a read-modify-write
+    /// of a pending row that another connection (the snapshot thread, a
+    /// leader-exit hook) may be updating at the same moment.
+    fn immediate<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     /// Merge `snapshot` into the registry slice of pending removal `session_id`.
@@ -830,52 +896,57 @@ impl SessionStore {
         session_id: &str,
         snapshot: &crate::process_sessions::RegistrySnapshot,
     ) -> Result<()> {
-        for row in self.load_pending_worktree_removals()? {
-            if row.session_id != session_id {
-                continue;
-            }
-            let mut merged = row.process_registry.clone();
-            merged.merge(snapshot);
-            // The sessions to end follow the slice: every session in it that
-            // is not a standalone agent's, and never one that is.
-            let mut row = row;
-            for entry in &merged.entries {
-                if entry.standalone {
-                    row.process_sessions
-                        .retain(|session| *session != entry.session);
-                } else if !row.process_sessions.contains(&entry.session) {
-                    row.process_sessions.push(entry.session);
-                }
-            }
-            // And so does what was recorded running in them.
-            for (session, identities) in &merged.survivors {
-                let standalone = merged
-                    .entries
-                    .iter()
-                    .any(|entry| entry.session == *session && entry.standalone);
-                if standalone {
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            for row in self.load_pending_worktree_removals()? {
+                if row.session_id != session_id {
                     continue;
                 }
-                for identity in identities {
-                    if !row.process_snapshot.contains(identity) {
-                        row.process_snapshot.push(*identity);
+                let mut merged = row.process_registry.clone();
+                merged.merge(snapshot);
+                // The sessions to end follow the slice: every session in it that
+                // is not a standalone agent's, and never one that is.
+                let mut row = row;
+                for entry in &merged.entries {
+                    if entry.standalone {
+                        row.process_sessions
+                            .retain(|session| *session != entry.session);
+                    } else if !row.process_sessions.contains(&entry.session) {
+                        row.process_sessions.push(entry.session);
                     }
                 }
-            }
-            self.update_pending_removal_evidence(&row)?;
-            self.conn
-                .execute(
-                    "update pending_worktree_removals set process_registry = ?2 \
+                // And so does what was recorded running in them.
+                for (session, identities) in &merged.survivors {
+                    let standalone = merged
+                        .entries
+                        .iter()
+                        .any(|entry| entry.session == *session && entry.standalone);
+                    if standalone {
+                        continue;
+                    }
+                    for identity in identities {
+                        if !row.process_snapshot.contains(identity) {
+                            row.process_snapshot.push(*identity);
+                        }
+                    }
+                }
+                self.update_pending_removal_evidence(&row)?;
+                self.conn
+                    .execute(
+                        "update pending_worktree_removals set process_registry = ?2 \
                      where session_id = ?1",
-                    params![
-                        session_id,
-                        serde_json::to_string(&merged)
-                            .context("failed to encode a pending removal's processes")?
-                    ],
-                )
-                .context("failed to keep a pending removal current")?;
-        }
-        Ok(())
+                        params![
+                            session_id,
+                            serde_json::to_string(&merged)
+                                .context("failed to encode a pending removal's processes")?
+                        ],
+                    )
+                    .context("failed to keep a pending removal current")?;
+            }
+            Ok(())
+        })
     }
 
     fn update_pending_removal_evidence(&self, row: &PendingWorktreeRemoval) -> Result<()> {
@@ -912,16 +983,21 @@ impl SessionStore {
         old: &str,
         new: &str,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "update pending_worktree_removals set \
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            self.conn
+                .execute(
+                    "update pending_worktree_removals set \
                  branch_name = case when branch_name = ?2 then ?3 else branch_name end, \
                  initial_branch = case when initial_branch = ?2 then ?3 else initial_branch end \
                  where session_id = ?1",
-                params![session_id, old, new],
-            )
-            .context("failed to follow a branch rename into a pending removal")?;
-        Ok(())
+                    params![session_id, old, new],
+                )
+                .context("failed to follow a branch rename into a pending removal")?;
+            Ok(())
+        })
     }
 
     /// Forget a pending worktree removal, finished one way or the other.

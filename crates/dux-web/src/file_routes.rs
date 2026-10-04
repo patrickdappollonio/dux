@@ -919,6 +919,18 @@ async fn rename_entry<R: EditorRoot>(
     let wt = worktree.clone();
     let from = op.from;
     let to = op.to;
+    // Removing or moving a folder removes or moves everything under it: an
+    // agent's worktree inside a terminal's root, a standalone agent's
+    // folder, something dux started there. The one occupancy question is
+    // asked of every end, and the blocking half of its answer is read below.
+    // It is asked BEFORE this operation's own hold is taken, because the
+    // hold sits on the very paths it asks about and would answer itself.
+    let checks = match destructive_checks(&state, root.path(), &[&from, &to]).await {
+        Some(checks) => checks,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+        }
+    };
     let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
@@ -931,11 +943,16 @@ async fn rename_entry<R: EditorRoot>(
     };
     match tokio::task::spawn_blocking(move || {
         let _hold = hold;
-        dux_core::worktree_file::rename_entry(&wt, &from, &to)
+        dux_core::worktree_file::rename_entry_guarded(&wt, &from, &to, |entry| {
+            destructive_guard(entry, &checks, "move")
+        })
     })
     .await
     {
         Ok(Ok(())) => {}
+        Ok(Err(e)) if e.downcast_ref::<DestructiveRefusal>().is_some() => {
+            return (StatusCode::CONFLICT, e.to_string()).into_response();
+        }
         Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => {
             return (
@@ -959,6 +976,18 @@ async fn delete_entry<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
+    // Removing or moving a folder removes or moves everything under it: an
+    // agent's worktree inside a terminal's root, a standalone agent's
+    // folder, something dux started there. The one occupancy question is
+    // asked of every end, and the blocking half of its answer is read below.
+    // It is asked BEFORE this operation's own hold is taken, because the
+    // hold sits on the very paths it asks about and would answer itself.
+    let checks = match destructive_checks(&state, root.path(), &[&path]).await {
+        Some(checks) => checks,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+        }
+    };
     let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
@@ -971,11 +1000,16 @@ async fn delete_entry<R: EditorRoot>(
     };
     match tokio::task::spawn_blocking(move || {
         let _hold = hold;
-        dux_core::worktree_file::delete_entry(&wt, &path)
+        dux_core::worktree_file::delete_entry_guarded(&wt, &path, |entry| {
+            destructive_guard(entry, &checks, "delete")
+        })
     })
     .await
     {
         Ok(Ok(())) => {}
+        Ok(Err(e)) if e.downcast_ref::<DestructiveRefusal>().is_some() => {
+            return (StatusCode::CONFLICT, e.to_string()).into_response();
+        }
         Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => {
             return (
@@ -987,6 +1021,49 @@ async fn delete_entry<R: EditorRoot>(
     }
     refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
+}
+
+/// A destructive editor operation refused because something lives where it
+/// would delete or move.
+#[derive(Debug)]
+struct DestructiveRefusal(String);
+
+impl std::fmt::Display for DestructiveRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DestructiveRefusal {}
+
+/// Refuse a delete or move of an entry something lives in. A symbolic link
+/// is never asked about: removing or moving one leaves what it points at
+/// where it is.
+fn destructive_guard(
+    entry: &std::fs::Metadata,
+    checks: &[dux_core::engine::DestructiveCheck],
+    what: &str,
+) -> anyhow::Result<()> {
+    if entry.file_type().is_symlink() {
+        return Ok(());
+    }
+    match checks.iter().find_map(|check| check.refusal(what)) {
+        Some(refused) => Err(anyhow::Error::new(DestructiveRefusal(refused))),
+        None => Ok(()),
+    }
+}
+
+/// The engine's destructive check for each of `targets`, relative to `root`.
+async fn destructive_checks(
+    state: &AppState,
+    root: &std::path::Path,
+    targets: &[&String],
+) -> Option<Vec<dux_core::engine::DestructiveCheck>> {
+    let mut checks = Vec::with_capacity(targets.len());
+    for target in targets {
+        checks.push(state.engine.destructive_check(root.join(target)).await?);
+    }
+    Some(checks)
 }
 
 /// Open a file in a locally-installed GUI editor, reusing the TUI's detection and
