@@ -308,10 +308,12 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
-            .send()
-            .await
-            .unwrap_or_else(|err| panic!("{method} {path} did not get a response: {err}"));
+        let response = request.send().await.unwrap_or_else(|err| {
+            panic!(
+                "{method} {path} did not get a response: {}",
+                error_chain(&err)
+            )
+        });
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -400,4 +402,17 @@ impl Client {
         );
         response.json()
     }
+}
+
+/// An error and every cause beneath it, so a failed request says WHY it got
+/// no response (refused, reset, a TLS alert) rather than only that it did not.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }

@@ -10,12 +10,14 @@ use dux_journeys::browser::{Browser, WEBDRIVER_PORT};
 use dux_journeys::container::published_bindings;
 use dux_journeys::image::JourneyNetwork;
 use dux_journeys::sidecars::{
-    PROXY_PORT, SERVE_PORT, Sidecar, serve_and_proxy_caddyfile, serve_client,
+    PROXY_PORT, SERVE_PORT, Sidecar, held_issuance_lock, serve_and_proxy_caddyfile,
+    serve_and_proxy_sites, serve_client,
 };
 use dux_journeys::util::suffix;
 use dux_journeys::ws::connect_ok;
 use dux_journeys::{
-    Client, DUX_PORT, Dux, DuxOptions, TAILNET_IP, TAILNET_PEER_IP, eventually, journey,
+    Client, DUX_PORT, Dux, DuxOptions, TAILNET_IP, TAILNET_NAME, TAILNET_PEER_IP, eventually,
+    journey,
 };
 
 /// Whether `address` is in Tailscale's CGNAT range (100.64.0.0/10).
@@ -257,12 +259,8 @@ async fn smoke_nginx_and_caddy_carry_requests_to_dux() {
         .await;
         dux.client_on(4100).await.wait_answering().await;
         let _nginx = Sidecar::nginx(&dux, &nginx_conf(), &[8080]).await;
-        let caddy = Sidecar::caddy(
-            &dux,
-            &serve_and_proxy_caddyfile(),
-            &[SERVE_PORT, PROXY_PORT],
-        )
-        .await;
+        let caddy =
+            Sidecar::caddy(&dux, &serve_and_proxy_caddyfile(), &serve_and_proxy_sites()).await;
         let root = caddy.caddy_root().await;
 
         let plain = dux.client_on(8080).await.get("/healthz").await;
@@ -285,6 +283,46 @@ async fn smoke_nginx_and_caddy_carry_requests_to_dux() {
             .get("/healthz")
             .await;
         assert_eq!((tls.status, tls.body.trim()), (200, "ok"));
+    })
+    .await;
+}
+
+/// Situation: dux on loopback and Caddy beside it, with Caddy's storage
+/// holding a fresh lock on issuing the serve stand-in's certificate, so Caddy
+/// listens, and has its authority's root, seconds before it can complete a
+/// handshake for that name. A loaded machine opens the same window by
+/// accident, which is how journey 08 once got "no response" from Caddy.
+///
+/// Task: a journey must be able to use a Caddy sidecar the moment the harness
+/// hands it over.
+///
+/// Action: start Caddy, then send one request through the serve stand-in.
+///
+/// Result: the very first request gets an answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_caddy_is_ready_only_once_its_sites_handshake() {
+    journey("smoke-caddy-ready", Duration::from_secs(240), async {
+        let dux = Dux::start(
+            DuxOptions::local()
+                .with_tailnet(4100)
+                .with_published(SERVE_PORT)
+                .with_published(PROXY_PORT),
+        )
+        .await;
+        dux.client_on(4100).await.wait_answering().await;
+        let caddy = Sidecar::caddy_with(
+            &dux,
+            &serve_and_proxy_caddyfile(),
+            &serve_and_proxy_sites(),
+            &[held_issuance_lock(TAILNET_NAME)],
+        )
+        .await;
+        let root = caddy.caddy_root().await;
+        let first = serve_client(&dux, &root).await.get("/healthz").await;
+        // Any answer at all: a handshake in the window gets none (the client
+        // panics with the TLS alert), and whether dux admits the tailnet name
+        // yet is another journey's question.
+        assert!(first.status >= 100, "{}", first.describe());
     })
     .await;
 }
