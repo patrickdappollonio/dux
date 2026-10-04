@@ -2737,26 +2737,50 @@ pub struct Config {
     pub server: ServerConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
-    /// The exact text of the file this config was read from, when it was read
-    /// from one. Never serialized. The config writer's three-way saves patch
-    /// against this text, so the base they compare memory with is the file
-    /// as it was at the moment this config was read, never a later re-read.
+    /// The exact text of the file this config was read from, or that dux
+    /// wrote from it, when there is one. Never serialized. The config
+    /// writer's three-way saves start from it: a config READ from the text is
+    /// re-parsed from it as written, while for a config dux WROTE the base is
+    /// that config itself, never a re-parse of the text (which, through the
+    /// three-way patch, can carry another writer's change dux never had).
     #[serde(skip)]
     pub source_text: SourceText,
 }
 
-/// The text a [`Config`] was read from (see [`Config::source_text`]). It
-/// never makes two configs differ: equality is about settings.
+/// The text behind a [`Config`] (see [`Config::source_text`]), and whether
+/// the config was read from it or dux wrote it. It never makes two configs
+/// differ: equality is about settings.
 #[derive(Clone, Default)]
-pub struct SourceText(pub Option<std::sync::Arc<str>>);
+pub struct SourceText {
+    text: Option<std::sync::Arc<str>>,
+    written: bool,
+}
 
 impl SourceText {
+    /// The text this config was read from.
     pub fn of(text: &str) -> Self {
-        Self(Some(std::sync::Arc::from(text)))
+        Self {
+            text: Some(std::sync::Arc::from(text)),
+            written: false,
+        }
+    }
+
+    /// The text dux wrote from this config (and so the file after it).
+    pub fn written(text: &str) -> Self {
+        Self {
+            text: Some(std::sync::Arc::from(text)),
+            written: true,
+        }
     }
 
     pub fn as_str(&self) -> Option<&str> {
-        self.0.as_deref()
+        self.text.as_deref()
+    }
+
+    /// Whether dux wrote the text from this config, rather than read the
+    /// config from it.
+    pub fn is_written(&self) -> bool {
+        self.written
     }
 }
 
@@ -2768,7 +2792,7 @@ impl PartialEq for SourceText {
 
 impl std::fmt::Debug for SourceText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_some() {
+        f.write_str(if self.text.is_some() {
             "SourceText(..)"
         } else {
             "SourceText(None)"
@@ -3104,8 +3128,24 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
     }
     toml::from_str::<toml::Table>(raw)
         .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
-    let file: File = toml::from_str(raw)
-        .map_err(|e| ConfigLoadProblem::AuthInvalid(describe_toml_error(raw, &e)))?;
+    let file: File = toml::from_str(raw).map_err(|e| {
+        // A rule the section breaks as a whole (checked after every field
+        // parsed) has no position of its own; the parser then points at the
+        // start of the file. Point at the section's header instead.
+        if e.span().is_none_or(|span| span.start == 0) {
+            let kind = problem_kind(e.message());
+            let header = raw.lines().position(|line| {
+                let line = line.trim();
+                line.starts_with("[server.auth]")
+                    || (line.starts_with("[server") && line.ends_with("auth]"))
+            });
+            return ConfigLoadProblem::AuthInvalid(match header {
+                Some(index) => format!("line {} (the [server.auth] header): {kind}", index + 1),
+                None => format!("in [server.auth]: {kind}"),
+            });
+        }
+        ConfigLoadProblem::AuthInvalid(describe_toml_error(raw, &e))
+    })?;
     Ok(file
         .server
         .and_then(|server| server.auth)
@@ -4664,6 +4704,42 @@ mod tests {
     /// with no `=`, the continuation of a multi-line string, an element of a
     /// multi-line array, and a type error that would repeat the value. They
     /// say the line, the column, the key where known, and what is wrong.
+    /// A rule `[server.auth]` breaks as a whole (a value out of range) points
+    /// at the section's own header line, not at a made-up line 1.
+    #[test]
+    fn an_auth_rule_error_points_at_the_section_header() {
+        let raw = "[ui]\nleft_width_pct = 20\n\n[server.auth]\nminimum_password_score = 9\n";
+        let err = recover_config(raw).expect_err("refused");
+        let text = err.reason().to_string();
+        assert!(text.contains("line 4"), "{text}");
+        assert!(!text.contains("line 1,"), "{text}");
+        // The full-config readers (the terminal UI's load, the raw editor)
+        // must point at it too.
+        let text = validate_config_str(raw).unwrap_err();
+        assert!(text.contains("line 4"), "{text}");
+        assert!(!text.contains("line 1,"), "{text}");
+        // And a section written inline under [server].
+        let inline = "[ui]
+left_width_pct = 20
+
+[server]
+auth = { minimum_password_score = 9 }
+";
+        let text = recover_config(inline)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(!text.contains("line 1,"), "{text}");
+        // A file that starts with the section: line 1 is the header, and the
+        // message says so rather than reading like a made-up position.
+        let first = "[server.auth]\nminimum_password_score = 9\n";
+        let text = recover_config(first)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(text.contains("line 1 (the [server.auth] header)"), "{text}");
+    }
+
     /// A parser message about a duplicate or unknown key would name the key
     /// the file wrote; that name is file text too, and can be a value pasted
     /// where a key should be. It is never repeated.

@@ -28,10 +28,6 @@ enum WriteMsg {
     /// The config dux just adopted (a reload), carrying the exact text it was
     /// read from: the base every following save is a three-way patch against.
     SetBase(Box<Config>),
-    /// The base is exactly this config (and the file as dux last had it),
-    /// not one parsed from its text: for a config memory changed on purpose
-    /// to match what the engine holds.
-    SetBaseExact(Box<Config>),
     /// Stop the writer thread unconditionally, obeyed even while paused. Sent by
     /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
     /// holds a sender clone, so the channel can stay connected) or on guard drop
@@ -215,13 +211,6 @@ impl ConfigWriteQueue {
     /// never undone. Ordered with the saves on the same channel.
     pub fn set_base(&self, config: Config) {
         let _ = self.tx.send(WriteMsg::SetBase(Box::new(config)));
-    }
-
-    /// Make the base exactly `config`, so a save writes only what memory
-    /// changes from it. What the file has been seen to hold is `config`'s own
-    /// text, or the file as it is now.
-    pub fn set_base_exact(&self, config: Config) {
-        let _ = self.tx.send(WriteMsg::SetBaseExact(Box::new(config)));
     }
 
     /// Exit-time drain: write any pending lazy, bounded by a timeout.
@@ -472,26 +461,31 @@ fn base_read_from(text: &str) -> Option<Base> {
     })
 }
 
-/// A base that is exactly `config`.
-fn base_exact(path: &std::path::Path, config: Config) -> Base {
-    let seen = config
-        .source_text
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
-    Base { config, seen }
+/// The base a config's own text gives: for a config read from it, the
+/// config parsed from that text as written; for a config dux wrote, that
+/// config itself (a re-parse could fold in another writer's change), with
+/// the text as what has been seen.
+fn base_from_source(config: &Config) -> Option<Base> {
+    let text = config.source_text.as_str()?;
+    if config.source_text.is_written() {
+        return Some(Base {
+            config: config.clone(),
+            seen: text.to_string(),
+        });
+    }
+    base_read_from(text)
 }
 
 /// The first base: the loaded config's own text, or no base at all for a
 /// config read from no file (its saves are then the full patch).
 fn base_of_loaded(loaded: &Config) -> Option<Base> {
-    loaded.source_text.as_str().and_then(base_read_from)
+    base_from_source(loaded)
 }
 
 /// The base for a config a reload adopted: the text it was read from, or,
 /// for a config read from no file, that config and the file as it is now.
 fn base_adopted(path: &std::path::Path, config: Config) -> Option<Base> {
-    if let Some(base) = config.source_text.as_str().and_then(base_read_from) {
+    if let Some(base) = base_from_source(&config) {
         return Some(base);
     }
     Some(Base {
@@ -563,7 +557,6 @@ fn handle_writer_input(
         }
         Ok(Some(WriteMsg::Resume)) => {}
         Ok(Some(WriteMsg::SetBase(config))) => state.base = base_adopted(path, *config),
-        Ok(Some(WriteMsg::SetBaseExact(config))) => state.base = Some(base_exact(path, *config)),
         Ok(Some(WriteMsg::Shutdown)) => {
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
@@ -600,7 +593,6 @@ fn run_paused_writer(
                 let _ = ack.send(());
             }
             Ok(WriteMsg::SetBase(config)) => *base = base_adopted(path, *config),
-            Ok(WriteMsg::SetBaseExact(config)) => *base = Some(base_exact(path, *config)),
         }
     }
 }
@@ -1447,6 +1439,150 @@ mod adv_tests {
             read(&path).contains("left_width_pct = 40"),
             "{}",
             read(&path)
+        );
+    }
+
+    // Sixth review cases.
+
+    fn pc(id: &str, path: &str, name: &str) -> crate::config::ProjectConfig {
+        crate::config::ProjectConfig {
+            id: id.into(),
+            path: path.into(),
+            name: Some(name.into()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+        }
+    }
+
+    /// dux changes B: the file must end with one B.
+    #[test]
+    fn rv_same_name_hand_delete_and_memory_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/x/api\"\nname = \"api\"\n\n[[projects]]\nid = \"b\"\npath = \"/y/api\"\nname = \"api\"\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        // hand delete A
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"b\"\npath = \"/y/api\"\nname = \"api\"\n",
+        )
+        .unwrap();
+        let mut memory = loaded.clone();
+        memory.projects[1].default_provider = Some("codex".into());
+        q.save_eager(memory).unwrap();
+        let text = read(&path);
+        eprintln!("RESULT1:\n{text}");
+        assert_eq!(text.matches("id = \"b\"").count(), 1, "{text}");
+    }
+
+    /// The user moves a project by hand: deletes the old entry, writes a new
+    /// one without an id but with the same name. The new entry must not
+    /// inherit the old id.
+    #[test]
+    fn rv_hand_move_without_id_does_not_steal_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/old/dux\"\nname = \"dux\"\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        std::fs::write(&path, "[[projects]]\npath = \"/new/dux\"\nname = \"dux\"\n").unwrap();
+        let mut memory = loaded.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        q.save_eager(memory).unwrap();
+        let text = read(&path);
+        eprintln!("RESULT2:\n{text}");
+        assert!(!text.contains("id = \"a\""), "{text}");
+    }
+
+    /// Env var deleted by hand, then 3 saves, then memory changes another env var.
+    #[test]
+    fn rv_env_hand_delete_survives_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\nA = \"1\"\nB = \"2\"\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        std::fs::write(&path, "[env]\nB = \"2\"\nC = \"3\"\n").unwrap();
+        let mut memory = loaded.clone();
+        for i in 0..3 {
+            memory.ui.copy_on_select = i % 2 == 0;
+            q.save_eager(memory.clone()).unwrap();
+        }
+        memory.env.insert("D".into(), "4".into());
+        q.save_eager(memory.clone()).unwrap();
+        memory.env.remove("B");
+        q.save_eager(memory.clone()).unwrap();
+        let text = read(&path);
+        eprintln!("RESULT3:\n{text}");
+        assert!(!text.contains("A ="), "{text}");
+        assert!(text.contains("C = \"3\""), "{text}");
+        assert!(text.contains("D = \"4\""), "{text}");
+        assert!(!text.contains("B ="), "{text}");
+    }
+
+    /// Macros reorder in memory while hand adds a macro.
+    #[test]
+    fn rv_hand_added_project_then_memory_removes_other_then_readds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nname = \"a\"\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        // hand adds c
+        let mut t = read(&path);
+        t.push_str("\n[[projects]]\npath = \"/c\"\nname = \"c\"\n");
+        std::fs::write(&path, t).unwrap();
+        // dux adds b
+        let mut memory = loaded.clone();
+        memory.projects.push(pc("b", "/b", "b"));
+        q.save_eager(memory.clone()).unwrap();
+        // dux removes a
+        memory.projects.remove(0);
+        q.save_eager(memory.clone()).unwrap();
+        // dux removes b
+        memory.projects.remove(0);
+        q.save_eager(memory.clone()).unwrap();
+        let text = read(&path);
+        eprintln!("RESULT4:\n{text}");
+        assert!(text.contains("/c"), "{text}");
+        assert!(!text.contains("\"/a\""), "{text}");
+        assert!(!text.contains("\"/b\""), "{text}");
+    }
+
+    #[test]
+    fn rv_hand_add_same_name_then_remove_old_in_dux() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/old/api\"\nname = \"api\"\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut t = read(&path);
+        t.push_str("\n[[projects]]\npath = \"/new/api\"\nname = \"api\"\n");
+        std::fs::write(&path, t).unwrap();
+        let mut memory = loaded.clone();
+        memory.projects.clear();
+        q.save_eager(memory).unwrap();
+        let text = read(&path);
+        assert!(
+            text.contains("/new/api"),
+            "hand-added project lost:\n{}",
+            text.lines().take(8).collect::<Vec<_>>().join("\n")
         );
     }
 }

@@ -2612,13 +2612,11 @@ impl Engine {
     /// too. Every surface's failed apply calls this.
     ///
     /// What the engine derives from the config is re-derived from the kept
-    /// one. When that is impossible because deriving it is what failed (the
-    /// session database could not be read), the kept config takes the
-    /// projects the engine actually has, and the writer's base becomes that
-    /// exact config: memory and base then agree, so the projects the engine
-    /// could not refresh never count as a change memory made, and the
-    /// file's own projects stay as they are.
-    pub fn keep_reloaded_config(&mut self, mut config: Config) {
+    /// one. When the session database cannot be read (often the very reason
+    /// the apply failed), the engine's projects are derived from the kept
+    /// config's own projects alone, so memory, the writer's base and the
+    /// file still agree.
+    pub fn keep_reloaded_config(&mut self, config: Config) {
         self.github_integration_enabled = config.ui.github_integration;
         let derived = self
             .session_store
@@ -2631,18 +2629,23 @@ impl Engine {
                 self.retune_after_config_swap();
             }
             Err(error) => {
+                // The kept config's own projects stay (a project deleted from
+                // the reloaded file by hand stays deleted), and the engine's
+                // projects are derived from them alone, so memory, base and
+                // file agree and a later save of the projects writes what the
+                // file already has. The session database is reconciled on the
+                // next sync that can read it.
                 crate::logger::warn(&format!(
-                    "the reloaded config's projects could not be read from the session \
-                     database ({error:#}); keeping the projects already loaded"
+                    "the reloaded config's projects could not be matched with the session \
+                     database ({error:#}); using the config file's projects until it can be read"
                 ));
-                config.projects = self
-                    .projects
-                    .iter()
-                    .map(project_to_project_config)
-                    .collect();
+                self.projects = crate::project_browser::load_projects(
+                    &config.projects,
+                    &std::collections::HashMap::new(),
+                    &config,
+                );
                 self.config = config;
                 self.retune_after_config_swap();
-                self.config_writer.set_base_exact(self.config.clone());
             }
         }
         self.refresh_project_defaults();

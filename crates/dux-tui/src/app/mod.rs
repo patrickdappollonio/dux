@@ -7512,7 +7512,7 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
             dux_core::config_write::Durability::Fsync,
         )?;
         // The file is now this text: what a later save compares with.
-        config.source_text = dux_core::config::SourceText::of(&written);
+        config.source_text = dux_core::config::SourceText::written(&written);
     }
 
     Ok(())
@@ -7545,7 +7545,7 @@ pub(crate) fn sync_config_projects_with_store(
     })?;
     // The file is now this text: what a later save compares with.
     if let Some(text) = written {
-        config.source_text = dux_core::config::SourceText::of(&text);
+        config.source_text = dux_core::config::SourceText::written(&text);
     }
     Ok(())
 }
@@ -9007,6 +9007,55 @@ leading_branch = "main"
             "the sync wrote its project:\n{saved}"
         );
         assert!(saved.contains("port = 4444"), "the set survives:\n{saved}");
+    }
+
+    /// After the startup sync wrote the file (folding in a `set` that landed
+    /// after dux read it), the writer's base is what dux wrote, not a re-read
+    /// of that file: a later save from memory does not revert the set.
+    #[test]
+    fn a_set_folded_into_the_sync_write_is_not_reverted_by_a_later_save() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        let key = dux_core::config_keys::lookup("ui.left_width_pct").unwrap();
+        dux_core::config_keys::set_plain(&paths.config_path, &key, "40").unwrap();
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store).expect("sync");
+        // The writer dux builds from that config, and a save from memory.
+        let writer =
+            dux_core::config_queue::ConfigWriteQueue::with_base(paths.config_path.clone(), &config);
+        let mut memory = config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        writer.save_eager(memory).expect("save");
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            saved.contains("left_width_pct = 40"),
+            "the set survives:\n{saved}"
+        );
     }
 
     #[test]

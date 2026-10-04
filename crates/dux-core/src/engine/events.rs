@@ -2458,7 +2458,7 @@ impl Engine {
             if writes_after != writes_before
                 && let Some(text) = written
             {
-                reloaded.source_text = crate::config::SourceText(Some(text));
+                reloaded.source_text = crate::config::SourceText::written(&text);
             }
             reactions.push(EventReaction::ApplyReloadedConfig(Box::new(reloaded)));
         }
@@ -9293,6 +9293,106 @@ mod tests {
         assert!(
             after.contains("API = \"from-set\""),
             "the set survives:\n{after}"
+        );
+    }
+
+    // Sixth review cases.
+
+    #[test]
+    fn rv_failed_apply_resurrects_project_deleted_by_hand() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"c\"\npath = \"/tmp/c\"\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config(&engine.paths).unwrap();
+        for (i, p) in loaded.projects.iter().enumerate() {
+            engine.session_store.upsert_project_at(p, i as i64).unwrap();
+        }
+        engine.apply_reloaded_config(loaded).expect("first apply");
+        eprintln!(
+            "engine projects: {:?}",
+            engine
+                .projects
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        );
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n",
+        )
+        .unwrap();
+        let reloaded = crate::config::load_config(&engine.paths).unwrap();
+        break_the_session_database(&engine);
+        assert!(engine.apply_reloaded_config(reloaded).is_err());
+        for round in 0..3 {
+            let mut memory = engine.config.clone();
+            memory.ui.copy_on_select = round % 2 == 0;
+            engine.config_writer.save_eager(memory).expect("save");
+            let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+            eprintln!(
+                "ROUND {round}:\n{}",
+                after.lines().take(12).collect::<Vec<_>>().join("\n")
+            );
+            assert!(
+                !after.contains("/tmp/c"),
+                "save {round}: hand-deleted project came back\n{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn rv_set_between_reload_read_and_deferred_write_is_reverted() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "deferred".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        // `dux config set ui.left_width_pct 40` lands after the reload read the file.
+        let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
+        crate::config_keys::set_plain(&engine.paths.config_path, &key, "40").unwrap();
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("reloaded config");
+        engine.apply_reloaded_config(*applied).expect("apply");
+        let mid = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            mid.contains("left_width_pct = 40"),
+            "after deferred:\n{mid}"
+        );
+        let mut memory = engine.config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        engine.config_writer.save_lazy(memory);
+        drop(engine.config_writer.quiesce());
+        let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 40"),
+            "the set was reverted:\n{}",
+            after
+                .lines()
+                .filter(|l| l.contains("left_width") || l.contains("API"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

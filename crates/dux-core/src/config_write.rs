@@ -516,6 +516,29 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
         })
         .collect();
     for key in gone {
+        // A whole array of tables memory emptied (its last project removed)
+        // is merged entry by entry against an empty one, so an entry added on
+        // disk by someone else stays; only the base's entries go.
+        if let (Some(base_side), Some(Item::ArrayOfTables(disk_array))) = (base, disk.get(&key))
+            && let Some(Item::ArrayOfTables(base_array)) = base_side.base.get(&key)
+        {
+            let raw_array = base_side
+                .raw
+                .and_then(|raw| raw.get(&key))
+                .and_then(Item::as_array_of_tables);
+            let mut out = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                &mut out,
+                disk_array,
+                raw_array,
+                Some(base_array),
+                &toml_edit::ArrayOfTables::new(),
+            );
+            if !out.is_empty() {
+                put_in_place(target, &key, Item::ArrayOfTables(out));
+                continue;
+            }
+        }
         target.remove(&key);
     }
     // Order is meaningful in some tables (`[macros]` above all), so a pure
@@ -565,20 +588,20 @@ fn put_in_place(target: &mut Table, key: &str, mut item: Item) {
 
 /// The first entry of `list` not yet `used` that is the same entry as
 /// `entry`, trying, in order: the same `id` AND the same `path`; the same
-/// `id`; the same `path`; the same `name`. The exact pair comes first so a
-/// copy-pasted entry with the original's id but its own path never takes the
-/// original's place. Falling back past a differing `id` is deliberate: a
-/// hand-written project has no id of its own, so each read mints a fresh
-/// one, and an id adopted from the session database replaces the file's for
-/// the same path.
+/// `id`; the same `path`. The exact pair comes first so a copy-pasted entry
+/// with the original's id but its own path never takes the original's
+/// place. Falling back past a differing `id` is deliberate: a hand-written
+/// project has no id of its own, so each read mints a fresh one, and an id
+/// adopted from the session database replaces the file's for the same path.
+/// Never by `name`: two different projects can share one (two folders both
+/// called `api`), and matching them would drop one or give it the other's id.
 fn find_entry(list: &[&Table], used: &[bool], entry: &Table) -> Option<usize> {
     let field = |table: &Table, name: &str| table.get(name).map(item_text);
     let same = |a: &Table, b: &Table, name: &str| matches!((field(a, name), field(b, name)), (Some(x), Some(y)) if x == y);
-    let tiers: [&dyn Fn(&Table) -> bool; 4] = [
+    let tiers: [&dyn Fn(&Table) -> bool; 3] = [
         &|other| same(other, entry, "id") && same(other, entry, "path"),
         &|other| same(other, entry, "id"),
         &|other| same(other, entry, "path"),
-        &|other| same(other, entry, "name"),
     ];
     tiers
         .iter()

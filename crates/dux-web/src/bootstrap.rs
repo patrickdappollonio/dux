@@ -70,7 +70,7 @@ impl ConfigSurface for WebConfigSurface {
                     )
                     .map_err(|e| format!("{e:#}"))?;
                     if let Some(text) = written {
-                        config.source_text = dux_core::config::SourceText::of(&text);
+                        config.source_text = dux_core::config::SourceText::written(&text);
                     }
                     Ok(())
                 });
@@ -120,7 +120,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         Ok(())
     })?;
     if let Some(text) = written {
-        config.source_text = dux_core::config::SourceText::of(&text);
+        config.source_text = dux_core::config::SourceText::written(&text);
     }
     let sessions = session_store.load_sessions()?;
     let agent_tabs = session_store.load_extra_agent_tabs()?;
