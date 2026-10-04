@@ -3252,25 +3252,57 @@ fn rename_source(status: char, source: &Option<String>) -> Option<String> {
     }
 }
 
-pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+/// The changed files as the Changes views show them: a submodule the
+/// repository's `.gitmodules` or config says to ignore is left out, as `git
+/// status` leaves it out. For rendering only; anything that decides from the
+/// listing asks [`changed_files_for_decisions`].
+pub fn changed_files_for_display(
+    worktree_path: &Path,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+    changed_files_with(worktree_path, Submodules::AsConfigured)
+}
+
+/// The changed files for a decision (a discard's classification, the commit
+/// preflight, which paths a stage, unstage or discard may touch): every
+/// submodule change, whatever `.gitmodules` or the config says to ignore, so
+/// the decision agrees with what git itself would act on.
+pub fn changed_files_for_decisions(
+    worktree_path: &Path,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+    changed_files_with(worktree_path, Submodules::All)
+}
+
+/// Which submodule changes a listing includes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Submodules {
+    /// What the repository's own `ignore` settings leave in.
+    AsConfigured,
+    /// Every one (`--ignore-submodules=none`).
+    All,
+}
+
+fn changed_files_with(
+    worktree_path: &Path,
+    submodules: Submodules,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
     let wt = worktree_path.to_string_lossy();
 
-    let output = Command::new("git")
-        .args([
-            "-C",
-            wt.as_ref(),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            // git's own default: a folder with nothing tracked inside it is ONE
-            // entry, `dir/`, rather than one entry per file. `all` listed a
-            // 30,000-file `node_modules` as 30,000 rows; see `folding`.
-            "--untracked-files=normal",
-            // Every submodule change, whatever `.gitmodules` or the config
-            // says to ignore: the changes view shows what is there.
-            "--ignore-submodules=none",
-        ])
-        .output()?;
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        wt.as_ref(),
+        "status",
+        "--porcelain=v1",
+        "-z",
+        // git's own default: a folder with nothing tracked inside it is ONE
+        // entry, `dir/`, rather than one entry per file. `all` listed a
+        // 30,000-file `node_modules` as 30,000 rows; see `folding`.
+        "--untracked-files=normal",
+    ]);
+    if submodules == Submodules::All {
+        command.arg("--ignore-submodules=none");
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "git status failed: {}",
@@ -4875,7 +4907,7 @@ pub fn discard_confirmed<'c>(
 /// change has nothing to discard; both are reported as an error.
 pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
     refuse_unplain_path(path, "discard")?;
-    let (staged, unstaged) = changed_files(worktree_path)?;
+    let (staged, unstaged) = changed_files_for_decisions(worktree_path)?;
     // A path inside a folded folder is answered for by that folder's row: a
     // file reached by expanding an untracked folder is untracked, and one
     // inside a folder staged whole is staged. But only a path git itself lists
@@ -4974,7 +5006,7 @@ pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight 
     if message.trim().is_empty() {
         return CommitPreflight::EmptyMessage;
     }
-    match changed_files(worktree_path) {
+    match changed_files_for_decisions(worktree_path) {
         Ok((staged, _unstaged)) if staged.is_empty() => CommitPreflight::NothingStaged,
         // A git-status error is not a preflight refusal: fall through to Ready and
         // let the actual `git commit` surface the underlying error. Treating a
@@ -6508,14 +6540,14 @@ mod tests {
         repo
     }
 
-    /// `changed_files` also decides (the discard classification, the commit
-    /// preflight, the paths a stage or unstage may touch), so it lists every
-    /// submodule change whatever the repository says to ignore.
+    /// The listing a decision reads (the discard classification, the commit
+    /// preflight, which paths a stage, unstage or discard may touch) sees
+    /// every submodule change, whatever the repository says to ignore.
     #[test]
-    fn the_changed_files_listing_sees_a_submodule_the_repository_says_to_ignore() {
+    fn the_decision_listing_sees_a_submodule_the_repository_says_to_ignore() {
         let repo = repo_with_an_ignored_submodule_change();
         std::fs::write(repo.path().join("untracked.txt"), "new\n").unwrap();
-        let (_, unstaged) = changed_files(repo.path()).unwrap();
+        let (_, unstaged) = changed_files_for_decisions(repo.path()).unwrap();
         assert!(
             unstaged.iter().any(|file| file.path == "sub"),
             "the submodule change is listed: {unstaged:?}"
@@ -6523,6 +6555,80 @@ mod tests {
         assert!(
             unstaged.iter().any(|file| file.path == "untracked.txt"),
             "and untracked files despite status.showUntrackedFiles=no: {unstaged:?}"
+        );
+    }
+
+    /// The listing the Changes views render honours the repository's own
+    /// `ignore = all`, as it did before the decision listing existed.
+    #[test]
+    fn the_display_listing_honours_a_submodule_the_repository_says_to_ignore() {
+        let repo = repo_with_an_ignored_submodule_change();
+        std::fs::write(repo.path().join("untracked.txt"), "new\n").unwrap();
+        let (staged, unstaged) = changed_files_for_display(repo.path()).unwrap();
+        assert!(
+            !staged
+                .iter()
+                .chain(&unstaged)
+                .any(|file| file.path == "sub"),
+            "the ignored submodule is not a row: {staged:?} {unstaged:?}"
+        );
+        assert!(
+            unstaged.iter().any(|file| file.path == "untracked.txt"),
+            "untracked files still show despite status.showUntrackedFiles=no: {unstaged:?}"
+        );
+    }
+
+    /// When the only staged change is an ignored submodule's new pointer, git
+    /// commits it, so the preflight lets the commit through rather than
+    /// saying nothing is staged.
+    #[test]
+    fn the_commit_preflight_allows_a_staged_ignored_submodule_pointer() {
+        let repo = repo_with_an_ignored_submodule_change();
+        let sub = repo.path().join("sub");
+        run_git(
+            &sub,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-am",
+                "b",
+            ],
+        );
+        let id = head_commit(&sub).unwrap();
+        run_git(
+            repo.path(),
+            &["update-index", "--cacheinfo", &format!("160000,{id},sub")],
+        );
+        assert!(matches!(
+            commit_preflight(repo.path(), "move the submodule"),
+            CommitPreflight::Ready
+        ));
+        run_git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "move the submodule",
+            ],
+        );
+        let committed = test_support::git_command()
+            .args(["rev-parse", "HEAD:sub"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&committed.stdout).trim(),
+            id,
+            "git committed the pointer"
         );
     }
 
@@ -7358,7 +7464,7 @@ mod tests {
     }
 
     fn staged_paths(wt: &Path) -> Vec<String> {
-        let (staged, _) = changed_files(wt).unwrap();
+        let (staged, _) = changed_files_for_display(wt).unwrap();
         let mut paths: Vec<String> = staged.into_iter().map(|f| f.path).collect();
         paths.sort();
         paths
@@ -9928,7 +10034,7 @@ mod tests {
         .unwrap();
         fs::write(nested.join("two.txt"), "nested line\n").unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
 
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
         let row = &unstaged[0];
@@ -10080,7 +10186,7 @@ mod tests {
             fs::write(wt.join(format!("f{index:06}.txt")), "one line\n").unwrap();
         }
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
 
         assert_eq!(unstaged.len(), total, "every change is listed");
         let counted = unstaged.iter().filter(|f| f.additions > 0).count();
@@ -10100,7 +10206,7 @@ mod tests {
 
         fs::write(wt.join("image.bin"), [0_u8, 159, 146, 150]).unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         assert_eq!(unstaged.len(), 1);
         let file = &unstaged[0];
         assert_eq!(file.path, "image.bin");
@@ -10150,7 +10256,7 @@ mod tests {
         fs::create_dir_all(repo.path().join("docs")).unwrap();
         run_git(repo.path(), &["mv", "src/old.txt", "docs/new.txt"]);
 
-        let (staged, _unstaged) = changed_files(repo.path()).unwrap();
+        let (staged, _unstaged) = changed_files_for_display(repo.path()).unwrap();
         let moved = staged
             .iter()
             .find(|f| f.path == "docs/new.txt")
@@ -10224,7 +10330,7 @@ mod tests {
         fs::write(wt.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
         fs::write(wt.join("image.bin"), [0_u8, 1, 2, 3, 4]).unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let notes = unstaged
             .iter()
             .find(|f| f.path == "notes.txt")
@@ -10261,7 +10367,7 @@ mod tests {
         fs::write(wt.join("image.bin"), [0_u8, 7, 7]).unwrap();
         git(&["add", "-A"]);
 
-        let (staged, _unstaged) = changed_files(&wt).unwrap();
+        let (staged, _unstaged) = changed_files_for_display(&wt).unwrap();
         let notes = staged
             .iter()
             .find(|f| f.path == "notes.txt")
@@ -10293,7 +10399,7 @@ mod tests {
         git(&["commit", "-m", "seed"]);
         fs::write(wt.join("pic.png"), [b'P', b'N', b'G', 0, 1, b'b', b'c']).unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let row = unstaged
             .iter()
             .find(|f| f.path == "pic.png")
@@ -10302,7 +10408,7 @@ mod tests {
         assert!(!row.diff_excluded);
 
         git(&["add", "-A"]);
-        let (staged, _unstaged) = changed_files(&wt).unwrap();
+        let (staged, _unstaged) = changed_files_for_display(&wt).unwrap();
         let row = staged
             .iter()
             .find(|f| f.path == "pic.png")
@@ -10327,7 +10433,7 @@ mod tests {
         git(&["commit", "-m", "seed"]);
         fs::write(wt.join("blob.dat"), [b'a', 0, b'b', b'c']).unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let row = unstaged
             .iter()
             .find(|f| f.path == "blob.dat")
@@ -10336,7 +10442,7 @@ mod tests {
         assert!(!row.diff_excluded, "NUL bytes are NUL bytes");
 
         git(&["add", "-A"]);
-        let (staged, _unstaged) = changed_files(&wt).unwrap();
+        let (staged, _unstaged) = changed_files_for_display(&wt).unwrap();
         let row = staged
             .iter()
             .find(|f| f.path == "blob.dat")
@@ -10366,7 +10472,7 @@ mod tests {
         // ...and NUL-bearing on disk.
         fs::write(wt.join("notes.txt"), [b'o', 0, b'n', b'e']).unwrap();
 
-        let (staged, unstaged) = changed_files(&wt).unwrap();
+        let (staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let staged_row = staged
             .iter()
             .find(|f| f.path == "notes.txt")
@@ -10396,7 +10502,7 @@ mod tests {
         git(&["commit", "-m", "seed"]);
         fs::remove_file(wt.join("notes.txt")).unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let row = unstaged
             .iter()
             .find(|f| f.path == "notes.txt")
@@ -10495,7 +10601,7 @@ mod tests {
         git(&["commit", "-m", "seed"]);
         fs::write(wt.join(name), "one\ntwo\n").unwrap();
 
-        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let (_staged, unstaged) = changed_files_for_display(&wt).unwrap();
         let row = unstaged
             .iter()
             .find(|f| f.path == name)
@@ -10647,7 +10753,7 @@ mod tests {
         run_git(&wt, &["commit", "-m", "add file"]);
         run_git(&wt, &["mv", "old name.txt", "new name.txt"]);
 
-        let (staged, unstaged) = changed_files(&wt).unwrap();
+        let (staged, unstaged) = changed_files_for_display(&wt).unwrap();
 
         assert!(unstaged.is_empty());
         assert_eq!(staged.len(), 1);

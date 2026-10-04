@@ -99,7 +99,9 @@ fn list_children(
         Vec<dux_core::model::ChangedFile>,
     )>,
 ) -> Result<Vec<dux_core::model::ChangedFile>, ChildrenError> {
-    use dux_core::git::{ChangesSide, changed_dir_children, changed_files, rows_answering};
+    use dux_core::git::{
+        ChangesSide, changed_dir_children, changed_files_for_display, rows_answering,
+    };
     if dir.is_empty() || !dux_core::model::is_lexically_normal_path(dir) {
         return Err(ChildrenError::Refused(format!(
             "\"{dir}\" is not a plain path inside the worktree"
@@ -125,7 +127,9 @@ fn list_children(
     // inside a folded one is asked of git, scoped to that folder.
     let (staged, unstaged) = match listing {
         Some(listing) => listing,
-        None => changed_files(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?,
+        None => {
+            changed_files_for_display(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?
+        }
     };
     let files = match side {
         ChangesSide::Staged => &staged,
@@ -282,7 +286,7 @@ mod tests {
             return;
         };
         let worktree = std::path::PathBuf::from(repo);
-        let cached = dux_core::git::changed_files(&worktree).expect("listing");
+        let cached = dux_core::git::changed_files_for_display(&worktree).expect("listing");
         let dirs = ["node_modules", "node_modules/pkg0", "node_modules/pkg1"];
 
         for (label, use_cache) in [("fresh listing", false), ("cached listing", true)] {

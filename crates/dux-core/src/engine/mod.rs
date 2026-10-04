@@ -3476,7 +3476,8 @@ impl Engine {
                     // a request slipping through the gap.
                     return LoopControl::Break;
                 };
-                let outcome = crate::git::changed_files(&path).map_err(|e| e.to_string());
+                let outcome =
+                    crate::git::changed_files_for_display(&path).map_err(|e| e.to_string());
                 if tx
                     .send(WorkerEvent::ChangedFilesReady {
                         outcome,
@@ -3552,7 +3553,7 @@ impl Engine {
                 let started = Instant::now();
                 let swept = path
                     .as_ref()
-                    .map(|worktree_path| crate::git::changed_files(worktree_path));
+                    .map(|worktree_path| crate::git::changed_files_for_display(worktree_path));
                 last_sweep = if swept.is_some() {
                     started.elapsed()
                 } else {

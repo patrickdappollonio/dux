@@ -1072,7 +1072,7 @@ mod tests {
 
     /// Apply a fresh changed-files read the way the pane does when one lands.
     fn load_lists(app: &mut App, worktree: &Path) {
-        let (staged, unstaged) = git::changed_files(worktree).expect("changed files");
+        let (staged, unstaged) = git::changed_files_for_display(worktree).expect("changed files");
         app.engine.set_changed_files(staged, unstaged);
         app.changes_tree.lists_for = app.selected_session().map(|s| s.id.clone());
         app.reconcile_changes_tree();
@@ -2018,7 +2018,7 @@ mod tests {
 
         // Only that file is staged, and it is its own row: the folder is not
         // staged whole, so no folder row may claim it.
-        let (staged, unstaged) = git::changed_files(&worktree).unwrap();
+        let (staged, unstaged) = git::changed_files_for_display(&worktree).unwrap();
         assert_eq!(staged.len(), 1, "{staged:?}");
         assert_eq!(staged[0].path, "node_modules/top.js");
         assert!(!staged[0].is_folder());

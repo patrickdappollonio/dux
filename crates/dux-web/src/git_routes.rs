@@ -375,18 +375,20 @@ async fn resolve_git_directory(
 async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteRejection> {
     let wt = worktree.to_path_buf();
     let p = path.to_string();
-    let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
-        // A path inside a folded folder is answered for by the folder's row,
-        // once git confirms it is a change it lists there.
-        Ok((staged, unstaged)) => {
-            use dux_core::git::{ChangesSide, rows_answering};
-            let asked = [p.clone()];
-            let on = |files: &[dux_core::model::ChangedFile], side| {
-                rows_answering(&wt, files, side, &asked).is_ok_and(|set| set.contains(&p))
-            };
-            on(&staged, ChangesSide::Staged) || on(&unstaged, ChangesSide::Unstaged)
+    let ok = tokio::task::spawn_blocking(move || {
+        match dux_core::git::changed_files_for_decisions(&wt) {
+            // A path inside a folded folder is answered for by the folder's row,
+            // once git confirms it is a change it lists there.
+            Ok((staged, unstaged)) => {
+                use dux_core::git::{ChangesSide, rows_answering};
+                let asked = [p.clone()];
+                let on = |files: &[dux_core::model::ChangedFile], side| {
+                    rows_answering(&wt, files, side, &asked).is_ok_and(|set| set.contains(&p))
+                };
+                on(&staged, ChangesSide::Staged) || on(&unstaged, ChangesSide::Unstaged)
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
     })
     .await
     .unwrap_or(false);
@@ -776,7 +778,7 @@ async fn files_op(
     let wt = worktree.clone();
     let requested = paths.clone();
     let partition = tokio::task::spawn_blocking(move || {
-        dux_core::git::changed_files(&wt).and_then(|(staged, unstaged)| {
+        dux_core::git::changed_files_for_decisions(&wt).and_then(|(staged, unstaged)| {
             let (live, side) = match section {
                 Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
                 Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
@@ -1555,7 +1557,7 @@ mod tests {
         );
 
         let staged = tokio::task::spawn_blocking(move || {
-            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
             let mut paths: Vec<String> = staged.into_iter().map(|f| f.path).collect();
             paths.sort();
             paths
@@ -1594,9 +1596,11 @@ mod tests {
             std::fs::write(dir.join(format!("f{index}.js")), "x\n").unwrap();
         }
         let lists = |worktree: PathBuf| async move {
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                dux_core::git::changed_files_for_display(&worktree).unwrap()
+            })
+            .await
+            .unwrap()
         };
         // A folder row of `count` files, whatever its fingerprint.
         let folder =
@@ -1746,10 +1750,11 @@ mod tests {
         );
         assert!(worktree.join(".git/HEAD").exists());
         assert!(worktree.join("node_modules/pkg/a.js").exists());
-        let (staged, unstaged) =
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap();
+        let (staged, unstaged) = tokio::task::spawn_blocking(move || {
+            dux_core::git::changed_files_for_display(&worktree).unwrap()
+        })
+        .await
+        .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
     }
@@ -1828,7 +1833,7 @@ mod tests {
             text.contains("nothing in \"only/\" to stage: it holds only repositories of their own"),
             "{text}"
         );
-        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -1879,7 +1884,7 @@ mod tests {
                 .is_some_and(|reason| reason.contains("it holds only repositories of their own")),
             "{json}"
         );
-        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
         assert_eq!(
             staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["plain.txt"]
@@ -2409,10 +2414,11 @@ mod tests {
                 "{route}"
             );
         }
-        let (staged, _) =
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap();
+        let (staged, _) = tokio::task::spawn_blocking(move || {
+            dux_core::git::changed_files_for_display(&worktree).unwrap()
+        })
+        .await
+        .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -2489,7 +2495,7 @@ mod tests {
         assert_eq!(parsed["refused"], serde_json::json!([]));
 
         let staged = tokio::task::spawn_blocking(move || {
-            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
             staged.into_iter().map(|f| f.path).collect::<Vec<_>>()
         })
         .await

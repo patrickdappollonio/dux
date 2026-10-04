@@ -567,7 +567,9 @@ impl ChangesService {
 
         // Stage 2: the git work, off the reactor.
         let wt = worktree.clone();
-        let computed = tokio::task::spawn_blocking(move || dux_core::git::changed_files(&wt)).await;
+        let computed =
+            tokio::task::spawn_blocking(move || dux_core::git::changed_files_for_display(&wt))
+                .await;
 
         match computed {
             Ok(Ok((staged_raw, unstaged_raw))) => {
@@ -1107,7 +1109,7 @@ mod tests {
         let (engine, bus, _tmp) = boot_session_at(&repo);
         for run in 1..=5 {
             let started = Instant::now();
-            let (staged, unstaged) = dux_core::git::changed_files(&repo).unwrap();
+            let (staged, unstaged) = dux_core::git::changed_files_for_display(&repo).unwrap();
             let core_ms = started.elapsed().as_secs_f64() * 1000.0;
 
             let svc = ChangesService::new(engine.clone(), Arc::clone(&bus));
