@@ -570,6 +570,9 @@ fn set_secret(
             Err(anyhow!("{}", SetPasswordError::BelowMinimums(check)))
         }
         Err(SetPasswordError::Failed(error)) => Err(error),
+        // Only the compare-and-set write can answer this, and `set` replaces
+        // whatever the file holds.
+        Err(error @ SetPasswordError::ChangedMeanwhile) => Err(anyhow!("{error}")),
     }
 }
 
@@ -599,13 +602,7 @@ fn missing_file_check(paths: &DuxPaths) -> config_keys::MissingConfig<'static> {
 /// Words a guesser would try first for this person, which count against a
 /// password built from them.
 fn user_inputs() -> Vec<String> {
-    let mut inputs = vec!["dux".to_string()];
-    if let Ok(user) = std::env::var("USER")
-        && !user.is_empty()
-    {
-        inputs.push(user);
-    }
-    inputs
+    dux_core::auth::guess_words()
 }
 
 /// What happens next. With `problems_remain`, what each surface makes of

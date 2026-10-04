@@ -539,6 +539,23 @@ pub struct ServeRoute {
     pub funnel: bool,
 }
 
+impl ServeRoute {
+    /// The route's host name and port, the way a request through it names
+    /// them in its `Host` (a default port included explicitly). `None` when
+    /// the URL cannot be read.
+    pub fn host_port(&self) -> Option<(String, u16)> {
+        let url = url::Url::parse(&self.url).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        let port = url.port_or_known_default()?;
+        Some((host, port))
+    }
+
+    /// Whether the route is served over HTTPS (TLS terminated by Tailscale).
+    pub fn is_https(&self) -> bool {
+        url::Url::parse(&self.url).is_ok_and(|url| url.scheme() == "https")
+    }
+}
+
 /// Everything one look at the Tailscale CLI says about how this machine is
 /// named and published on the tailnet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -555,6 +572,13 @@ pub struct TailscaleIdentity {
     /// Whether the node is down (`Stopped`, `NeedsLogin`, `NeedsMachineAuth`),
     /// so a saved Funnel to dux comes back only once it is brought up.
     pub node_down: bool,
+    /// Whether a raw TCP forward (`TCPForward`, Funnel or not) names dux's
+    /// port. Such a forward hands dux a bare stream from loopback with no
+    /// forwarding header, so loopback can no longer be taken for this machine
+    /// while one stands. See [`parse_tcp_forward_to_port`]. Always false for a
+    /// node that is down: it forwards nothing until it is brought up, and the
+    /// next look after that sees the forward again.
+    pub forward_to_dux: bool,
 }
 
 /// Ask the `tailscale` CLI for this machine's name and the serve routes that
@@ -647,6 +671,8 @@ pub fn detect_identity_with(
     let funnel = parse_serve_funnel(&serve).ok_or(TailscaleUnavailable::NoAddress)?;
     let funnel_to_dux =
         parse_funnel_to_port(&serve, dux_port).ok_or(TailscaleUnavailable::NoAddress)?;
+    let forward_to_dux =
+        parse_tcp_forward_to_port(&serve, dux_port).ok_or(TailscaleUnavailable::NoAddress)?;
     let serve = parse_serve_status_json(&serve, dux_port).ok_or(TailscaleUnavailable::NoAddress)?;
     if down {
         // A node that is down publishes nothing now, but its saved config is
@@ -659,6 +685,7 @@ pub fn detect_identity_with(
             funnel: false,
             funnel_to_dux,
             node_down: true,
+            forward_to_dux: false,
         });
     }
     Ok(TailscaleIdentity {
@@ -667,6 +694,7 @@ pub fn detect_identity_with(
         funnel,
         funnel_to_dux,
         node_down: false,
+        forward_to_dux,
     })
 }
 
@@ -907,6 +935,37 @@ pub fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
         });
         tcp_to_dux || web_to_dux
     }))
+}
+
+/// Whether any raw TCP forward (`TCPForward`) in the serve configuration names
+/// `dux_port`, Funnel or not, at the top level or in any foreground session.
+/// `None` when the text is not a JSON object.
+///
+/// Broader than a route dux shows, on purpose, for the same reason as
+/// [`parse_serve_funnel`]: a forward whose target port cannot be read counts as
+/// dux's. A web handler (`Proxy`) does not count: Tailscale's serve proxy adds
+/// forwarding headers to every request it forwards, so it never hands dux a
+/// bare stream that looks like this machine.
+pub fn parse_tcp_forward_to_port(text: &str, dux_port: u16) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value.as_object()?;
+    Some(any_tcp_forward_to_port(&value, dux_port))
+}
+
+fn any_tcp_forward_to_port(value: &serde_json::Value, dux_port: u16) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, inner)| {
+            let names_dux = key == "TCPForward"
+                && inner
+                    .as_str()
+                    .is_some_and(|target| target_reaches_port(target, dux_port));
+            names_dux || any_tcp_forward_to_port(inner, dux_port)
+        }),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| any_tcp_forward_to_port(item, dux_port)),
+        _ => false,
+    }
 }
 
 /// Whether any `TCPForward` or `Proxy` anywhere in the document names
@@ -2773,5 +2832,72 @@ mod identity_tests {
         let text = "{\"TCP\": 5, \"Web\": {\"box.tail.ts.net:443\": {\"Handlers\": {\"/\": \
                     {\"Proxy\": 7}}}, \"other:443\": \"nope\"}}";
         assert_eq!(parse_serve_status_json(text, 3890), Some(vec![]));
+    }
+
+    // ── Raw TCP forwards to dux, Funnel or not ──────────────────────────────
+
+    #[test]
+    fn a_tailnet_only_tcp_forward_to_dux_is_a_forward_to_dux() {
+        let text = "{\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}";
+        assert_eq!(parse_tcp_forward_to_port(text, 3890), Some(true));
+        assert_eq!(
+            parse_funnel_to_port(text, 3890),
+            Some(false),
+            "not a Funnel"
+        );
+    }
+
+    #[test]
+    fn a_tcp_forward_elsewhere_or_a_web_proxy_is_not_a_forward_to_dux() {
+        let other = "{\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:22\"}}}";
+        assert_eq!(parse_tcp_forward_to_port(other, 3890), Some(false));
+        // A web handler always adds forwarding headers, so it is not headerless.
+        let web = "{\"Web\": {\"h:443\": {\"Handlers\": {\"/\": \
+                   {\"Proxy\": \"http://127.0.0.1:3890\"}}}}}";
+        assert_eq!(parse_tcp_forward_to_port(web, 3890), Some(false));
+        let unix = "{\"TCP\": {\"443\": {\"TCPForward\": \"unix:/tmp/x\"}}}";
+        assert_eq!(parse_tcp_forward_to_port(unix, 3890), Some(false));
+        assert_eq!(parse_tcp_forward_to_port("[]", 3890), None);
+    }
+
+    #[test]
+    fn a_tcp_forward_in_a_foreground_session_or_on_an_unreadable_port_counts() {
+        let foreground = "{\"Foreground\": {\"s1\": {\"TCP\": {\"443\": \
+                          {\"TCPForward\": \"localhost:3890\"}}}}}";
+        assert_eq!(parse_tcp_forward_to_port(foreground, 3890), Some(true));
+        let named = "{\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:dux\"}}}";
+        assert_eq!(parse_tcp_forward_to_port(named, 3890), Some(true));
+    }
+
+    #[test]
+    fn the_probe_reports_a_tailnet_tcp_forward_to_dux_and_a_down_node_forwards_nothing() {
+        let serve = "{\"TCP\":{\"443\":{\"TCPForward\":\"127.0.0.1:3890\"}}}";
+        let cli = identity_cli("identity-tcp-forward", STATUS, serve);
+        let identity = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).unwrap();
+        assert!(identity.forward_to_dux);
+        assert!(!identity.funnel_to_dux);
+    }
+
+    #[test]
+    fn a_serve_route_names_its_host_and_port() {
+        let route = |url: &str| ServeRoute {
+            url: url.to_string(),
+            funnel: false,
+        };
+        assert_eq!(
+            route("https://box.tail.ts.net").host_port(),
+            Some(("box.tail.ts.net".to_string(), 443))
+        );
+        assert_eq!(
+            route("https://box.tail.ts.net:8443").host_port(),
+            Some(("box.tail.ts.net".to_string(), 8443))
+        );
+        assert_eq!(
+            route("http://box.tail.ts.net").host_port(),
+            Some(("box.tail.ts.net".to_string(), 80))
+        );
+        assert!(route("https://box.tail.ts.net").is_https());
+        assert!(!route("http://box.tail.ts.net:8080").is_https());
+        assert_eq!(route("not a url").host_port(), None);
     }
 }

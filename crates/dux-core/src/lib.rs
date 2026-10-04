@@ -88,6 +88,7 @@ pub mod text;
 pub mod theme;
 pub mod urls;
 pub mod viewmodel;
+pub mod web_sessions;
 pub mod welcome;
 pub mod welcome_screen;
 pub mod wire;

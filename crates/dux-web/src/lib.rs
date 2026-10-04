@@ -4561,6 +4561,7 @@ mod live_tailscale_mode_tests {
             funnel: serve.iter().any(|(_, funnel)| *funnel),
             funnel_to_dux: false,
             node_down: false,
+            forward_to_dux: false,
         }
     }
 

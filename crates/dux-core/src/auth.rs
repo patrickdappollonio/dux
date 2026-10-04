@@ -297,6 +297,20 @@ pub fn strength(password: &Password, user_inputs: &[&str]) -> Strength {
     }
 }
 
+/// Words a guesser would try first for the owner of this dux, which count
+/// against a password built from them: the program's own name and the login
+/// name. Every place that measures a password passes these, so the CLI's
+/// meter, its check and the web's check agree.
+pub fn guess_words() -> Vec<String> {
+    let mut inputs = vec!["dux".to_string()];
+    if let Ok(user) = std::env::var("USER")
+        && !user.is_empty()
+    {
+        inputs.push(user);
+    }
+    inputs
+}
+
 /// The configured minimums a new password must meet, from `[server.auth]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PasswordPolicy {

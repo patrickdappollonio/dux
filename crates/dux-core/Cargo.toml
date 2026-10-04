@@ -56,6 +56,12 @@ zeroize = "1.9"
 # The SIGUSR1 "reload the config" flag (dux_core::reload_signal), the same
 # registry dux-tui and tokio already register their handlers through.
 signal-hook = "0.4"
+# The web login's sessions (dux_core::web_sessions): a random token from the
+# operating system's generator, kept server-side only as its SHA-256 digest, and
+# carried in the cookie as unpadded URL-safe base64.
+getrandom = "0.3"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 # Decodes the QR codes dux_core::qr draws, so the tests prove a phone could read

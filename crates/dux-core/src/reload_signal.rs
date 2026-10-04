@@ -59,6 +59,23 @@ pub fn is_installed() -> bool {
     matches!(INSTALLED.get(), Some(Ok(())))
 }
 
+/// Ask THIS process to reload its config, through exactly the path a
+/// `dux config set` from outside takes: raise SIGUSR1, which sets the flag
+/// every serving mode drains with its own reload. For a change dux itself
+/// wrote to `config.toml` from the web (a password, a ban, the no-password
+/// warning's dismissal), so the running config, and every surface reading it,
+/// catches up with the file the same way in all three serving modes.
+///
+/// Raises nothing unless this process installed the handler: without it,
+/// SIGUSR1's default action would end the process. Answers whether the signal
+/// was raised.
+pub fn request_reload() -> bool {
+    if !is_installed() {
+        return false;
+    }
+    signal_hook::low_level::raise(signal_hook::consts::SIGUSR1).is_ok()
+}
+
 /// Whether a SIGUSR1 arrived since the last call. Clears the flag, so exactly
 /// one serving mode acts on each signal (several signals before the next
 /// check are one reload, which is all they could ask for).
@@ -366,6 +383,48 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    const RAISE_CHILD_ENV: &str = "DUX_TEST_RELOAD_RAISE_CHILD";
+    const RAISE_CHILD_TEST: &str = "reload_signal::tests::child_requests_its_own_reload";
+
+    /// Not a test on its own: re-run as a child process by the test below. Asks
+    /// for its own reload before and after installing the handler, and writes
+    /// what each request did.
+    #[test]
+    fn child_requests_its_own_reload() {
+        let Ok(dir) = std::env::var(RAISE_CHILD_ENV) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        // Before the handler: nothing is raised, so the process survives.
+        let before = request_reload();
+        install().expect("install");
+        let after = request_reload();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            seen = take_pending();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::write(dir.join("result"), format!("{before} {after} {seen}")).expect("result");
+    }
+
+    #[test]
+    fn a_reload_request_raises_only_once_the_handler_is_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", RAISE_CHILD_TEST, "--test-threads=1"])
+            .env(RAISE_CHILD_ENV, dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run child");
+        assert!(status.success(), "the child survived its own requests");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("result")).expect("result"),
+            "false true true"
+        );
     }
 
     fn wait_for(path: &Path) -> bool {

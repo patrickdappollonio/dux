@@ -904,6 +904,9 @@ pub enum SetPasswordError {
     BelowMinimums(MinimumCheck),
     /// Reading the policy, hashing or writing failed.
     Failed(anyhow::Error),
+    /// The file's password hash is no longer the one the caller checked: the
+    /// password was set or changed meanwhile by someone else. Nothing written.
+    ChangedMeanwhile,
 }
 
 impl fmt::Display for SetPasswordError {
@@ -931,6 +934,10 @@ impl fmt::Display for SetPasswordError {
                 Ok(())
             }
             Self::Failed(error) => write!(f, "{error:#}"),
+            Self::ChangedMeanwhile => f.write_str(
+                "the password was changed by someone else while this change was being made, \
+                 so nothing was written; try again",
+            ),
         }
     }
 }
@@ -1092,6 +1099,157 @@ pub fn set_password_with(
         ))),
     }
 }
+
+/// [`set_password`], but only over the hash the caller checked: `expected` is
+/// the `password_hash` the caller verified the current password against (empty
+/// when it found none, for a first password). The comparison and the write
+/// happen under the config write lock, so a change that lands between the
+/// caller's check and this write makes this one fail with
+/// [`SetPasswordError::ChangedMeanwhile`] rather than silently replacing it.
+///
+/// The write is [`set_password`]'s own: the locked, repairing, start-checked
+/// mutation, so it adds no problem the file did not have and reports the ones
+/// left.
+pub fn set_password_if_current(
+    config_path: &Path,
+    expected: &str,
+    password: &Password,
+    user_inputs: &[&str],
+) -> Result<PasswordSet, SetPasswordError> {
+    let policy = current_password_policy(config_path).map_err(SetPasswordError::Failed)?;
+    let check = crate::auth::check_minimums(password, &policy, user_inputs);
+    if !check.passes() {
+        return Err(SetPasswordError::BelowMinimums(check));
+    }
+    let hash = crate::auth::hash_password(password)
+        .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
+    let path = password_hash_path();
+    let written = crate::config_write::mutate_config_file_repairing(
+        config_path,
+        MissingConfig::CreateDocumented,
+        &path,
+        |doc| {
+            let current = value_in_doc(doc, &path)
+                .and_then(|text| text.parse::<toml::Value>().ok())
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default();
+            if current != expected {
+                return Err(anyhow::Error::new(Unchanged));
+            }
+            set_in_doc(doc, &path, Value::from(hash))
+        },
+    );
+    match written {
+        Ok(((), remaining_problems)) => Ok(PasswordSet {
+            strength: check.strength,
+            remaining_problems,
+        }),
+        Err(error) if error.is::<Unchanged>() => Err(SetPasswordError::ChangedMeanwhile),
+        Err(error) => Err(SetPasswordError::Failed(error)),
+    }
+}
+
+/// A mutation that decided to write nothing; it never reaches a caller.
+#[derive(Debug)]
+struct Unchanged;
+
+impl fmt::Display for Unchanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("nothing to change")
+    }
+}
+
+impl std::error::Error for Unchanged {}
+
+/// What [`append_blocked_address`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanWrite {
+    /// The address was appended to `blocked_addresses`.
+    Written,
+    /// An entry already covers it (the address itself or a range holding it).
+    AlreadyBlocked,
+    /// The list already holds `max_blocked_addresses` entries, so nothing was
+    /// written; the caller keeps the ban in memory and says so.
+    AtLimit,
+}
+
+/// Append `ip` to `[server.auth] blocked_addresses` through the coordinated
+/// mutation path, keeping every comment and every entry another writer added
+/// meanwhile. The repairing path: a problem the file already had elsewhere
+/// never refuses a ban, while one the append would add does. An IPv4-mapped IPv6 address is written as the IPv4 address it
+/// carries. `max_entries` is `max_blocked_addresses`: a list already that long
+/// is left alone.
+pub fn append_blocked_address(
+    config_path: &Path,
+    ip: std::net::IpAddr,
+    max_entries: u32,
+) -> Result<BanWrite> {
+    let ip = crate::config_auth::canonical(ip);
+    let blocked_path: Vec<String> = ["server", "auth", "blocked_addresses"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let written = crate::config_write::mutate_config_file_repairing(
+        config_path,
+        MissingConfig::CreateDocumented,
+        &blocked_path,
+        |doc| {
+            let entries: Vec<String> = doc
+                .get("server")
+                .and_then(|server| server.get("auth"))
+                .and_then(|auth| auth.get("blocked_addresses"))
+                .and_then(|item| item.as_array())
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let covered = entries.iter().any(|entry| {
+                crate::config_auth::AddressBlock::parse(entry).is_ok_and(|block| block.contains(ip))
+            });
+            if covered {
+                return Err(anyhow::Error::new(BanNoop(BanWrite::AlreadyBlocked)));
+            }
+            if entries.len() >= max_entries as usize {
+                return Err(anyhow::Error::new(BanNoop(BanWrite::AtLimit)));
+            }
+            let path: Vec<String> = ["server", "auth", "blocked_addresses"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let mut array = doc
+                .get("server")
+                .and_then(|server| server.get("auth"))
+                .and_then(|auth| auth.get("blocked_addresses"))
+                .and_then(|item| item.as_array())
+                .cloned()
+                .unwrap_or_default();
+            array.push(ip.to_string());
+            set_in_doc(doc, &path, Value::Array(array))
+        },
+    );
+    match written {
+        Ok(((), _)) => Ok(BanWrite::Written),
+        Err(error) => match error.downcast_ref::<BanNoop>() {
+            Some(BanNoop(outcome)) => Ok(*outcome),
+            None => Err(error),
+        },
+    }
+}
+
+/// A ban that needs no write; it never reaches a caller.
+#[derive(Debug)]
+struct BanNoop(BanWrite);
+
+impl fmt::Display for BanNoop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl std::error::Error for BanNoop {}
 
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
 /// through the coordinated mutation path. The caller never prints it.
@@ -3439,6 +3597,127 @@ port = 3890
             panic!("expected Unknown");
         };
         assert!(reason.contains("localhost"), "{reason}");
+    }
+
+    // ── The web's writes: a compare-and-set password and a ban ──────────────
+
+    const STRONG: &str = "orbit velvet quarry lantern cobalt";
+
+    fn hash_in(path: &Path) -> String {
+        let raw = std::fs::read_to_string(path).unwrap();
+        crate::config::auth_section_of(&raw).unwrap().password_hash
+    }
+
+    #[test]
+    fn a_password_is_set_only_over_the_hash_the_caller_checked() {
+        let (_dir, path) = temp_config(COMMENTED);
+        let first = set_password_if_current(&path, "", &Password::new(STRONG.to_string()), &[])
+            .expect("first password over none");
+        assert!(first.strength.score >= 2);
+        assert!(first.remaining_problems.is_empty());
+        let hash = hash_in(&path);
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# The port.")
+        );
+
+        // A writer that checked an older hash (or none) loses, and writes nothing.
+        let stale = set_password_if_current(
+            &path,
+            "",
+            &Password::new("another long passphrase entirely here".to_string()),
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(stale, SetPasswordError::ChangedMeanwhile),
+            "{stale}"
+        );
+        assert_eq!(hash_in(&path), hash);
+
+        set_password_if_current(
+            &path,
+            &hash,
+            &Password::new("another long passphrase entirely here".to_string()),
+            &[],
+        )
+        .expect("over the hash it checked");
+        assert_ne!(hash_in(&path), hash);
+    }
+
+    /// A problem the file already had elsewhere never refuses a ban: a ban that
+    /// cannot land is held in memory by the caller, and refusing it here
+    /// would turn an unrelated typo into an unblockable guesser.
+    #[test]
+    fn a_ban_lands_in_a_file_with_an_unrelated_problem() {
+        let (_dir, path) = temp_config("[server.auth]\nsession_idle_seconds = 0\n");
+        assert_eq!(
+            append_blocked_address(&path, "203.0.113.9".parse().unwrap(), 10).unwrap(),
+            BanWrite::Written
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"203.0.113.9\""), "{raw}");
+        assert!(
+            raw.contains("session_idle_seconds = 0"),
+            "the problem is left alone"
+        );
+    }
+
+    #[test]
+    fn a_compare_and_set_password_still_meets_the_files_minimums() {
+        let (_dir, path) = temp_config(COMMENTED);
+        let err = set_password_if_current(&path, "", &Password::new("password1234".into()), &[])
+            .unwrap_err();
+        assert!(matches!(err, SetPasswordError::BelowMinimums(_)), "{err}");
+        assert_eq!(hash_in(&path), "");
+    }
+
+    #[test]
+    fn a_ban_is_appended_once_keeping_the_comments_and_stops_at_the_limit() {
+        let (_dir, path) = temp_config(COMMENTED);
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(
+            append_blocked_address(&path, ip, 10).unwrap(),
+            BanWrite::Written
+        );
+        assert_eq!(
+            append_blocked_address(&path, ip, 10).unwrap(),
+            BanWrite::AlreadyBlocked
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# How wide the left pane is."), "{raw}");
+        let auth = crate::config::auth_section_of(&raw).unwrap();
+        assert_eq!(auth.blocked_addresses, vec!["203.0.113.7".to_string()]);
+
+        // An address inside a range already there is already blocked.
+        std::fs::write(
+            &path,
+            "[server.auth]\nblocked_addresses = [\"198.51.100.0/24\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            append_blocked_address(&path, "198.51.100.9".parse().unwrap(), 10).unwrap(),
+            BanWrite::AlreadyBlocked
+        );
+        assert_eq!(
+            append_blocked_address(&path, ip, 1).unwrap(),
+            BanWrite::AtLimit,
+            "the list is full"
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("203.0.113.7"), "{raw}");
+        // An IPv4-mapped address is written as the IPv4 address it carries.
+        assert_eq!(
+            append_blocked_address(&path, "::ffff:192.0.2.1".parse().unwrap(), 10).unwrap(),
+            BanWrite::Written
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"192.0.2.1\"")
+        );
     }
 }
 
