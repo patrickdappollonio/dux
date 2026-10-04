@@ -1258,3 +1258,51 @@ async fn a_password_stored_beside_old_problems_is_said_not_to_be_in_force() {
         json!(false)
     );
 }
+
+/// With `[server] tailscale = "no"` dux cannot check for a Funnel or forward, so
+/// it does not trust loopback: under the default `require` this machine signs
+/// in too, the status says why, and the first password cannot be set from it.
+#[tokio::test]
+async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why() {
+    use dux_web::exposure::{ExposureCell, FunnelState};
+    let unchecked = ExposureCell::new(FunnelState::Unchecked);
+    let guarded = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        let cell = unchecked.clone();
+        move |p| p.with_live_exposure(cell)
+    });
+    assert_auth_required(
+        &guarded.get(THIS_MACHINE, "/api/v1/projects").await,
+        "loopback",
+    );
+    let status = guarded.status(THIS_MACHINE, None).await;
+    assert_eq!(status["required_here"], json!(true));
+    assert_eq!(status["client_class"], json!("network"));
+    assert_eq!(status["transport_encrypted"], json!(false));
+    let reason = status["required_reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(reason.contains("tailscale = \"no\""), "{reason}");
+    assert!(guarded.status(NETWORK, None).await["required_reason"].is_null());
+
+    let open = Dux::start_tuned("", move |p| p.with_live_exposure(unchecked));
+    assert_eq!(
+        open.status(THIS_MACHINE, None).await["can_set_first_password"],
+        json!(false)
+    );
+    let refused = open
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert!(
+        refused.json()["message"]
+            .as_str()
+            .unwrap()
+            .contains("tailscale"),
+        "{}",
+        refused.body
+    );
+}

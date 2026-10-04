@@ -278,6 +278,7 @@ mod tests {
             transport_encrypted: false,
             https_serve_route: false,
             unvouched_proxy: false,
+            loopback_distrusted: None,
         }
     }
 

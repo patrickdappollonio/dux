@@ -112,6 +112,16 @@ impl DuxOptions {
         self
     }
 
+    /// Let dux check Tailscale (it finds none, unless [`Self::with_tailnet`]
+    /// puts the stand-in there). The image otherwise starts `dux server` with
+    /// `--no-tailscale`, and a dux that cannot check whether a Funnel or
+    /// forward relays the internet onto its port counts loopback as the
+    /// network, so a journey that needs this machine to BE this machine asks
+    /// for the check.
+    pub fn with_tailscale_checks(self) -> Self {
+        self.with_env("DUX_NO_TAILSCALE", "0")
+    }
+
     /// Relay `port` onto loopback with no forwarding header, the way a raw TCP
     /// forward (a `tailscale serve` TCP forward, a port forwarder) reaches dux.
     pub fn with_loopback_relay(mut self, port: u16) -> Self {

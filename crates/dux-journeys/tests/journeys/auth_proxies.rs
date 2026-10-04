@@ -87,6 +87,7 @@ async fn journey_07_behind_nginx_the_password_still_applies() {
     journey("07-nginx", Duration::from_secs(240), async {
         let dux = Dux::start(
             DuxOptions::local()
+                .with_tailscale_checks()
                 .with_published(8080)
                 .with_published(8081)
                 .with_password(STRONG_PASSWORD),

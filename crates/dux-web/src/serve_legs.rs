@@ -1099,10 +1099,15 @@ pub(crate) fn funnel_state_news(
     password_set: bool,
 ) -> Option<(dux_core::statusline::StatusTone, String)> {
     use crate::exposure::FunnelState::{
-        Checking, CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed,
+        Checking, CliNotFound, Funnel, FunnelSaved, Open, Unchecked, Unconfirmed,
     };
     use dux_core::statusline::StatusTone;
     if before == after {
+        return None;
+    }
+    // Leaving or entering the mode that does not check is said by the mode
+    // change itself (`not_checking_tailscale`, `no_longer_checking_funnel`).
+    if before == Unchecked || after == Unchecked {
         return None;
     }
     let meanwhile = if password_set {
@@ -1171,7 +1176,7 @@ pub(crate) fn funnel_state_news(
         )),
         (Checking, Open)
         | (Open | Checking | Unconfirmed | CliNotFound | Funnel | FunnelSaved, Checking) => None,
-        (Open, Open) => None,
+        (Open, Open) | (Unchecked, _) | (_, Unchecked) => None,
     }
 }
 
@@ -1184,20 +1189,23 @@ pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
         "[server] tailscale = \"no\""
     };
     format!(
-        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel \
-         publishing it to the public internet, and a request relayed through one would look \
-         like this machine. Keep this port private to your own network, or set a password \
-         with [server.auth] require = \"everywhere\"."
+        "dux is not checking Tailscale ({why}), so it cannot rule out a Tailscale Funnel or \
+         TCP forward relaying the internet onto this port, and it counts every request that \
+         reaches it over loopback as the network: with a password set, someone on this \
+         machine signs in too, whatever [server.auth] require says. With no password, keep \
+         this port private to your own network. Set [server] tailscale back to \"auto\" to \
+         let dux check, and trust this machine once it finds nothing."
     )
 }
 
-/// What dux says when a switch to `tailscale = "no"` lifts a refusal: an
-/// explicit choice, but one that serves whatever a Funnel publishes.
+/// What dux says when a switch to `tailscale = "no"` stops it checking: loopback
+/// stays the network from then on, because dux keeps distrusting whenever it
+/// cannot check.
 pub(crate) fn no_longer_checking_funnel() -> String {
-    "[server] tailscale is now \"no\", so dux no longer checks for Tailscale Funnel and takes \
-     requests from this machine for this machine again, including any a Funnel relays from \
-     the public internet. Turn the Funnel off, set tailscale back to \"auto\", or set \
-     [server.auth] require = \"everywhere\"."
+    "[server] tailscale is now \"no\", so dux no longer checks for a Tailscale Funnel or \
+     forward, and from now on counts requests that reach it over loopback as the network: \
+     with a password set, someone on this machine signs in too. Set tailscale back to \
+     \"auto\" to let dux check again."
         .to_string()
 }
 
@@ -1293,7 +1301,7 @@ impl TailscaleModeControl {
             crate::exposure::ExposureCell::new(if host_literals.load(Ordering::SeqCst) {
                 crate::exposure::FunnelState::Checking
             } else {
-                crate::exposure::FunnelState::Open
+                crate::exposure::FunnelState::Unchecked
             });
         (
             Self {
@@ -2370,7 +2378,7 @@ mod tests {
         let text = no_longer_checking_funnel();
         assert!(text.contains("no longer checks"), "{text}");
         assert!(text.contains("Funnel"), "{text}");
-        assert!(text.contains("require = \"everywhere\""), "{text}");
+        assert!(text.contains("signs in too"), "{text}");
     }
 
     #[test]

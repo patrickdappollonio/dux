@@ -1798,10 +1798,12 @@ async fn apply_mode_request(
             ModeStep::ForgetIdentity => {
                 ts.hold_identity(None);
                 // `no` is the mode in which dux does not consult Tailscale at
-                // all, so loopback is this machine again: an explicit choice,
-                // said loudly.
-                let before = ts.exposure.set_funnel(crate::exposure::FunnelState::Open);
-                if before != crate::exposure::FunnelState::Open {
+                // all, so it cannot rule out a Funnel or forward: loopback stays
+                // the network, and the change is said loudly.
+                let before = ts
+                    .exposure
+                    .set_funnel(crate::exposure::FunnelState::Unchecked);
+                if before != crate::exposure::FunnelState::Unchecked {
                     say(
                         dux_core::statusline::StatusTone::Warning,
                         &crate::serve_legs::no_longer_checking_funnel(),
@@ -4977,7 +4979,7 @@ mod live_tailscale_mode_tests {
     }
 
     #[tokio::test]
-    async fn switching_to_no_trusts_this_machine_again_out_loud() {
+    async fn switching_to_no_keeps_distrusting_this_machine_and_says_so() {
         use axum::http::StatusCode;
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let (_primary, primary_addr) = primary_listener();
@@ -5002,12 +5004,23 @@ mod live_tailscale_mode_tests {
         }
         assert_eq!(from_this_machine(&app).await, StatusCode::UNAUTHORIZED);
         h.control.set_mode(TailscaleMode::No).await;
-        until_this_machine(&app, StatusCode::OK).await;
+        // dux can no longer check, so it keeps distrusting: never lifted by
+        // looking away.
+        assert_eq!(
+            h.control.exposure().funnel(),
+            crate::exposure::FunnelState::Unchecked
+        );
+        tokio::time::sleep(FAST_LOOK * 10).await;
+        assert_eq!(from_this_machine(&app).await, StatusCode::UNAUTHORIZED);
         let said = ring_texts(&ring);
         assert!(
-            said.iter().any(|m| m.contains("no longer checks")),
+            said.iter()
+                .any(|m| m.contains("no longer checks") && m.contains("signs in too")),
             "{said:?}"
         );
+        // And choosing to check again trusts this machine once a look finds
+        // nothing.
+        h.control.set_mode(TailscaleMode::Auto).await;
         h.finish().await;
     }
 
@@ -5634,12 +5647,7 @@ mod live_tailscale_mode_tests {
             match says {
                 Some(why) => {
                     assert_eq!(texts.len(), 1, "{mode:?} {forced_no}: {texts:#?}");
-                    for needle in [
-                        "not checking Tailscale",
-                        why,
-                        "Funnel",
-                        "require = \"everywhere\"",
-                    ] {
+                    for needle in ["not checking Tailscale", why, "Funnel", "signs in too"] {
                         assert!(texts[0].contains(needle), "{needle}: {}", texts[0]);
                     }
                 }

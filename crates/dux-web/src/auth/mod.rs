@@ -464,6 +464,17 @@ impl AuthState {
             }),
             minimum_password_length: config.minimum_password_length,
             minimum_password_score: config.minimum_password_score,
+            required_reason: a
+                .classification
+                .loopback_distrusted
+                .filter(|_| a.required)
+                .map(|cause| {
+                    format!(
+                        "This browser reached dux over loopback, but {cause}, so dux cannot \
+                         tell it from a request relayed from elsewhere and asks for the \
+                         password here too."
+                    )
+                }),
         }
     }
 

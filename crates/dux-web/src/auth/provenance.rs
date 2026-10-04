@@ -200,6 +200,9 @@ pub struct Classification {
     /// Whether the request was forwarded by a proxy dux cannot vouch for, the
     /// case the one-time proxy warning is about.
     pub unvouched_proxy: bool,
+    /// Why a plain loopback request was counted as the network rather than
+    /// this machine (see [`Exposure::loopback_distrust_reason`]), or `None`.
+    pub loopback_distrusted: Option<&'static str>,
 }
 
 impl Classification {
@@ -227,6 +230,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
             transport_encrypted: false,
             https_serve_route: false,
             unvouched_proxy: false,
+            loopback_distrusted: None,
         };
     };
     let local = canonical(arrival.local.ip());
@@ -242,6 +246,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
         transport_encrypted: false,
         https_serve_route: false,
         unvouched_proxy,
+        loopback_distrusted: None,
     };
     if facts.funnel_marker {
         return Classification {
@@ -251,8 +256,11 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
     }
     if local.is_loopback() {
         if !facts.forwarded {
-            if exposure.loopback_possibly_public() {
-                return network(false);
+            if let Some(reason) = exposure.loopback_distrust_reason() {
+                return Classification {
+                    loopback_distrusted: Some(reason),
+                    ..network(false)
+                };
             }
             return Classification {
                 class: ClientClass::ThisMachine,
@@ -260,6 +268,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
                 transport_encrypted: true,
                 https_serve_route: false,
                 unvouched_proxy: false,
+                loopback_distrusted: None,
             };
         }
         let route = facts
@@ -273,6 +282,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
                 transport_encrypted: true,
                 https_serve_route: route.is_https(),
                 unvouched_proxy: false,
+                loopback_distrusted: None,
             },
             _ => network(true),
         };
@@ -284,6 +294,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
             transport_encrypted: true,
             https_serve_route: false,
             unvouched_proxy: false,
+            loopback_distrusted: None,
         };
     }
     network(false)
@@ -389,6 +400,24 @@ mod tests {
             class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &forward).class,
             ClientClass::Network
         );
+    }
+
+    #[test]
+    fn loopback_is_the_network_with_its_reason_while_dux_does_not_check_tailscale() {
+        let unchecked = Exposure {
+            funnel: FunnelState::Unchecked,
+            identity: None,
+        };
+        let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &unchecked);
+        assert_eq!(c.class, ClientClass::Network);
+        assert!(!c.transport_encrypted);
+        assert!(
+            c.loopback_distrusted
+                .unwrap()
+                .contains("does not check Tailscale")
+        );
+        let trusted = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &Exposure::default());
+        assert_eq!(trusted.loopback_distrusted, None);
     }
 
     #[test]

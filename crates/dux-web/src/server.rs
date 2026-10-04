@@ -254,6 +254,11 @@ const WS_LIVENESS_PING_PERIOD: std::time::Duration = std::time::Duration::from_s
 /// two missed pings and some slack. It bounds how long a dead connection can
 /// keep holding a connection slot and, with a password set, keep a signed-in
 /// session from going idle.
+///
+/// It applies to every socket, with or without a password (decided, not an
+/// oversight): a half-open connection holds a slot of the per-class caps
+/// either way, every browser answers pings by protocol, and one liveness rule
+/// for all sockets is one rule to reason about rather than two.
 const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
 
 /// Whether a peer last heard at `heard` has been quiet past [`PONG_DEADLINE`].

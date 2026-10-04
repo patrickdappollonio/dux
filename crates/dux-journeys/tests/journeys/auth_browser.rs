@@ -113,6 +113,7 @@ async fn journey_12b_no_eavesdropping_warning_on_this_machine() {
     journey("12b-browser-loopback", Duration::from_secs(300), async {
         let dux = Dux::start(
             DuxOptions::local()
+                .with_tailscale_checks()
                 .with_published(WEBDRIVER_PORT)
                 .with_password(STRONG_PASSWORD)
                 .with_config("server.auth.require", "everywhere"),

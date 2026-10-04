@@ -454,7 +454,9 @@ async fn wrong_password_until_counted(client: &Client) -> Response {
 )]
 async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
     journey("11-first-password", Duration::from_secs(300), async {
-        let dux = Dux::start(DuxOptions::exposed()).await;
+        // dux checks Tailscale (and finds none), so this machine is this
+        // machine; with the checks off it could not tell.
+        let dux = Dux::start(DuxOptions::exposed().with_tailscale_checks()).await;
         let network = dux.client().await;
 
         let status = network.auth_status().await;

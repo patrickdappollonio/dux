@@ -31,12 +31,15 @@ use dux_core::tailscale::{ServeRoute, TailscaleIdentity};
 ///
 /// Every state but [`FunnelState::Open`] is one in which a request from
 /// loopback may have come from the public internet, so such a request is not
-/// taken for this machine.
+/// taken for this machine: whenever dux cannot check, it does not trust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunnelState {
-    /// No Funnel forwards to dux, as far as the last look could tell, or dux
-    /// is not consulting Tailscale at all (`tailscale = "no"`).
+    /// No Funnel forwards to dux, as far as the last look could tell.
     Open,
+    /// dux does not consult Tailscale (`[server] tailscale = "no"` or
+    /// `--no-tailscale`), so it cannot rule out a Funnel or forward relaying
+    /// the internet onto its port, and loopback is not trusted.
+    Unchecked,
     /// The serve has started and its first look at Tailscale has not answered
     /// yet. Unknown is not clear.
     Checking,
@@ -106,6 +109,32 @@ impl Exposure {
                 .identity
                 .as_ref()
                 .is_some_and(|facts| facts.forward_to_dux)
+    }
+
+    /// Why a loopback request with no trustworthy origin is not taken for
+    /// this machine, in words for the person on it, or `None` when it is.
+    pub fn loopback_distrust_reason(&self) -> Option<&'static str> {
+        if self
+            .identity
+            .as_ref()
+            .is_some_and(|facts| facts.forward_to_dux)
+        {
+            return Some("a tailscale serve TCP forward reaches dux's port");
+        }
+        match self.funnel {
+            FunnelState::Open => None,
+            FunnelState::Unchecked => Some(
+                "dux does not check Tailscale ([server] tailscale = \"no\" or --no-tailscale), \
+                 so it cannot rule out a Funnel or forward relaying the internet onto its port",
+            ),
+            FunnelState::Checking => Some("dux has not finished its first look at Tailscale"),
+            FunnelState::Unconfirmed | FunnelState::CliNotFound => {
+                Some("dux cannot confirm with Tailscale that no Funnel reaches its port")
+            }
+            FunnelState::Funnel | FunnelState::FunnelSaved => {
+                Some("a Tailscale Funnel reaches dux's port from the public internet")
+            }
+        }
     }
 
     /// Whether dux KNOWS it is published beyond this machine and its own

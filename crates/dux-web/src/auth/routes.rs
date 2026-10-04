@@ -47,6 +47,10 @@ pub(crate) struct StatusDoc {
     pub(crate) auth_broken: Option<String>,
     pub(crate) minimum_password_length: u32,
     pub(crate) minimum_password_score: u8,
+    /// Why this machine is asked for the password too, when it reached dux
+    /// over loopback but dux could not rule out that the request was relayed
+    /// from elsewhere. `null` otherwise. Shown, never decided on.
+    pub(crate) required_reason: Option<String>,
 }
 
 async fn status(
@@ -354,13 +358,25 @@ async fn change_password(
                 a.classification.class,
                 ClientClass::ThisMachine | ClientClass::Tailnet
             ) {
+                let because = a
+                    .classification
+                    .loopback_distrusted
+                    .map(|cause| {
+                        format!(
+                            " This browser reached dux over loopback, but {cause}, so dux \
+                             cannot tell it is this machine."
+                        )
+                    })
+                    .unwrap_or_default();
                 return refusal(
                     StatusCode::FORBIDDEN,
                     json!({
                         "error": "first_password_not_here",
-                        "message": "The first password can only be set from the machine dux runs \
-                                    on, from your tailnet, or with `dux config set \
-                                    server.auth.password`.",
+                        "message": format!(
+                            "The first password can only be set from the machine dux runs on, \
+                             from your tailnet, or with `dux config set \
+                             server.auth.password`.{because}"
+                        ),
                     }),
                 );
             }
@@ -493,6 +509,12 @@ async fn change_password(
 
 /// `POST /api/v1/auth/dismiss-no-auth-warning`: the red banner's "don't show
 /// again", which writes `disable_no_auth_warning = true`.
+///
+/// With no password set this is reachable by anyone who can reach dux, and that
+/// is decided: the warning exists only while there is no password, so whoever
+/// can press it can already drive every terminal and edit the config itself.
+/// The single-owner trust model has nothing more to protect here, and the
+/// terminal's own warnings are not silenced by it.
 async fn dismiss_no_auth_warning(State(state): State<AppState>) -> Response {
     let Some(path) = state.auth.config_path().cloned() else {
         return server_error("This server has no config file to save that choice to.".into());
