@@ -114,8 +114,8 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(String, String)> {
 /// A value the load migrations write in place of a deprecated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarriedOver {
-    /// The dotted key the value lands in.
-    pub key: String,
+    /// The path of the setting the value lands in.
+    pub key: Vec<String>,
     /// The deprecated key's section and name.
     pub old_section: &'static str,
     pub old_key: &'static str,
@@ -159,7 +159,7 @@ pub fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
                 .is_some_and(|before| before.contains_key(key));
             if !existed {
                 found.push(CarriedOver {
-                    key: format!("{}.{key}", rule.old.section),
+                    key: vec![rule.old.section.to_string(), key.to_string()],
                     old_section: rule.old.section,
                     old_key: rule.old.key,
                     old_value: old_value.clone(),
@@ -173,7 +173,7 @@ pub fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
 
 /// Every retired provider's stock block in `doc` the load prunes, as its
 /// dotted key and why.
-pub fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(String, String)> {
+pub fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
     let mut pruned = doc.clone();
     let Some(before) = doc.get("providers").and_then(Item::as_table) else {
         return Vec::new();
@@ -185,7 +185,7 @@ pub fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(String, String)> {
         .filter(|(name, _)| after.is_none_or(|after| !after.contains_key(name)))
         .map(|(name, _)| {
             (
-                format!("providers.{name}"),
+                vec!["providers".to_string(), name.to_string()],
                 format!(
                     "dux no longer ships the {name} provider, and drops the untouched \
                      [providers.{name}] block it once wrote when it loads the file (change any \

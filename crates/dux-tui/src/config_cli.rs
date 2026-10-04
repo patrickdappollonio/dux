@@ -72,11 +72,11 @@ pub(crate) fn run_get(
         Err(error) => bail!(
             "{error}. Neither the terminal UI nor dux server starts with it, so no value of \
              {} is in use.",
-            dux_core::config::shown_key("", path)
+            dux_core::config::shown_path("", &key.path)
         ),
     };
     // Every path printed below goes through the one formatter.
-    let path = &dux_core::config::shown_key(&raw, path);
+    let path = &dux_core::config::shown_path(&raw, &key.path);
     let report = config_keys::get_report(&raw, &key)?;
     let hide = key.is_sensitive() && !show;
     // Every surface that starts with the file uses the same value, so it is
@@ -143,8 +143,13 @@ pub(crate) fn run_get(
     // One line per value the load changes: the setting asked for, or each
     // entry inside the table asked for.
     for correction in &report.corrections {
-        let at = dux_core::config::shown_key(&raw, &correction.path);
+        let at = dux_core::config::shown_path(&raw, &correction.path);
         let reason = correction.reason.trim_end_matches('.');
+        // A correction only one surface makes says it all in its reason.
+        if correction.surface.is_some() {
+            writeln!(err, "({at}: {reason})")?;
+            continue;
+        }
         let Some(in_file) = &correction.in_file else {
             // Left out of the file; the load writes it from a deprecated key.
             match &correction.used {
@@ -243,11 +248,11 @@ pub(crate) fn run_set(
     Ok(())
 }
 
-/// A setting's dotted path as printed, through the one formatter, against
-/// the file as it is now.
-fn shown(paths: &DuxPaths, dotted: &str) -> String {
+/// A setting's path as printed, through the one formatter, against the
+/// file as it is now.
+fn shown(paths: &DuxPaths, path: &[String]) -> String {
     let raw = std::fs::read_to_string(&paths.config_path).unwrap_or_default();
-    dux_core::config::shown_key(&raw, dotted)
+    dux_core::config::shown_path(&raw, path)
 }
 
 /// The problems that stop `surface` (at start, and on a reload, which
@@ -430,7 +435,7 @@ fn set_secret(
         writeln!(
             out,
             "{} updated in {} (the value is not shown).",
-            shown(paths, &key.dotted()),
+            shown(paths, &key.path),
             paths.config_path.display()
         )?;
         return Ok((remaining, false));
@@ -1973,3 +1978,9 @@ mod printing_signals_and_carried_values_tests;
 
 #[cfg(test)]
 mod rule_breaking_names_in_tables_tests;
+
+#[cfg(test)]
+mod dotted_names_migrations_and_providers_tests;
+
+#[cfg(test)]
+mod sets_over_the_start_corpus_tests;

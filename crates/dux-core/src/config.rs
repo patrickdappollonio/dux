@@ -2946,6 +2946,9 @@ pub enum ConfigLoadProblem {
     NotToml(String),
     /// `[server.auth]` (or the `[server]` table holding it) is invalid.
     AuthInvalid(String),
+    /// A web UI password setting is somewhere dux does not read one (see
+    /// [`misplaced_auth_problem_list`]); the file may have no `[server.auth]`.
+    AuthMisplaced(String),
     /// The file was there when dux started and is gone now. Only a reload
     /// reports this: a first start with no file is the defaults.
     Missing,
@@ -3063,7 +3066,10 @@ impl ConfigLoadProblem {
     /// What went wrong, in words, without the advice around it.
     pub fn reason(&self) -> &str {
         match self {
-            Self::Unreadable(reason) | Self::NotToml(reason) | Self::AuthInvalid(reason) => reason,
+            Self::Unreadable(reason)
+            | Self::NotToml(reason)
+            | Self::AuthInvalid(reason)
+            | Self::AuthMisplaced(reason) => reason,
             Self::Missing => "the file no longer exists",
             Self::DanglingLink(_) => "it is a symbolic link to a file that does not exist",
         }
@@ -3115,6 +3121,12 @@ impl std::fmt::Display for ConfigLoadError {
                  shows what the file holds; a new password is \
                  `dux config set server.auth.password`).\n{reason}"
             ),
+            ConfigLoadProblem::AuthMisplaced(reason) => write!(
+                f,
+                "{path} has a web UI password setting where dux does not read one, and dux will \
+                 not guess at it. Web UI password settings belong in [server.auth] (a new \
+                 password is `dux config set server.auth.password`).\n{reason}"
+            ),
         }
     }
 }
@@ -3149,10 +3161,11 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
     let Some(server) = doc.get_mut("server") else {
         return Ok(ServerAuthConfig::default());
     };
+    // A `[server]` that is not a table holds no `[server.auth]`: it is left
+    // to the recovery, as dux always read it. One holding a password setting
+    // never gets here (see [`misplaced_auth_problem_list`]).
     let toml::Value::Table(server) = server else {
-        return Err(ConfigLoadProblem::AuthInvalid(
-            "[server] is not a table, so [server.auth] inside it cannot be read".to_string(),
-        ));
+        return Ok(ServerAuthConfig::default());
     };
     let Some(auth) = server.remove("auth") else {
         return Ok(ServerAuthConfig::default());
@@ -3229,6 +3242,18 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             ));
         }
     }
+    // A `[server]` that is not a table (an array of tables, a value) holding
+    // a password hash or an auth-like table anywhere inside it.
+    if let Some(server) = file.get("server").filter(|server| !server.is_table())
+        && holds_auth_setting(server, &auth_settings)
+    {
+        problems.push(Problem::about(
+            "server",
+            "[server] is not a table, and it holds a web UI password setting, which dux does \
+             not read there: the settings belong in [server.auth] (a [server] table holding an \
+             [auth] table), so dux will not start until they are moved there or removed",
+        ));
+    }
     if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
         if server.contains_key("password_hash") {
             problems.push(stray("server.password_hash".to_string()));
@@ -3253,6 +3278,29 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         }
     }
     problems
+}
+
+/// Whether `value` holds, anywhere inside it, a `password_hash` or a table
+/// under a name close to "auth" holding one of `auth_settings`.
+fn holds_auth_setting(value: &toml::Value, auth_settings: &[String]) -> bool {
+    match value {
+        toml::Value::Table(table) => table.iter().any(|(key, child)| {
+            let near = {
+                let key = key.to_lowercase();
+                key == "auth" || edit_distance(&key, "auth") <= 2
+            };
+            key == "password_hash"
+                || (near
+                    && child
+                        .as_table()
+                        .is_some_and(|t| t.keys().any(|k| auth_settings.contains(k))))
+                || holds_auth_setting(child, auth_settings)
+        }),
+        toml::Value::Array(items) => items
+            .iter()
+            .any(|item| holds_auth_setting(item, auth_settings)),
+        _ => false,
+    }
 }
 
 /// [`misplaced_auth_problem_list`]'s sentences.
@@ -3297,10 +3345,16 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
         #[serde(default)]
         auth: Option<ServerAuthConfig>,
     }
-    toml::from_str::<toml::Table>(raw)
+    let table = toml::from_str::<toml::Table>(raw)
         .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
     if let Some(problem) = misplaced_auth_problems(raw).into_iter().next() {
-        return Err(ConfigLoadProblem::AuthInvalid(problem));
+        return Err(ConfigLoadProblem::AuthMisplaced(problem));
+    }
+    // A `[server]` that is not a table holds no `[server.auth]` (a password
+    // setting inside it was refused just above), so there is no password,
+    // as dux always read such a file; the rest is left to the recovery.
+    if table.get("server").is_some_and(|server| !server.is_table()) {
+        return Ok(ServerAuthConfig::default());
     }
     let file: File = toml::from_str(raw).map_err(|e| {
         // A rule the section breaks as a whole (checked after every field
@@ -3454,6 +3508,65 @@ pub fn install_terminal_ui_migration(migration: TerminalUiMigration) {
     let _ = TERMINAL_UI_MIGRATION.set(migration);
 }
 
+/// What the terminal UI's own `[keys]` migrations make of each `[keys]`
+/// entry in the whole config file `raw` they change, by path, with what the
+/// terminal UI uses instead: a binding folded into the action that replaced
+/// a retired one, or one it drops. Empty when the migrations are not
+/// installed (no terminal UI in this process) or change nothing.
+pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
+    };
+    if TERMINAL_UI_MIGRATION.get().is_none() {
+        return Vec::new();
+    }
+    let read = as_terminal_ui_reads(&file);
+    let keys_of = |table: &toml::Table| -> toml::Table {
+        table
+            .get("keys")
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (before, after) = (keys_of(&file), keys_of(&read));
+    let mut found = Vec::new();
+    for (name, value) in &before {
+        if after.get(name) == Some(value) {
+            continue;
+        }
+        // Where its binding went: an action that now has it and did not.
+        let moved_to = after
+            .iter()
+            .find(|(other, bound)| {
+                *other != name
+                    && before.get(*other) != Some(bound)
+                    && contains_binding(bound, value)
+            })
+            .map(|(other, _)| other.clone());
+        let reason = match (moved_to, after.get(name)) {
+            (Some(other), _) => format!("the terminal UI uses this binding as {other}"),
+            (None, Some(_)) => "the terminal UI reads this binding differently".to_string(),
+            (None, None) => {
+                "the terminal UI drops this binding: that action no longer exists".to_string()
+            }
+        };
+        found.push((vec!["keys".to_string(), name.clone()], reason));
+    }
+    found
+}
+
+/// Whether the binding `bound` carries everything `value` binds.
+fn contains_binding(bound: &toml::Value, value: &toml::Value) -> bool {
+    let items = |v: &toml::Value| -> Vec<toml::Value> {
+        match v {
+            toml::Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
+        }
+    };
+    let bound = items(bound);
+    items(value).iter().all(|item| bound.contains(item))
+}
+
 /// `table` as the terminal UI's start reads it: with its own migrations
 /// applied, when installed.
 fn as_terminal_ui_reads(table: &toml::Table) -> toml::Table {
@@ -3536,8 +3649,9 @@ pub fn check_start(raw: &str) -> StartCheck {
             || "dux server reads it as its default".to_string(),
             |r| r.said_of(&key, raw),
         );
+        // The setting it is about, for attribution only; never printed.
         check.problems.push(StartProblem::new(
-            Problem::about(key, format!("{place}: {kind} ({what})")),
+            Problem::about(key.join("."), format!("{place}: {kind} ({what})")),
             true,
             false,
         ));
@@ -3651,7 +3765,7 @@ fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, Vec<(String,
 /// An entry of `[env]` whose name is not a variable name is placed by its
 /// line in `raw` rather than named: such a name may be a value pasted in
 /// the wrong place.
-fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, String, String)> {
+fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, Vec<String>, String)> {
     let mut found = Vec::new();
     for (section, value) in table {
         if !section_solo_ok(section, value.clone()) {
@@ -3660,7 +3774,7 @@ fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, String, 
     }
     found
         .into_iter()
-        .map(|(segments, kind)| (shown_place(raw, &segments), segments.join("."), kind))
+        .map(|(segments, kind)| (shown_place(raw, &segments), segments, kind))
         .collect()
 }
 
@@ -3724,12 +3838,6 @@ pub fn shown_path(raw: &str, segments: &[String]) -> String {
 /// map's naming rule, which the formatter never prints.
 pub fn name_is_hidden(raw: &str, segments: &[String]) -> bool {
     hidden_entry(raw, segments).is_some_and(|(_, _, rest)| rest.is_empty())
-}
-
-/// [`shown_path`] for a dotted key.
-pub fn shown_key(raw: &str, dotted: &str) -> String {
-    let segments: Vec<String> = dotted.split('.').map(str::to_string).collect();
-    shown_path(raw, &segments)
 }
 
 /// A setting's place in a problem sentence: `[ui] left_width_pct`, or
@@ -3972,10 +4080,10 @@ fn auth_section_problems(file: &toml::Table, raw: &str) -> Vec<crate::config_aut
     let Some(server) = file.get("server") else {
         return Vec::new();
     };
+    // Not a table: no `[server.auth]` to judge; a password setting inside it
+    // is the misplaced-auth rule's.
     let Some(server) = server.as_table() else {
-        return vec![crate::config_auth::Problem::plain(
-            "[server] is not a table",
-        )];
+        return Vec::new();
     };
     let Some(auth) = server.get("auth") else {
         return Vec::new();
@@ -4023,22 +4131,21 @@ enum Recovery {
 }
 
 impl Recovery {
-    /// The dotted key of what it drops or resets.
-    fn key(&self) -> String {
+    /// The path of what it drops or resets.
+    fn key(&self) -> Vec<String> {
         match self {
-            Self::DropField { section, field } => format!("{section}.{field}"),
-            Self::ResetSection { section } => section.clone(),
+            Self::DropField { section, field } => vec![section.clone(), field.clone()],
+            Self::ResetSection { section } => vec![section.clone()],
         }
     }
 
-    /// Whether the dotted `key` is inside what it drops or resets.
-    fn covers(&self, key: &str) -> bool {
-        let own = self.key();
-        key == own || key.starts_with(&format!("{own}."))
+    /// Whether the setting at `key` is inside what it drops or resets.
+    fn covers(&self, key: &[String]) -> bool {
+        key.starts_with(&self.key())
     }
 
     /// The action in `plan` that covers `key`, if any.
-    fn covering<'a>(plan: &'a [Recovery], key: &str) -> Option<&'a Recovery> {
+    fn covering<'a>(plan: &'a [Recovery], key: &[String]) -> Option<&'a Recovery> {
         plan.iter().find(|recovery| recovery.covers(key))
     }
 
@@ -4054,7 +4161,7 @@ impl Recovery {
     }
 
     /// What `dux server` does about the wrong value at `key`, which it covers.
-    fn said_of(&self, key: &str, raw: &str) -> String {
+    fn said_of(&self, key: &[String], raw: &str) -> String {
         let place = self.place(raw);
         match self {
             Self::DropField { .. } if self.key() == key => {
@@ -4380,11 +4487,18 @@ fn apply_load_corrections(config: Config) -> Config {
     config
 }
 
+/// A setting's path as segments, from its names.
+fn key_path(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
 /// Every value a load of the whole config file `raw` uses in place of what
-/// the file says, by dotted key, with why: an entry the load migrations drop
-/// (a retired provider's stock block) and each value the load corrects.
-/// Empty for a file that does not read.
-pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
+/// the file says, by the path of the setting (or entry) as segments, with
+/// why: an entry the load migrations drop (a retired provider's stock
+/// block), a value carried over from a deprecated key, what dux server's
+/// recovery drops or resets, and each value the load corrects. Empty for a
+/// file that does not read.
+pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
     let mut found = raw
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
@@ -4418,7 +4532,7 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
     {
         let wrong = wrong_typed_settings(&rest, raw);
         for recovery in recovery_plan(&rest) {
-            let causes: Vec<&(String, String, String)> = wrong
+            let causes: Vec<&(String, Vec<String>, String)> = wrong
                 .iter()
                 .filter(|(_, key, _)| recovery.covers(key))
                 .collect();
@@ -4457,16 +4571,16 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
 }
 
 /// [`apply_load_corrections`] without the logging: the corrected config,
-/// and each correction's dotted key and warning.
-fn load_corrections(mut config: Config) -> (Config, Vec<(String, String)>) {
-    let mut corrections: Vec<(String, String)> = Vec::new();
+/// and each correction's path and warning.
+fn load_corrections(mut config: Config) -> (Config, Vec<(Vec<String>, String)>) {
+    let mut corrections: Vec<(Vec<String>, String)> = Vec::new();
     // Same idea again for an out-of-range terminal_font_size: warn ONCE here and
     // correct it IN MEMORY, rather than letting `normalized_terminal_font_size`
     // (now pure, see its doc comment) warn on every bootstrap read. Correcting it
     // here also fixes on-disk persistence: a later save writes back the
     // already-valid in-memory value instead of re-persisting the bad one.
     if let Some(warning) = terminal_font_size_load_warning(config.ui.terminal_font_size) {
-        corrections.push(("ui.terminal_font_size".to_string(), warning));
+        corrections.push((key_path(&["ui", "terminal_font_size"]), warning));
         config.ui.terminal_font_size = DEFAULT_TERMINAL_FONT_SIZE;
     }
     // And once more for an upload directory that names somewhere dux will not
@@ -4474,7 +4588,7 @@ fn load_corrections(mut config: Config) -> (Config, Vec<(String, String)>) {
     // later upload resolves the default silently rather than warning per file.
     if let Some(warning) = upload_pasted_text_chars_load_warning(config.ui.upload_pasted_text_chars)
     {
-        corrections.push(("ui.upload_pasted_text_chars".to_string(), warning));
+        corrections.push((key_path(&["ui", "upload_pasted_text_chars"]), warning));
         config.ui.upload_pasted_text_chars =
             normalized_upload_pasted_text_chars(config.ui.upload_pasted_text_chars);
     }
@@ -4483,26 +4597,26 @@ fn load_corrections(mut config: Config) -> (Config, Vec<(String, String)>) {
     // mistyped value from warning tens of times a second for the whole run.
     if let Some(warning) = github_probe_interval_load_warning(config.ui.github_probe_interval_secs)
     {
-        corrections.push(("ui.github_probe_interval_secs".to_string(), warning));
+        corrections.push((key_path(&["ui", "github_probe_interval_secs"]), warning));
         config.ui.github_probe_interval_secs =
             normalized_github_probe_interval(config.ui.github_probe_interval_secs);
     }
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
-        corrections.push(("ui.upload_directory".to_string(), warning));
+        corrections.push((key_path(&["ui", "upload_directory"]), warning));
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
     // And once more for a `ui.compose_bar` naming a mode dux does not know.
     // Corrected in memory so the bootstrap projection publishes a mode the
     // browser can act on rather than passing the typo through to it.
     if let Some(warning) = compose_bar_load_warning(&config) {
-        corrections.push(("ui.compose_bar".to_string(), warning));
+        corrections.push((key_path(&["ui", "compose_bar"]), warning));
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
     }
     // And once more for a `[server] tailscale` naming a mode dux does not know.
     // Corrected in memory so the serve path reads a real mode rather than
     // silently treating a typo as the default on every question it asks.
     if let Some(warning) = tailscale_load_warning(&config) {
-        corrections.push(("server.tailscale".to_string(), warning));
+        corrections.push((key_path(&["server", "tailscale"]), warning));
         config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
     }
     (config, corrections)
@@ -6184,10 +6298,33 @@ auth = { minimum_password_score = 9 }
         }
     }
 
+    /// A `[server]` that is not a table is read as dux always read it (the
+    /// recovery resets it), unless it holds a web UI password setting, which
+    /// is refused as misplaced, never as an invalid `[server.auth]`.
     #[test]
-    fn a_server_section_that_is_not_a_table_is_refused() {
-        let err = recover_config("server = 5\n").expect_err("refused");
-        assert!(matches!(err, ConfigLoadProblem::AuthInvalid(_)), "{err:?}");
+    fn a_server_section_that_is_not_a_table_reads_as_dux_always_read_it() {
+        for body in ["server = 5\n", "server = []\n", "[[server]]\nport = 1\n"] {
+            let config = recover_config(body).expect("read as before");
+            assert_eq!(config.server.port, Config::default().server.port, "{body}");
+        }
+        for body in [
+            "[[server]]\npassword_hash = \"x\"\n",
+            "[[server]]\n[server.auth]\npassword_hash = \"x\"\n",
+            "server = [{auth = {require = \"network\"}}]\n",
+        ] {
+            let err = recover_config(body).expect_err("misplaced");
+            assert!(
+                matches!(err, ConfigLoadProblem::AuthMisplaced(_)),
+                "{body}: {err:?}"
+            );
+            let shown = ConfigLoadError {
+                path: PathBuf::from("config.toml"),
+                problem: err,
+            }
+            .to_string();
+            assert!(!shown.contains("[server.auth] in"), "{shown}");
+            assert!(shown.contains("belong in [server.auth]"), "{shown}");
+        }
     }
 
     #[test]
@@ -7230,7 +7367,7 @@ mod recovery_flags_and_names_tests {
         let corrections = load_corrections_of(raw);
         let (_, reason) = corrections
             .iter()
-            .find(|(key, _)| key == "ui")
+            .find(|(key, _)| *key == ["ui"])
             .expect("the reset is recorded");
         assert!(reason.contains("dux server resets all of [ui]"), "{reason}");
         assert!(reason.contains("[ui] right_width_pct"), "{reason}");
@@ -7343,8 +7480,11 @@ mod printed_paths_and_carried_values_tests {
     fn the_formatter_never_prints_a_name_that_breaks_its_rule() {
         let raw = "[env]\n\"sk-live-SECRET\" = 5\nGOOD = \"1\"\n\n\
                    [providers.\"bad name!\"]\ncommand = \"x\"\nargs = 5\n";
-        assert_eq!(shown_key(raw, "ui.left_width_pct"), "ui.left_width_pct");
-        assert_eq!(shown_key(raw, "env.GOOD"), "env.GOOD");
+        assert_eq!(
+            shown_path(raw, &key_path(&["ui", "left_width_pct"])),
+            "ui.left_width_pct"
+        );
+        assert_eq!(shown_path(raw, &key_path(&["env", "GOOD"])), "env.GOOD");
         assert_eq!(
             shown_path(raw, &["env".to_string(), "sk-live-SECRET".to_string()]),
             "the entry on line 2 of [env]"
@@ -7414,7 +7554,7 @@ mod printed_paths_and_carried_values_tests {
             let corrections = load_corrections_of(raw);
             let reason = corrections
                 .iter()
-                .find(|(corrected, _)| corrected == key)
+                .find(|(corrected, _)| corrected.join(".") == key)
                 .map(|(_, reason)| reason.as_str())
                 .unwrap_or_else(|| panic!("{key}: {corrections:?}"));
             assert!(reason.contains(said), "{key}: {reason}");
@@ -7426,8 +7566,48 @@ mod printed_paths_and_carried_values_tests {
         assert!(
             load_corrections_of("[server]\nbind = \"0.0.0.0:4000\"\nhost = \"1.2.3.4\"\n")
                 .iter()
-                .all(|(key, _)| key != "server.host")
+                .all(|(key, _)| *key != ["server", "host"])
         );
+    }
+}
+
+#[cfg(test)]
+mod names_with_dots_quotes_and_spaces_tests {
+    use super::*;
+
+    /// A name that breaks its map's rule and holds a dot, a quote or a
+    /// space is carried as one segment from the file to every sentence:
+    /// the formatter places it by its line, and no problem or correction
+    /// ever prints it, in each map with a naming rule.
+    #[test]
+    fn a_name_with_a_dot_quote_or_space_is_one_segment_everywhere() {
+        for name in ["ghp.SECRET one", "ghp\"SECRET\"", "ghp SECRET.x.y"] {
+            let quoted = toml::Value::String(name.to_string()).to_string();
+            for (body, section) in [
+                (format!("[env]\n{quoted} = 5\n"), "env"),
+                (format!("[providers.{quoted}]\nargs = 5\n"), "providers"),
+                (format!("[macros]\n{quoted} = 5\n"), "macros"),
+            ] {
+                let segments = vec![section.to_string(), name.to_string()];
+                let shown = shown_path(&body, &segments);
+                assert!(!shown.contains("SECRET"), "{body}: {shown}");
+                assert!(
+                    shown.contains("line 2") || shown.contains("line 1"),
+                    "{body}: {shown}"
+                );
+                for problem in start_problems_of(&body) {
+                    assert!(!problem.message.contains("SECRET"), "{body}: {problem:?}");
+                }
+                for (path, reason) in load_corrections_of(&body) {
+                    assert!(!reason.contains("SECRET"), "{body}: {reason}");
+                    assert!(
+                        path.iter()
+                            .all(|segment| !segment.contains('.') || segment == name),
+                        "{body}: a path was split on a dot: {path:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

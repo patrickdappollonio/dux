@@ -11,12 +11,17 @@
 # - A file that is not TOML (a broken header, a key written twice) stops
 #   `dux server` too. 7437238c started it on the defaults, silently, which
 #   would serve with no web password at all when the file meant to set one.
+# - A `[server]` that is not a table (an array of tables, a value) but holds a
+#   web UI password setting (a `password_hash`, or an `auth` table) stops
+#   `dux server` too. 7437238c reset `[server]` and started with no password;
+#   a `[server]` that is not a table and holds none starts as it did then.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
 # macro and key names, the deprecated keys, project records, tables of the
-# user's own (near "auth" included) and whole-file oddities. [server.auth]
-# did not exist then and is not in it.
+# user's own (near "auth" included), a `[server]` that is not a table, names
+# holding dots and spaces, and whole-file oddities. [server.auth] did not
+# exist then and is not in it, except as a misplaced password setting.
 
 start start "shutdown_timeout_seconds = 0\n"
 refuse start "shutdown_timeout_seconds = -1\n"
@@ -407,3 +412,18 @@ start start "x = 1\n"
 refuse refuse(was:start) "[ui]\nleft_width_pct = 30\nleft_width_pct = 31\n"
 refuse start "[ui]\nleft_width_pct = \"a\"\nright_width_pct = \"b\"\n"
 refuse start "[ui]\nleft_width_pct = 40\nright_width_pct = \"b\"\nstatus_clear_seconds = \"c\"\n"
+start start "server = []\n"
+refuse start "server = 5\n"
+refuse start "server = \"x\"\n"
+refuse start "server = [1]\n"
+refuse start "server = [{}]\n"
+refuse start "[[server]]\nport = 1\n"
+refuse start "[[server]]\n"
+refuse refuse(was:start) "server = [{password_hash = \"x\"}]\n"
+refuse refuse(was:start) "[[server]]\npassword_hash = \"x\"\n"
+refuse refuse(was:start) "[[server]]\n[server.auth]\npassword_hash = \"x\"\n"
+refuse refuse(was:start) "server = [{auth = {require = \"network\"}}]\n"
+start start "[keys]\nexit_interactive = [\"ctrl-x\"]\n"
+refuse start "[env]\n\"ghp.SECRET 1\" = \"x\"\n"
+start start "[providers.\"a.b c\"]\ncommand = \"x\"\n"
+refuse start "[macros]\n\"a.b c\" = \"x\"\n"

@@ -5606,38 +5606,40 @@ second_note = \"nowhere to go\"
         );
     }
 
-    /// A refusal names the shape that is actually wrong: a `server` that is
-    /// not a table, or a `server.auth` that is not one, is not called an
-    /// invalid `[server.auth]` section, because there is no such section.
+    /// A refusal names the shape that is actually wrong: a `server.auth`
+    /// that is not a table is not called an invalid `[server.auth]` section.
+    /// A `server` that is not a table holds no password and is written
+    /// around, as dux always read it.
     #[test]
     fn a_refused_write_names_the_shape_that_is_actually_wrong() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("config.toml");
-        for (text, names) in [
-            ("server = 1\n", "[server] in"),
-            ("[server]\nauth = [1]\n", "server.auth in"),
-        ] {
-            fs::write(&path, text).unwrap();
-            let err = mutate_config_file(&path, |doc| {
-                doc["ui"]["left_width_pct"] = toml_edit::value(30);
-                Ok(())
-            })
-            .expect_err("refused");
-            let message = format!("{err:#}");
-            assert!(message.contains(names), "{message}");
-            assert!(message.contains("is not a table"), "{message}");
-            assert!(!message.contains("make [server.auth]"), "{message}");
-            let err =
-                replace_config_file(&path, |_| Ok((text.to_string(), ()))).expect_err("refused");
-            let message = format!("{err:#}");
-            assert!(message.contains(names), "{message}");
-            assert!(!message.contains("leave [server.auth]"), "{message}");
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                text,
-                "nothing was written"
-            );
-        }
+        fs::write(&path, "server = 1\n").unwrap();
+        mutate_config_file(&path, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            Ok(())
+        })
+        .expect("a [server] that is not a table holds no password");
+        let text = "[server]\nauth = [1]\n";
+        fs::write(&path, text).unwrap();
+        let err = mutate_config_file(&path, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            Ok(())
+        })
+        .expect_err("refused");
+        let message = format!("{err:#}");
+        assert!(message.contains("server.auth in"), "{message}");
+        assert!(message.contains("is not a table"), "{message}");
+        assert!(!message.contains("make [server.auth]"), "{message}");
+        let err = replace_config_file(&path, |_| Ok((text.to_string(), ()))).expect_err("refused");
+        let message = format!("{err:#}");
+        assert!(message.contains("server.auth in"), "{message}");
+        assert!(!message.contains("leave [server.auth]"), "{message}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            text,
+            "nothing was written"
+        );
     }
 
     /// A config.toml kept as a symlink stays one: every write goes to the

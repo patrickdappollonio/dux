@@ -506,7 +506,7 @@ fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Resul
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetReport {
     /// The dot path written (for a secret, where its hash went).
-    pub path: String,
+    pub path: Vec<String>,
     /// The value the file had before, as TOML, or `None` when it had none.
     pub previous: Option<String>,
     /// The value written, as TOML.
@@ -550,14 +550,15 @@ fn write_value(
         &path.join("."),
         |doc| {
             let previous = value_in_doc(doc, path);
+            let had = provider_command_in(doc, path);
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
-            check_provider_command(doc, path)?;
+            check_provider_command(doc, path, had)?;
             Ok(previous)
         },
     )?;
     Ok(SetReport {
-        path: path.join("."),
+        path: path.to_vec(),
         previous,
         now,
         remaining_problems,
@@ -618,23 +619,61 @@ fn prepare_provider(doc: &mut DocumentMut, path: &[String]) -> Result<()> {
 
 /// After a provider field is set: the provider must still have a command,
 /// or dux could not start it.
-fn check_provider_command(doc: &DocumentMut, path: &[String]) -> Result<()> {
+/// What a provider's entry says of its command, before or after a set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderCommand {
+    /// The file does not list the provider.
+    NoEntry,
+    /// It lists it, without a command (or with an empty one).
+    Missing,
+    /// It lists it with a command.
+    Present,
+}
+
+/// [`ProviderCommand`] for the provider `path` is a field of, read on its own
+/// (a problem in another field is that field's); `None` for any other path.
+fn provider_command_in(doc: &DocumentMut, path: &[String]) -> Option<ProviderCommand> {
     let [section, name, _] = path else {
-        return Ok(());
+        return None;
     };
     if section != "providers" {
-        return Ok(());
+        return None;
     }
-    let file: toml::Table =
-        toml::from_str(&doc.to_string()).context("failed to read the change back")?;
-    // The command on its own: a problem in another field of the provider is
-    // that field's, and never reads as a missing command.
-    let command = file
+    let file: toml::Table = toml::from_str(&doc.to_string()).ok()?;
+    let Some(provider) = file
         .get("providers")
         .and_then(|providers| providers.get(name))
-        .and_then(|provider| provider.get("command"))
-        .and_then(toml::Value::as_str);
-    if command.is_none_or(|command| command.trim().is_empty()) {
+    else {
+        return Some(ProviderCommand::NoEntry);
+    };
+    let command = provider.get("command").and_then(toml::Value::as_str);
+    Some(
+        if command.is_some_and(|command| !command.trim().is_empty()) {
+            ProviderCommand::Present
+        } else {
+            ProviderCommand::Missing
+        },
+    )
+}
+
+/// After a provider field is set: a provider must not lose its command, and
+/// a set must not create a provider entry without one. Attributed like every
+/// other rule: a provider the file already lists without a command (`had`)
+/// never blocks a set of its other fields, so they can still be repaired.
+fn check_provider_command(
+    doc: &DocumentMut,
+    path: &[String],
+    had: Option<ProviderCommand>,
+) -> Result<()> {
+    let Some(had) = had else {
+        return Ok(());
+    };
+    let [_, name, _] = path else {
+        return Ok(());
+    };
+    let now = provider_command_in(doc, path);
+    let answerable = matches!(had, ProviderCommand::Present | ProviderCommand::NoEntry);
+    if answerable && now != Some(ProviderCommand::Present) {
         anyhow::bail!(
             "that would leave providers.{name} with no command, so dux could not start it. \
              Nothing was written."
@@ -863,9 +902,9 @@ pub enum GetValue {
 /// A value dux uses in place of what the file says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Correction {
-    /// The dotted setting it is about: the key asked for, or an entry inside
-    /// the table asked for.
-    pub path: String,
+    /// The setting it is about, as segments: the key asked for, or an entry
+    /// inside the table asked for.
+    pub path: Vec<String>,
     /// What the file says, as TOML text (a string unquoted), or `None`
     /// when the file leaves the setting out and the load writes it from a
     /// deprecated key.
@@ -874,6 +913,10 @@ pub struct Correction {
     pub used: Option<String>,
     /// Why dux uses something else: the load's own sentence.
     pub reason: String,
+    /// The one surface that uses something else, when only one does (the
+    /// terminal UI's own `[keys]` migrations); `None` for every surface that
+    /// starts with the file. The reason then says it all.
+    pub surface: Option<crate::config::Surface>,
 }
 
 /// What `get` found: the value every surface that starts with the file
@@ -917,6 +960,27 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
 /// stored (the password's hash).
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
     let mut report = get_report_inner(raw, key)?;
+    // The terminal UI's own `[keys]` migrations (a retired action folded
+    // into the one that replaced it, or dropped) are corrections it alone
+    // makes, said for it whenever it starts with the file.
+    let terminal_ui_starts = !report
+        .refused_by
+        .iter()
+        .any(|(surface, _)| *surface == crate::config::Surface::TerminalUi);
+    if terminal_ui_starts && !matches!(report.value, GetValue::Unknown { .. }) {
+        let asked = stored_path(key);
+        for (at, reason) in crate::config::terminal_ui_key_corrections(raw) {
+            if at.starts_with(&asked) {
+                report.corrections.push(Correction {
+                    path: at,
+                    in_file: None,
+                    used: None,
+                    reason,
+                    surface: Some(crate::config::Surface::TerminalUi),
+                });
+            }
+        }
+    }
     // The table as the file names its entries, for `--show`, when the
     // formatter replaced any name.
     let path = stored_path(key);
@@ -1036,17 +1100,21 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
         }
     };
     let used = used_at(&path);
-    let corrected: Vec<(String, String)> = crate::config::load_corrections_of(raw);
-    let dotted = path.join(".");
+    // Every path below is a list of segments, never a dotted string split
+    // again: a name may hold a dot.
+    let corrected: Vec<(Vec<String>, String)> = crate::config::load_corrections_of(raw);
+    let inside =
+        |key: &[String], scope: &[String]| key.len() > scope.len() && key.starts_with(scope);
     let Some(in_file) = in_file else {
         // Left out of the file, but the load may still write it, from a
         // deprecated key; that is said with where it came from.
         let carried = used.as_ref().and_then(|_| {
             corrected
                 .iter()
-                .find(|(key, _)| *key == dotted)
+                .find(|(key, _)| *key == path)
                 .map(|(_, reason)| Correction {
-                    path: dotted.clone(),
+                    surface: None,
+                    path: path.clone(),
                     in_file: None,
                     used: used.clone(),
                     reason: reason.clone(),
@@ -1063,18 +1131,17 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     // comparing the two, for every key: the load's own record says why
     // (the correction or recovery step that covers it, a sibling included),
     // and a difference it has no record of is still reported.
-    let covering = |key: &str| {
+    let covering = |key: &[String]| {
         corrected
             .iter()
-            .find(|(scope, _)| key == scope || key.starts_with(&format!("{scope}.")))
+            .find(|(scope, _)| key == scope.as_slice() || inside(key, scope))
     };
-    let reason_at = |key: &str| {
+    let reason_at = |key: &[String]| {
         covering(key).map_or_else(
             || "that is how dux server's load reads the file".to_string(),
             |(_, reason)| reason.clone(),
         )
     };
-    let split = |key: &str| -> Vec<String> { key.split('.').map(str::to_string).collect() };
     if let Some(table) = node.filter(|node| node.is_table()) {
         // A table is shown as the file writes it (the load filling in its
         // defaults is not a correction), with every entry inside it whose
@@ -1084,10 +1151,9 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
         leaves_of(table, &mut path.clone(), &mut leaves);
         let mut corrections: Vec<Correction> = Vec::new();
         for (at, value) in leaves {
-            let key = at.join(".");
             if corrections
                 .iter()
-                .any(|done| done.used.is_none() && key.starts_with(&format!("{}.", done.path)))
+                .any(|done| done.used.is_none() && inside(&at, &done.path))
             {
                 continue;
             }
@@ -1096,21 +1162,21 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             if !compared(value) || used.as_deref() == Some(in_file.as_str()) {
                 continue;
             }
-            let whole = covering(&key).filter(|(scope, _)| {
-                *scope != key
-                    && scope.starts_with(&format!("{dotted}."))
-                    && used_at(&split(scope)).is_none()
+            let whole = covering(&at).filter(|(scope, _)| {
+                inside(&at, scope) && inside(scope, &path) && used_at(scope).is_none()
             });
             corrections.push(match whole {
                 Some((scope, reason)) => Correction {
+                    surface: None,
                     path: scope.clone(),
-                    in_file: value_at(&file, &split(scope)).map(render),
+                    in_file: value_at(&file, scope).map(render),
                     used: None,
                     reason: reason.clone(),
                 },
                 None => Correction {
-                    reason: reason_at(&key),
-                    path: key,
+                    surface: None,
+                    reason: reason_at(&at),
+                    path: at,
                     in_file: Some(in_file),
                     used,
                 },
@@ -1118,12 +1184,12 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
         }
         // Entries the file leaves out that the load writes from a
         // deprecated key.
-        let prefix = format!("{dotted}.");
         for (key, reason) in &corrected {
-            if key.starts_with(&prefix) && value_at(&file, &split(key)).is_none() {
-                let used = used_at(&split(key));
+            if inside(key, &path) && value_at(&file, key).is_none() {
+                let used = used_at(key);
                 if used.is_some() {
                     corrections.push(Correction {
+                        surface: None,
                         path: key.clone(),
                         in_file: None,
                         used,
@@ -1152,8 +1218,9 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     Ok(GetReport {
         value: used.clone().map_or(GetValue::Unset, GetValue::Set),
         corrections: vec![Correction {
-            reason: reason_at(&dotted),
-            path: dotted,
+            surface: None,
+            reason: reason_at(&path),
+            path: path.clone(),
             in_file: Some(in_file),
             used,
         }],
@@ -1779,6 +1846,10 @@ port = 3890
         set_plain(&path, &lookup("providers.mine.args").unwrap(), "[\"-x\"]").expect("then args");
         let config = crate::config::load_config_file(&path).unwrap();
         assert_eq!(config.providers.commands["mine"].command, "mine");
+
+        // A new entry without a command is refused too.
+        set_plain(&path, &lookup("providers.other.command").unwrap(), "")
+            .expect_err("a new provider with an empty command");
 
         let before = std::fs::read_to_string(&path).unwrap();
         for name in ["mine", "claude"] {
