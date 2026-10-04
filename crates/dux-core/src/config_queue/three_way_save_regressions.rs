@@ -1695,3 +1695,243 @@ fn projects_written_as_an_inline_array_keep_their_count() {
         .unwrap_or_else(|error| panic!("{text}: {}", error.reason()));
     assert_eq!(config.projects.len(), 1, "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// What dux has seen of the file, over many saves
+// ---------------------------------------------------------------------------
+
+/// The text the writer keeps of what it has seen of the file.
+fn seen_text(queue: &ConfigWriteQueue) -> String {
+    queue
+        .last_written()
+        .1
+        .and_then(|source| source.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+const ARRAYS_OF_TABLES_BESIDE_SETTINGS: [&str; 12] = [
+    "",
+    "[[extra]]\na = 1\n",
+    "[[ui.notes]]\ntext = \"hi\"\n",
+    "[providers.claude]\ncommand = \"claude\"\n\n[[providers.claude.hooks]]\nrun = \"x\"\n",
+    "[[projects]]\nid = \"p1\"\npath = \"/a\"\n\n[[projects.hooks]]\nrun = \"h1\"\n",
+    "[[extra]]\na = 1\n\n[[projects]]\nid = \"p1\"\npath = \"/a\"\n\n[[projects.hooks]]\nrun = \"h1\"\n",
+    "[[extra]]\na = 1\n\n[[ui2]]\nx = 1\n",
+    "[[extra]]\na = 1\n\n[[extra.sub]]\nx = 1\n",
+    "[providers.claude]\ncommand = \"claude\"\n\n[[providers.claude.hooks]]\nrun = \"x\"\n\n[[projects]]\nid = \"p1\"\npath = \"/a\"\n",
+    "[[a]]\nx = 1\n\n[[b]]\ny = 1\n\n[[b.c]]\nz = 1\n",
+    "[[a]]\nx = 1\n[[a.c]]\nz = 1\n\n[[a]]\nx = 2\n",
+    "[[projects]]\nid = \"p1\"\npath = \"/a\"\n\n[[projects.hooks]]\nrun = \"h1\"\n\n[[projects]]\nid = \"p2\"\npath = \"/b\"\n",
+];
+
+/// A setting dux filled in and the user deleted stays deleted over eight
+/// saves, whatever arrays of tables (top-level, nested, under a provider,
+/// under a project) sit in the file beside it, and what dux has seen of the
+/// file always parses.
+#[test]
+fn a_hand_deletion_stays_deleted_beside_any_array_of_tables() {
+    for extra in ARRAYS_OF_TABLES_BESIDE_SETTINGS {
+        let (_dir, path, loaded, queue) = setup(&format!("[ui]\nleft_width_pct = 25\n\n{extra}"));
+        let mut memory = loaded.clone();
+        memory.env.insert("Z".into(), "1".into());
+        queue.save_eager(memory.clone()).unwrap();
+        let text = read(&path);
+        assert!(text.contains("diff_tab_width = 4\n"), "{text}");
+        std::fs::write(&path, text.replace("diff_tab_width = 4\n", "")).unwrap();
+        for round in 0..8 {
+            memory.env.insert(format!("R{round}"), "1".into());
+            queue.save_eager(memory.clone()).unwrap();
+            let written = read(&path);
+            assert!(
+                !written.contains("diff_tab_width"),
+                "save {round} beside {extra:?}:\n{written}"
+            );
+            let seen = seen_text(&queue);
+            assert!(
+                seen.parse::<toml_edit::DocumentMut>().is_ok(),
+                "save {round} beside {extra:?} left what dux has seen unreadable:\n{seen}"
+            );
+        }
+    }
+}
+
+/// What dux has seen of the file stays the size of the file over 300
+/// saves, with arrays of tables dux does not own beside `[[projects]]`
+/// entries carrying nested arrays of their own.
+#[test]
+fn what_dux_has_seen_stays_bounded_over_many_saves() {
+    for text in [
+        "[[extra]]\na = 1\n\n[[extra]]\na = 2\n",
+        "[[extra]]\na = 1\n\n[[extra]]\na = 2\n\n[providers.x]\ncommand = \"x\"\n\n[[providers.x.hooks]]\nrun = \"p\"\n\n[[projects]]\nid = \"p1\"\npath = \"/a\"\n\n[[projects.hooks]]\nrun = \"h1\"\n",
+    ] {
+        let (_dir, path, loaded, queue) = setup(text);
+        let mut memory = loaded.clone();
+        let mut first = None;
+        for round in 0..300u16 {
+            memory.ui.left_width_pct = 20 + round % 2;
+            queue.save_eager(memory.clone()).unwrap();
+            let seen = seen_text(&queue);
+            assert!(
+                seen.parse::<toml_edit::DocumentMut>().is_ok(),
+                "save {round}: what dux has seen does not parse:\n{seen}"
+            );
+            let first = *first.get_or_insert(seen.len());
+            assert!(
+                seen.len() <= first * 2,
+                "save {round}: seen grew from {first} to {} bytes (file {} bytes)",
+                seen.len(),
+                read(&path).len()
+            );
+        }
+        let written = read(&path);
+        assert_eq!(written.matches("[[extra]]").count(), 2, "{written}");
+    }
+}
+
+/// Macros, providers and keys keep what the user added by hand and every
+/// comment, once each, over twenty saves of dux adding, reordering and
+/// removing macros, changing a provider and adding keys, and a reload.
+#[test]
+fn macros_providers_and_keys_keep_hand_additions_and_comments_over_many_saves() {
+    use crate::config::{MacroEntry, MacroSurface};
+    let text = "[macros]\nfirst = { text = \"1\", surface = \"agent\" } # c1\n# above second\n[macros.second]\ntext = \"2\"\nsurface = \"both\"\n\n[providers.claude]\ncommand = \"claude\"\nargs = [\"--x\"]\nmine = 1\n\n[keys]\nzeta = [\"ctrl-z\"]\nalpha = [\"ctrl-a\"]\n";
+    let (_dir, path, loaded, mut queue) = setup(text);
+    let mut memory = loaded.clone();
+    std::fs::write(
+        &path,
+        read(&path)
+            + "\n[macros.hand]\ntext = \"h\"\nsurface = \"agent\"\n\n[providers.handp]\ncommand = \"hp\"\n",
+    )
+    .unwrap();
+    for round in 0..20 {
+        match round % 4 {
+            0 => {
+                memory.macros.entries.insert(
+                    format!("m{round}"),
+                    MacroEntry {
+                        text: "x".into(),
+                        surface: MacroSurface::Agent,
+                    },
+                );
+            }
+            1 => memory.macros.entries.reverse(),
+            2 => {
+                memory
+                    .providers
+                    .commands
+                    .get_mut("claude")
+                    .expect("claude")
+                    .args
+                    .push(format!("--r{round}"));
+            }
+            _ => {
+                memory
+                    .keys
+                    .bindings
+                    .insert(format!("k{round}"), vec!["ctrl-k".into()]);
+                memory
+                    .macros
+                    .entries
+                    .shift_remove(&format!("m{}", round - 3));
+            }
+        }
+        queue.save_eager(memory.clone()).unwrap();
+        let written = read(&path);
+        let config = crate::config::config_from_text_as_written(&written)
+            .unwrap_or_else(|error| panic!("{round}: {}\n{written}", error.reason()));
+        for (needle, what) in [
+            ("text = \"h\"", "the hand macro"),
+            ("handp", "the hand provider"),
+            ("# c1", "the inline macro's comment"),
+            ("# above second", "the comment above a macro"),
+            ("mine = 1", "the provider's own key"),
+            ("zeta", "a key binding"),
+        ] {
+            assert_eq!(
+                written.matches(needle).count(),
+                1,
+                "{what}, save {round}:\n{written}"
+            );
+        }
+        // The order memory holds is the order the file says, wherever
+        // the hand macro sits.
+        let memory_order: Vec<&String> = memory
+            .macros
+            .entries
+            .keys()
+            .filter(|name| name.as_str() != "hand")
+            .collect();
+        let file_order: Vec<&String> = config
+            .macros
+            .entries
+            .keys()
+            .filter(|name| name.as_str() != "hand")
+            .collect();
+        assert_eq!(file_order, memory_order, "save {round}:\n{written}");
+        if round == 9 {
+            drop(queue);
+            memory = load(&path);
+            queue = queue_for(&path);
+        }
+    }
+}
+
+/// What dux has seen of the file, if it ever cannot be read back, fails
+/// safe: every setting counts as seen, so a deletion is never undone by
+/// filling the setting back in. And a union over such a text keeps it as it
+/// is, so the next save fails safe too.
+#[test]
+fn an_unreadable_record_of_what_dux_has_seen_fills_nothing_in() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[ui]\nleft_width_pct = 25\n").unwrap();
+    let loaded = load(&path);
+    let unreadable = "[[a.b]]\nx = 1\n[a]\ny = 2\n[a]\n";
+    assert!(unreadable.parse::<toml_edit::DocumentMut>().is_err());
+    let mut memory = loaded.clone();
+    memory.env.insert("Z".into(), "1".into());
+    crate::config_write::patch_config_file_three_way(
+        &path,
+        Some(crate::config_write::SaveBase {
+            config: &loaded,
+            seen: Some(unreadable),
+        }),
+        &memory,
+        crate::config_write::Durability::NoFsync,
+    )
+    .unwrap();
+    let written = read(&path);
+    assert!(written.contains("Z = \"1\""), "{written}");
+    assert!(!written.contains("diff_tab_width"), "{written}");
+    assert_eq!(
+        crate::config_write::union_seen(Some(unreadable), &written),
+        unreadable
+    );
+}
+
+/// A `[macros]` mixing inline macros and `[macros.<name>]` sections is
+/// rewritten only when memory's order cannot be read back from it: an order
+/// TOML can show leaves the sections as they are, and one it cannot turns
+/// them into inline macros, comments kept, in memory's order.
+#[test]
+fn mixed_macro_forms_are_rewritten_only_when_the_order_needs_it() {
+    let text = "[macros]\nfirst = { text = \"1\", surface = \"agent\" }\n\n# about second\n[macros.second]\n# inner note\ntext = \"2\"\nsurface = \"both\"\n";
+    let (_dir, path, loaded, queue) = setup(text);
+    let mut memory = loaded.clone();
+    for written in three_unrelated_saves(&path, &queue, &mut memory) {
+        assert!(written.contains("[macros.second]"), "{written}");
+    }
+    memory.macros.entries.reverse();
+    queue.save_eager(memory.clone()).unwrap();
+    let written = read(&path);
+    assert!(!written.contains("[macros.second]"), "{written}");
+    assert!(written.contains("# about second"), "{written}");
+    assert!(written.contains("# inner note"), "{written}");
+    let config = crate::config::config_from_text_as_written(&written)
+        .unwrap_or_else(|error| panic!("{}\n{written}", error.reason()));
+    assert_eq!(
+        config.macros.entries.keys().collect::<Vec<_>>(),
+        vec!["second", "first"],
+        "{written}"
+    );
+}

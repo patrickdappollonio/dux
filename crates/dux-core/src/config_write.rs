@@ -156,14 +156,34 @@ pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) 
 /// write path checks this before anything lands.
 fn check_auth_before_write(path: &Path, contents: &str) -> Result<()> {
     if let Err(problem) = crate::config::auth_section_of(contents) {
-        let reason = problem.reason();
-        anyhow::bail!(
-            "that write would leave [server.auth] in {} invalid, and dux refuses to start \
-             with an invalid [server.auth]; nothing was written.\n{reason}",
-            path.display()
-        );
+        return Err(auth_refusal(path, contents, problem.reason(), "write"));
     }
     Ok(())
+}
+
+/// The refusal of a write (`act`) that would leave `contents`, whose
+/// `[server.auth]` cannot be read for `reason`. It names the shape that is
+/// actually wrong: a `server` or a `server.auth` that is not a table is not
+/// an invalid `[server.auth]` section, because there is no such section.
+fn auth_refusal(path: &Path, contents: &str, reason: &str, act: &str) -> anyhow::Error {
+    let file = toml::from_str::<toml::Table>(contents).ok();
+    let server = file.as_ref().and_then(|file| file.get("server"));
+    let auth = server
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("auth"));
+    let what = match (server, auth) {
+        (Some(server), _) if !server.is_table() => {
+            format!("[server] in {} is not a table", path.display())
+        }
+        (_, Some(auth)) if !auth.is_table() => {
+            format!("server.auth in {} is not a table", path.display())
+        }
+        _ => format!("[server.auth] in {} is invalid", path.display()),
+    };
+    anyhow::anyhow!(
+        "after that {act}, {what} ({reason}), and dux refuses to start when it cannot read its \
+         [server.auth] settings; nothing was written"
+    )
 }
 
 /// [`write_config_atomic`] for a caller already holding the lock.
@@ -340,24 +360,58 @@ pub fn source_after_sync(
 /// What the writer has seen of the file after writing `written` on top of
 /// what it had seen (`seen`): every key and project entry of either. Keeps a
 /// setting it filled in, and later found deleted, deleted.
+///
+/// The result is rendered with every table in its natural place, so it
+/// always parses: tables taken from two documents keep the positions they
+/// had in their own, and rendering those together can put an array's
+/// nested header before its parent's. A `seen` that does not parse (which
+/// this never writes) is kept as it is, so every later save keeps treating
+/// every setting as seen rather than as new (see
+/// [`apply_patches_three_way`]).
 pub fn union_seen(seen: Option<&str>, written: &str) -> String {
-    let Some(mut seen_doc) = seen.and_then(|text| text.parse::<DocumentMut>().ok()) else {
+    let Some(seen) = seen else {
         return written.to_string();
     };
-    let Ok(written_doc) = written.parse::<DocumentMut>() else {
-        return seen_doc.to_string();
+    let Ok(mut seen_doc) = seen.parse::<DocumentMut>() else {
+        crate::logger::warn(
+            "what dux has seen of config.toml could not be read back; settings missing from the \
+             file are left out rather than filled in",
+        );
+        return seen.to_string();
     };
-    union_tables(seen_doc.as_table_mut(), written_doc.as_table());
+    let Ok(written_doc) = written.parse::<DocumentMut>() else {
+        return seen.to_string();
+    };
+    union_tables(seen_doc.as_table_mut(), written_doc.as_table(), true);
+    clear_positions(seen_doc.as_table_mut());
     seen_doc.to_string()
 }
 
-fn union_tables(seen: &mut Table, written: &Table) {
+/// Forget where each table sat in the document it came from, so the whole
+/// renders in its natural order: every header after its parent's.
+fn clear_positions(table: &mut Table) {
+    table.set_position(None);
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => clear_positions(child),
+            Item::ArrayOfTables(array) => {
+                for entry in array.iter_mut() {
+                    clear_positions(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `root` when `seen` is the file itself (see [`merges_entries`]).
+fn union_tables(seen: &mut Table, written: &Table, root: bool) {
     for (key, item) in written.iter() {
         match seen.get_mut(key) {
             None => {
                 seen.insert(key, item.clone());
             }
-            Some(seen_item) => union_items(seen_item, item),
+            Some(seen_item) => union_items(seen_item, item, merges_entries(key, root)),
         }
     }
 }
@@ -365,23 +419,30 @@ fn union_tables(seen: &mut Table, written: &Table) {
 /// Fold `written` into `seen` at one key, everywhere a key can live: inside
 /// a table in either form (a subtable, an inline table, one nested inline in
 /// another), and inside each entry of an array of tables matched to its
-/// written entry by the same assignment the merge uses. A value is already
-/// seen; its text does not matter here.
-fn union_items(seen: &mut Item, written: &Item) {
+/// written entry by the same assignment the merge uses, for `[[projects]]`
+/// (`by_entry`). Any other array of tables is one value to the merge, so it
+/// is seen as the one written; nothing is ever appended to it, because an
+/// entry with nothing to identify it by would be appended on every save. A
+/// value is already seen; its text does not matter here.
+fn union_items(seen: &mut Item, written: &Item, by_entry: bool) {
     if let (Item::ArrayOfTables(seen_array), Item::ArrayOfTables(written_array)) =
         (&mut *seen, written)
     {
-        union_arrays(seen_array, written_array);
+        if by_entry {
+            union_arrays(seen_array, written_array);
+        } else {
+            *seen_array = written_array.clone();
+        }
         return;
     }
     let Some(written_table) = table_like(written) else {
         return;
     };
     match seen {
-        Item::Table(seen_table) => union_tables(seen_table, &written_table),
+        Item::Table(seen_table) => union_tables(seen_table, &written_table, false),
         Item::Value(Value::InlineTable(inline)) => {
             let mut table = inline.clone().into_table();
-            union_tables(&mut table, &written_table);
+            union_tables(&mut table, &written_table, false);
             let decor = inline.decor().clone();
             *inline = table.into_inline_table();
             *inline.decor_mut() = decor;
@@ -408,7 +469,7 @@ fn union_arrays(seen: &mut toml_edit::ArrayOfTables, written: &toml_edit::ArrayO
     };
     for (entry, matched) in written_entries.into_iter().zip(matched) {
         match matched.and_then(|index| seen.get_mut(index)) {
-            Some(seen_entry) => union_tables(seen_entry, entry),
+            Some(seen_entry) => union_tables(seen_entry, entry, false),
             None => seen.push(entry.clone()),
         }
     }
@@ -422,7 +483,21 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
         Some(base) => {
             let mut with_base = original.clone();
             apply_patches(&mut with_base, base.config);
-            let seen = base.seen.and_then(|text| text.parse::<DocumentMut>().ok());
+            // What dux has seen of the file. One that cannot be read back
+            // fails SAFE: every setting dux writes counts as seen, so a
+            // setting missing from the file stays out rather than being
+            // filled in over a deletion nobody can now tell from a new key.
+            let seen = match base.seen.map(str::parse::<DocumentMut>) {
+                Some(Ok(seen)) => Some(seen),
+                Some(Err(_)) => {
+                    crate::logger::warn(
+                        "what dux has seen of config.toml could not be read back; this save \
+                         treats every setting as seen and fills nothing in",
+                    );
+                    Some(with_base.clone())
+                }
+                None => None,
+            };
             merge_changed_at(
                 disk.as_table_mut(),
                 original.as_table(),
@@ -442,10 +517,102 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
             true,
         ),
     }
+    settle_macro_order(disk, &ours.macros);
     // Retired keys still go on every save, as they always have.
     for (section, key) in RETIRED_KEYS {
         remove_table_key(disk, section, key);
     }
+}
+
+/// Write memory's macro order when the file's `[macros]` cannot show it.
+///
+/// TOML renders a table's plain values before its subtables, so in a
+/// `[macros]` that mixes `name = { … }` lines with `[macros.name]` sections,
+/// a macro written as a section always reads back after every inline one,
+/// whatever order memory has. When that would lose memory's order, the
+/// sections are rewritten as inline entries, each keeping the comments
+/// written above and inside it, and the whole table is put in memory's
+/// order (macros memory does not know follow it). A `[macros]` whose order
+/// already reads back as memory's is left exactly as it is.
+fn settle_macro_order(doc: &mut DocumentMut, macros: &MacrosConfig) {
+    let Some(Item::Table(table)) = doc.get_mut("macros") else {
+        return;
+    };
+    let sections: Vec<String> = table
+        .iter()
+        .filter(|(_, item)| item.is_table())
+        .map(|(key, _)| key.to_string())
+        .collect();
+    if sections.is_empty() {
+        return;
+    }
+    // The order the file reads back in: plain values, then sections.
+    let read_back: Vec<String> = table
+        .iter()
+        .filter(|(_, item)| !item.is_table())
+        .map(|(key, _)| key.to_string())
+        .chain(sections.iter().cloned())
+        .filter(|key| macros.entries.contains_key(key))
+        .collect();
+    let wanted: Vec<String> = macros
+        .entries
+        .keys()
+        .filter(|key| table.contains_key(key))
+        .cloned()
+        .collect();
+    if read_back == wanted {
+        return;
+    }
+    crate::logger::info(
+        "config.toml: [macros] mixes inline macros with [macros.<name>] sections, which TOML \
+         always reads back after the inline ones; rewriting the sections as inline macros, \
+         comments kept, so the macro order set in dux is the order the file holds",
+    );
+    for name in &sections {
+        let Some(Item::Table(section)) = table.get(name) else {
+            continue;
+        };
+        let mut comments: Vec<String> = decor_comment(section.decor()).into_iter().collect();
+        comments.extend(
+            section
+                .iter()
+                .filter_map(|(key, _)| section.key(key))
+                .filter_map(|key| decor_comment(key.leaf_decor())),
+        );
+        let mut inline = section.clone().into_inline_table();
+        for (_, value) in inline.iter_mut() {
+            value.decor_mut().clear();
+        }
+        let mut keys: Vec<String> = Vec::new();
+        for (key, _) in inline.iter() {
+            keys.push(key.to_string());
+        }
+        for key in keys {
+            if let Some(mut key) = inline.key_mut(&key) {
+                key.leaf_decor_mut().clear();
+            }
+        }
+        inline.fmt();
+        if let Some(item) = table.get_mut(name) {
+            *item = toml_edit::value(inline);
+        }
+        if let Some(mut key) = table.key_mut(name) {
+            let prefix = if comments.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", comments.join("\n"))
+            };
+            key.leaf_decor_mut().set_prefix(prefix);
+            key.leaf_decor_mut().set_suffix(" ");
+        }
+    }
+    let rank = |key: &str| {
+        macros
+            .entries
+            .get_index_of(key)
+            .unwrap_or(macros.entries.len())
+    };
+    table.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
 }
 
 /// Keys dux once wrote and every save removes (see `apply_patches`).
@@ -1132,12 +1299,7 @@ pub fn mutate_config_file_with<T>(
     let outcome = change(&mut doc)?;
     let text = doc.to_string();
     if let Err(problem) = crate::config::auth_section_of(&text) {
-        let reason = problem.reason();
-        anyhow::bail!(
-            "that change would make [server.auth] in {} invalid ({reason}), and dux refuses \
-             to start with an invalid [server.auth]; nothing was written",
-            config_path.display()
-        );
+        return Err(auth_refusal(config_path, &text, problem.reason(), "change"));
     }
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
     Ok(outcome)
@@ -5316,5 +5478,39 @@ second_note = \"nowhere to go\"
             parsed.ui.left_width_pct,
             Config::default().ui.left_width_pct
         );
+    }
+
+    /// A refusal names the shape that is actually wrong: a `server` that is
+    /// not a table, or a `server.auth` that is not one, is not called an
+    /// invalid `[server.auth]` section, because there is no such section.
+    #[test]
+    fn a_refused_write_names_the_shape_that_is_actually_wrong() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        for (text, names) in [
+            ("server = 1\n", "[server] in"),
+            ("[server]\nauth = [1]\n", "server.auth in"),
+        ] {
+            fs::write(&path, text).unwrap();
+            let err = mutate_config_file(&path, |doc| {
+                doc["ui"]["left_width_pct"] = toml_edit::value(30);
+                Ok(())
+            })
+            .expect_err("refused");
+            let message = format!("{err:#}");
+            assert!(message.contains(names), "{message}");
+            assert!(message.contains("is not a table"), "{message}");
+            assert!(!message.contains("make [server.auth]"), "{message}");
+            let err =
+                replace_config_file(&path, |_| Ok((text.to_string(), ()))).expect_err("refused");
+            let message = format!("{err:#}");
+            assert!(message.contains(names), "{message}");
+            assert!(!message.contains("leave [server.auth]"), "{message}");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                text,
+                "nothing was written"
+            );
+        }
     }
 }
