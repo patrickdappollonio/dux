@@ -256,9 +256,13 @@ pub fn patch_config_file_three_way(
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            config_path.display(),
+            crate::config::redact_toml_error(&e.to_string())
+        )
+    })?;
     apply_patches_three_way(&mut doc, base, ours);
     let text = doc.to_string();
     check_auth_before_write(config_path, &text)?;
@@ -565,10 +569,11 @@ pub fn mutate_config_file<T>(
             return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
         }
     };
-    let mut doc: DocumentMut = raw.parse().with_context(|| {
-        format!(
-            "{} is not valid TOML, so it cannot be changed safely; fix it by hand first",
-            config_path.display()
+    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "{} is not valid TOML, so it cannot be changed safely; fix it by hand first.\n{}",
+            config_path.display(),
+            crate::config::redact_toml_error(&e.to_string())
         )
     })?;
     let outcome = change(&mut doc)?;

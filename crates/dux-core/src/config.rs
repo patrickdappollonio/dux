@@ -2851,7 +2851,7 @@ pub fn provider_config(
 /// applied); callers that want to *adopt* the config should reload from disk via
 /// [`load_config`] so provider defaults are reapplied consistently.
 pub fn validate_config_str(s: &str) -> Result<Config, String> {
-    toml::from_str::<Config>(s).map_err(|e| e.to_string())
+    toml::from_str::<Config>(s).map_err(|e| redact_toml_error(&e.to_string()))
 }
 
 /// Why `config.toml` could not be used at all. Each of these means dux cannot
@@ -2866,6 +2866,35 @@ pub enum ConfigLoadProblem {
     NotToml(String),
     /// `[server.auth]` (or the `[server]` table holding it) is invalid.
     AuthInvalid(String),
+}
+
+/// A TOML error with every quoted value hidden.
+///
+/// The parser's errors quote the offending line of the user's file, and that
+/// line can be an API token under `[env]` or a password hash. The error goes
+/// to the status line, toasts, dialogs and dux.log, so each quoted line keeps
+/// its line number and key name and loses its value (`2 | GITHUB_TOKEN =
+/// <hidden>`). Table headers and the caret line under the quote stay.
+pub fn redact_toml_error(message: &str) -> String {
+    message
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+            let rest = trimmed[digits..].trim_start();
+            match (digits > 0, rest.strip_prefix('|')) {
+                (true, Some(content)) => match content.split_once('=') {
+                    Some((key, _)) => {
+                        let prefix_len = line.len() - content.len();
+                        format!("{}{}= <hidden>", &line[..prefix_len], key)
+                    }
+                    None => line.to_string(),
+                },
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl ConfigLoadProblem {
@@ -2928,7 +2957,7 @@ impl std::error::Error for ConfigLoadError {}
 fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
     let auth = auth_section_of(raw)?;
     let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
-        .map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
+        .map_err(|e| ConfigLoadProblem::NotToml(redact_toml_error(&e.to_string())))?;
     take_auth_section(&mut doc)?;
     let mut config = recover_config_table(doc);
     config.server.auth = auth;
@@ -2970,9 +2999,10 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
         #[serde(default)]
         auth: Option<ServerAuthConfig>,
     }
-    toml::from_str::<toml::Table>(raw).map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
-    let file: File =
-        toml::from_str(raw).map_err(|e| ConfigLoadProblem::AuthInvalid(e.to_string()))?;
+    toml::from_str::<toml::Table>(raw)
+        .map_err(|e| ConfigLoadProblem::NotToml(redact_toml_error(&e.to_string())))?;
+    let file: File = toml::from_str(raw)
+        .map_err(|e| ConfigLoadProblem::AuthInvalid(redact_toml_error(&e.to_string())))?;
     Ok(file
         .server
         .and_then(|server| server.auth)
@@ -4464,7 +4494,31 @@ mod tests {
             panic!("{err:?}");
         };
         assert!(reason.contains("line 7"), "{reason}");
-        assert!(reason.contains("require = \"lan\""), "{reason}");
+        assert!(
+            reason.contains("7 | require = <hidden>"),
+            "the real line, value hidden: {reason}"
+        );
+    }
+
+    /// A file that is not valid TOML because of an unquoted token must not
+    /// have the token quoted back in the error, which reaches the status
+    /// line, toasts, modals and dux.log. The line, column and key name stay.
+    #[test]
+    fn an_error_quoting_a_line_never_carries_its_value() {
+        let raw = "[env]\nGITHUB_TOKEN = ghp_abcdef123456\n";
+        let err = recover_config(raw).expect_err("not toml");
+        let text = err.reason().to_string();
+        assert!(!text.contains("ghp_abcdef123456"), "{text}");
+        assert!(text.contains("GITHUB_TOKEN"), "{text}");
+        assert!(text.contains("line 2"), "{text}");
+
+        let raw = "[server.auth]\npassword_hash = \"$argon2id$v=19$nope\"\n";
+        let err = recover_config(raw).expect_err("bad hash");
+        assert!(
+            !err.reason().contains("$argon2id$v=19$nope"),
+            "{}",
+            err.reason()
+        );
     }
 
     /// The advice fits any problem in the section, not only the password.

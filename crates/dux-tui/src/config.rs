@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
+#[cfg(test)]
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -35,9 +36,13 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         ))
     })?;
     dux_core::config::auth_section_of(&raw).map_err(load_error)?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            paths.config_path.display(),
+            dux_core::config::redact_toml_error(&e.to_string())
+        )
+    })?;
     // The deprecated-key + retired-provider migrations are the core-owned
     // `dux_core::config_migrate::apply_load_migrations` (also applied in memory
     // by `load_config`, so `dux serve` honors them); the TUI ADDITIONALLY
@@ -52,8 +57,14 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    let mut config: Config = toml::from_str(&doc.to_string())
-        .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    // The parser quotes the offending line, which may hold a token: hidden.
+    let mut config: Config = toml::from_str(&doc.to_string()).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            paths.config_path.display(),
+            dux_core::config::redact_toml_error(&e.to_string())
+        )
+    })?;
     config.providers.ensure_defaults();
     validate_server_host(&config)?;
     validate_project_envs(&config)?;
@@ -1730,12 +1741,20 @@ impl RestoredConfig {
 ///   input. A mismatch aborts with an error rather than writing, so a renderer
 ///   bug can never silently rewrite a user's settings.
 pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
-    let original: DocumentMut = raw
-        .parse()
-        .context("config.toml is not valid TOML, so its values cannot be read back safely")?;
+    let original: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "config.toml is not valid TOML, so its values cannot be read back safely: {}",
+            dux_core::config::redact_toml_error(&e.to_string())
+        )
+    })?;
 
-    let config: Config = toml::from_str(raw)
-        .context("config.toml parses as TOML but not as a dux config, so its values cannot be read back safely")?;
+    let config: Config = toml::from_str(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "config.toml parses as TOML but not as a dux config, so its values cannot be read \
+             back safely: {}",
+            dux_core::config::redact_toml_error(&e.to_string())
+        )
+    })?;
 
     let rendered_text = render_config_documented(&config);
     let mut rendered: DocumentMut = rendered_text
@@ -1778,10 +1797,10 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 /// from the on-disk version are updated, preserving user comments, formatting
 /// and unknown keys; a missing file gets a fresh canonical config.
 ///
-/// Deprecated: this bypasses the `ConfigWriteQueue` gate every runtime write
-/// must route through. Its only legitimate callers are the TUI bootstrap
-/// helpers (`persist_runtime_projects_to_config_and_store`,
-/// `sync_config_projects_with_store`), which are sync-direct by design.
+/// Test-only now: the TUI bootstrap helpers that used it write three-way
+/// through `dux_core::config_write::save_config_three_way`, so only the
+/// tests that pin the first-creation render and the patch shape call it.
+#[cfg(test)]
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]

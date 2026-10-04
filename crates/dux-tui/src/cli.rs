@@ -153,7 +153,13 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
 
     let current_raw =
         fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
-    let current: Config = toml::from_str(&current_raw).with_context_path(&paths.config_path)?;
+    let current: Config = toml::from_str(&current_raw).map_err(|e| {
+        anyhow!(
+            "{}: {}",
+            paths.config_path.display(),
+            dux_core::config::redact_toml_error(&e.to_string())
+        )
+    })?;
 
     if raw {
         run_diff_raw(&current_raw, &current)?;

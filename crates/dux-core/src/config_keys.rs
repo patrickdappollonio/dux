@@ -615,7 +615,12 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
         }
         WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
     };
-    let doc: toml::Table = toml::from_str(raw).context("config.toml is not valid TOML")?;
+    let doc: toml::Table = toml::from_str(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "config.toml is not valid TOML: {}",
+            crate::config::redact_toml_error(&e.to_string())
+        )
+    })?;
     let mut node = Some(toml::Value::Table(doc));
     for segment in &path {
         node = node.and_then(|n| n.get(segment).cloned());
