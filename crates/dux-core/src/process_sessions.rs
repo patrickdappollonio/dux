@@ -38,6 +38,12 @@ const PURGE_POLL: Duration = Duration::from_millis(50);
 /// on the same clock, when the leader was already gone.
 const START_TIME_SLACK: u64 = 2_000_000_000;
 
+/// A start time the platform would not give (another user's process on
+/// macOS). Every membership rule fails closed on it: such a process is a
+/// member when its session or its parent chain says so, because a start time
+/// that cannot be read cannot rule it out.
+pub const UNKNOWN_START: u64 = 0;
+
 /// A session dux created: a PTY's child or a startup command, both started
 /// with `setsid`, so the session id is the leader's pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -72,14 +78,15 @@ impl ProcessSession {
 }
 
 /// An identity for the running boot of this machine: a hash of
-/// `/proc/sys/kernel/random/boot_id` on Linux, and the boot time
-/// (`kern.boottime`, read through sysinfo) elsewhere. Read once per process.
+/// `/proc/sys/kernel/random/boot_id` on Linux and of the `kern.bootsessionuuid`
+/// sysctl on macOS, both of which change at every boot and at nothing else.
+/// (`kern.boottime` is not used: it is derived from the wall clock and moves
+/// when the clock is stepped, without a reboot.) Only when neither can be
+/// read does it fall back to the boot time. Read once per process.
 pub fn current_boot() -> u64 {
     static BOOT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *BOOT.get_or_init(|| {
-        let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .map(|text| text.trim().to_string())
-            .ok()
+        let id = platform_boot_id()
             .filter(|text| !text.is_empty())
             .unwrap_or_else(|| sysinfo::System::boot_time().to_string());
         // FNV-1a: stable across runs and builds, unlike the std hasher.
@@ -87,6 +94,38 @@ pub fn current_boot() -> u64 {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         })
     })
+}
+
+#[cfg(target_os = "linux")]
+fn platform_boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|text| text.trim().to_string())
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_boot_id() -> Option<String> {
+    let mut buf = [0u8; 128];
+    let mut len: libc::size_t = buf.len();
+    // SAFETY: the name is NUL-terminated, the buffer and its length describe
+    // writable memory, and no new value is set.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let text = buf.get(..len.min(buf.len()))?;
+    let text = text.split(|byte| *byte == 0).next()?;
+    std::str::from_utf8(text)
+        .ok()
+        .map(|text| text.trim().to_string())
 }
 
 /// Now, in nanoseconds since the machine booted, on the clock process start
@@ -266,11 +305,15 @@ pub fn members(
         .iter()
         .filter(|session| session.is_this_boot())
         .filter(|session| {
+            // A zombie leader still counts: its pid stays allocated until it
+            // is reaped, so its session number cannot have been handed out
+            // again. A start time the platform would not give (another
+            // user's process on macOS) fails closed: it counts.
             by_pid.get(&session.sid).is_some_and(|leader| {
-                !leader.exited
-                    && leader.sid == Some(leader.pid)
-                    && leader.start_time + START_TIME_SLACK >= session.started_at
-                    && leader.start_time <= session.started_at + START_TIME_SLACK
+                leader.sid == Some(leader.pid)
+                    && (leader.start_time == UNKNOWN_START
+                        || (leader.start_time + START_TIME_SLACK >= session.started_at
+                            && leader.start_time <= session.started_at + START_TIME_SLACK))
             })
         })
         .map(|session| {
@@ -297,7 +340,9 @@ pub fn members(
         .filter(|row| {
             row.sid
                 .and_then(|sid| led.get(&sid))
-                .is_some_and(|earliest| row.start_time >= *earliest)
+                .is_some_and(|earliest| {
+                    row.start_time == UNKNOWN_START || row.start_time >= *earliest
+                })
                 || known.contains(&row.identity())
         })
         .collect();
@@ -314,9 +359,9 @@ pub fn members(
         // until they are reparented the link is the only one there is.
         if let Some(kids) = children.get(&row.pid) {
             queue.extend(
-                kids.iter()
-                    .copied()
-                    .filter(|kid| kid.start_time >= row.start_time),
+                kids.iter().copied().filter(|kid| {
+                    kid.start_time == UNKNOWN_START || kid.start_time >= row.start_time
+                }),
             );
         }
     }
@@ -339,7 +384,7 @@ pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity>
         .filter(|row| {
             !row.exited
                 && row.sid == Some(session.sid)
-                && row.start_time >= earliest
+                && (row.start_time == UNKNOWN_START || row.start_time >= earliest)
                 && row.pid != std::process::id()
         })
         .map(ProcRow::identity)
@@ -382,7 +427,7 @@ pub fn read_process_table() -> Vec<ProcRow> {
                 pid: pid.as_u32(),
                 ppid: process.parent().map(|parent| parent.as_u32()),
                 sid: process.session_id().map(|sid| sid.as_u32()),
-                start_time: macos_start(pid.as_u32()).unwrap_or(0),
+                start_time: macos_start(pid.as_u32()).unwrap_or(UNKNOWN_START),
                 name: process.name().to_string_lossy().into_owned(),
                 exited: matches!(
                     process.status(),
@@ -1516,6 +1561,39 @@ mod tests {
             left.len()
         );
         assert!(left.contains(&first), "the live one stayed");
+    }
+
+    /// A zombie leader still leads: its pid is allocated until it is reaped,
+    /// so the session number cannot have been reused, and a job holding
+    /// the leader's output (which keeps it unreaped) is still a member.
+    #[test]
+    fn a_zombie_leader_still_leads_its_session() {
+        let mut leader = row(100, 1, 100);
+        leader.exited = true;
+        let table = vec![leader, row(101, 1, 100)];
+        assert_eq!(pids(&members(&table, &[session(100)], &[], 9)), vec![101]);
+    }
+
+    /// A start time the platform would not give fails closed: such a process
+    /// is a member through its session or its parent chain.
+    #[test]
+    fn an_unknown_start_time_counts_as_a_member() {
+        let mut theirs = row(101, 1, 100);
+        theirs.start_time = UNKNOWN_START;
+        let mut their_child = row(102, 101, 102);
+        their_child.start_time = UNKNOWN_START;
+        let mut leader = row(100, 1, 100);
+        leader.start_time = UNKNOWN_START;
+        let table = vec![leader.clone(), theirs.clone(), their_child.clone()];
+        assert_eq!(
+            pids(&members(&table, &[session(100)], &[], 9)),
+            vec![100, 101, 102],
+            "an unreadable leader, member and descendant all count"
+        );
+        // A session whose leader is gone is still trusted only through what
+        // was recorded: an unknown start time does not make a stranger ours.
+        let table = vec![theirs, their_child];
+        assert!(members(&table, &[session(100)], &[], 9).is_empty());
     }
 
     /// A session registered while the prune is reading the process table is

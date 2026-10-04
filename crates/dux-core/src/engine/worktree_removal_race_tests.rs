@@ -886,3 +886,59 @@ fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_e
     let result = delete_and_wait(&mut fx.engine);
     assert_removed_cleanly(&fx, result);
 }
+
+/// Review 7: a startup command that backgrounds a job WITHOUT redirecting its
+/// output (`npm run dev &`) exits at once, but the job keeps the command's
+/// stdout/stderr pipes open, so `wait_with_output` never reaps the command:
+/// the session's leader stays a zombie. `members` treats a zombie leader as
+/// gone and nothing was recorded for it (the survivors are recorded only after
+/// `wait_with_output` returns), so the job is invisible: the removal neither
+/// ends it nor counts it, and deletes the worktree from under it.
+#[test]
+fn review7_a_startup_job_holding_the_commands_output_is_ended_before_removal() {
+    let mut fx = fixture();
+    let script = writer_script(&fx.pidfile);
+    let session = fx.engine.sessions[0].clone();
+    let run = crate::startup::StartupCommandRun {
+        project: fx.engine.projects[0].clone(),
+        managed: session
+            .workspace
+            .as_managed()
+            .expect("managed test session")
+            .clone(),
+        session,
+        // The job inherits the command's stdout and stderr; the command itself
+        // exits right away.
+        command: format!("sh '{}' & exit 0", script.display()),
+        terminal: crate::config::StartupCommandTerminalConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string()],
+        },
+        env: Vec::new(),
+    };
+    let paths = fx.engine.paths.clone();
+    let registry = fx.engine.process_registry.clone();
+    let _handle =
+        std::thread::spawn(move || crate::startup::run_startup_command(&paths, run, &registry));
+    wait_for_writers(&fx.pidfile, 1);
+    // The command has long exited; only its job is running.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let result = delete_and_wait(&mut fx.engine);
+    let alive: Vec<i32> = writer_pids(&fx.pidfile)
+        .into_iter()
+        .filter(|pid| process_alive(*pid))
+        .collect();
+    let worktree_exists = fx.worktree.exists();
+    for pid in writer_pids(&fx.pidfile) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+    assert!(
+        alive.is_empty(),
+        "git ran on the worktree ({result:?}, folder left: {worktree_exists}) while the \
+         startup command's job {alive:?} was still running in it: it was neither ended nor \
+         counted"
+    );
+}

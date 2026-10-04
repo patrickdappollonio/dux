@@ -290,10 +290,20 @@ pub fn run_claimed_startup_command(
             .env("DUX_AGENT_ID", &run.session.id)
             .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
             .env("DUX_PROVIDER", run.session.provider.as_str())
-            .env("DUX_STARTUP_COMMAND_LOG", &log_path)
+            .env("DUX_STARTUP_COMMAND_LOG", &log_path);
+        // Output goes to files, never pipes. A job the command backgrounds
+        // without redirecting its output (`npm run dev &`) inherits whatever
+        // the command writes to; a pipe would stay open for as long as that
+        // job lives, so dux could not tell the command had ended (and could
+        // not reap it) until the job ended too. A file has no such tie: the
+        // command is reaped the moment it exits, and what it left running is
+        // recorded at that moment.
+        let mut stdout = capture_file(&log_dir)?;
+        let mut stderr = capture_file(&log_dir)?;
+        command
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdout(std::process::Stdio::from(stdout.try_clone()?))
+            .stderr(std::process::Stdio::from(stderr.try_clone()?));
         for (name, value) in &run.env {
             command.env(name, value);
         }
@@ -312,23 +322,31 @@ pub fn run_claimed_startup_command(
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
         guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
         guard.label(process, "an agent's startup command");
-        let output = child
-            .wait_with_output()
+        // Dropped here, so the only copies of the capture files' descriptors
+        // left are the command's own (and those of anything it starts).
+        drop(command);
+        let mut child = child;
+        let status = child
+            .wait()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         // The command (the session's leader) has exited: what it left running
         // is recorded now, the only evidence those processes are dux's later.
         guard.record_survivors(process);
         let ended = Utc::now();
+        // What the command wrote before it exited. A job it left running may
+        // still be writing; that is the job's output, not the command's.
+        let stdout = read_capture(&mut stdout)?;
+        let stderr = read_capture(&mut stderr)?;
         Ok(CommandOutcome {
             shell,
             shell_args,
             started,
             ended,
             duration_ms: started_instant.elapsed().as_millis(),
-            code: output.status.code(),
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            code: status.code(),
+            success: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
         })
     })();
 
@@ -385,6 +403,37 @@ pub fn run_claimed_startup_command(
         log_path,
         status,
     }
+}
+
+/// A file the startup command writes one of its output streams into: created
+/// in the run's log folder and unlinked at once, so it leaves nothing behind
+/// whoever holds it open and for however long.
+fn capture_file(dir: &Path) -> Result<fs::File> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = format!(
+        ".startup-output-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let path = dir.join(name);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(file)
+}
+
+/// Everything written into a capture file so far.
+fn read_capture(file: &mut fs::File) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let written = file.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(written).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The refusal for a second startup-command run of one agent while the first
@@ -734,6 +783,64 @@ mod tests {
             assert!(Instant::now() < deadline, "the command never started");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// A command that backgrounds a job without redirecting its output ends
+    /// when the command ends, not when the job does: dux reaps it at once,
+    /// records the job as what it left running, and logs exactly what the
+    /// command wrote, in the same shape as ever.
+    #[test]
+    fn a_startup_job_holding_the_output_does_not_hold_the_run() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let pidfile = tmp.path().join("job.pid");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let started = Instant::now();
+        let result = run_startup_command(
+            &paths,
+            sleeper_run(
+                tmp.path(),
+                &format!(
+                    "echo before; echo oops >&2; (sleep 30; echo late) & echo $! > '{}'; exit 0",
+                    pidfile.display()
+                ),
+            ),
+            &registry,
+        );
+        let elapsed = started.elapsed();
+        let job = wait_for_pid(&pidfile);
+        let session = registry.sessions_of("session-1");
+        let recorded = registry.survivors_of(&session);
+        if let Some(pid) = rustix::process::Pid::from_raw(job) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the run waited {elapsed:?} for the job it left running"
+        );
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        assert!(
+            recorded.iter().any(|identity| identity.pid as i32 == job),
+            "the job was recorded as what the command left running: {recorded:?}"
+        );
+        let log = read_log(&result.log_path).expect("log");
+        assert!(log.contains("--- stdout ---\nbefore\n"), "{log}");
+        assert!(log.contains("--- stderr ---\noops\n"), "{log}");
+        assert!(
+            !log.contains("\nlate\n"),
+            "the job's later output is not the command's: {log}"
+        );
+        let leftovers: Vec<_> = fs::read_dir(result.log_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".startup-output")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "no capture file is left behind");
     }
 
     /// One run per agent: a second run while the first is going is refused
