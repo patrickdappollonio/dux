@@ -250,6 +250,9 @@ pub struct App {
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
     pub(crate) commit_input: TextInput,
+    /// The status key of a commit running on a worker: its success final
+    /// clears `commit_input`.
+    pub(crate) pending_commit: Option<String>,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,
@@ -4361,6 +4364,7 @@ impl App {
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
+            pending_commit: None,
             left_collapsed: false,
             right_collapsed: false,
             right_hidden,

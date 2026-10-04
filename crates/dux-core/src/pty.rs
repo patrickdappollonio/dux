@@ -1235,6 +1235,28 @@ impl PtyClient {
         })
     }
 
+    /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
+    /// its pid and session number stay allocated until `try_wait` or `wait`
+    /// reaps it. `block` waits for the exit. `None` when the question cannot
+    /// be asked (no pid, already reaped elsewhere, an error): the caller then
+    /// reaps as before.
+    fn child_exit_unreaped(&self, block: bool) -> Option<bool> {
+        let pid = rustix::process::Pid::from_raw(self.child.process_id()? as i32)?;
+        let mut options =
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
+        if !block {
+            options |= rustix::process::WaitIdOptions::NOHANG;
+        }
+        loop {
+            match rustix::process::waitid(rustix::process::WaitId::Pid(pid), options) {
+                Ok(Some(_)) => return Some(true),
+                Ok(None) => return Some(false),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
     /// Set what runs once this client's child is gone (see the field).
     pub fn set_leader_exit_hook(&self, hook: Box<dyn FnOnce() + Send>) {
         if let Ok(mut slot) = self.leader_exit_hook.lock() {
@@ -1712,6 +1734,15 @@ impl PtyClient {
         if let Some((status, _)) = &self.reaped {
             return Some(status.clone());
         }
+        // What the child left running is recorded from the moment it is seen
+        // to exit, BEFORE it is reaped: until then its session number still
+        // names its session, so a removal never looks in a window where the
+        // number proves nothing and nothing is recorded yet.
+        match self.child_exit_unreaped(false) {
+            Some(true) => self.fire_leader_exit_hook(),
+            Some(false) => return None,
+            None => {}
+        }
         let status = self.child.try_wait().ok().flatten()?;
         if let Some(session) = self.process_session {
             crate::process_sessions::note_reaped(session);
@@ -2131,6 +2162,10 @@ impl Drop for PtyClient {
         // was unavailable above (without it, `wait` could block on a child that
         // nothing has asked to exit).
         let _ = self.child.kill();
+        // Recorded before the reap, for the reason `try_wait` gives.
+        if self.child_exit_unreaped(true) == Some(true) {
+            self.fire_leader_exit_hook();
+        }
         if self.child.wait().is_ok()
             && let Some(session) = self.process_session
         {
@@ -5927,6 +5962,64 @@ mod tests {
             !client.is_live(),
             "a reaped child is not running, whatever is still holding the PTY open"
         );
+    }
+
+    /// A child that exits on its own has what it left running in its session
+    /// recorded as soon as it is seen to exit, before it is reaped, not only
+    /// when the client drops: in between, the session number proves nothing
+    /// and a removal must still find the job.
+    #[test]
+    fn a_child_seen_to_exit_has_its_survivors_recorded_before_the_client_drops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let session = client.process_session().expect("a session");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        client.set_leader_exit_hook(registry.leader_exit_hook(session));
+        struct Kill(std::path::PathBuf);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                if let Ok(text) = std::fs::read_to_string(&self.0)
+                    && let Some(pid) = text
+                        .trim()
+                        .parse::<i32>()
+                        .ok()
+                        .and_then(rustix::process::Pid::from_raw)
+                {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+        let _job = Kill(pidfile.clone());
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        registry.wait_for_all_recordings(std::time::Duration::from_secs(5));
+
+        let job: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the job's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(
+            registry
+                .survivors_of(&[session])
+                .iter()
+                .any(|identity| identity.pid == job),
+            "the job the shell left running is recorded while the client still stands"
+        );
+        drop(client);
     }
 
     #[test]

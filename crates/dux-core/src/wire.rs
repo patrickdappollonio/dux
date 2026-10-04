@@ -4366,15 +4366,24 @@ impl Engine {
             },
             WireCommand::DiscardFile { session_id, path } => {
                 let worktree_path = self.changes_worktree(&session_id)?;
-                let is_untracked = crate::git::discard_classify(&worktree_path, &path)?;
+                // Refused here, with no git: a path that is not plain inside
+                // the worktree (`node_modules/..` is the whole worktree) never
+                // becomes a discard.
+                if !crate::model::is_lexically_normal_path(&path) {
+                    anyhow::bail!(
+                        "refusing to discard {path:?}: it is not a plain path inside the worktree"
+                    );
+                }
                 // The wire names no kind, so it is a file's discard: a plain
                 // file is deleted or restored as it always was, and a folder
                 // (which only the confirmed routes may delete) is refused.
-                Command::DiscardFile {
+                // Tracked or untracked is decided against live git status on
+                // the discard's worker, and its refusals ("unstage the file
+                // first", "nothing to discard") are the final, before anything
+                // is touched.
+                Command::DiscardFileLive {
                     worktree_path,
                     path,
-                    is_untracked,
-                    confirmed: crate::git::ConfirmedEntry::File,
                 }
             }
             WireCommand::CommitChanges {
@@ -5796,32 +5805,56 @@ mod tests {
         s
     }
 
+    /// Drive a wire discard to its final: the command, the keyed busy it
+    /// answers with, and the final the worker sends.
+    fn wire_discard(engine: &mut Engine, path: &str) -> StatusUpdate {
+        let command = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: path.to_string(),
+            })
+            .expect("reconstruct");
+        assert!(matches!(command, Command::DiscardFileLive { .. }));
+        let busy = match engine.apply(command).expect("apply") {
+            crate::engine::EventReaction::Status(update) => update,
+            _ => panic!("expected a busy status"),
+        };
+        assert_eq!(busy.tone, crate::statusline::StatusTone::Busy);
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the discard reports");
+            let done = matches!(event, crate::worker::WorkerEvent::StatusOpCompleted { .. });
+            let reaction = engine.process_worker_event(event);
+            if done {
+                match reaction {
+                    crate::engine::EventReaction::Status(update) => return update,
+                    _ => panic!("expected the discard's final"),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn wire_to_command_discard_derives_untracked_for_untracked_file() {
+    fn wire_discard_deletes_an_untracked_file_classified_on_the_worker() {
         // init_repo leaves a.txt untracked (never committed).
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let cmd = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::DiscardFile {
-                worktree_path,
-                path,
-                is_untracked,
-                confirmed,
-            } => {
-                assert_eq!(confirmed, crate::git::ConfirmedEntry::File);
-                assert_eq!(worktree_path, repo.path());
-                assert_eq!(path, "a.txt");
-                assert!(is_untracked, "untracked file must be classified untracked");
-            }
-            _ => panic!("expected Command::DiscardFile variant"),
-        }
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(
+            done.tone,
+            crate::statusline::StatusTone::Info,
+            "{}",
+            done.message
+        );
+        assert!(
+            done.message.contains("Deleted untracked file"),
+            "{}",
+            done.message
+        );
+        assert!(!repo.path().join("a.txt").exists());
     }
 
     /// A path that climbs out of an untracked folder is not a file inside it,
@@ -5854,29 +5887,30 @@ mod tests {
     }
 
     #[test]
-    fn wire_to_command_discard_derives_tracked_for_modified_file() {
+    fn wire_discard_restores_a_modified_tracked_file() {
         // init_repo_with_commit commits a.txt; modify it so it has an unstaged
         // (tracked) change.
         let repo = init_repo_with_commit();
+        let committed = std::fs::read_to_string(repo.path().join("a.txt")).expect("read");
         std::fs::write(repo.path().join("a.txt"), "changed\n").expect("modify file");
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let cmd = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::DiscardFile { is_untracked, .. } => {
-                assert!(!is_untracked, "modified tracked file must not be untracked");
-            }
-            _ => panic!("expected Command::DiscardFile variant"),
-        }
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(
+            done.tone,
+            crate::statusline::StatusTone::Info,
+            "{}",
+            done.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+            committed,
+            "a modified tracked file is restored, never deleted"
+        );
     }
 
     #[test]
-    fn wire_to_command_discard_rejects_staged_file() {
+    fn wire_discard_refuses_a_staged_file_in_its_final() {
         // Commit a.txt, modify it, then STAGE the modification: it is now purely
         // staged with no remaining working-tree change. The TUI blocks this.
         let repo = init_repo_with_commit();
@@ -5890,38 +5924,36 @@ mod tests {
         assert!(ok, "git add failed");
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let err = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .map(|_| ())
-            .unwrap_err();
+        let done = wire_discard(&mut engine, "a.txt");
         // Mirrors the TUI's "Unstage the file first to discard changes." copy.
+        assert_eq!(done.tone, crate::statusline::StatusTone::Error);
         assert!(
-            err.to_string()
+            done.message
                 .contains("Unstage the file first to discard changes."),
-            "got: {err}"
+            "got: {}",
+            done.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+            "staged change\n",
+            "nothing was touched"
         );
     }
 
     #[test]
-    fn wire_to_command_discard_rejects_unchanged_file() {
+    fn wire_discard_refuses_an_unchanged_file_in_its_final() {
         // a.txt is committed and clean: nothing to discard.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let err = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .map(|_| ())
-            .unwrap_err();
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(done.tone, crate::statusline::StatusTone::Error);
         assert!(
-            err.to_string().contains("No unstaged changes to discard"),
-            "got: {err}"
+            done.message.contains("No unstaged changes to discard"),
+            "got: {}",
+            done.message
         );
+        assert!(repo.path().join("a.txt").exists());
     }
 
     #[test]

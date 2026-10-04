@@ -2014,6 +2014,9 @@ pub struct WorktreeRegistration {
     pub path: PathBuf,
     /// git's own verdict that the directory behind this registration is gone.
     pub prunable: bool,
+    /// The registration is locked (`git worktree lock`): git never calls a
+    /// locked worktree prunable, even with its directory gone.
+    pub locked: bool,
 }
 
 /// Parse `git worktree list --porcelain -z` output into registrations.
@@ -2040,11 +2043,16 @@ pub fn parse_worktree_registrations(output: &[u8]) -> Vec<WorktreeRegistration> 
             current = Some(WorktreeRegistration {
                 path: PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())),
                 prunable: false,
+                locked: false,
             });
         } else if (field == b"prunable" || field.starts_with(b"prunable "))
             && let Some(entry) = current.as_mut()
         {
             entry.prunable = true;
+        } else if (field == b"locked" || field.starts_with(b"locked "))
+            && let Some(entry) = current.as_mut()
+        {
+            entry.locked = true;
         }
     }
     if let Some(done) = current.take() {
@@ -2089,7 +2097,12 @@ pub fn forget_missing_worktree_registration(repo_path: &Path, worktree_path: &Pa
         // free to run.
         return Ok(());
     };
-    if !target.prunable {
+    // A locked registration is never called prunable, so its directory being
+    // gone is checked here, without following a link (measured on git 2.53:
+    // a locked worktree whose directory is deleted lists as `locked` only,
+    // and is removed only by a doubled `--force`).
+    let gone_but_locked = target.locked && std::fs::symlink_metadata(&target.path).is_err();
+    if !target.prunable && !gone_but_locked {
         return Err(anyhow!(
             "git still has a working copy registered at {}, so dux left the registration alone \
              rather than removing a directory that is in use.",
@@ -2097,17 +2110,12 @@ pub fn forget_missing_worktree_registration(repo_path: &Path, worktree_path: &Pa
         ));
     }
     let path = target.path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.as_ref(),
-            "worktree",
-            "remove",
-            "--force",
-            "--",
-            path.as_ref(),
-        ])
-        .output()?;
+    let mut command = Command::new("git");
+    command.args(["-C", repo.as_ref(), "worktree", "remove", "--force"]);
+    if gone_but_locked {
+        command.arg("--force");
+    }
+    let output = command.args(["--", path.as_ref()]).output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "git worktree remove failed: {}",

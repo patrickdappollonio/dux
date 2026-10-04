@@ -2853,20 +2853,12 @@ impl App {
             return Ok(());
         };
         let message = self.commit_input.text.clone();
-        // Route the empty-message / nothing-staged decision through the shared core
-        // preflight so the TUI and the web agree, and so the nothing-staged check
-        // reads LIVE git status rather than the possibly-stale `staged_files`
-        // cache. Each surface still renders its own copy for the refusals.
-        match git::commit_preflight(&worktree, &message) {
-            git::CommitPreflight::EmptyMessage => {
-                self.set_error("Enter a commit message first.");
-                return Ok(());
-            }
-            git::CommitPreflight::NothingStaged => {
-                self.set_error("No staged changes to commit.");
-                return Ok(());
-            }
-            git::CommitPreflight::Ready => {}
+        // An empty message needs no git to refuse. Nothing staged is decided by
+        // the shared core preflight, against LIVE git status, on the commit's
+        // worker, and is its final; the UI thread never runs git for it.
+        if message.trim().is_empty() {
+            self.set_error(dux_core::engine::COMMIT_EMPTY_MESSAGE);
+            return Ok(());
         }
         // The push hint is only offered where pushing is possible. A standalone
         // agent has no branch, so `push_to_remote` refuses it, and advertising
@@ -2882,18 +2874,18 @@ impl App {
             message,
             success_message,
         })?;
-        let success = matches!(
-            &reaction,
-            EventReaction::Status(StatusUpdate {
-                tone: StatusTone::Info,
-                ..
-            })
-        );
-        self.apply_reaction(reaction);
-        if success {
-            self.commit_input.clear();
-            self.reload_changed_files();
+        // The typed message is cleared when the commit's final says it
+        // landed (see the status arm of `apply_reaction`); the changes list is
+        // read again when the worker finishes.
+        if let EventReaction::Status(StatusUpdate {
+            tone: StatusTone::Busy,
+            key: Some(key),
+            ..
+        }) = &reaction
+        {
+            self.pending_commit = Some(key.clone());
         }
+        self.apply_reaction(reaction);
         Ok(())
     }
 
@@ -27114,6 +27106,11 @@ cyan = "#00ffff"
         app.commit_input.text = "a real message".to_string();
 
         app.execute_commit().expect("execute_commit");
+        // The live check runs on the commit's worker; its refusal is the final.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(
@@ -27121,6 +27118,57 @@ cyan = "#00ffff"
             "the live status check must refuse the commit despite the stale cache, got: {}",
             app.status.text(),
         );
+        assert_eq!(
+            app.commit_input.text, "a real message",
+            "a refused commit keeps the typed message"
+        );
+    }
+
+    /// A commit runs on a worker: the busy goes up at once, and the typed
+    /// message is cleared only when the final says the commit landed.
+    #[test]
+    fn execute_commit_clears_the_message_when_the_commit_lands() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(worktree.join("a.txt"), "seed\n").expect("seed");
+        git(&["add", "a.txt"]);
+        app.selected_left = 1;
+        app.commit_input.text = "the first commit".to_string();
+
+        app.execute_commit().expect("execute_commit");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(
+            app.commit_input.text, "the first commit",
+            "kept until the commit lands"
+        );
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Info,
+            "{}",
+            app.status.text()
+        );
+        assert!(app.commit_input.text.is_empty(), "cleared once it landed");
+        assert!(app.pending_commit.is_none());
     }
 
     #[test]

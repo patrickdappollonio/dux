@@ -142,9 +142,12 @@ pub enum Command {
         path: String,
     },
 
-    /// Run `git commit -m <message>` synchronously. The caller pre-formats
-    /// `success_message` because it depends on view-side bindings the engine
-    /// cannot resolve.
+    /// Commit the staged changes with `message`, on a worker: a keyed busy
+    /// now, then the final. The worker first asks the shared preflight
+    /// against live git status, so an empty message or nothing staged is the
+    /// final's refusal ([`COMMIT_EMPTY_MESSAGE`], [`COMMIT_NOTHING_STAGED`])
+    /// and nothing is committed. The caller pre-formats `success_message`
+    /// because it depends on view-side bindings the engine cannot resolve.
     CommitChanges {
         worktree_path: PathBuf,
         message: String,
@@ -272,6 +275,12 @@ pub enum Command {
     /// broadcast is the feedback rather than a toast on every selection.
     WatchChangedFiles { session_id: Option<String> },
 }
+
+/// The commit's refusal when its message is empty.
+pub const COMMIT_EMPTY_MESSAGE: &str = "Enter a commit message first.";
+
+/// The commit's refusal when nothing is staged.
+pub const COMMIT_NOTHING_STAGED: &str = "No staged changes to commit.";
 
 impl Engine {
     /// One discard of a changes-pane row, on a worker. `untracked` is the
@@ -874,7 +883,7 @@ impl Engine {
                 // Held for the commit's own duration, so a removal of this
                 // worktree that is already waiting sees it, and refused once a
                 // removal has begun.
-                let _hold = match self
+                let hold = match self
                     .worktree_ops()
                     .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Commit)
                 {
@@ -885,14 +894,27 @@ impl Engine {
                         )));
                     }
                 };
-                match crate::git::commit(&worktree_path, &message) {
-                    Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
+                let op = crate::engine::status_op("Committing the staged changes\u{2026}")
+                    .on_success(move |_: &()| crate::engine::Final::info(success_message.clone()))
                     // Commit failures leave the index and typed message intact, so
-                    // recovery stays inside the UI and does not require a sticky status.
-                    Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Commit failed: {e}"
-                    )))),
-                }
+                    // recovery stays inside the UI and does not require a sticky
+                    // status.
+                    .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
+                Ok(self.spawn_changes_op(op, move || {
+                    let _hold = hold;
+                    match crate::git::commit_preflight(&worktree_path, &message) {
+                        crate::git::CommitPreflight::EmptyMessage => {
+                            return Err(COMMIT_EMPTY_MESSAGE.to_string());
+                        }
+                        crate::git::CommitPreflight::NothingStaged => {
+                            return Err(COMMIT_NOTHING_STAGED.to_string());
+                        }
+                        crate::git::CommitPreflight::Ready => {}
+                    }
+                    crate::git::commit(&worktree_path, &message)
+                        .map(|_| ())
+                        .map_err(|e| format!("Commit failed: {e}"))
+                }))
             }
 
             Command::Push { worktree_path } => {
@@ -2806,6 +2828,47 @@ mod tests {
             }
             _ => panic!("expected Info status reaction"),
         }
+    }
+
+    /// A commit runs on a worker: a keyed busy at once, the preflight and
+    /// `git commit` off the engine thread, and the final.
+    #[test]
+    fn a_commit_runs_on_a_worker_and_refuses_nothing_staged_in_its_final() {
+        let repo = discard_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        let commit = |engine: &mut Engine| {
+            let reaction = engine
+                .apply(Command::CommitChanges {
+                    worktree_path: repo.path().to_path_buf(),
+                    message: "a real message".to_string(),
+                    success_message: "Committed.".to_string(),
+                })
+                .expect("apply");
+            assert!(
+                matches!(&reaction, EventReaction::Status(s) if s.tone == StatusTone::Busy
+                    && s.key.is_some()),
+                "a keyed busy"
+            );
+            match finish_discard(engine, reaction) {
+                EventReaction::Status(update) => update,
+                _ => panic!("expected the commit's final"),
+            }
+        };
+
+        let refused = commit(&mut engine);
+        assert_eq!(refused.tone, StatusTone::Error);
+        assert_eq!(refused.message, COMMIT_NOTHING_STAGED);
+
+        std::fs::write(repo.path().join("b.txt"), "b\n").expect("write");
+        let added = crate::git::test_support::git_command()
+            .args(["add", "b.txt"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git add");
+        assert!(added.success());
+        let landed = commit(&mut engine);
+        assert_eq!(landed.tone, StatusTone::Info, "{}", landed.message);
+        assert_eq!(landed.message, "Committed.");
     }
 
     /// A file's discard, classified live, runs entirely on a worker: the

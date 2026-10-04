@@ -147,28 +147,48 @@ impl CheckoutMoveGuard {
             ));
         }
         for (location, claim) in locations.iter().zip(&claims) {
+            // A link is judged at its own path only, both ways: removing it
+            // leaves its target, and whatever lives there, alone.
+            let link = crate::engine::is_symlink(&location.path);
             // What lives in it (a folder or a link removed whole) ...
-            if let Err((_, reason)) = self.check(&location.path).clear_or_say_why(&[claim]) {
+            if let Err((_, reason)) = self.check(&location.path, link).clear_or_say_why(&[claim]) {
                 return Err(refusal(checkout, location, what, &reason));
             }
             // ... and what it lives in.
-            if let Some(reason) = self.occupant_around(checkout, &location.path)? {
+            if let Some(reason) = self.occupant_around(checkout, &location.path, link)? {
                 return Err(refusal(checkout, location, what, &reason));
             }
         }
         Ok(MoveClearance { _claims: claims })
     }
 
-    /// What `location` lies in: an agent's folder, a project's repository, a
-    /// PTY's folder, a session dux started there that still runs, a process
-    /// of dux's standing there, or an operation holding it. Only a folder
+    /// What `location` lies in (for a link, `link`, what its own path lies
+    /// in, never what its target does): an agent's folder, a project's
+    /// repository, a PTY's folder, a session dux started there that still
+    /// runs, a process of dux's standing there, or an operation holding it. Only a folder
     /// short of the checkout itself counts: the checkout's own agent and
     /// project contain every path in it, and moving the checkout is theirs to
     /// ask for. `Err` when the session database cannot be read (fail closed).
-    fn occupant_around(&self, checkout: &Path, location: &Path) -> Result<Option<String>> {
+    fn occupant_around(
+        &self,
+        checkout: &Path,
+        location: &Path,
+        link: bool,
+    ) -> Result<Option<String>> {
+        // A link's own LEXICAL path, never followed: what lies around the
+        // link, not around what it points at.
+        let lexical = crate::worktree_ops::lexical_key(location);
+        let contains_location = |dir: &Path| {
+            if link {
+                crate::worktree_ops::spellings(dir)
+                    .iter()
+                    .any(|outer| crate::worktree_ops::spelled_under(&lexical, outer))
+            } else {
+                crate::worktree_ops::folder_contains(dir, location)
+            }
+        };
         let around = |dir: &Path| {
-            crate::worktree_ops::folder_contains(dir, location)
-                && !crate::worktree_ops::folder_contains(dir, checkout)
+            contains_location(dir) && !crate::worktree_ops::folder_contains(dir, checkout)
         };
         let (stored_agents, stored_projects) = crate::storage::SessionStore::open(&self.db_path)
             .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
@@ -252,8 +272,7 @@ impl CheckoutMoveGuard {
     /// holds them; the rest (agents and projects in the session database now,
     /// operations holding a path, sessions dux recorded and the working
     /// directories of what runs in them) is asked when it is cleared.
-    fn check(&self, folder: &Path) -> crate::destructive::DestructiveCheck {
-        let link = crate::engine::is_symlink(folder);
+    fn check(&self, folder: &Path, link: bool) -> crate::destructive::DestructiveCheck {
         let facts = crate::engine::OccupancyFacts {
             agents: &self.agents,
             projects: &self.projects,

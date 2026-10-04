@@ -60,6 +60,8 @@ mod review22_tests;
 #[cfg(test)]
 mod review23_tests;
 #[cfg(test)]
+mod review24_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -69,7 +71,7 @@ pub(crate) mod test_support;
 mod worktree_removal_race_tests;
 
 pub use crate::destructive::DestructiveCheck;
-pub use command::Command;
+pub use command::{COMMIT_EMPTY_MESSAGE, COMMIT_NOTHING_STAGED, Command};
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,

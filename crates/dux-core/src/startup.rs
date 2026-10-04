@@ -357,15 +357,26 @@ pub fn run_claimed_startup_command(
         drop(spawning);
         guard.label(process, "an agent's startup command");
         drop(command);
+        // The command (the session's leader) is waited for WITHOUT being
+        // reaped first. While it is an unreaped zombie its session number
+        // still names this session, so a removal looking now still finds
+        // everything the command left running there by that number. What it
+        // left running is recorded next, the only evidence those processes
+        // are dux's once the number proves nothing; only then is the leader
+        // reaped. Reaping first left a window (measured: a removal fell into
+        // it under load) where the number no longer counted and nothing was
+        // recorded yet, so a job the command left writing in the worktree was
+        // invisible to the removal.
+        wait_for_exit_unreaped(child.id());
+        #[cfg(test)]
+        tests_hooks::delay_after_exit(worktree);
+        guard.record_survivors(process);
         let status = child.wait();
         if status.is_ok() {
             crate::process_sessions::note_reaped(process);
         }
         let status =
             status.with_context(|| format!("failed to run startup command through {shell}"))?;
-        // The command (the session's leader) has exited: what it left running
-        // is recorded now, the only evidence those processes are dux's later.
-        guard.record_survivors(process);
         let ended = Utc::now();
         // What the command wrote before it exited. A job it left running may
         // still be writing; that is the job's output, not the command's.
@@ -453,6 +464,25 @@ pub fn run_claimed_startup_command(
     }
 }
 
+/// Block until the child `pid` has exited, leaving it unreaped (`WNOWAIT`),
+/// so its pid, and the session number it leads, stay allocated until the
+/// caller reaps it. Interrupted waits are retried; any other error returns at
+/// once and the caller's ordinary `wait` reaps as before.
+fn wait_for_exit_unreaped(pid: u32) {
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return;
+    };
+    loop {
+        match rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        ) {
+            Err(rustix::io::Errno::INTR) => continue,
+            _ => return,
+        }
+    }
+}
+
 /// The error a run gives itself when its agent was deleted before the command
 /// could start.
 const NOT_STARTED_DELETED: &str = "the agent was deleted before the command started";
@@ -475,6 +505,30 @@ pub(crate) mod tests_hooks {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert_with(HashMap::new)
             .insert(worktree.to_path_buf(), delay);
+    }
+
+    static EXIT_DELAYS: Mutex<Option<HashMap<PathBuf, Duration>>> = Mutex::new(None);
+
+    /// Hold every run in `worktree` for `delay` between its command exiting
+    /// and what the command left running being recorded: the window a
+    /// removal must not lose a job in.
+    pub(crate) fn delay_after_exit_in(worktree: &Path, delay: Duration) {
+        EXIT_DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(worktree.to_path_buf(), delay);
+    }
+
+    pub(super) fn delay_after_exit(worktree: &Path) {
+        let delay = EXIT_DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|delays| delays.get(worktree).copied());
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
     }
 
     pub(super) fn delay_registration(worktree: &Path) {

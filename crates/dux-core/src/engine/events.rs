@@ -1064,7 +1064,8 @@ pub(crate) fn wait_then_last_look(
     // terminal and add is refused under the claim), so whatever is found here
     // arrived before the claim and has not gone, or is a process dux started
     // that walked in. Anything that occupies the folder keeps it.
-    match last_look() {
+    let looked = last_look();
+    match looked {
         Some(occupant) => Err(occupied_after_wait_message(folder, &occupant)),
         None => Ok(()),
     }
@@ -1092,6 +1093,37 @@ pub(crate) fn remove_after_last_look<T>(
             remove().map_err(|e| format!("{e:#}"))
         }
         other => other.map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// Test-only: hold a removal's process snapshot, per engine (keyed by its
+/// session database), so a test can let something happen before it is taken.
+#[cfg(test)]
+pub(crate) mod removal_snapshot_hooks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static DELAYS: Mutex<Option<HashMap<PathBuf, Duration>>> = Mutex::new(None);
+
+    pub(crate) fn delay_for(db_path: &Path, delay: Duration) {
+        DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(db_path.to_path_buf(), delay);
+    }
+
+    pub(super) fn delay(db_path: &Path) {
+        let delay = DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|delays| delays.get(db_path).copied());
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
     }
 }
 
@@ -1173,12 +1205,13 @@ pub(crate) fn end_agent_processes_before_removal(
     // is never read before it has been written.
     registry.wait_for_recordings(&processes.sessions, REMOVAL_SNAPSHOT_WAIT);
     snapshot.extend(registry.survivors_of(&processes.sessions));
-    match crate::process_sessions::purge(
+    let outcome = crate::process_sessions::purge(
         &mut crate::process_sessions::SystemProcesses,
         &processes.sessions,
         &snapshot,
         processes.grace,
-    ) {
+    );
+    match outcome {
         crate::process_sessions::PurgeOutcome::Clean { stopped } => {
             if stopped > 0 {
                 logger::info(&format!(
@@ -2422,6 +2455,8 @@ impl Engine {
         let spawned = std::thread::Builder::new()
             .name("worktree-removal-snapshot".to_string())
             .spawn(move || {
+                #[cfg(test)]
+                removal_snapshot_hooks::delay(&db_path);
                 let found = crate::process_sessions::snapshot(&snapshot_sessions);
                 for target in &targets {
                     target.terminate();

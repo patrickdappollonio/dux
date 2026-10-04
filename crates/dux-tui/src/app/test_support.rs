@@ -241,6 +241,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         commit_input: TextInput::new()
             .with_multiline(4)
             .with_placeholder("Type your commit message\u{2026}"),
+        pending_commit: None,
         show_diff_line_numbers: false,
         left_width_pct: 20,
         right_width_pct: 23,

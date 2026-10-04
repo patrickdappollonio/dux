@@ -571,6 +571,75 @@ fn a_removal_waits_for_a_startup_command_spawned_before_it_registered() {
     assert_removed_cleanly(&fx, result);
 }
 
+/// The flake, made deterministic. A startup command whose shell does not
+/// exec into its job (`sh script; :`), and whose job ignores SIGTERM: the
+/// delete's TERM kills the command but not the job, and the job keeps
+/// writing in the worktree. The run is held for a second between seeing the
+/// command exit and recording what it left running. A removal looking in that
+/// second must still find the job, by the session number of a command that is
+/// exited but not yet reaped.
+#[test]
+fn a_removal_finds_a_job_whose_command_exited_before_it_was_recorded() {
+    let mut fx = fixture();
+    // The delete's TERM ends the command before the snapshot of what it
+    // runs is taken (as it did when the flake hit), and the run waits a
+    // second after seeing the command exit before recording its job.
+    crate::engine::events::removal_snapshot_hooks::delay_for(
+        &fx.engine.paths.sessions_db_path,
+        Duration::from_millis(1500),
+    );
+    crate::startup::tests_hooks::delay_after_exit_in(
+        std::path::Path::new(&fx.engine.sessions[0].directory().to_string()),
+        Duration::from_secs(3),
+    );
+    let script = writer_script(&fx.pidfile);
+    let session = fx.engine.sessions[0].clone();
+    let run = crate::startup::StartupCommandRun {
+        project: fx.engine.projects[0].clone(),
+        managed: session
+            .workspace
+            .as_managed()
+            .expect("managed test session")
+            .clone(),
+        session,
+        // The trailing `:` keeps the shell from exec'ing into the job, so
+        // the job is a child of the command rather than the command itself.
+        command: format!("sh '{}'; :", script.display()),
+        terminal: crate::config::StartupCommandTerminalConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string()],
+        },
+        env: Vec::new(),
+    };
+    let paths = fx.engine.paths.clone();
+    let registry = fx.engine.process_registry.clone();
+    let handle =
+        std::thread::spawn(move || crate::startup::run_startup_command(&paths, run, &registry));
+    wait_for_writers(&fx.pidfile, 1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fx
+        .engine
+        .process_registry
+        .sessions_in(&fx.worktree)
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the run never recorded its session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let result = delete_and_wait(&mut fx.engine);
+    for pid in writer_pids(&fx.pidfile) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = handle.join().expect("startup thread");
+    assert_removed_cleanly(&fx, result);
+}
+
 fn pending_rows(engine: &Engine) -> Vec<crate::storage::PendingWorktreeRemoval> {
     engine
         .session_store

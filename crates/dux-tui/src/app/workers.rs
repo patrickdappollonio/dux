@@ -550,6 +550,17 @@ impl App {
                         return;
                     }
                 }
+                // A commit's final: a landed commit clears the typed message, a
+                // refused one leaves it for another try.
+                if tone != StatusTone::Busy
+                    && key.is_some()
+                    && key.as_deref() == self.pending_commit.as_deref()
+                {
+                    if tone == StatusTone::Info {
+                        self.commit_input.clear();
+                    }
+                    self.pending_commit = None;
+                }
                 // When a `StatusUpdate` carries a key (keyed operation), write it
                 // into the named slot so `most_recent_tui` can pick it up.
                 // Unkeyed updates (`key == None`) write the anonymous slot.
