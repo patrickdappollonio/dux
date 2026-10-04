@@ -5120,3 +5120,116 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -
 fn is_duplicate_column_error(err: &rusqlite::Error) -> bool {
     err.to_string().to_lowercase().contains("duplicate column")
 }
+
+/// The store's write transactions take the write lock when they begin.
+#[cfg(test)]
+mod immediate_transaction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// What every store write transaction does: begin, read, then write. The
+    /// `between` hook runs after the read and before the write, which is
+    /// where another connection's commit lands in the race.
+    fn read_then_write(
+        conn: &Connection,
+        begin: impl FnOnce(&Connection) -> rusqlite::Result<rusqlite::Transaction<'_>>,
+        between: impl FnOnce(),
+    ) -> rusqlite::Result<()> {
+        let tx = begin(conn)?;
+        let _rows: i64 = tx.query_row("select count(*) from t", [], |row| row.get(0))?;
+        between();
+        tx.execute("insert into t (who) values ('a')", [])?;
+        tx.commit()
+    }
+
+    /// Two connections to one WAL database, the way the engine's store and
+    /// the registry's writer thread share it.
+    fn two_connections() -> (tempfile::TempDir, Connection, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        drop(SessionStore::open(&db).unwrap());
+        let a = Connection::open(&db).unwrap();
+        a.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        a.execute_batch("create table t (who text not null)")
+            .unwrap();
+        (tmp, a, db)
+    }
+
+    /// The bug, on purpose: a DEFERRED transaction reads, another connection
+    /// commits, and the write is refused at once with SQLITE_BUSY_SNAPSHOT
+    /// (517), however long the busy timeout.
+    #[test]
+    fn a_deferred_transaction_is_refused_when_another_connection_commits_in_between() {
+        let (_tmp, a, db) = two_connections();
+        let refused = read_then_write(
+            &a,
+            |conn| {
+                rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)
+            },
+            || {
+                let b = Connection::open(&db).unwrap();
+                b.execute("insert into t (who) values ('b')", []).unwrap();
+            },
+        )
+        .expect_err("the deferred write is refused");
+        let rusqlite::Error::SqliteFailure(failure, _) = &refused else {
+            panic!("not a SQLite failure: {refused}");
+        };
+        assert_eq!(
+            failure.extended_code, 517,
+            "SQLITE_BUSY_SNAPSHOT: {refused}"
+        );
+    }
+
+    /// Set by the second connection's busy handler: it is waiting for the
+    /// write lock.
+    static B_IS_WAITING: AtomicBool = AtomicBool::new(false);
+
+    fn b_busy(_attempt: i32) -> bool {
+        B_IS_WAITING.store(true, Ordering::SeqCst);
+        std::thread::yield_now();
+        true
+    }
+
+    /// The fix: `immediate_tx` holds the write lock from its first statement,
+    /// so the other connection's write waits (its busy handler is seen
+    /// running) until this transaction commits, and both writes land, this
+    /// one first.
+    #[test]
+    fn an_immediate_transaction_makes_the_other_writer_wait_and_both_succeed() {
+        let (_tmp, a, db) = two_connections();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let b = std::cell::RefCell::new(None);
+        read_then_write(&a, immediate_tx, || {
+            let db = db.clone();
+            *b.borrow_mut() = Some(std::thread::spawn(move || {
+                let b = Connection::open(&db).unwrap();
+                b.busy_handler(Some(b_busy)).unwrap();
+                started_tx.send(()).unwrap();
+                b.execute("insert into t (who) values ('b')", [])
+            }));
+            started_rx.recv().unwrap();
+            // The other writer is blocked on this transaction's lock, and
+            // retrying, before this transaction writes.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !B_IS_WAITING.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the other writer never had to wait"
+                );
+                std::thread::yield_now();
+            }
+        })
+        .expect("the immediate transaction's write succeeds");
+        let other = b.into_inner().unwrap().join().unwrap();
+        assert_eq!(other.expect("the other writer succeeds once it may"), 1);
+        let order: Vec<String> = a
+            .prepare("select who from t order by rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(order, vec!["a".to_string(), "b".to_string()]);
+    }
+}
