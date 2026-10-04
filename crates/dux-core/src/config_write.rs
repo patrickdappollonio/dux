@@ -259,10 +259,7 @@ pub fn patch_config_file_three_way(
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    match base {
-        Some(base) => apply_patches_three_way(&mut doc, base, ours),
-        None => apply_patches(&mut doc, ours),
-    }
+    apply_patches_three_way(&mut doc, base, ours);
     let text = doc.to_string();
     check_auth_before_write(config_path, &text)?;
     write_config_atomic_unlocked(config_path, &text, durability)
@@ -284,17 +281,22 @@ pub fn save_config_three_way(
 
 /// Apply to `disk` only what changed between `base` and `ours`, by running the
 /// ordinary patch twice (once with each) over copies of the file and copying
-/// across the items where the two results differ.
-fn apply_patches_three_way(disk: &mut DocumentMut, base: &Config, ours: &Config) {
+/// across the items where the two results differ. With no `base` every item
+/// counts as changed (the full patch), through the same merge, so both keep
+/// comments the same way.
+fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<&Config>, ours: &Config) {
     let mut with_ours = disk.clone();
     apply_patches(&mut with_ours, ours);
-    let mut with_base = disk.clone();
-    apply_patches(&mut with_base, base);
+    let with_base = base.map(|base| {
+        let mut doc = disk.clone();
+        apply_patches(&mut doc, base);
+        doc
+    });
     let original = disk.clone();
     merge_changed(
         disk.as_table_mut(),
         original.as_table(),
-        with_base.as_table(),
+        with_base.as_ref().map(DocumentMut::as_table),
         with_ours.as_table(),
     );
     // Retired keys still go on every save, as they always have.
@@ -311,42 +313,174 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
     ("server", "max_websocket_connections"),
 ];
 
-fn merge_changed(target: &mut Table, original: &Table, base: &Table, ours: &Table) {
+/// Copy into `target` (the file) what changed between `base` and `ours`
+/// (both the file patched from a config), recursing into tables. `original`
+/// is the file before this save, so "missing from the file" and "added on
+/// disk by someone else" can be told apart.
+fn merge_changed(target: &mut Table, original: &Table, base: Option<&Table>, ours: &Table) {
     for (key, ours_item) in ours.iter() {
-        let Some(base_item) = base.get(key) else {
-            target.insert(key, ours_item.clone());
+        let base_item = base.and_then(|base| base.get(key));
+        let Some(original_item) = original.get(key) else {
+            // Missing from the file: fill it in, as every save always has.
+            put_in_place(target, key, ours_item.clone());
             continue;
         };
-        if original.get(key).is_none() {
-            // Missing from the file: fill it in, as every save always has.
-            target.insert(key, ours_item.clone());
+        if base.is_some() && base_item.is_none() {
+            put_in_place(target, key, ours_item.clone());
             continue;
         }
-        match (base_item, ours_item, original.get(key), target.get_mut(key)) {
+        match (base_item, ours_item, original_item, target.get_mut(key)) {
             (
-                Item::Table(base_table),
+                base_item,
                 Item::Table(ours_table),
-                Some(Item::Table(original_table)),
+                Item::Table(original_table),
                 Some(Item::Table(target_table)),
-            ) => merge_changed(target_table, original_table, base_table, ours_table),
+            ) if base_item.is_none_or(Item::is_table) => {
+                merge_changed(
+                    target_table,
+                    original_table,
+                    base_item.and_then(Item::as_table),
+                    ours_table,
+                );
+            }
+            (
+                base_item,
+                Item::ArrayOfTables(ours_array),
+                Item::ArrayOfTables(original_array),
+                Some(Item::ArrayOfTables(target_array)),
+            ) if base_item.is_none_or(Item::is_array_of_tables) => merge_array_of_tables(
+                target_array,
+                original_array,
+                base_item.and_then(Item::as_array_of_tables),
+                ours_array,
+            ),
             _ => {
-                if item_text(base_item) != item_text(ours_item) {
-                    target.insert(key, ours_item.clone());
+                let changed = base_item.is_none_or(|base| item_text(base) != item_text(ours_item));
+                if changed {
+                    put_in_place(target, key, ours_item.clone());
                 }
             }
         }
     }
     // Removed in memory (an env variable, a provider): present after the
     // base patch, gone after ours. An entry the base patch drops too was
-    // added on disk by someone else, so it stays.
+    // added on disk by someone else, so it stays. With no base, whatever the
+    // patch left out goes, as in the full patch.
     let gone: Vec<String> = original
         .iter()
         .map(|(key, _)| key.to_string())
-        .filter(|key| base.get(key).is_some() && ours.get(key).is_none())
+        .filter(|key| ours.get(key).is_none() && base.is_none_or(|base| base.get(key).is_some()))
         .collect();
     for key in gone {
         target.remove(&key);
     }
+    // Order is meaningful in some tables (`[macros]` above all), so a pure
+    // reorder in memory is a change: the keys ours shares with the file take
+    // ours' order, and anything added on disk keeps its place after them.
+    let reference: Vec<String> = match base {
+        Some(base) => base.iter().map(|(key, _)| key.to_string()).collect(),
+        None => original.iter().map(|(key, _)| key.to_string()).collect(),
+    };
+    let ours_order: Vec<String> = ours.iter().map(|(key, _)| key.to_string()).collect();
+    let shared = |order: &[String]| -> Vec<String> {
+        order
+            .iter()
+            .filter(|key| ours_order.contains(key) && reference.contains(key))
+            .cloned()
+            .collect()
+    };
+    if shared(&reference) != shared(&ours_order) {
+        let rank = |key: &str| {
+            ours_order
+                .iter()
+                .position(|k| k == key)
+                .unwrap_or(ours_order.len())
+        };
+        target.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
+    }
+}
+
+/// Write `item` at `key`, keeping the key itself (and so the comment above
+/// it) and the comment trailing the old value. `Table::insert` on an existing
+/// key would replace the key and drop its comment.
+fn put_in_place(target: &mut Table, key: &str, mut item: Item) {
+    match target.get_mut(key) {
+        Some(existing) => {
+            match (&*existing, &mut item) {
+                (Item::Value(old), Item::Value(new)) => *new.decor_mut() = old.decor().clone(),
+                (Item::Table(old), Item::Table(new)) => *new.decor_mut() = old.decor().clone(),
+                _ => {}
+            }
+            *existing = item;
+        }
+        None => {
+            target.insert(key, item);
+        }
+    }
+}
+
+/// An entry's identity in an array of tables: `id`, else `path`, else
+/// `name`. `None` when it has none, and the array is then compared whole.
+fn entry_identity(entry: &Table) -> Option<String> {
+    ["id", "path", "name"]
+        .iter()
+        .find_map(|field| entry.get(field).map(item_text))
+}
+
+/// `[[projects]]` and any other array of tables, merged entry by entry by
+/// identity: an entry memory did not change keeps the file's version (or
+/// stays deleted if the file deleted it), one memory changed or added is
+/// written, one memory removed goes, and one added on disk is kept after
+/// memory's entries.
+fn merge_array_of_tables(
+    target: &mut toml_edit::ArrayOfTables,
+    original: &toml_edit::ArrayOfTables,
+    base: Option<&toml_edit::ArrayOfTables>,
+    ours: &toml_edit::ArrayOfTables,
+) {
+    let whole =
+        |array: &toml_edit::ArrayOfTables| array.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+    let Some(base) = base else {
+        *target = ours.clone();
+        return;
+    };
+    let all_keyed = [base, ours, original]
+        .iter()
+        .all(|array| array.iter().all(|entry| entry_identity(entry).is_some()));
+    if !all_keyed {
+        if whole(base) != whole(ours) {
+            *target = ours.clone();
+        }
+        return;
+    }
+    let find = |array: &toml_edit::ArrayOfTables, id: &str| {
+        array
+            .iter()
+            .find(|entry| entry_identity(entry).as_deref() == Some(id))
+            .cloned()
+    };
+    let mut merged = toml_edit::ArrayOfTables::new();
+    let mut seen: Vec<String> = Vec::new();
+    for entry in ours.iter() {
+        let id = entry_identity(entry).expect("keyed");
+        seen.push(id.clone());
+        match find(base, &id) {
+            Some(base_entry) if base_entry.to_string() == entry.to_string() => {
+                // Unchanged in memory: the file's own version, if it still has one.
+                if let Some(file_entry) = find(original, &id) {
+                    merged.push(file_entry);
+                }
+            }
+            _ => merged.push(entry.clone()),
+        }
+    }
+    for entry in original.iter() {
+        let id = entry_identity(entry).expect("keyed");
+        if !seen.contains(&id) && find(base, &id).is_none() {
+            merged.push(entry.clone());
+        }
+    }
+    *target = merged;
 }
 
 /// An item's TOML text without the comments and spacing around it.
@@ -3948,6 +4082,78 @@ second_note = \"nowhere to go\"
 
     /// The three-way save: a key changed on disk by someone else, and not in
     /// memory, keeps the disk value; a key changed in memory is written.
+    fn base_and_file(path: &Path, body: &str) -> Config {
+        std::fs::write(path, body).expect("seed");
+        toml::from_str(body).expect("parse")
+    }
+
+    /// A setting a save changes keeps the documentation comment above it and
+    /// the one trailing it.
+    #[test]
+    fn a_changed_key_keeps_its_comments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[ui]\n# Copy on select.\ncopy_on_select = true # trailing\nleft_width_pct = 20\n",
+        );
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        for base in [Some(&base), None] {
+            std::fs::write(
+                &path,
+                "[ui]\n# Copy on select.\ncopy_on_select = true # trailing\nleft_width_pct = 20\n",
+            )
+            .unwrap();
+            save_config_three_way(&path, base, &ours, Durability::NoFsync).expect("save");
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                after.contains("# Copy on select.\ncopy_on_select = false # trailing\n"),
+                "{after}"
+            );
+        }
+    }
+
+    /// A pure reorder of an ordered table is a change and is written.
+    #[test]
+    fn a_reorder_in_memory_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[macros]\na = { text = \"a\", surface = \"agent\" }\nb = { text = \"b\", surface = \"agent\" }\nc = { text = \"c\", surface = \"agent\" }\n",
+        );
+        let mut ours = base.clone();
+        ours.macros.entries.move_index(2, 0);
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let order: Vec<&str> = parsed.macros.entries.keys().map(String::as_str).collect();
+        assert_eq!(order, ["c", "a", "b"]);
+    }
+
+    /// A project added to the file by hand survives a save that adds another
+    /// project from memory; projects are matched by id, not by position.
+    #[test]
+    fn projects_merge_by_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(&path, "[[projects]]\nid = \"one\"\npath = \"/tmp/one\"\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"one\"\npath = \"/tmp/one\"\n\n[[projects]]\nid = \"hand\"\npath = \"/tmp/hand\"\n",
+        )
+        .unwrap();
+        let mut ours = base.clone();
+        let mut added = ours.projects[0].clone();
+        added.id = "two".to_string();
+        added.path = "/tmp/two".to_string();
+        ours.projects.push(added);
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ids: Vec<&str> = parsed.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["one", "two", "hand"]);
+    }
+
     #[test]
     fn a_three_way_save_keeps_a_disk_change_memory_did_not_make() {
         let dir = tempfile::tempdir().expect("tempdir");

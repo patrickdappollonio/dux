@@ -9126,6 +9126,30 @@ mod tests {
         }
     }
 
+    /// Reordering macros by drag saves the new order: a pure reorder is a
+    /// change even though no macro's own text changed.
+    #[test]
+    fn reordering_macros_reaches_the_file() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[macros]\na = { text = \"a\", surface = \"agent\" }\nb = { text = \"b\", surface = \"agent\" }\nc = { text = \"c\", surface = \"agent\" }\n",
+        )
+        .expect("seed");
+        engine.config = crate::config::load_config(&engine.paths).expect("load");
+        engine.retune_after_config_swap();
+        let mut macros = engine.config.macros.clone();
+        macros.entries.move_index(2, 0);
+        engine
+            .apply(Command::UpdateMacros { macros })
+            .expect("update macros");
+        engine.config_writer.flush();
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&engine.paths.config_path).unwrap()).unwrap();
+        let order: Vec<&str> = parsed.macros.entries.keys().map(String::as_str).collect();
+        assert_eq!(order, ["c", "a", "b"]);
+    }
+
     #[test]
     fn reentrant_reload_is_rejected_and_keeps_the_first_barrier() {
         let (mut engine, _tmp) = test_engine();
