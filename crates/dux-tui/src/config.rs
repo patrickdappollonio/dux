@@ -1770,6 +1770,15 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
             dux_core::config::describe_toml_error(raw, &e)
         )
     })?;
+    // A password in a place dux does not read is refused, never cleaned up:
+    // a top-level `[auth]` is an orphaned section, and dropping it would
+    // lose the hash the user meant to set.
+    if let Some(problem) = dux_core::config::misplaced_auth_problems(raw)
+        .into_iter()
+        .next()
+    {
+        anyhow::bail!("{problem}. Nothing was changed.");
+    }
 
     let rendered_text = render_config_documented(&config);
     let mut rendered: DocumentMut = rendered_text
@@ -4196,6 +4205,32 @@ args = [\"-l\"]
         );
         let migrated = fs::read_to_string(&target).unwrap();
         assert!(!migrated.contains("tailscale_enabled"), "{migrated}");
+    }
+
+    /// A top-level `[auth]` is an orphaned section the documentation restore
+    /// cleans up, but one holding a password hash is a password in the wrong
+    /// place: the restore refuses it, naming it, and drops nothing.
+    #[test]
+    fn restoring_the_docs_never_cleans_up_a_misplaced_password_hash() {
+        let raw = "[auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n";
+        let error = format!("{:#}", restore_documentation(raw).expect_err("refused"));
+        assert!(error.contains("auth.password_hash"), "{error}");
+        assert!(error.contains("[server.auth]"), "{error}");
+        assert!(!error.contains("argon2id"), "{error}");
+        let mut rendered: DocumentMut = "".parse().unwrap();
+        let report = dux_core::config_write::merge_unmanaged_keys(
+            &mut rendered,
+            &raw.parse::<DocumentMut>().unwrap(),
+        );
+        assert!(report.dropped.is_empty(), "{report:?}");
+        assert!(rendered.to_string().contains("password_hash"), "{rendered}");
+        // An old `[auth]` with no password in it is still cleaned up.
+        let mut rendered: DocumentMut = "".parse().unwrap();
+        let report = dux_core::config_write::merge_unmanaged_keys(
+            &mut rendered,
+            &"[auth]\nenabled = true\n".parse::<DocumentMut>().unwrap(),
+        );
+        assert_eq!(report.dropped, vec!["auth".to_string()]);
     }
 
     #[test]

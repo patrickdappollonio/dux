@@ -2144,3 +2144,23 @@ fn what_dux_has_seen_stays_bounded_while_projects_come_and_go() {
         );
     }
 }
+
+/// A setting a save filled in, deleted by hand and then reloaded (the way
+/// a hand edit takes effect while dux runs), stays deleted: a reload adds
+/// what it read to what dux has seen, never replacing it.
+#[test]
+fn a_hand_deletion_survives_a_reload() {
+    let (_dir, path, loaded, queue) = setup("[ui]\nleft_width_pct = 25\n");
+    let mut memory = loaded.clone();
+    memory.env.insert("A".into(), "1".into());
+    queue.save_eager(memory.clone()).unwrap();
+    let text = read(&path);
+    assert!(text.contains("diff_tab_width = 4\n"), "filled in:\n{text}");
+    std::fs::write(&path, text.replace("diff_tab_width = 4\n", "")).unwrap();
+    let reloaded = load(&path);
+    queue.set_base(reloaded.clone());
+    let mut memory = reloaded;
+    for written in three_unrelated_saves(&path, &queue, &mut memory) {
+        assert!(!written.contains("diff_tab_width"), "{written}");
+    }
+}

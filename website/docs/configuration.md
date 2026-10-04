@@ -178,6 +178,13 @@ argument, where shell history and the process list would keep it. What lands in
 password signs every browser out. To remove it, run
 `dux config set server.auth.password_hash ""`.
 
+> [!IMPORTANT]
+> dux reads the password only from `[server.auth]`. A `password_hash` anywhere else, or a
+> table with a near-miss name such as `[server.auht]` or `[server.Auth]`, stops dux from
+> starting (and a running dux keeps its settings on reload) instead of letting it run
+> without the password you meant to set. The message names where the key is and where it
+> belongs.
+
 > [!WARNING]
 > The hash is safe to keep in a dotfiles repository in the sense that it is not your
 > password, but anyone who has it can try guesses offline as fast as their hardware

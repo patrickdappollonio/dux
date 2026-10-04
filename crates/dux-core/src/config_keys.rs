@@ -1580,4 +1580,52 @@ port = 3890
             .expect("no new problem");
         assert_eq!(problems.len(), 1, "{problems:?}");
     }
+
+    /// Every bad environment variable is its own start problem, so a second
+    /// one is a new problem: a set adding it is refused and nothing is
+    /// written.
+    #[test]
+    fn a_second_broken_env_value_is_refused() {
+        let (_dir, path) = temp_config("[env]\nA = \"${\"\n");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let error = set_secret_text(
+            &path,
+            &lookup("env.B").unwrap(),
+            &Password::new("${".to_string()),
+        )
+        .expect_err("a second broken env value");
+        assert!(format!("{error:#}").contains('B'), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// With two broken env values, each is reported by name, and repairing
+    /// either is allowed; the other stays listed.
+    #[test]
+    fn repairing_one_of_two_broken_env_values_is_allowed() {
+        let (_dir, path) = temp_config("[env]\nA = \"${\"\nB = \"${\"\n");
+        let problems = crate::config::start_problems_of(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems.iter().all(|p| !p.contains("${")),
+            "no values: {problems:?}"
+        );
+        let remaining = set_secret_text(
+            &path,
+            &lookup("env.A").unwrap(),
+            &Password::new("fixed".to_string()),
+        )
+        .expect("repairing a reported problem");
+        assert_eq!(remaining.len(), 1, "{remaining:?}");
+        assert!(remaining[0].contains('B'), "{remaining:?}");
+    }
+
+    /// The same per variable inside a project's env.
+    #[test]
+    fn broken_project_env_values_are_problems_of_their_own() {
+        let problems = crate::config::start_problems_of(
+            "[[projects]]\nid = \"p\"\npath = \"/p\"\nname = \"api\"\n[projects.env]\nA = \"${\"\nB = \"${\"\n",
+        );
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().all(|p| p.contains("api")), "{problems:?}");
+    }
 }

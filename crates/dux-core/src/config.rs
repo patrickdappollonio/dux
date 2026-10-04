@@ -3166,6 +3166,96 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
 ///
 /// Read from the user's own text, so an error quotes their file with its real
 /// line numbers rather than a re-serialized copy of the section.
+/// A password hash, or an `auth` table, where dux does not read one: a
+/// `password_hash` key anywhere outside `[server.auth]`, or a table at the
+/// top level or under `[server]` whose name is within two edits of "auth"
+/// (`[server.auht]`, `[server.Auth]`, a top-level `[auht]`). dux would start
+/// without the password the user meant to set, so each is a problem that
+/// stops the start, named by where it is (never its value) and saying where
+/// it belongs. Other unknown keys stay harmless.
+///
+/// A top-level table named exactly `[auth]` is the one exception: it is the
+/// section the retired HTTP basic-auth feature wrote, real configs from
+/// before the upgrade still carry it (`username = "…"`), and the
+/// documentation restore cleans it up. It stops the start only when it
+/// holds a `password_hash`, which the first rule catches.
+pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+    collect_stray_password_hashes(&file, &mut Vec::new(), &mut problems);
+    let near_auth = |name: &str| {
+        let name = name.to_lowercase();
+        name == "auth" || edit_distance(&name, "auth") <= 2
+    };
+    for (name, value) in &file {
+        if name != "auth" && value.is_table() && near_auth(name) {
+            problems.push(format!(
+                "[{name}] is not read: the web UI password settings belong in [server.auth], so \
+                 dux will not start until [{name}] is moved there or removed"
+            ));
+        }
+    }
+    if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
+        for (name, value) in server {
+            if name != "auth" && value.is_table() && near_auth(name) {
+                problems.push(format!(
+                    "[server.{name}] is not read: the web UI password settings belong in \
+                     [server.auth], so dux will not start until it is renamed or removed"
+                ));
+            }
+        }
+    }
+    problems
+}
+
+fn collect_stray_password_hashes(
+    table: &toml::Table,
+    path: &mut Vec<String>,
+    problems: &mut Vec<String>,
+) {
+    for (key, value) in table {
+        path.push(key.clone());
+        let at_auth = path.len() == 3 && path[0] == "server" && path[1] == "auth";
+        if key == "password_hash" && !at_auth {
+            problems.push(format!(
+                "{} is not read: a password hash belongs in [server.auth] as password_hash, so \
+                 dux will not start until it is moved there or removed",
+                path.join(".")
+            ));
+        }
+        match value {
+            toml::Value::Table(child) => collect_stray_password_hashes(child, path, problems),
+            toml::Value::Array(items) => {
+                for item in items {
+                    if let toml::Value::Table(child) = item {
+                        collect_stray_password_hashes(child, path, problems);
+                    }
+                }
+            }
+            _ => {}
+        }
+        path.pop();
+    }
+}
+
+/// The Levenshtein distance between two short names.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
 pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
     // Only `server.auth` is read; every other key is ignored here.
     #[derive(Deserialize)]
@@ -3180,6 +3270,9 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
     }
     toml::from_str::<toml::Table>(raw)
         .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
+    if let Some(problem) = misplaced_auth_problems(raw).into_iter().next() {
+        return Err(ConfigLoadProblem::AuthInvalid(problem));
+    }
     let file: File = toml::from_str(raw).map_err(|e| {
         // A rule the section breaks as a whole (checked after every field
         // parsed) has no position of its own; the parser then points at the
@@ -3229,18 +3322,38 @@ pub fn start_check_problems(config: &Config) -> Vec<String> {
     if let Err(error) = parse_server_host(&config.server.host) {
         problems.push(error);
     }
-    for project in &config.projects {
-        if let Err(error) = resolve_agent_env(&config.env, &project.env) {
-            problems.push(format!(
-                "invalid env for project {}: {error:#}",
-                project.name.as_deref().unwrap_or(&project.path)
-            ));
+    // One problem per variable, named by the variable (and project), never
+    // by its value, so a second bad variable is a new problem of its own and
+    // repairing one never waits on another.
+    for (name, value) in &config.env {
+        if let Some(problem) = env_variable_problem(name, value) {
+            problems.push(format!("global env variable {name}: {problem}"));
         }
     }
-    if let Err(error) = resolve_project_env(&config.env) {
-        problems.push(format!("invalid global env: {error:#}"));
+    for project in &config.projects {
+        let label = project.name.as_deref().unwrap_or(&project.path);
+        for (name, value) in &project.env {
+            if let Some(problem) = env_variable_problem(name, value) {
+                problems.push(format!("env variable {name} of project {label}: {problem}"));
+            }
+        }
     }
     problems
+}
+
+/// What is wrong with one environment variable as a start reads it (see
+/// [`resolve_project_env`]), without its value.
+fn env_variable_problem(name: &str, value: &str) -> Option<String> {
+    if !is_valid_var_name(name) {
+        return Some("the name must match [A-Za-z_][A-Za-z0-9_]*".to_string());
+    }
+    match expand_env_vars(value) {
+        None => Some("the value has invalid $VAR expansion syntax".to_string()),
+        Some(expanded) if expanded.contains('\0') => {
+            Some("the value contains a NUL byte".to_string())
+        }
+        Some(_) => None,
+    }
 }
 
 /// [`start_check_problems`], failing on the first.
@@ -3296,6 +3409,13 @@ pub fn auth_problems_of(raw: &str) -> Vec<String> {
             )];
         }
     };
+    let mut problems = misplaced_auth_problems(raw);
+    problems.extend(auth_section_problems(&file));
+    problems
+}
+
+/// The problems of `[server.auth]` itself, key by key.
+fn auth_section_problems(file: &toml::Table) -> Vec<String> {
     let Some(server) = file.get("server") else {
         return Vec::new();
     };
@@ -4969,7 +5089,7 @@ mod tests {
 
     #[test]
     fn an_auth_rule_error_never_points_at_a_look_alike_header() {
-        let raw = "[server.oauth]\nx = 1\n\n[server.auth]\nminimum_password_score = 9\n";
+        let raw = "[server.authority]\nx = 1\n\n[server.auth]\nminimum_password_score = 9\n";
         let text = recover_config(raw)
             .expect_err("refused")
             .reason()
@@ -6069,6 +6189,48 @@ max_websocket_connections = 16
             "[server]\nmax_websocket_events_connections = 16\n"
         ));
         assert!(!raw_has_removed_max_websocket_connections("[server]\n"));
+    }
+
+    /// A password hash in a place dux does not read fails closed: a
+    /// `password_hash` outside `[server.auth]`, or a table named "auth" (or
+    /// within two edits of it) under `[server]` or at the top level stops the
+    /// start, naming where it is and where it belongs, never the hash.
+    #[test]
+    fn a_password_hash_in_a_misspelled_place_stops_the_start() {
+        let hash = a_password_hash();
+        for (body, named) in [
+            (
+                format!("[server.auht]\npassword_hash = \"{hash}\"\n"),
+                "server.auht",
+            ),
+            (
+                format!("[server]\npassword_hash = \"{hash}\"\n"),
+                "server.password_hash",
+            ),
+            (
+                format!("[auth]\npassword_hash = \"{hash}\"\n"),
+                "auth.password_hash",
+            ),
+            ("[auht]\nrequire = \"network\"\n".to_string(), "[auht]"),
+            (
+                format!("[ui]\npassword_hash = \"{hash}\"\n"),
+                "ui.password_hash",
+            ),
+            (
+                "[server.Auth]\nrequire = \"network\"\n".to_string(),
+                "server.Auth",
+            ),
+        ] {
+            let error = recover_config(&body).expect_err(&body);
+            let message = error.reason().to_string();
+            assert!(message.contains(named), "{body}: {message}");
+            assert!(message.contains("[server.auth]"), "{body}: {message}");
+            assert!(!message.contains(&hash), "{message}");
+        }
+        // Not every unknown key is fatal, and the retired basic-auth `[auth]`
+        // section real older configs carry (no password hash in it) still loads.
+        recover_config("[ui]\nsomething_new = 1\n[server.limits]\nx = 1\n").expect("loads");
+        recover_config("[auth]\nusername = \"ada\"\n").expect("the retired section loads");
     }
 }
 

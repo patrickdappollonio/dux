@@ -529,7 +529,16 @@ fn adopt_minted_ids(base: &mut Base, config: &Config) {
 /// The first base: the loaded config's own text, or no base at all for a
 /// config read from no file (its saves are then the full patch).
 fn base_of_loaded(loaded: &Config) -> Option<Base> {
-    base_from_source(loaded)
+    // A config read from no file (dux started without one) is still what
+    // memory started with: only what memory changes since is dux's change,
+    // so a file the user writes afterwards keeps everything they wrote.
+    // Nothing has been seen, so a setting the file lacks is filled in.
+    base_from_source(loaded).or_else(|| {
+        Some(Base {
+            config: loaded.clone(),
+            seen: String::new(),
+        })
+    })
 }
 
 /// The base for a config a reload adopted: the text it was read from, or,
@@ -613,13 +622,29 @@ fn handle_writer_input(
             }
         }
         Ok(Some(WriteMsg::Resume)) => {}
-        Ok(Some(WriteMsg::SetBase(config))) => state.base = base_adopted(path, *config),
+        Ok(Some(WriteMsg::SetBase(config))) => adopt_base(path, &mut state.base, *config),
         Ok(Some(WriteMsg::Shutdown)) => {
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
         }
     }
     WriterControl::Continue
+}
+
+/// Move the writer's base to `config`, which a reload adopted. What the
+/// reload read is ADDED to what has been seen, never replacing it, so a
+/// setting the user deleted by hand stays seen and stays deleted; projects
+/// gone from both memory and the file are still forgotten.
+fn adopt_base(path: &std::path::Path, base: &mut Option<Base>, config: Config) {
+    let adopted = base_adopted(path, config);
+    *base = match (base.take(), adopted) {
+        (Some(old), Some(mut new)) => {
+            new.seen =
+                crate::config_write::union_seen(Some(&old.seen), &new.seen, &new.config.projects);
+            Some(new)
+        }
+        (_, new) => new,
+    };
 }
 
 fn run_paused_writer(
@@ -649,7 +674,7 @@ fn run_paused_writer(
                 depth = depth.saturating_add(1);
                 let _ = ack.send(());
             }
-            Ok(WriteMsg::SetBase(config)) => *base = base_adopted(path, *config),
+            Ok(WriteMsg::SetBase(config)) => adopt_base(path, base, *config),
         }
     }
 }

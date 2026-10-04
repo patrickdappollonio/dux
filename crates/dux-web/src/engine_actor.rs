@@ -7926,4 +7926,25 @@ mod tests {
             "Auto-reopening 3 agents that were running when dux last exited..."
         );
     }
+
+    /// `dux server` started with no config.toml, and the user then writes
+    /// one by hand: a save from memory keeps what they wrote, changing only
+    /// what memory changed.
+    #[tokio::test]
+    async fn a_config_written_by_hand_after_a_start_without_one_survives_a_save() {
+        let (_tmp, paths) = temp_paths();
+        let _ = std::fs::remove_file(&paths.config_path);
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 31\n").unwrap();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        handle
+            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .await
+            .expect("save");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(after.contains("left_width_pct = 31"), "{after}");
+        assert!(after.contains("API = \"k\""), "{after}");
+    }
 }

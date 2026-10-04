@@ -2654,6 +2654,24 @@ fn dotted_key_path(path: &[PathSeg]) -> String {
     keys.join(".")
 }
 
+/// Whether `item` holds a `password_hash` key anywhere inside it.
+fn holds_password_hash(item: &Item) -> bool {
+    match item {
+        Item::Table(table) => table
+            .iter()
+            .any(|(key, child)| key == "password_hash" || holds_password_hash(child)),
+        Item::Value(Value::InlineTable(table)) => table.iter().any(|(key, child)| {
+            key == "password_hash" || holds_password_hash(&Item::Value(child.clone()))
+        }),
+        Item::ArrayOfTables(array) => array.iter().any(|entry| {
+            entry
+                .iter()
+                .any(|(key, child)| key == "password_hash" || holds_password_hash(child))
+        }),
+        _ => false,
+    }
+}
+
 /// Whether `dotted` is exactly an orphaned section.
 fn is_orphan_root(dotted: &str) -> bool {
     ORPHANED_CONFIG_SECTIONS.contains(&dotted)
@@ -2746,7 +2764,10 @@ fn collect_unmanaged(
         path.push(PathSeg::Key(key.to_string()));
         let dotted = dotted_key_path(path);
 
-        if is_orphan_root(&dotted) {
+        // An orphaned section holding a password hash is never cleaned up:
+        // that is a password in the wrong place, and the load refuses the
+        // file over it (see `misplaced_auth_problems`) rather than lose it.
+        if is_orphan_root(&dotted) && !holds_password_hash(item) {
             // Report the section once and do not descend: everything beneath it
             // goes away with it.
             dropped.push(dotted);
