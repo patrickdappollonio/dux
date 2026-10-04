@@ -93,10 +93,15 @@ impl AuthSnapshot {
 /// and dux itself, which writes a password, a ban or the warning's dismissal
 /// to the file and then applies the same change in memory at once. A reload
 /// that READ the file before such a write can arrive after it; storing what it
-/// read would drop the write from memory (decided, after review: it must
-/// never). So every in-memory write is kept as a pending change, re-applied
-/// to whatever a reload stores, until a stored section shows the file has it
-/// (or has moved past it), and every read-modify-store happens under one lock.
+/// read would drop the write from memory. So every in-memory write stays
+/// pending and is judged by FILE IDENTITY, never by comparing values (decided,
+/// after review): it remembers the digest of the text its write replaced, and
+/// a reload re-applies it only when the text that reload read has exactly
+/// that digest, which means it read the file before the write. Any other text
+/// (the write's own, or anything written after it, the owner's hand edit
+/// included) retires it for good, so a later accepted reload can never put
+/// back a ban the owner removed. Every read-modify-store happens under one
+/// lock.
 pub struct LiveAuth {
     inner: std::sync::RwLock<Live>,
     changes: tokio::sync::watch::Sender<u64>,
@@ -116,80 +121,16 @@ impl std::fmt::Debug for LiveAuth {
 
 struct Live {
     current: Arc<AuthSnapshot>,
+    /// In the order they were written.
     pending: Vec<PendingChange>,
 }
 
 /// One change dux applied in memory after writing it to the file.
 struct PendingChange {
     change: Box<dyn Fn(&mut ServerAuthConfig) + Send + Sync>,
-    /// The section's settings this change touches, as they were before it
-    /// and as it left them.
-    before: serde_json::Map<String, serde_json::Value>,
-    after: serde_json::Map<String, serde_json::Value>,
-}
-
-/// What a stored section says about a pending change.
-enum Seen {
-    /// It holds the change: the file has it, so it is no longer pending.
-    Has,
-    /// It holds what was there before the change: read before the write, so
-    /// the change is applied over it.
-    Before,
-    /// It holds something else: the file moved past the change.
-    Moved,
-}
-
-fn settings_of(config: &ServerAuthConfig) -> serde_json::Map<String, serde_json::Value> {
-    match serde_json::to_value(config) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    }
-}
-
-impl PendingChange {
-    fn new(
-        change: Box<dyn Fn(&mut ServerAuthConfig) + Send + Sync>,
-        before: &ServerAuthConfig,
-        after: &ServerAuthConfig,
-    ) -> Self {
-        let (before, after) = (settings_of(before), settings_of(after));
-        let touched: Vec<&String> = before
-            .keys()
-            .chain(after.keys())
-            .filter(|key| before.get(*key) != after.get(*key))
-            .collect();
-        let part = |of: &serde_json::Map<String, serde_json::Value>| {
-            touched
-                .iter()
-                .map(|key| {
-                    (
-                        (*key).clone(),
-                        of.get(*key).cloned().unwrap_or(serde_json::Value::Null),
-                    )
-                })
-                .collect::<serde_json::Map<_, _>>()
-        };
-        Self {
-            before: part(&before),
-            after: part(&after),
-            change,
-        }
-    }
-
-    fn seen_in(&self, config: &ServerAuthConfig) -> Seen {
-        let settings = settings_of(config);
-        let part = |of: &serde_json::Map<String, serde_json::Value>| {
-            of.iter()
-                .all(|(key, value)| settings.get(key).unwrap_or(&serde_json::Value::Null) == value)
-        };
-        if part(&self.after) {
-            Seen::Has
-        } else if part(&self.before) {
-            Seen::Before
-        } else {
-            Seen::Moved
-        }
-    }
+    /// The digest of the file text the write replaced; `None` when the write
+    /// left no identity to judge by, which the next reload retires.
+    replaced: Option<String>,
 }
 
 impl Default for LiveAuth {
@@ -233,23 +174,38 @@ impl LiveAuth {
         self.snapshot().has_password()
     }
 
-    /// Adopt a section a reload read, with every change dux wrote that the
-    /// reload's read predates applied over it. Answers whether anything
-    /// changed.
-    pub fn store(&self, config: &ServerAuthConfig) -> bool {
+    /// Adopt a section a reload read from `source` (the file's text, when
+    /// there was one), with every change dux wrote after that text was read
+    /// applied over it. Answers whether anything changed.
+    pub fn store(&self, config: &ServerAuthConfig, source: Option<&str>) -> bool {
+        let read = source.map(|text| dux_core::config_write::read_token(Some(text)));
+        self.store_read(config, read.as_deref())
+    }
+
+    /// [`LiveAuth::store`] by the digest of the text the reload read.
+    fn store_read(&self, config: &ServerAuthConfig, read: Option<&str>) -> bool {
         let changed = {
             let mut live = self.write();
             let mut config = config.clone();
-            // In the order they were made, each judged against the section
-            // with the earlier ones applied, as it was judged when it was made.
-            live.pending
-                .retain(|pending| match pending.seen_in(&config) {
-                    Seen::Before => {
+            // The first change whose write replaced exactly the text this
+            // reload read came after that read, and so did every change after
+            // it: they are applied over it, in order. Every change before it
+            // is in the text already. A read matching none of them read the
+            // file after them all, or after somebody else changed it: all of
+            // them retire.
+            match read.and_then(|read| {
+                live.pending
+                    .iter()
+                    .position(|pending| pending.replaced.as_deref() == Some(read))
+            }) {
+                Some(first) => {
+                    live.pending.drain(..first);
+                    for pending in &live.pending {
                         (pending.change)(&mut config);
-                        true
                     }
-                    Seen::Has | Seen::Moved => false,
-                });
+                }
+                None => live.pending.clear(),
+            }
             Self::set(&mut live, &config)
         };
         if changed {
@@ -259,10 +215,15 @@ impl LiveAuth {
     }
 
     /// Change the section in memory after dux wrote the same change to
-    /// `config.toml` itself, so it applies before the reload that follows.
-    /// The read, the change and the store happen under one lock, and the
-    /// change stays pending until a reload shows the file has it.
-    pub(crate) fn update(&self, change: impl Fn(&mut ServerAuthConfig) + Send + Sync + 'static) {
+    /// `config.toml` itself (`written` is that write's file identity), so it
+    /// applies before the reload that follows. The read, the change and the
+    /// store happen under one lock, and the change stays pending until a
+    /// reload reads a text other than the one the write replaced.
+    pub(crate) fn update(
+        &self,
+        change: impl Fn(&mut ServerAuthConfig) + Send + Sync + 'static,
+        written: Option<dux_core::config_write::FileWrite>,
+    ) {
         let changed = {
             let mut live = self.write();
             let before = live.current.config.clone();
@@ -275,10 +236,12 @@ impl LiveAuth {
             {
                 hook();
             }
-            let mut after = before.clone();
+            let mut after = before;
             change(&mut after);
-            live.pending
-                .push(PendingChange::new(Box::new(change), &before, &after));
+            live.pending.push(PendingChange {
+                change: Box::new(change),
+                replaced: written.map(|written| written.before),
+            });
             Self::set(&mut live, &after)
         };
         if changed {
@@ -358,7 +321,13 @@ pub struct AuthSetup {
     pub engine: Option<crate::engine_actor::EngineHandle>,
     /// Asks the running dux to reload its config after dux wrote to it.
     pub reload: Arc<dyn Fn() + Send + Sync>,
+    /// Test seam: see [`crate::server::RouterParams::pty_opening_hook`].
+    pub opening_hook: Option<OpeningHook>,
 }
+
+/// A test seam awaited at a socket's opening check.
+pub type OpeningHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 /// The auth layer's state for one serve.
 pub struct AuthState {
@@ -369,7 +338,9 @@ pub struct AuthState {
     interfaces: std::sync::RwLock<Arc<Vec<IpAddr>>>,
     reach: Reach,
     pub(crate) sessions: sessions::Sessions,
-    pub(crate) admission: admission::Admission,
+    /// The process's admission state, shared by every serve over this
+    /// engine (see [`dux_core::engine::Engine::serve_memory`]).
+    pub(crate) admission: Arc<admission::Admission>,
     pub(crate) gate: Arc<gate::CheckGate>,
     /// Bumped whenever something an open socket depends on changed: the
     /// section, a session ended, an address was blocked.
@@ -381,6 +352,8 @@ pub struct AuthState {
     config_path: Option<PathBuf>,
     reload: Arc<dyn Fn() + Send + Sync>,
     pub(crate) speaker: warnings::Speaker,
+    /// See [`AuthSetup::opening_hook`].
+    pub(crate) opening_hook: Option<OpeningHook>,
 }
 
 /// Everything the auth layer worked out about one request. Handlers read it
@@ -466,7 +439,10 @@ impl AuthState {
                 tailscale_leg: setup.tailscale_leg,
             },
             sessions,
-            admission: admission::Admission::default(),
+            admission: setup
+                .engine
+                .as_ref()
+                .map_or_else(Arc::default, crate::engine_actor::EngineHandle::admission),
             gate: Arc::default(),
             revision: tokio::sync::watch::Sender::new(0),
             weak: std::sync::Mutex::new(None),
@@ -474,6 +450,7 @@ impl AuthState {
             config_path: setup.config_path,
             reload: setup.reload,
             speaker: warnings::Speaker::new(setup.console, setup.engine),
+            opening_hook: setup.opening_hook,
         });
         if let Some(db) = setup.sessions_db {
             let snapshot = state.snapshot();
@@ -850,6 +827,7 @@ impl AuthState {
                 let (ip, entry) = (ban.ip, ban.entry.clone());
                 tokio::task::spawn_blocking(move || {
                     dux_core::config_keys::append_blocked_entry(&path, ip, &entry, max)
+                        .map(|outcome| (outcome, dux_core::config_write::take_last_write()))
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("the write stopped: {e}"))
@@ -859,24 +837,28 @@ impl AuthState {
         };
         let path = self.config_path_text();
         match outcome {
-            Ok(
+            Ok((
                 dux_core::config_keys::BanWrite::Written
                 | dux_core::config_keys::BanWrite::AlreadyBlocked,
-            ) => {
+                written,
+            )) => {
                 // The file holds it now, so the file is where it lives: the
                 // owner lifting it there (and reloading) lifts it here too.
                 let entry = ban.entry.clone();
-                self.live.update(move |config| {
-                    if !config.blocked_addresses.contains(&entry) {
-                        config.blocked_addresses.push(entry.clone());
-                    }
-                });
+                self.live.update(
+                    move |config| {
+                        if !config.blocked_addresses.contains(&entry) {
+                            config.blocked_addresses.push(entry.clone());
+                        }
+                    },
+                    written,
+                );
                 self.admission.lift_ban_for_this_run(&ban);
                 (self.reload)();
                 self.speaker
                     .blocked(&ban.entry, failures, &path, warnings::BanKept::InConfig);
             }
-            Ok(dux_core::config_keys::BanWrite::AtLimit) => {
+            Ok((dux_core::config_keys::BanWrite::AtLimit, _)) => {
                 self.speaker.blocked(
                     &ban.entry,
                     failures,
@@ -954,8 +936,12 @@ impl AuthState {
 
     /// Adopt a change dux just wrote to `config.toml` and ask for the reload
     /// that brings the rest of the running config along.
-    pub(crate) fn applied(&self, change: impl Fn(&mut ServerAuthConfig) + Send + Sync + 'static) {
-        self.live.update(change);
+    pub(crate) fn applied(
+        &self,
+        change: impl Fn(&mut ServerAuthConfig) + Send + Sync + 'static,
+        written: Option<dux_core::config_write::FileWrite>,
+    ) {
+        self.live.update(change, written);
         (self.reload)();
     }
 }
@@ -1128,9 +1114,12 @@ mod tests {
     fn the_live_section_reports_a_change_only_when_there_is_one() {
         let live = LiveAuth::default();
         let rx = live.subscribe();
-        assert!(!live.store(&ServerAuthConfig::default()));
+        assert!(!live.store(&ServerAuthConfig::default(), None));
         assert!(!rx.has_changed().unwrap());
-        live.update(|config| config.blocked_addresses.push("198.51.100.1".into()));
+        live.update(
+            |config| config.blocked_addresses.push("198.51.100.1".into()),
+            None,
+        );
         assert!(rx.has_changed().unwrap());
         assert_eq!(live.snapshot().blocks.len(), 1);
     }
@@ -1143,59 +1132,96 @@ mod tests {
         }
     }
 
-    /// A reload that read the file before dux wrote a ban stores a section
-    /// without it; the ban must survive that, and leave once the file has it.
+    /// A write from file text `before` to `after`, as its file identity.
+    fn wrote(before: &str, after: &str) -> Option<dux_core::config_write::FileWrite> {
+        Some(dux_core::config_write::FileWrite {
+            before: dux_core::config_write::read_token(Some(before)),
+            after: dux_core::config_write::read_token(Some(after)),
+        })
+    }
+
+    fn with_bans(bans: &[&str]) -> ServerAuthConfig {
+        ServerAuthConfig {
+            blocked_addresses: bans.iter().map(ToString::to_string).collect(),
+            ..ServerAuthConfig::default()
+        }
+    }
+
+    /// Staleness is the file's identity, never a comparison of values: a
+    /// reload that read the very text a write replaced gets the write applied
+    /// over it, and any other text (the write's own, or the owner's later
+    /// edit) retires the write for good.
     #[test]
     fn a_reload_read_before_a_write_never_drops_it() {
         let live = LiveAuth::default();
-        let stale = ServerAuthConfig::default();
-        live.update(ban("198.51.100.1"));
-        live.store(&stale);
-        assert_eq!(live.snapshot().config.blocked_addresses, ["198.51.100.1"]);
-
-        // A stale read that also carries an edit made before the write keeps
-        // the edit and the ban.
+        live.update(ban("198.51.100.1"), wrote("v0", "v1"));
+        // Read before the write: the ban stands over it, edits and all.
         let edited = ServerAuthConfig {
             disable_no_auth_warning: true,
             ..ServerAuthConfig::default()
         };
-        live.store(&edited);
+        live.store(&edited, Some("v0"));
         let now = live.snapshot();
         assert!(now.config.disable_no_auth_warning);
         assert_eq!(now.config.blocked_addresses, ["198.51.100.1"]);
-
-        // The file has it now: no longer pending, so the owner lifting it in
-        // the file lifts it here.
-        let written = ServerAuthConfig {
-            blocked_addresses: vec!["198.51.100.1".into()],
-            ..ServerAuthConfig::default()
-        };
-        live.store(&written);
-        live.store(&ServerAuthConfig::default());
+        // Read after it: retired. The owner removing the ban by hand, with a
+        // list equal to the one before the ban, lifts it.
+        live.store(&with_bans(&["198.51.100.1"]), Some("v1"));
+        live.store(&with_bans(&[]), Some("v2 the owner's edit"));
         assert!(live.snapshot().config.blocked_addresses.is_empty());
+        // Even when the reload of the write's own text never landed.
+        let live = LiveAuth::default();
+        live.update(ban("198.51.100.1"), wrote("v0", "v1"));
+        live.store(&with_bans(&[]), Some("v2 the owner's edit"));
+        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        live.store(&with_bans(&[]), Some("v0"));
+        assert!(
+            live.snapshot().config.blocked_addresses.is_empty(),
+            "retired for good"
+        );
+    }
 
-        // Two writes in a row both survive a read older than either.
-        live.update(ban("198.51.100.2"));
-        live.update(ban("198.51.100.3"));
-        live.store(&ServerAuthConfig::default());
+    #[test]
+    fn writes_in_a_row_survive_a_read_older_than_them_all() {
+        let live = LiveAuth::default();
+        live.update(ban("198.51.100.2"), wrote("v0", "v1"));
+        live.update(ban("198.51.100.3"), wrote("v1", "v2"));
+        live.store(&with_bans(&[]), Some("v0"));
         assert_eq!(
             live.snapshot().config.blocked_addresses,
             ["198.51.100.2", "198.51.100.3"]
         );
-        // A password someone else set meanwhile is newer than ours: theirs
-        // stands.
+        // A read between them carries the first already; the second applies.
+        live.store(&with_bans(&["198.51.100.2"]), Some("v1"));
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            ["198.51.100.2", "198.51.100.3"]
+        );
+        live.store(&with_bans(&["198.51.100.2", "198.51.100.3"]), Some("v2"));
+        live.store(&with_bans(&[]), Some("v3"));
+        assert!(live.snapshot().config.blocked_addresses.is_empty());
+    }
+
+    #[test]
+    fn a_password_written_after_ours_stands() {
         let live = LiveAuth::default();
-        live.update(|config| config.password_hash = "ours".into());
-        live.store(&ServerAuthConfig {
-            password_hash: "theirs".into(),
-            ..ServerAuthConfig::default()
-        });
+        live.update(
+            |config| config.password_hash = "ours".into(),
+            wrote("v0", "v1"),
+        );
+        live.store(
+            &ServerAuthConfig {
+                password_hash: "theirs".into(),
+                ..ServerAuthConfig::default()
+            },
+            Some("v2"),
+        );
         assert_eq!(live.snapshot().config.password_hash, "theirs");
     }
 
     /// The read, the change and the store of an update are one step: a store
     /// racing it (forced into the window by the hook) cannot interleave, and
-    /// whichever order they land in, the write survives.
+    /// a reload that read the file before the write cannot drop it.
     #[test]
     fn an_update_and_a_racing_store_cannot_interleave() {
         let live = Arc::new(LiveAuth::default());
@@ -1208,15 +1234,16 @@ mod tests {
             let live = Arc::clone(&live);
             std::thread::spawn(move || {
                 inside_rx.recv().unwrap();
-                // A reload that read the file before the write, storing while
-                // the update is between its read and its store.
-                live.store(&ServerAuthConfig {
-                    disable_no_auth_warning: true,
-                    ..ServerAuthConfig::default()
-                });
+                live.store(
+                    &ServerAuthConfig {
+                        disable_no_auth_warning: true,
+                        ..ServerAuthConfig::default()
+                    },
+                    Some("v0"),
+                );
             })
         };
-        live.update(ban("198.51.100.9"));
+        live.update(ban("198.51.100.9"), wrote("v0", "v1"));
         racer.join().unwrap();
         let now = live.snapshot();
         assert_eq!(now.config.blocked_addresses, ["198.51.100.9"]);
@@ -1247,6 +1274,7 @@ mod tests {
             console: crate::console::Console::noop(),
             engine: None,
             reload: Arc::new(|| {}),
+            opening_hook: None,
         });
         state.sessions.ready().await;
         let token = state.sessions.issue("").await.unwrap();

@@ -2821,3 +2821,263 @@ async fn a_tailnet_guesser_over_ipv6_never_gets_the_owners_device_banned() {
         dux.config()
     );
 }
+
+// ── Pending writes by file identity, process-wide admission ─────────────
+
+/// Ask the running engine to reload and wait until `done` says the reload
+/// landed (or give up after a few seconds).
+async fn reload_until(dux: &Dux, done: impl Fn(&Value) -> bool) -> bool {
+    let reload = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/config/reload").json(json!({})),
+        )
+        .await;
+    assert_eq!(reload.status, StatusCode::OK, "{}", reload.body);
+    for _ in 0..50 {
+        let status = dux.status(THIS_MACHINE, None).await;
+        if done(&status) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// The owner mistypes their password from their own device and is blocked.
+/// dux's own follow-up reload is refused because the file already had an
+/// unrelated `[server.auth]` problem (a ban is written whatever the file's
+/// existing problems are). The owner then does exactly what the log line tells
+/// them: removes their address from `blocked_addresses` (fixing the other
+/// problem too) and reloads. The reload is accepted, the file no longer lists
+/// the address, and yet the address stays refused: the in-memory ban is a
+/// pending change that was never retired, and a stored list equal to the one
+/// before the ban is taken as "read before the write", so the ban is put back.
+#[tokio::test]
+async fn removing_a_ban_and_reloading_lifts_it_even_when_the_first_reload_failed() {
+    let dux = Dux::with_password("max_failed_logins = 2\nfailed_login_delay_seconds = 0");
+    let path = dux.tmp.path().join("config.toml");
+    // A hand edit not yet reloaded: an invalid value in [server.auth].
+    let good = dux.config();
+    std::fs::write(
+        &path,
+        good.replace(
+            "max_failed_logins = 2",
+            "max_failed_logins = 2\nrequire = \"nowhere\"",
+        ),
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        dux.login(NETWORK, "not the password at all").await;
+    }
+    assert_eq!(
+        dux.get(NETWORK, "/api/v1/auth/status").await.status,
+        StatusCode::FORBIDDEN,
+        "blocked"
+    );
+    assert!(
+        dux.config().contains("\"198.51.100.7\""),
+        "{}",
+        dux.config()
+    );
+
+    // dux's own reload after the ban: refused, the file has a problem.
+    let _ = reload_until(&dux, |_| false).await;
+
+    // The owner removes the address, fixes the problem, and reloads. The
+    // minimum length moves too, so the test can see the reload landed.
+    let fixed = good.replace(
+        "max_failed_logins = 2",
+        "max_failed_logins = 2\nminimum_password_length = 13",
+    );
+    assert!(!fixed.contains("198.51.100.7"));
+    std::fs::write(&path, &fixed).unwrap();
+    assert!(
+        reload_until(&dux, |s| s["minimum_password_length"] == json!(13)).await,
+        "the owner's reload landed"
+    );
+    let answer = dux.get(NETWORK, "/api/v1/auth/status").await;
+    assert_eq!(
+        answer.status,
+        StatusCode::OK,
+        "the file no longer lists the address and the reload landed, yet it is still \
+         refused: {}",
+        answer.body
+    );
+}
+
+/// Control for the probe above: with no pre-existing problem, dux's own reload
+/// is accepted, and the owner's removal then lifts the ban.
+#[tokio::test]
+async fn removing_a_ban_lifts_it_when_the_first_reload_landed() {
+    let dux = Dux::with_password("max_failed_logins = 2\nfailed_login_delay_seconds = 0");
+    let path = dux.tmp.path().join("config.toml");
+    let good = dux.config();
+    for _ in 0..2 {
+        dux.login(NETWORK, "not the password at all").await;
+    }
+    assert_eq!(
+        dux.get(NETWORK, "/api/v1/auth/status").await.status,
+        StatusCode::FORBIDDEN
+    );
+    // dux's own reload after the ban lands (moving nothing else).
+    let with_ban = dux.config();
+    std::fs::write(
+        &path,
+        with_ban.replace(
+            "max_failed_logins = 2",
+            "max_failed_logins = 2\nminimum_password_length = 14",
+        ),
+    )
+    .unwrap();
+    assert!(reload_until(&dux, |s| s["minimum_password_length"] == json!(14)).await);
+    let fixed = good.replace(
+        "max_failed_logins = 2",
+        "max_failed_logins = 2\nminimum_password_length = 13",
+    );
+    std::fs::write(&path, &fixed).unwrap();
+    assert!(reload_until(&dux, |s| s["minimum_password_length"] == json!(13)).await);
+    assert_eq!(
+        dux.get(NETWORK, "/api/v1/auth/status").await.status,
+        StatusCode::OK
+    );
+}
+
+/// A ban that could not be written (here `blocked_addresses` is already at
+/// `max_blocked_addresses`) is said to hold "until dux restarts". It is held
+/// by the serve's own auth state, though, and every new serve in the same
+/// dux process (the terminal UI turning its background server off and on, or
+/// a second start-web-server flip) builds a fresh one over the same engine:
+/// the blocked address is let straight back in while dux keeps running.
+#[tokio::test]
+async fn a_ban_held_in_memory_survives_a_new_serve_in_the_same_dux() {
+    let tmp = dux_core::test_scratch::ScratchDir::new();
+    let root = tmp.path().to_path_buf();
+    let paths = dux_core::config::DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::write(
+        &paths.config_path,
+        format!(
+            "[server.auth]\npassword_hash = \"{}\"\nmax_failed_logins = 2\n\
+             failed_login_delay_seconds = 0\nmax_blocked_addresses = 1\n\
+             blocked_addresses = [\"203.0.113.250\"]\n",
+            hash_of(PASSWORD)
+        ),
+    )
+    .unwrap();
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    dux_core::test_provider::defuse_config(&mut engine.config);
+    let (handle, _join) = spawn_engine_thread(engine);
+    let serve = |handle: dux_web::engine_actor::EngineHandle| {
+        build_app(
+            handle,
+            Router::<AppState>::new(),
+            RouterParams::plain_http()
+                .with_live_exposure(tailnet_exposure())
+                .with_auth_reload(Arc::new(|| {})),
+        )
+    };
+    let first = Dux {
+        app: serve(handle.clone()),
+        tmp,
+        reloads: Arc::default(),
+    };
+    for _ in 0..2 {
+        first.login(NETWORK, "not the password at all").await;
+    }
+    assert_eq!(
+        first.get(NETWORK, "/api/v1/auth/status").await.status,
+        StatusCode::FORBIDDEN,
+        "blocked for this run, in memory only"
+    );
+    assert!(!first.config().contains("198.51.100.7"));
+
+    // The same dux serves again.
+    let again = Dux {
+        app: serve(handle),
+        ..first
+    };
+    let answer = again.get(NETWORK, "/api/v1/auth/status").await;
+    assert_eq!(
+        answer.status,
+        StatusCode::FORBIDDEN,
+        "the ban was said to hold until dux restarts, but dux did not restart: {}",
+        answer.body
+    );
+}
+
+/// A PTY socket checks its session immediately before its handshake and its
+/// replay: a session revoked while the socket was subscribing gets the 4401
+/// close and not one byte of the terminal. The hook holds the socket in exactly
+/// that window while the session is signed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
+    use tokio_tungstenite::tungstenite::Message;
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hook: dux_web::auth::OpeningHook = {
+        let release = Arc::clone(&release);
+        Arc::new(move || {
+            let reached_tx = reached_tx.clone();
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let _ = reached_tx.send(());
+                release.notified().await;
+            })
+        })
+    };
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nrequire = \"everywhere\"",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_pty_opening_hook(hook),
+    );
+    let cookie = dux.signed_in(THIS_MACHINE).await;
+    let created = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/terminals").cookie(&cookie),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let tid = created.json()["terminal_id"].as_str().unwrap().to_string();
+    let server = Serve::start(dux).await;
+    // The cookie is named for the port a browser reached dux on.
+    let (_, value) = cookie.split_once('=').unwrap();
+    let on_server = format!("dux_session_{}={value}", server.addr.port());
+    let mut socket = server
+        .connect(&format!("/ws/terminals/{tid}/pty"), &[], Some(&on_server))
+        .await;
+    // The socket has subscribed and is about to send its handshake.
+    if tokio::time::timeout(Duration::from_secs(10), reached_rx.recv())
+        .await
+        .is_err()
+    {
+        let first = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
+        panic!("the socket never reached its opening check: {first:?}");
+    }
+    let out = server
+        ._dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
+        )
+        .await;
+    assert_eq!(out.status, StatusCode::NO_CONTENT, "{}", out.body);
+    release.notify_waiters();
+    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("the socket answered");
+    match first {
+        Some(Ok(Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 4401),
+        other => panic!("the first frame after a sign-out was not the 4401 close: {other:?}"),
+    }
+}

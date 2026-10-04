@@ -225,6 +225,9 @@ fn lock_changed_files_queue(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// See [`Engine::serve_memory`].
+pub type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
+
 pub struct Engine {
     pub config: Config,
     pub paths: DuxPaths,
@@ -517,6 +520,13 @@ pub struct Engine {
     /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
     pub has_active_processes: Arc<AtomicBool>,
+    /// What a web serve keeps for the life of this engine, which is the life
+    /// of this dux process, rather than for one serve: the web layer's address
+    /// admission (bans held in memory, failure counts, waits). Every serve this
+    /// process starts (`dux server`, the flip, the background server turned off
+    /// and on) shares it, so a ban said to hold "until dux restarts" does.
+    /// Opaque here; the web layer owns its type.
+    pub serve_memory: ServeMemory,
     /// The audience for statuses minted while processing the CURRENT command.
     /// Transient, never persisted: the single-threaded engine actor sets it to
     /// the originating connection's [`StatusScope`] before processing a web

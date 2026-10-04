@@ -903,7 +903,7 @@ impl App {
     /// `[server]` section, and a change only a restart applies says so.
     fn note_config_adopted(&mut self, before: &Config) {
         if let Some(companion) = self.companion.as_mut() {
-            companion.note_config_applied(&self.engine.config.server);
+            companion.note_config_applied(&self.engine.config);
         }
         if dux_core::config::server_bind_settings_changed(
             &before.server,

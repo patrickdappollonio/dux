@@ -68,6 +68,24 @@ impl SocketAuth {
         }
     }
 
+    /// The close code this socket must close with right now, if any.
+    pub(crate) fn verdict_now(&self) -> Option<u16> {
+        let watch = self.watch.as_ref()?;
+        watch
+            .state
+            .socket_verdict(&watch.facts, watch.session.as_ref())
+    }
+
+    /// [`SocketAuth::verdict_now`] for a socket about to send its opening
+    /// frames, after the test seam (when one is set) has had its turn.
+    pub(crate) async fn opening_verdict(&self) -> Option<u16> {
+        let watch = self.watch.as_ref()?;
+        if let Some(hook) = &watch.state.opening_hook {
+            hook().await;
+        }
+        self.verdict_now()
+    }
+
     /// Resolves with the close code once this socket must close; at once when
     /// it already must. Never resolves for [`SocketAuth::none`].
     pub(crate) async fn revoked(&mut self) -> u16 {

@@ -100,9 +100,9 @@ impl BackgroundServeCompanion for WebCompanion {
         outcome
     }
 
-    fn note_config_applied(&mut self, server: &dux_core::config::ServerConfig) {
+    fn note_config_applied(&mut self, config: &dux_core::config::Config) {
         if let Some(server_handle) = self.server.as_mut() {
-            server_handle.note_config_applied(server);
+            server_handle.note_config_applied(config);
         }
     }
 

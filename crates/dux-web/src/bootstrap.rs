@@ -243,6 +243,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         changed_files_refresh: Default::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        serve_memory: Default::default(),
         current_origin: dux_core::statusline::StatusScope::All,
         in_flight: InFlightSet::new(),
         rename_expected: std::collections::HashMap::new(),

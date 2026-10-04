@@ -375,6 +375,11 @@ pub struct RouterParams {
     /// config catches up the way it does after `dux config set`. Defaults to
     /// raising SIGUSR1 at this process, which every serving mode reloads on.
     pub auth_reload: Arc<dyn Fn() + Send + Sync>,
+    /// Test seam: awaited by a PTY socket right before it checks its session
+    /// for the handshake, so a test can revoke the session in exactly that
+    /// window. `None` everywhere else.
+    #[doc(hidden)]
+    pub pty_opening_hook: Option<crate::auth::OpeningHook>,
     /// The handle the Tailscale-mode route changes `[server] tailscale` through
     /// while dux serves. `None` on any path with no serve loop behind it, and in
     /// tests.
@@ -441,6 +446,7 @@ impl RouterParams {
             auth_reload: Arc::new(|| {
                 dux_core::reload_signal::request_reload();
             }),
+            pty_opening_hook: None,
             tailscale_mode_control: None,
             tailscale_forced_no: false,
             create_await_timeout: None,
@@ -644,6 +650,13 @@ impl RouterParams {
         self
     }
 
+    /// See [`RouterParams::pty_opening_hook`].
+    #[doc(hidden)]
+    pub fn with_pty_opening_hook(mut self, hook: crate::auth::OpeningHook) -> Self {
+        self.pty_opening_hook = Some(hook);
+        self
+    }
+
     /// Replace what the auth layer calls after it writes `config.toml`.
     pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.auth_reload = reload;
@@ -792,6 +805,7 @@ pub fn build_app(
         console: params.console.clone(),
         engine: Some(engine.clone()),
         reload: Arc::clone(&params.auth_reload),
+        opening_hook: params.pty_opening_hook.clone(),
     });
     let state = AppState {
         engine,
@@ -1981,6 +1995,15 @@ async fn handle_pty_socket(
         // ownership is released and the connection permit is freed, exactly as a
         // clean disconnect would. Proceeding into the select loop instead would park
         // a socket nobody can ever see anything on.
+        // The session is judged again right here, and again before the replay:
+        // `subscribe_pty` can take a while (it may launch the provider), and a
+        // session revoked meanwhile must get its close and not one byte of the
+        // terminal (decided, after review: the loop's own watch only starts
+        // after both opening sends).
+        if let Some(code) = socket_auth.opening_verdict().await {
+            let _ = sink.lock().await.send(auth_close(code)).await;
+            break 'attached;
+        }
         if with_send_deadline(
             opening_send_deadline,
             send_pty_connected(
@@ -1999,6 +2022,10 @@ async fn handle_pty_socket(
                 conn_id,
                 crate::pty_log::FailedSend::ConnectedHandshake,
             ));
+            break 'attached;
+        }
+        if let Some(code) = socket_auth.verdict_now() {
+            let _ = sink.lock().await.send(auth_close(code)).await;
             break 'attached;
         }
         // Replay the buffered scrollback/repaint before streaming live bytes.
@@ -6343,7 +6370,7 @@ mod tests {
             allowed_hosts: vec!["new.example.com".to_string()],
             ..Default::default()
         };
-        limits.store_from(&reloaded);
+        limits.store_from(&reloaded, None);
 
         assert_eq!(status("new.example.com").await, StatusCode::OK);
         assert_eq!(

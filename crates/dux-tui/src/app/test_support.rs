@@ -198,6 +198,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         watched_session_id: None,
         current_origin: Default::default(),
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        serve_memory: Default::default(),
         in_flight: std::collections::HashSet::new(),
         rename_expected: std::collections::HashMap::new(),
         pr_last_checked: std::collections::HashMap::new(),

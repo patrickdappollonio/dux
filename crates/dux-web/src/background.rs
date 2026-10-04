@@ -252,8 +252,8 @@ impl BackgroundServer {
 
     /// Adopt the `[server]` section the terminal UI just swapped in, so the limits
     /// the routes read per request stop answering on the old config.
-    pub fn note_config_applied(&mut self, server: &dux_core::config::ServerConfig) {
-        self.service.note_config_applied(server);
+    pub fn note_config_applied(&mut self, config: &dux_core::config::Config) {
+        self.service.note_config_applied(config);
     }
 
     /// Open the spine-change gate when the terminal UI applied anything since the

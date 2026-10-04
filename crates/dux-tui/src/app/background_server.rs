@@ -966,12 +966,12 @@ pub(crate) mod tests {
                 .push(command_applies);
         }
 
-        fn note_config_applied(&mut self, server: &dux_core::config::ServerConfig) {
+        fn note_config_applied(&mut self, config: &dux_core::config::Config) {
             self.recorded
                 .lock()
                 .expect("not poisoned")
                 .config_applied
-                .push(server.clone());
+                .push(config.server.clone());
         }
 
         fn is_serving(&self) -> bool {

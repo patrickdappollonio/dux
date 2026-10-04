@@ -104,6 +104,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         changed_files_refresh: Default::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        serve_memory: Default::default(),
         current_origin: crate::statusline::StatusScope::All,
         in_flight: HashSet::new(),
         rename_expected: std::collections::HashMap::new(),

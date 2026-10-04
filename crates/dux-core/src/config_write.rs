@@ -1469,6 +1469,27 @@ enum AuthRule {
     NothingAddedBy(Vec<String>),
 }
 
+/// The file identity of one locked write: the [`read_token`] of the text it
+/// replaced and of the text it wrote. A writer that also changes running
+/// state in memory keeps these, so a later reload can tell whether the text
+/// IT read came before the write (it carries `before`) or not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileWrite {
+    pub before: String,
+    pub after: String,
+}
+
+thread_local! {
+    static LAST_WRITE: std::cell::RefCell<Option<FileWrite>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The [`FileWrite`] of the last locked mutation this THREAD completed, taken
+/// (so a second call answers `None`). For a caller that ran a `config_keys`
+/// write on this thread and needs the file identity it produced.
+pub fn take_last_write() -> Option<FileWrite> {
+    LAST_WRITE.with(|slot| slot.borrow_mut().take())
+}
+
 fn mutate_config_file_ruled<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
@@ -1476,18 +1497,22 @@ fn mutate_config_file_ruled<T>(
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
 ) -> Result<(T, Vec<crate::config::StartProblem>)> {
     let _lock = ConfigFileLock::acquire(config_path)?;
+    LAST_WRITE.with(|slot| *slot.borrow_mut() = None);
+    let mut found = true;
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if let MissingConfig::CheckFirst(check) = missing {
                 check()?;
             }
+            found = false;
             render_config_documented(&Config::default())
         }
         Err(error) => {
             return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
         }
     };
+    let before_token = read_token(found.then_some(raw.as_str()));
     let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
         anyhow::anyhow!(
             "{} is not valid TOML, so it cannot be changed safely; fix it by hand first.\n{}",
@@ -1528,6 +1553,12 @@ fn mutate_config_file_ruled<T>(
         }
     };
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    LAST_WRITE.with(|slot| {
+        *slot.borrow_mut() = Some(FileWrite {
+            before: before_token,
+            after: read_token(Some(&text)),
+        })
+    });
     Ok((outcome, remaining))
 }
 
@@ -5952,6 +5983,35 @@ pub fn read_token(current: Option<&str>) -> String {
     }
     .finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod last_write_tests {
+    use super::*;
+
+    /// A locked write leaves its file identity for the thread that made it:
+    /// the digest of the text it replaced and of the text it wrote, taken once.
+    #[test]
+    fn a_locked_write_leaves_the_identity_of_both_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        mutate_config_file(&path, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(25);
+            Ok(())
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            take_last_write(),
+            Some(FileWrite {
+                before: read_token(Some(&before)),
+                after: read_token(Some(&after)),
+            })
+        );
+        assert_eq!(take_last_write(), None, "taken once");
+    }
 }
 
 #[cfg(test)]

@@ -632,8 +632,9 @@ impl LiveServerLimits {
             .store(value, Ordering::Relaxed);
     }
 
-    /// Adopt every value from a reloaded `[server]` section.
-    pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
+    /// Adopt every value from a reloaded `[server]` section. `source` is the
+    /// text it was read from, when there is one (see [`crate::auth::LiveAuth::store`]).
+    pub fn store_from(&self, server: &dux_core::config::ServerConfig, source: Option<&str>) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(server.access_log);
         // As dux uses them, through the functions `dux config get` reports.
@@ -649,7 +650,7 @@ impl LiveServerLimits {
             ) as usize,
         );
         self.set_allowed_hosts(&server.allowed_hosts);
-        self.auth.store(&server.auth);
+        self.auth.store(&server.auth, source);
     }
 }
 
@@ -701,7 +702,10 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     let live_limits = Arc::new(LiveServerLimits::default());
     // The password and the rest of `[server.auth]` hold from the first request,
     // before any router seeds the other limits.
-    live_limits.auth().store(&engine.config.server.auth);
+    live_limits.auth().store(
+        &engine.config.server.auth,
+        engine.config.source_text.as_str(),
+    );
     // Filled by the serve path once its loop exists, which is after the actor is
     // already running on `dux server`. A `OnceLock` rather than a constructor
     // argument for exactly that reason; empty means nothing is serving, which is
@@ -725,6 +729,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
             paths: Arc::new(engine.paths.clone()),
             reload_surface: engine.surface.start_surface(),
+            admission: process_admission(engine),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -743,6 +748,19 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
         },
     )
+}
+
+/// The address admission `engine` keeps for its whole life, made the first
+/// time a serve asks for it.
+fn process_admission(engine: &Engine) -> Arc<crate::auth::admission::Admission> {
+    let held = engine.serve_memory.get_or_init(|| {
+        let admission: Arc<dyn std::any::Any + Send + Sync> =
+            Arc::new(crate::auth::admission::Admission::default());
+        admission
+    });
+    Arc::clone(held)
+        .downcast::<crate::auth::admission::Admission>()
+        .unwrap_or_default()
 }
 
 /// Spawn the four global background workers on `engine`. Both `App::run` (the
@@ -833,6 +851,11 @@ pub struct EngineHandle {
     /// `dux server`'s, or the terminal UI's for the flip and the background
     /// server, which run on the terminal UI's engine.
     reload_surface: dux_core::config::Surface,
+    /// The web layer's address admission for this engine's whole life, so
+    /// every serve over it shares bans held in memory, failure counts and
+    /// waits (decided, after review: they belong to the dux process, not to
+    /// one serve).
+    admission: Arc<crate::auth::admission::Admission>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1610,6 +1633,11 @@ impl EngineHandle {
     /// Which surface's start checks this engine's reload refuses a file by.
     pub fn reload_surface(&self) -> dux_core::config::Surface {
         self.reload_surface
+    }
+
+    /// This engine's (this dux process's) address admission.
+    pub(crate) fn admission(&self) -> Arc<crate::auth::admission::Admission> {
+        Arc::clone(&self.admission)
     }
 
     /// The configured preferred editor name for the "open in editor" action
@@ -2588,7 +2616,8 @@ impl EngineService {
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
         self.config_disk_ahead = false;
-        self.live_limits.store_from(&engine.config.server);
+        self.live_limits
+            .store_from(&engine.config.server, engine.config.source_text.as_str());
         // Signal the web layer that config-static state changed so it emits a
         // `config.changed` event and clients refetch `/api/v1/bootstrap`.
         // Fire-and-forget: an `Err` only means no forwarder is listening (e.g.
@@ -2631,8 +2660,9 @@ impl EngineService {
     /// Adopt the two live `[server]` limits from a config the drainer has already
     /// applied. The companion seam's post-apply half; see
     /// [`dux_core::background_serve::BackgroundServeCompanion::note_config_applied`].
-    pub(crate) fn note_config_applied(&self, server: &dux_core::config::ServerConfig) {
-        self.live_limits.store_from(server);
+    pub(crate) fn note_config_applied(&self, config: &dux_core::config::Config) {
+        self.live_limits
+            .store_from(&config.server, config.source_text.as_str());
     }
 
     /// The shared maintenance sweeps, run by whoever drains `worker_rx`.
@@ -4730,10 +4760,10 @@ mod tests {
         limits.set_access_log(false);
         let svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
 
-        let mut server = engine.config.server.clone();
-        server.search_index_max_files = 4321;
-        server.access_log = true;
-        svc.note_config_applied(&server);
+        let mut config = engine.config.clone();
+        config.server.search_index_max_files = 4321;
+        config.server.access_log = true;
+        svc.note_config_applied(&config);
 
         assert_eq!(limits.search_index_max_files(), 4321);
         assert!(limits.access_log());
@@ -6304,7 +6334,7 @@ mod tests {
             assert_eq!(server_restart_warning_copy(&prev, &next, surface), None);
         }
         let limits = LiveServerLimits::default();
-        limits.store_from(&next);
+        limits.store_from(&next, None);
         assert_eq!(limits.auth().snapshot().config, next.auth);
     }
 

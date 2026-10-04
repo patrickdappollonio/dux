@@ -442,6 +442,7 @@ async fn change_password(
         }
         let set =
             dux_core::config_keys::set_password_if_current(&config_path, &expected, &new, &refs)?;
+        let file_write = dux_core::config_write::take_last_write();
         // Not in force only when the reload of THIS run refuses the file: the
         // problems that stop the surface whose reload applies it, judged the
         // way `start_refusal` judges them, never "any problem remains" (a file
@@ -457,10 +458,13 @@ async fn change_password(
         }
         // The hash now in the file is the one to apply at once; the reload
         // that follows brings the rest along.
-        Ok(Ok(std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|raw| dux_core::config::auth_section_of(&raw).ok())
-            .map(|section| section.password_hash)))
+        Ok(Ok((
+            std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|raw| dux_core::config::auth_section_of(&raw).ok())
+                .map(|section| section.password_hash),
+            file_write,
+        )))
     })
     .await;
     match written {
@@ -479,12 +483,13 @@ async fn change_password(
                 ),
             }),
         ),
-        Ok(Ok(Ok(hash))) => {
+        Ok(Ok(Ok((hash, file_write)))) => {
             match hash {
-                Some(hash) => state
-                    .auth
-                    .applied(move |config| config.password_hash = hash.clone()),
-                None => state.auth.applied(|_| {}),
+                Some(hash) => state.auth.applied(
+                    move |config| config.password_hash = hash.clone(),
+                    file_write,
+                ),
+                None => state.auth.applied(|_| {}, file_write),
             }
             let mut response = StatusCode::NO_CONTENT.into_response();
             let secure = cookie::secure(config.cookie_secure, a.classification.https_serve_route);
@@ -522,17 +527,20 @@ async fn dismiss_no_auth_warning(State(state): State<AppState>) -> Response {
     let Some(path) = state.auth.config_path().cloned() else {
         return server_error("This server has no config file to save that choice to.".into());
     };
-    let written = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        dux_core::config_keys::set_plain(&path, &key, "true").map(|_| ())
-    })
+    let written = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Option<dux_core::config_write::FileWrite>> {
+            let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning")
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            dux_core::config_keys::set_plain(&path, &key, "true")?;
+            Ok(dux_core::config_write::take_last_write())
+        },
+    )
     .await;
     match written {
-        Ok(Ok(())) => {
+        Ok(Ok(file_write)) => {
             state
                 .auth
-                .applied(|config| config.disable_no_auth_warning = true);
+                .applied(|config| config.disable_no_auth_warning = true, file_write);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(Err(error)) => server_error(format!("Could not save that choice: {error:#}")),

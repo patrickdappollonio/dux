@@ -5271,13 +5271,13 @@ mod live_tailscale_mode_tests {
     /// [`router_over`], with a password set.
     fn router_with_password(h: &Harness, tmp: &std::path::Path) -> axum::Router {
         let handle = crate::test_support::test_engine_handle(tmp);
-        handle
-            .live_limits()
-            .auth()
-            .store(&dux_core::config::ServerAuthConfig {
+        handle.live_limits().auth().store(
+            &dux_core::config::ServerAuthConfig {
                 password_hash: password_hash().to_string(),
                 ..Default::default()
-            });
+            },
+            None,
+        );
         crate::server::build_app(
             handle,
             axum::Router::new(),

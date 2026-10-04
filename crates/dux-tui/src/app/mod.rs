@@ -4258,6 +4258,7 @@ impl App {
             changed_files_refresh: Default::default(),
             watched_session_id: None,
             has_active_processes,
+            serve_memory: Default::default(),
             current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
