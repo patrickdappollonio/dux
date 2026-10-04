@@ -108,10 +108,6 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     {
         anyhow::bail!("{}: {refusal}", paths.config_path.display());
     }
-    // Warn once here (TUI startup and reload both funnel through ensure_config) on
-    // an unrecognized clipboard_passthrough so the per-tick host forward can parse
-    // silently. The warning is from_config_str's side effect.
-    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     // The load's in-memory corrections, the same every surface makes (an
     // out-of-range `gh` re-check interval among them, whose read path is the
     // engine tick, run tens of times a second on the thread that draws), each
@@ -449,7 +445,8 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "level",
             comment: Some(CommentSource::Static(
-                "# Log level can be error, warn, info, or debug.\n\
+                "# Log level: \"error\", \"warn\", \"info\" or \"debug\", in lowercase. Anything\n\
+                 # else logs at info, with a note in dux.log.\n\
                  # A config reload applies a new level right away; the path below\n\
                  # is read only at startup.",
             )),
@@ -639,7 +636,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "terminal_font_family",
             comment: Some(CommentSource::Static(
-                "# Web UI only: name a font installed on the VIEWING device (the browser's\n# machine, not the server's) to use in the web terminal, e.g. \"Fira Code\" or\n# \"Cascadia Code\". It is placed AHEAD of dux's own bundled terminal font, so\n# the bundled font still fills in any glyph (box drawing, blocks, braille,\n# arrows, powerline) your chosen font lacks. Leave empty (the default) to use\n# only the bundled font. The TUI is unaffected: it always uses your host\n# terminal's own font. Change it at runtime from the web UI's Preferences\n# dialog.",
+                "# Web UI only: name a font installed on the VIEWING device (the browser's\n# machine, not the server's) to use in the web terminal, e.g. \"Fira Code\" or\n# \"Cascadia Code\". It is placed AHEAD of dux's own bundled terminal font, so\n# the bundled font still fills in any glyph (box drawing, blocks, braille,\n# arrows, powerline) your chosen font lacks. Leave empty (the default) to use\n# only the bundled font. Only letters, digits, spaces and _ - , ' \" are kept\n# in the name, up to 200 characters; anything else is left out. The TUI is\n# unaffected: it always uses your host terminal's own font. Change it at\n# runtime from the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.terminal_font_family.clone()),
         },
@@ -810,14 +807,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
-                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
+                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\". Anything\n# else shows it at the bottom, with a note in dux.log.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
         },
         ConfigEntry::Field {
             key: "agent_sort",
             comment: Some(CommentSource::Static(
-                "# Agent-list sort mode, persisted across restarts and shared by the TUI\n# and the web. One of:\n#   \"active\"    (default) working / needs-attention agents float to the top\n#   \"updated\"   most recently updated first\n#   \"created\"   most recently created first\n#   \"name\"      by name, A to Z\n#   \"name_desc\" by name, Z to A\n#   \"manual\"    the hand-placed order (the stored global order)\n# The TUI cycles the five non-manual modes via the \"sort-agents\" palette\n# command and hand-places rows with the \"move-agent-*\" and\n# \"move-terminal-*\" commands; the web sets the mode from its sidebar sort\n# control and hand-places rows by dragging. Either surface's hand-placing\n# switches the mode to \"manual\" automatically. Each surface offers its own\n# subset but displays whatever value the other set.",
+                "# Agent-list sort mode, persisted across restarts and shared by the TUI\n# and the web. One of:\n#   \"active\"    (default) working / needs-attention agents float to the top\n#   \"updated\"   most recently updated first\n#   \"created\"   most recently created first\n#   \"name\"      by name, A to Z\n#   \"name_desc\" by name, Z to A\n#   \"manual\"    the hand-placed order (the stored global order)\n# The TUI cycles the five non-manual modes via the \"sort-agents\" palette\n# command and hand-places rows with the \"move-agent-*\" and\n# \"move-terminal-*\" commands; the web sets the mode from its sidebar sort\n# control and hand-places rows by dragging. Either surface's hand-placing\n# switches the mode to \"manual\" automatically. Each surface offers its own\n# subset but displays whatever value the other set. Anything else sorts as\n# \"active\", with a note in dux.log.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.agent_sort.clone()),
         },

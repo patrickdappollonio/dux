@@ -2042,4 +2042,6 @@ mod get_never_prints_unknown_names_tests;
 mod names_never_printed_property_tests;
 
 #[cfg(test)]
+mod effective_values_and_array_names_tests;
+#[cfg(test)]
 mod restore_report_and_unknown_path_tests;

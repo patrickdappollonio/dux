@@ -88,13 +88,6 @@ describe("a published document", () => {
     expect(reconnectAttemptBudget()).toBe(8)
   })
 
-  it("floors the attempt deadline, which cannot meaningfully be zero", () => {
-    publishConnectionTiming({ reconnect_attempt_timeout_seconds: 0 })
-    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
-    publishConnectionTiming({ reconnect_attempt_timeout_seconds: -1 })
-    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
-  })
-
   it("reads the changes request deadline, defaulting to thirty seconds", () => {
     publishConnectionTiming(undefined)
     expect(changesRequestTimeoutMs()).toBe(30_000)
@@ -102,15 +95,11 @@ describe("a published document", () => {
     expect(changesRequestTimeoutMs()).toBe(12_000)
   })
 
-  it("bounds the changes request deadline: zero and nonsense fall back, and it caps at ten minutes", () => {
-    publishConnectionTiming({ changes_request_timeout_seconds: 0 })
-    expect(changesRequestTimeoutMs()).toBe(30_000)
+  it("falls back on a changes request deadline that is no answer at all", () => {
     publishConnectionTiming({ changes_request_timeout_seconds: -4 })
     expect(changesRequestTimeoutMs()).toBe(30_000)
     publishConnectionTiming({ changes_request_timeout_seconds: Number.NaN })
     expect(changesRequestTimeoutMs()).toBe(30_000)
-    publishConnectionTiming({ changes_request_timeout_seconds: 86_400 })
-    expect(changesRequestTimeoutMs()).toBe(600_000)
   })
 
   it("keeps a configured zero for the replay wait, which DISABLES it", () => {
@@ -127,43 +116,18 @@ describe("a published document", () => {
     expect(heartbeatPeriodMs()).toBe(15_000)
   })
 
-  it("floors the three periods that cannot meaningfully be zero", () => {
-    // A zero backoff cap would be a hot retry loop, a zero heartbeat period a
-    // frame per tick, and a zero deadline a reconnect on every beat.
+  // Zero meaning the default, the changes ceiling and the inverted
+  // heartbeat pair are the SERVER's rules now (dux_core::config_effective,
+  // tested there): the browser runs what it is sent, so a value the server
+  // sends is never second-guessed here.
+  it("runs every published value as sent, the heartbeat pair included", () => {
     publishConnectionTiming({
-      reconnect_backoff_cap_seconds: 0,
-      heartbeat_seconds: 0,
-      heartbeat_deadline_seconds: 0,
+      heartbeat_seconds: 30,
+      heartbeat_deadline_seconds: 60,
+      changes_request_timeout_seconds: 600,
     })
-    expect(reconnectBackoffCapMs()).toBe(10_000)
-    expect(heartbeatPeriodMs()).toBe(15_000)
-    expect(heartbeatDeadlineMs()).toBe(30_000)
-  })
-})
-
-// AN INVERTED PAIR IS A PERMANENT RECONNECT LOOP. The frame goes out, the next
-// tick arrives no earlier than the deadline, and the socket is dropped for a
-// miss that never had time to arrive. Zero and negative values were already
-// refused; this pair was not, and the docs already promise the deadline is
-// comfortably larger than the interval.
-describe("the heartbeat deadline against its own period", () => {
-  it("is clamped up when a config makes it smaller than the period", () => {
-    publishConnectionTiming({ heartbeat_seconds: 30, heartbeat_deadline_seconds: 5 })
+    expect(heartbeatPeriodMs()).toBe(30_000)
     expect(heartbeatDeadlineMs()).toBe(60_000)
-  })
-
-  it("is clamped up when the two are EQUAL, which loops just as surely", () => {
-    publishConnectionTiming({ heartbeat_seconds: 20, heartbeat_deadline_seconds: 20 })
-    expect(heartbeatDeadlineMs()).toBe(40_000)
-  })
-
-  it("leaves a sane pair exactly as configured", () => {
-    publishConnectionTiming({ heartbeat_seconds: 10, heartbeat_deadline_seconds: 45 })
-    expect(heartbeatDeadlineMs()).toBe(45_000)
-  })
-
-  it("leaves a merely TIGHT pair alone, because that one still works", () => {
-    publishConnectionTiming({ heartbeat_seconds: 5, heartbeat_deadline_seconds: 6 })
-    expect(heartbeatDeadlineMs()).toBe(6_000)
+    expect(changesRequestTimeoutMs()).toBe(600_000)
   })
 })

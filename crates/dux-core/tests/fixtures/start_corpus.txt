@@ -19,9 +19,12 @@
 #   `[SERVER.AUTH]`, a quoted `["server.auth"]`, `"auth.password_hash"` under
 #   `[server]`, `[ui]`, `[defaults]`) stops both surfaces. 7437238c had no
 #   web password and ignored such a key, but the hash is a password the user
-#   meant to set, and starting without it would serve with none. Inside a map
-#   whose keys are names the user chose (`[env]`, a provider) it is just a
-#   name, and the file starts as it did then.
+#   meant to set, and starting without it would serve with none. As a name
+#   the user chose (`[env] password_hash`, a provider or a macro called
+#   that, a variable in a project's `env`) it is just a name, and the file
+#   starts as it did then. A field INSIDE a provider, a macro or a
+#   `[[projects]]` entry is a field of dux's schema, not a name, so a
+#   `password_hash` there is misplaced and stops both surfaces.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -442,4 +445,9 @@ start start "server = { auth = { password_hash = \"$argon2id$v=19$m=19456,t=2,p=
 refuse(was:start) refuse(was:start) "[ui]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
 refuse(was:start) refuse(was:start) "[defaults]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
 start start "[env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
-start start "[providers.mytool]\ncommand = \"x\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[macros.greet]\ntext = \"hi\"\nsurface = \"agent\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "[macros.password_hash]\ntext = \"hi\"\nsurface = \"agent\"\n"
+start start "[providers.password_hash]\ncommand = \"x\"\n"
+refuse(was:start) refuse(was:start) "[providers.mytool]\ncommand = \"x\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"

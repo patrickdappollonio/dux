@@ -3315,11 +3315,11 @@ build = { text = \"cargo build\", surface = \"terminal\" }
 
     #[test]
     fn log_viewer_lines_is_read_within_its_documented_bounds() {
-        use crate::config::{LOG_VIEWER_LINES_MAX, log_viewer_capacity};
-        assert_eq!(log_viewer_capacity(0), 1);
-        assert_eq!(log_viewer_capacity(500), 500);
+        use crate::config::{LOG_VIEWER_LINES_MAX, effective_log_viewer_lines};
+        assert_eq!(effective_log_viewer_lines(0), 1);
+        assert_eq!(effective_log_viewer_lines(500), 500);
         assert_eq!(
-            log_viewer_capacity(LOG_VIEWER_LINES_MAX + 1),
+            effective_log_viewer_lines(LOG_VIEWER_LINES_MAX + 1),
             LOG_VIEWER_LINES_MAX
         );
     }

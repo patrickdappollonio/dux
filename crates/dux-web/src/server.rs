@@ -789,7 +789,9 @@ pub fn build_app(
         // instead. Switching file drop off is what `file_drop_max_bytes = 0` is
         // for.
         file_drop_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.file_drop_max_concurrency.max(1) as usize,
+            dux_core::config_effective::effective_file_drop_max_concurrency(
+                params.file_drop_max_concurrency,
+            ) as usize,
         )),
         event_bus,
         changes,
@@ -3497,8 +3499,9 @@ async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) -> Result<(), ()> {
 /// needs and still far shorter than forever, and a user on a genuinely slow link
 /// can raise it.
 ///
-/// A zero or missing value falls back to the compiled default rather than
-/// removing the bound: no bound is the one answer this must not give.
+/// The stored value is the effective one, so a zero means not seeded yet, and
+/// it falls back to the compiled default rather than removing the bound: no
+/// bound is the one answer this must not give.
 fn pty_opening_send_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
     let seconds = limits.pty_send_timeout_seconds();
     let seconds = if seconds == 0 {
@@ -3542,8 +3545,9 @@ const PTY_BEAT_ECHO_CEILING: std::time::Duration = std::time::Duration::from_sec
 /// `min(ceiling, deadline)`: never longer than the client's own patience, and
 /// never longer than a twenty-five byte write can honestly need.
 ///
-/// A `0` deadline is "not seeded yet" (or a config that means it), so it falls
-/// back to the compiled default rather than collapsing the bound to nothing.
+/// The stored deadline is the effective one, so a `0` means not seeded yet,
+/// and it falls back to the compiled default rather than collapsing the bound
+/// to nothing.
 fn pty_beat_echo_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
     let seconds = limits.heartbeat_deadline_seconds();
     let seconds = if seconds == 0 {

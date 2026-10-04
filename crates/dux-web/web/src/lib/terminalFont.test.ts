@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
 import {
@@ -191,4 +195,34 @@ describe("clampTerminalFontSize", () => {
   it("accepts a numeric string", () => {
     expect(clampTerminalFontSize("20")).toBe(20)
   })
+})
+
+describe("the shared terminal font family fixture", () => {
+  // The other half of the pin in `config_effective.rs`. The server applies the
+  // rule (`effective_terminal_font_family`) and sends its answer; the Rust half
+  // checks the answers, and this half checks that the browser runs each one
+  // unchanged ahead of the bundled fonts, so what `dux config get` reports is
+  // what the terminal draws with.
+  const cases = JSON.parse(
+    readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../../dux-core/tests/fixtures/terminal_font_family_cross_language.json",
+      ),
+      "utf8",
+    ),
+  ) as { cases: { what: string; configured: string; used: string }[] }
+
+  it("has not lost its cases", () => {
+    expect(cases.cases.length).toBeGreaterThanOrEqual(10)
+  })
+
+  it.each(cases.cases.map((c) => [c.what, c.used] as const))(
+    "runs the server's answer for %s unchanged",
+    (_what, used) => {
+      expect(terminalFontFamily(used)).toBe(
+        used ? `${used}, ${DUX_TERMINAL_FONT_STACK}` : DUX_TERMINAL_FONT_STACK,
+      )
+    },
+  )
 })

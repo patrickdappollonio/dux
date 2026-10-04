@@ -57,10 +57,14 @@ dux config set providers.claude.command claude
 
 - `get` prints what `config.toml` says, or, when the file leaves the setting out, the value
   dux actually uses with that file (a note on stderr says so, so the value alone is what a
-  script captures). A provider listed without a command reads as an empty command, and
-  `get` says that provider cannot start. It also works when dux refuses to start with the
-  file, which is how you look at the broken part: it prints what the file says and names
-  the problem that keeps dux from working out the value it would use.
+  script captures). Where dux uses something other than what the file says (a log level
+  it does not know runs as `info`, a value past its ceiling runs at the ceiling, a `0`
+  that means the default runs as the default), `get` prints what dux uses, and the note
+  names what the file says and why. A provider listed without a command reads as an
+  empty command, and `get` says that provider cannot start. It also works when dux
+  refuses to start with the file, which is how you look at the broken part: it prints
+  what the file says and names the problem that keeps dux from working out the value it
+  would use.
 - `set` never writes a file dux would refuse to start with: a value that would add such a
   problem (a host name where `server.host` needs an IP address, an environment variable
   name dux does not accept) is refused with the same message a start gives, and nothing
@@ -89,8 +93,10 @@ dux config set providers.claude.command claude
   from a pipe with `--stdin`) and never takes it as an argument, and it reports only that
   the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
   it is set but prints the value only when you add `--show`.
-- A misspelled setting is refused with the closest real one: `there is no setting called
-  server.prot; did you mean server.port?`
+- A misspelled setting is refused with the closest real one. The message repeats only the
+  part of the name that exists, never what you typed after it, in case that was a value
+  typed where a name goes: `server has no setting below it with that name; did you mean
+  server.port? Values are never given in the path.`
 - `[[projects]]`, `[keys]` and `[macros]` are read with `get` but not written with `set`,
   because each has rules of its own. Edit them in the file, or use dux itself.
 - A key whose own name contains a dot cannot be named this way. Edit the file for that

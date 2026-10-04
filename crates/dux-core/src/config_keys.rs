@@ -73,47 +73,6 @@ pub const VIRTUAL_KEYS: &[(&[&str], WritePolicy)] = &[(
     }),
 )];
 
-/// String settings whose value must be one of a known set. Only settings
-/// whose own reader names the set appear here; the rest are free text.
-/// Each by its path's segments, `*` standing for any one name.
-const ALLOWED_VALUES: &[(&[&str], &[&str])] = &[
-    (&["server", "tailscale"], &["auto", "yes", "no"]),
-    (&["server", "color"], &["auto", "always", "never"]),
-    (
-        &["server", "auth", "require"],
-        &["network", "tailnet", "everywhere"],
-    ),
-    (
-        &["server", "auth", "cookie_secure"],
-        &["auto", "always", "never"],
-    ),
-    (&["ui", "compose_bar"], &["auto", "always", "never"]),
-    (
-        &["ui", "agent_sort"],
-        &[
-            "active",
-            "updated",
-            "created",
-            "name",
-            "name_desc",
-            "manual",
-        ],
-    ),
-    (
-        &["capabilities", "clipboard_passthrough"],
-        &["focused", "always", "off"],
-    ),
-    (
-        &["providers", "*", "web_dragdrop_paste"],
-        &[
-            "bare",
-            "single_quoted",
-            "double_quoted",
-            "backslash_escaped",
-        ],
-    ),
-];
-
 /// Top-level tables `set` refuses, with the reason it gives.
 const NOT_SETTABLE: &[(&str, &str)] = &[
     (
@@ -202,7 +161,7 @@ impl fmt::Display for KeyError {
                     Some(close) => write!(f, "; did you mean {close}?")?,
                     None => write!(
                         f,
-                        "; `dux config path` shows the file, whose comments list every setting"
+                        "; `dux config path` shows the file, whose comments list every setting."
                     )?,
                 }
                 write!(f, " Values are never given in the path.")
@@ -413,17 +372,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b.len()]
 }
 
-fn allowed_values(segments: &[String]) -> Option<&'static [&'static str]> {
-    ALLOWED_VALUES.iter().find_map(|(pattern, values)| {
-        (pattern.len() == segments.len()
-            && pattern
-                .iter()
-                .zip(segments)
-                .all(|(p, s)| *p == "*" || p == s))
-        .then_some(*values)
-    })
-}
-
 /// Read `raw` (as typed on the command line) as a value for `key`, checked
 /// against the setting's type, range and allowed values. Text settings take
 /// `raw` verbatim, with no quotes needed; lists take a TOML array.
@@ -464,13 +412,21 @@ pub fn parse_value(key: &Key, raw: &str) -> Result<Value, String> {
             .collect(),
         Shape::Table => Vec::new(),
     };
-    if let Some(allowed) = allowed_values(&key.path)
-        && !allowed.contains(&raw)
+    // A setting with a fixed set of values is checked by the parser dux reads
+    // it with (see `config_effective`), so `set` accepts exactly what dux
+    // then uses as written.
+    if let Some(fixed) = crate::config_effective::fixed_values(&key.path)
+        && !fixed.accepts(raw)
     {
+        let or_empty = if fixed.or_empty {
+            ", or an empty value for the default"
+        } else {
+            ""
+        };
         return Err(format!(
-            "{} takes one of {}, not {raw}",
+            "{} takes one of {}{or_empty}, not {raw}",
             key.dotted(),
-            allowed.join(", ")
+            fixed.listed.join(", ")
         ));
     }
     let mut last_error = String::new();
@@ -1057,29 +1013,60 @@ fn stored_path(key: &Key) -> Vec<String> {
     }
 }
 
-/// `value`, at `path` in the file `raw`, as `get` prints it: a table whose
-/// entries are names in a map with a naming rule prints each name that
-/// breaks the rule as a marker naming its line (the formatter's own words),
-/// never the name, which may be a token pasted in the wrong place.
+/// `value`, at `path` in the file `raw`, as `get` prints it: every key the
+/// formatter may not print (a name that breaks its map's rule, a key the
+/// schema has no place for, a key inside an element of an array whose
+/// elements have no keys in the schema) is a marker naming its line (the
+/// formatter's own words), never the name, which may be a token pasted in
+/// the wrong place. Arrays are walked too, element by element.
 fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
-    fn shown(raw: &str, path: &mut Vec<String>, value: &toml::Value) -> toml::Value {
-        let toml::Value::Table(table) = value else {
-            return value.clone();
-        };
-        let mut out = toml::Table::new();
-        for (key, child) in table {
-            path.push(key.clone());
-            let name = if crate::config::name_is_hidden(raw, path) {
-                format!("<{}>", crate::config::shown_path(raw, path))
-            } else {
-                key.clone()
-            };
-            out.insert(name, shown(raw, path, child));
-            path.pop();
-        }
-        toml::Value::Table(out)
+    /// One step of the walk: a key, or an element of an array.
+    enum Step {
+        Key(String),
+        Index(usize),
     }
-    render(&shown(raw, &mut path.to_vec(), value))
+    fn parts(path: &[Step]) -> Vec<crate::config::PathPart<'_>> {
+        path.iter()
+            .map(|step| match step {
+                Step::Key(key) => crate::config::PathPart::Key(key),
+                Step::Index(index) => crate::config::PathPart::Index(*index),
+            })
+            .collect()
+    }
+    fn shown(raw: &str, path: &mut Vec<Step>, value: &toml::Value) -> toml::Value {
+        match value {
+            toml::Value::Table(table) => {
+                let mut out = toml::Table::new();
+                for (key, child) in table {
+                    path.push(Step::Key(key.clone()));
+                    let at = parts(path);
+                    let name = if crate::config::part_is_hidden(&at) {
+                        format!("<{}>", crate::config::shown_parts(raw, &at))
+                    } else {
+                        key.clone()
+                    };
+                    out.insert(name, shown(raw, path, child));
+                    path.pop();
+                }
+                toml::Value::Table(out)
+            }
+            toml::Value::Array(items) => toml::Value::Array(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        path.push(Step::Index(index));
+                        let item = shown(raw, path, item);
+                        path.pop();
+                        item
+                    })
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    let mut start: Vec<Step> = path.iter().map(|key| Step::Key(key.clone())).collect();
+    render(&shown(raw, &mut start, value))
 }
 
 /// The table `in_use` (what dux uses at `path`) as `get` prints it: every
@@ -1211,7 +1198,23 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             .collect();
         return Ok(unknown(named.join("; "), in_file));
     }
+    // What dux makes of a value where it is used (a level it does not know
+    // read as info, a ceiling, `0` meaning the default), by the same
+    // `effective_*` function every runtime reader goes through.
+    let use_time = crate::config_effective::use_time_corrections(&effective);
     let mut effective = serde_json::to_value(&effective).ok();
+    for correction in &use_time {
+        if let Some(slot) = correction
+            .path
+            .iter()
+            .try_fold(effective.as_mut(), |node, segment| {
+                Some(node.and_then(|node| node.get_mut(segment)))
+            })
+            .flatten()
+        {
+            *slot = correction.used.clone();
+        }
+    }
     // `[keys]` is the terminal UI's alone, so it is what the terminal UI
     // runs with, by its own resolution: its key migrations, and every
     // action's default where the file has none.
@@ -1243,6 +1246,15 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     // Every path below is a list of segments, never a dotted string split
     // again: a name may hold a dot.
     let mut sourced = crate::config::load_corrections_with_sources(raw);
+    sourced.extend(
+        use_time
+            .into_iter()
+            .map(|correction| crate::config::LoadCorrection {
+                path: correction.path,
+                reason: correction.reason,
+                from: None,
+            }),
+    );
     // The terminal UI's own `[keys]` migrations are corrections it alone
     // makes (see `surface_of` below).
     if keys_resolved.is_some() {
@@ -1341,8 +1353,10 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                     from: None,
                     surface: surface_of(&at),
                     reason: reason_at(&at),
-                    path: at,
-                    in_file: Some(in_file),
+                    path: at.clone(),
+                    // Printed through the formatter: a list may hold tables
+                    // whose keys are no setting names.
+                    in_file: Some(render_shown(raw, &at, value)),
                     used,
                 },
             });
@@ -1514,6 +1528,17 @@ port = 3890
             err.to_string().contains("did you mean ui.left_width_pct?"),
             "{err}"
         );
+        // The message the docs quote, word for word.
+        assert_eq!(
+            lookup("server.prot").unwrap_err().to_string(),
+            "server has no setting below it with that name; did you mean server.port? Values \
+             are never given in the path."
+        );
+        assert_eq!(
+            lookup("server.zzzzzz").unwrap_err().to_string(),
+            "server has no setting below it with that name; `dux config path` shows the file, \
+             whose comments list every setting. Values are never given in the path."
+        );
         let err = lookup("server.auth.pasword").unwrap_err();
         assert!(err.to_string().contains("server.auth.password"), "{err}");
         let far = lookup("completely.unrelated.thing").unwrap_err();
@@ -1633,6 +1658,73 @@ port = 3890
         let paste = lookup("providers.claude.web_dragdrop_paste").unwrap();
         assert!(parse_value(&paste, "bare").is_ok());
         assert!(parse_value(&paste, "quoted").is_err());
+    }
+
+    /// `set` and `get` read a fixed-value setting with one parser: every value
+    /// `set` lists is accepted and reads as itself, and a value it refuses is
+    /// one `get` says dux uses something else for.
+    #[test]
+    fn set_accepts_exactly_what_dux_reads_as_written() {
+        let paths: &[&[&str]] = &[
+            &["logging", "level"],
+            &["ui", "agent_sort"],
+            &["ui", "pr_banner_position"],
+            &["ui", "compose_bar"],
+            &["capabilities", "terminal_identity"],
+            &["capabilities", "clipboard_passthrough"],
+            &["providers", "claude", "web_dragdrop_paste"],
+            &["editor", "default"],
+            &["server", "tailscale"],
+            &["server", "color"],
+            &["server", "favicon"],
+        ];
+        let file = |path: &[&str], value: &str| {
+            let (table, key) = path.split_at(path.len() - 1);
+            format!(
+                "[{}]\n{} = {}\n",
+                table.join("."),
+                key[0],
+                toml::Value::String(value.to_string())
+            )
+        };
+        for path in paths {
+            let segments: Vec<String> = path.iter().map(|s| (*s).to_string()).collect();
+            let fixed = crate::config_effective::fixed_values(&segments)
+                .unwrap_or_else(|| panic!("{path:?} has a fixed set"));
+            let key = lookup(&path.join(".")).unwrap();
+            for value in &fixed.listed {
+                assert!(parse_value(&key, value).is_ok(), "{path:?} refuses {value}");
+                let report = get_report(&file(path, value), &key).unwrap();
+                assert_eq!(report.corrections, Vec::new(), "{path:?} = {value}");
+            }
+            for value in ["zz-unknown", "UPPER"] {
+                if fixed.accepts(value) {
+                    continue;
+                }
+                assert!(
+                    parse_value(&key, value).is_err(),
+                    "{path:?} accepts {value}"
+                );
+                let report = get_report(&file(path, value), &key).unwrap();
+                assert!(
+                    !report.corrections.is_empty()
+                        || matches!(report.value, GetValue::Set(ref v) if v != value),
+                    "{path:?} = {value}: {report:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logging_level_takes_exactly_the_levels_the_logger_knows() {
+        let key = lookup("logging.level").unwrap();
+        for level in ["debug", "info", "warn", "error"] {
+            assert!(parse_value(&key, level).is_ok(), "{level}");
+        }
+        for level in ["loud", "DEBUG", " info", "trace"] {
+            let err = parse_value(&key, level).unwrap_err();
+            assert!(err.contains("debug, info, warn, error"), "{err}");
+        }
     }
 
     #[test]
@@ -2419,6 +2511,58 @@ port = 3890
 #[cfg(test)]
 mod get_reports_what_dux_uses_tests {
     use super::*;
+
+    /// A field missing from an entry is the entry's problem, named with the
+    /// field, and `get` gives the same reason a start does.
+    #[test]
+    fn a_missing_field_is_blamed_on_its_table_by_name() {
+        let raw = "[macros.greet]\ntext = \"hi\"\n";
+        let messages: Vec<String> = crate::config::start_problems_of(raw)
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("[macros] greet: missing field surface")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| !m.contains("greet.text")),
+            "{messages:?}"
+        );
+        let report = get_report(raw, &lookup("macros").unwrap()).unwrap();
+        let reasons: Vec<&str> = report
+            .corrections
+            .iter()
+            .map(|correction| correction.reason.as_str())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("[macros] greet: missing field surface")),
+            "{report:?}"
+        );
+        assert!(
+            reasons.iter().all(|r| !r.contains("greet.text")),
+            "{report:?}"
+        );
+    }
+
+    /// A sibling whose own type is wrong is still named beside a table
+    /// missing a field.
+    #[test]
+    fn a_wrong_typed_field_beside_a_missing_one_is_still_named() {
+        let raw = "[macros.greet]\ntext = 5\n";
+        let messages: Vec<String> = crate::config::start_problems_of(raw)
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect();
+        assert!(
+            messages.iter().any(|m| m.contains("greet.text")),
+            "{messages:?}"
+        );
+    }
 
     #[test]
     fn get_reports_the_corrected_terminal_font_size_dux_uses() {

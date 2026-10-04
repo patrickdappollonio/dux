@@ -189,6 +189,21 @@ pub const NAME_POSITIONS: &[&str] = &[
     "[keys]\nquit = { \"{T}\" = 1 }\n",
     "[[projects]]\nid = \"p\"\npath = \"/tmp/dux-names-p\"\n\"{T}\" = 1\n",
     "[[projects]]\nid = \"p\"\npath = \"/tmp/dux-names-p\"\n[projects.env]\n\"{T}\" = \"x\"\n",
+    // Inside arrays: an array of tables where the schema has a table or a
+    // map, an unknown array, a table inside a list setting (nested too), and
+    // the keys of a project entry written inline or a level down.
+    "[[ui]]\n\"{T}\" = 1\n",
+    "[[providers]]\n\"{T}\" = 1\n",
+    "[[macros]]\n\"{T}\" = 1\n",
+    "[[extra]]\n\"{T}\" = 1\n",
+    "[server]\nauth = [{ \"{T}\" = 1 }]\n",
+    "[server]\nallowed_hosts = [{ \"{T}\" = 1 }]\n",
+    "[server]\nallowed_hosts = [[{ \"{T}\" = 1 }]]\n",
+    "[env]\nA = [{ \"{T}\" = 1 }]\n",
+    "[providers.mytool]\ncommand = \"x\"\nargs = [{ \"{T}\" = 1 }]\n",
+    "[keys]\nquit = [{ \"{T}\" = 1 }]\n",
+    "projects = [{ id = \"p\", path = \"/tmp/dux-names-p\", \"{T}\" = 1 }]\n",
+    "[[projects]]\nid = \"p\"\npath = \"/tmp/dux-names-p\"\n[[projects.extra]]\n\"{T}\" = 1\n",
 ];
 
 /// Token-like names, from a fixed seed: each holds a dot and a space, so it

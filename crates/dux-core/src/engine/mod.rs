@@ -2132,7 +2132,7 @@ impl Engine {
     /// from the configured mode, the owning surface, and the inherited-env probe.
     /// Companion terminals reuse it too so a plain shell sees the same identity.
     pub fn resolved_identity(&self) -> crate::term_identity::TerminalIdentity {
-        let mode = crate::term_identity::TerminalIdentityMode::from_config_str(
+        let mode = crate::config_effective::effective_terminal_identity(
             &self.config.capabilities.terminal_identity,
         );
         crate::term_identity::resolve_identity(mode, self.surface_kind, &self.host_env)
@@ -2200,13 +2200,10 @@ impl Engine {
         wrap_for_tmux: bool,
     ) -> Vec<u8> {
         let master = self.config.capabilities.passthrough;
-        // Parse without warning on the per-tick path: an unrecognized value is
-        // surfaced once at config load/reload (see `ClipboardPassthroughMode`), and
-        // falls back to the default here.
-        let clipboard_mode = crate::config::ClipboardPassthroughMode::parse(
-            &self.config.capabilities.clipboard_passthrough,
-        )
-        .unwrap_or(crate::config::ClipboardPassthroughMode::Focused);
+        // Pure on the per-tick path: an unrecognized value is said once, at
+        // config load/reload.
+        let clipboard_mode =
+            crate::config_effective::effective_clipboard_passthrough(&self.config.capabilities);
         let mut out = Vec::new();
         for (tab_id, provider) in &self.providers {
             // Always drain (keeps the ring bounded even for a headless server).
@@ -2734,13 +2731,13 @@ impl Engine {
         crate::logger::set_level(&self.config.logging.level);
         crate::logger::set_rotation(&self.config.logging);
         self.pr_poll_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_interval(
+            u64::from(crate::config::effective_pr_poll_interval_seconds(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
         self.pr_poll_inactive_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+            u64::from(crate::config::effective_pr_poll_inactive_interval_seconds(
                 self.config.ui.pr_poll_inactive_interval_seconds,
             )),
             Ordering::Relaxed,
@@ -3741,13 +3738,13 @@ impl Engine {
         // them, and arm BEFORE spawning so the kill switch observes the live
         // state on the first iteration.
         interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_interval(
+            u64::from(crate::config::effective_pr_poll_interval_seconds(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
         inactive_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+            u64::from(crate::config::effective_pr_poll_inactive_interval_seconds(
                 self.config.ui.pr_poll_inactive_interval_seconds,
             )),
             Ordering::Relaxed,
@@ -5732,7 +5729,7 @@ impl Engine {
 
     /// The effective per-agent tab cap (clamped, default-substituted).
     pub fn agent_tabs_max(&self) -> u16 {
-        crate::config::normalized_agent_tabs_max(self.config.ui.agent_tabs_max)
+        crate::config::effective_agent_tabs_max(self.config.ui.agent_tabs_max)
     }
 
     /// Create a new extra tab for `session_id` running `provider`, persist its

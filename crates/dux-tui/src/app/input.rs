@@ -677,13 +677,6 @@ fn clamp_right_width_pct(right_width_pct: u16, left_width_pct: u16) -> u16 {
     right_width_pct.clamp(MIN_RIGHT_WIDTH_PCT, max_right.max(MIN_RIGHT_WIDTH_PCT))
 }
 
-const MIN_TERMINAL_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_TERMINAL_PANE_HEIGHT_PCT: u16 = 80;
-const MIN_STAGED_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_STAGED_PANE_HEIGHT_PCT: u16 = 80;
-const MIN_COMMIT_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_COMMIT_PANE_HEIGHT_PCT: u16 = 80;
-
 fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     if total_width == 0 {
         return 0;
@@ -10483,7 +10476,7 @@ impl App {
                     let term_rows = left_bottom.saturating_sub(row).clamp(1, left.height);
                     let pct = pct_from_columns(term_rows, left.height); // reuse same % helper
                     self.terminal_pane_height_pct =
-                        pct.clamp(MIN_TERMINAL_PANE_HEIGHT_PCT, MAX_TERMINAL_PANE_HEIGHT_PCT);
+                        dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
             Some(ResizeDragState::StagedDivider) => {
@@ -10494,7 +10487,7 @@ impl App {
                     let staged_rows = right_bottom.saturating_sub(row).clamp(1, right.height);
                     let pct = pct_from_columns(staged_rows, right.height);
                     self.staged_pane_height_pct =
-                        pct.clamp(MIN_STAGED_PANE_HEIGHT_PCT, MAX_STAGED_PANE_HEIGHT_PCT);
+                        dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
             Some(ResizeDragState::CommitDivider) => {
@@ -10515,7 +10508,7 @@ impl App {
                         let commit_rows = sub_bottom.saturating_sub(row).clamp(1, sub_height);
                         let pct = pct_from_columns(commit_rows, sub_height);
                         self.commit_pane_height_pct =
-                            pct.clamp(MIN_COMMIT_PANE_HEIGHT_PCT, MAX_COMMIT_PANE_HEIGHT_PCT);
+                            dux_core::config_effective::effective_pane_height_pct(pct);
                     }
                 }
             }

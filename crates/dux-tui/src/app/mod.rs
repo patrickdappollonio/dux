@@ -3930,17 +3930,19 @@ impl AgentSortMode {
         AgentSortMode::NameDesc,
     ];
 
-    /// Parse the shared `config.ui.agent_sort` string. Unknown values fall back to
-    /// `Active` (the default), matching the web's tolerance for a value it does
-    /// not offer.
+    /// The shared `config.ui.agent_sort` string, read by
+    /// [`dux_core::config_effective::effective_agent_sort`], the one rule both
+    /// surfaces and `dux config get` share: an unknown value is `Active`, the
+    /// default.
     pub(crate) fn from_config_str(s: &str) -> AgentSortMode {
-        match s {
-            "updated" => AgentSortMode::Updated,
-            "created" => AgentSortMode::Created,
-            "name" => AgentSortMode::NameAsc,
-            "name_desc" => AgentSortMode::NameDesc,
-            "manual" => AgentSortMode::Manual,
-            _ => AgentSortMode::Active,
+        use dux_core::flat_list::FlatSortMode;
+        match dux_core::config_effective::effective_agent_sort(s) {
+            FlatSortMode::Active => AgentSortMode::Active,
+            FlatSortMode::Updated => AgentSortMode::Updated,
+            FlatSortMode::Created => AgentSortMode::Created,
+            FlatSortMode::NameAsc => AgentSortMode::NameAsc,
+            FlatSortMode::NameDesc => AgentSortMode::NameDesc,
+            FlatSortMode::Manual => AgentSortMode::Manual,
         }
     }
 
@@ -4312,7 +4314,9 @@ impl App {
         theme: Theme,
         restore: SessionRestore,
     ) -> Result<Self> {
-        let pr_banner_at_bottom = engine.config.ui.pr_banner_position == "bottom";
+        let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
+            &engine.config.ui.pr_banner_position,
+        ) == dux_core::config_effective::PrBannerPosition::Bottom;
         let show_diff_line_numbers = engine.config.ui.show_diff_line_numbers;
         // Seed the changes (right) pane's hidden state from config; the runtime
         // RemoveGitPane toggle (Ctrl-]) overrides it for the rest of the session.
@@ -5801,7 +5805,9 @@ impl App {
     /// only a reload has to re-seed them.
     pub(crate) fn sync_view_state_from_config(&mut self) {
         let ui = &self.engine.config.ui;
-        self.pr_banner_at_bottom = ui.pr_banner_position == "bottom";
+        self.pr_banner_at_bottom =
+            dux_core::config_effective::effective_pr_banner_position(&ui.pr_banner_position)
+                == dux_core::config_effective::PrBannerPosition::Bottom;
         let clear_after = Duration::from_secs(ui.status_clear_seconds.into());
         let hide_right = !ui.show_changes_pane;
         self.status.set_clear_after(clear_after);

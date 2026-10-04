@@ -1515,14 +1515,16 @@ impl Engine {
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
-            terminal_font_family: self.config.ui.terminal_font_family.clone(),
+            terminal_font_family: crate::config_effective::effective_terminal_font_family(
+                &self.config.ui.terminal_font_family,
+            ),
             terminal_font_size: crate::config::normalized_terminal_font_size(
                 self.config.ui.terminal_font_size,
             ),
             // Normalized rather than passed through: `set_settings` and the raw
             // config editor both put a value in memory without going through
             // `load_config`, so this is the last place to catch a typo.
-            compose_bar: crate::config::ComposeBarMode::from_config_str(
+            compose_bar: crate::config_effective::effective_compose_bar(
                 &self.config.ui.compose_bar,
             )
             .as_str()
@@ -1536,26 +1538,28 @@ impl Engine {
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
-            // Resolve the `passthrough` master switch here rather than publishing
-            // it beside this field, so the browser gets one answer. Browser
-            // notifications are not one of its consequences: `web_notifications`
-            // is the only switch over those and is published untouched above.
-            clipboard_passthrough: if self.config.capabilities.passthrough {
-                crate::config::ClipboardPassthroughMode::parse(
-                    &self.config.capabilities.clipboard_passthrough,
-                )
-                .unwrap_or(crate::config::ClipboardPassthroughMode::Focused)
-            } else {
-                crate::config::ClipboardPassthroughMode::Off
-            }
+            // The `passthrough` master switch is resolved in, so the browser gets
+            // one answer. Browser notifications are not one of its consequences:
+            // `web_notifications` is the only switch over those and is published
+            // untouched above.
+            clipboard_passthrough: crate::config_effective::effective_clipboard_passthrough(
+                &self.config.capabilities,
+            )
             .as_str()
             .to_string(),
-            pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            pr_banner_position: crate::config_effective::effective_pr_banner_position(
+                &self.config.ui.pr_banner_position,
+            )
+            .as_str()
+            .to_string(),
             tailscale_mode: self.config.server.tailscale_mode().as_str().to_string(),
             // Always `false` here: `--no-tailscale` is the serving process's own
             // fact, and the bootstrap ROUTE injects it. See the field's doc.
             tailscale_forced_no: false,
-            agent_sort: self.config.ui.agent_sort.clone(),
+            agent_sort: crate::config_effective::agent_sort_name(
+                crate::config_effective::effective_agent_sort(&self.config.ui.agent_sort),
+            )
+            .to_string(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
             global_env: self.config.env.clone(),
@@ -1566,8 +1570,8 @@ impl Engine {
                 self.config.shutdown_timeout_seconds,
             )
             .as_secs(),
-            title: self.config.server.title.clone(),
-            favicon: self.config.server.favicon.clone(),
+            title: crate::config_effective::effective_server_title(&self.config.server.title),
+            favicon: crate::config_effective::effective_server_favicon(&self.config.server.favicon),
             agent_tabs_max: self.agent_tabs_max(),
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
             tab_reaches_agent: self.config.ui.tab_reaches_agent,
@@ -1585,13 +1589,31 @@ impl Engine {
             disable_automated_welcome_screen: self.config.ui.disable_automated_welcome_screen,
             disable_release_notes: self.config.ui.disable_release_notes,
             file_drop_max_bytes: self.config.server.file_drop_max_bytes,
+            // The browser runs these as sent: each rule (0 meaning the default,
+            // a ceiling, a deadline kept above the beat) is applied here, once,
+            // by the function `dux config get` reports too.
             replay_wait_seconds: self.config.server.replay_wait_seconds,
-            reconnect_backoff_cap_seconds: self.config.server.reconnect_backoff_cap_seconds,
+            reconnect_backoff_cap_seconds:
+                crate::config_effective::effective_reconnect_backoff_cap_seconds(
+                    self.config.server.reconnect_backoff_cap_seconds,
+                ),
             reconnect_attempts: self.config.server.reconnect_attempts,
-            reconnect_attempt_timeout_seconds: self.config.server.reconnect_attempt_timeout_seconds,
-            changes_request_timeout_seconds: self.config.server.changes_request_timeout_seconds,
-            heartbeat_seconds: self.config.server.heartbeat_seconds,
-            heartbeat_deadline_seconds: self.config.server.heartbeat_deadline_seconds,
+            reconnect_attempt_timeout_seconds:
+                crate::config_effective::effective_reconnect_attempt_timeout_seconds(
+                    self.config.server.reconnect_attempt_timeout_seconds,
+                ),
+            changes_request_timeout_seconds:
+                crate::config_effective::effective_changes_request_timeout_seconds(
+                    self.config.server.changes_request_timeout_seconds,
+                ),
+            heartbeat_seconds: crate::config_effective::effective_heartbeat_seconds(
+                self.config.server.heartbeat_seconds,
+            ),
+            heartbeat_deadline_seconds:
+                crate::config_effective::effective_heartbeat_deadline_seconds(
+                    self.config.server.heartbeat_deadline_seconds,
+                    self.config.server.heartbeat_seconds,
+                ),
         }
     }
 }

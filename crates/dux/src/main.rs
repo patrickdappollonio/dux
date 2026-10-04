@@ -61,7 +61,9 @@ fn run_tui_with_flip() -> Result<()> {
                 // log viewer (the consumer). Created here so both get the same
                 // handle, sized by `[server] log_viewer_lines`.
                 let activity = dux_core::activity::ActivityRing::new(
-                    dux_core::config::log_viewer_capacity(engine.config.server.log_viewer_lines),
+                    dux_core::config::effective_log_viewer_lines(
+                        engine.config.server.log_viewer_lines,
+                    ),
                 );
 
                 // A failure here (no TTY, a raw-mode error) falls back to a plain

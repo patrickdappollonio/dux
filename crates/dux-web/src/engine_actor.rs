@@ -591,9 +591,10 @@ impl LiveServerLimits {
 
     /// Deadline on one of a PTY socket's opening sends, in seconds, read when a
     /// socket opens so a reload applies to the next connection rather than to the
-    /// ones already attached. `0` means not seeded yet and the caller falls back to
-    /// the compiled default, because no bound at all is the one answer this must
-    /// never give.
+    /// ones already attached. Stored as dux uses it (see
+    /// `config_effective::effective_pty_send_timeout_seconds`), so `0` only ever
+    /// means not seeded yet, and the caller falls back to the compiled default,
+    /// because no bound at all is the one answer this must never give.
     pub fn pty_send_timeout_seconds(&self) -> usize {
         self.pty_send_timeout_seconds.load(Ordering::Relaxed)
     }
@@ -606,8 +607,9 @@ impl LiveServerLimits {
     /// How long a browser waits for the server's answer to one beat before treating
     /// the socket as half-open and reconnecting. Nothing on the server times itself
     /// by this; it is read so a send that answers a beat cannot outlive the window
-    /// the client waits in. `0` means not seeded yet, and the caller falls back to
-    /// the compiled default.
+    /// the client waits in. Stored as the browser uses it (see
+    /// `config_effective::effective_heartbeat_deadline_seconds`), so `0` only ever
+    /// means not seeded yet, and the caller falls back to the compiled default.
     pub fn heartbeat_deadline_seconds(&self) -> usize {
         self.heartbeat_deadline_seconds.load(Ordering::Relaxed)
     }
@@ -621,8 +623,18 @@ impl LiveServerLimits {
     pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(server.access_log);
-        self.set_pty_send_timeout_seconds(server.pty_send_timeout_seconds as usize);
-        self.set_heartbeat_deadline_seconds(server.heartbeat_deadline_seconds as usize);
+        // As dux uses them, through the functions `dux config get` reports.
+        self.set_pty_send_timeout_seconds(
+            dux_core::config_effective::effective_pty_send_timeout_seconds(
+                server.pty_send_timeout_seconds,
+            ) as usize,
+        );
+        self.set_heartbeat_deadline_seconds(
+            dux_core::config_effective::effective_heartbeat_deadline_seconds(
+                server.heartbeat_deadline_seconds,
+                server.heartbeat_seconds,
+            ) as usize,
+        );
         self.set_allowed_hosts(&server.allowed_hosts);
     }
 }

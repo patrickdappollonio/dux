@@ -1,0 +1,55 @@
+{
+  "note": "[ui] terminal_font_family as dux uses it. Read by `the_shared_terminal_font_family_fixture_holds` in crates/dux-core/src/config_effective.rs, which checks that `effective_terminal_font_family(configured)` is `used`, and by terminalFont.test.ts in crates/dux-web/web, which checks that the browser runs `used`, the value the server sends, unchanged ahead of the bundled fonts.",
+  "cases": [
+    {
+      "what": "an ordinary name",
+      "configured": "Fira Code",
+      "used": "Fira Code"
+    },
+    {
+      "what": "surrounding spaces",
+      "configured": "  Fira Code  ",
+      "used": "Fira Code"
+    },
+    {
+      "what": "a declaration smuggled after a newline",
+      "configured": "Fira Code\n; color: red",
+      "used": "Fira Code color red"
+    },
+    {
+      "what": "a quoted list",
+      "configured": "\"Cascadia Code\", Consolas",
+      "used": "\"Cascadia Code\", Consolas"
+    },
+    {
+      "what": "non-ASCII letters",
+      "configured": "Ünïcödé",
+      "used": "ncd"
+    },
+    {
+      "what": "a space left at the front once a letter is taken out",
+      "configured": " é Fira ",
+      "used": "Fira"
+    },
+    {
+      "what": "empty",
+      "configured": "",
+      "used": ""
+    },
+    {
+      "what": "only spaces",
+      "configured": "   ",
+      "used": ""
+    },
+    {
+      "what": "markup",
+      "configured": "x</style><script>alert(1)</script>",
+      "used": "xstylescriptalert1script"
+    },
+    {
+      "what": "a name past the length cap",
+      "configured": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "used": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

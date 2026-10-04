@@ -15,6 +15,14 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The `effective_*` functions that used to live here, under the module path
+/// their callers already reach them by.
+pub use crate::config_effective::{
+    effective_agent_tabs_max, effective_log_keep, effective_log_viewer_lines,
+    effective_pr_poll_inactive_interval_seconds, effective_pr_poll_interval_seconds,
+    effective_upload_directory,
+};
+
 /// Which surface(s) a macro is available on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -153,21 +161,6 @@ pub const DEFAULT_LOG_KEEP: u32 = 5;
 /// copies and the user is unlikely to want a thousand of them.
 pub const MAX_LOG_KEEP: u32 = 1000;
 
-/// The effective number of rotated copies to keep: values above
-/// [`MAX_LOG_KEEP`] are clamped with a warning, as the other numeric settings
-/// are. `0` is a real answer here (rotate and discard) rather than "use the
-/// default", so it passes through.
-pub fn normalized_log_keep(configured: u32) -> u32 {
-    if configured > MAX_LOG_KEEP {
-        crate::logger::warn(&format!(
-            "[logging] keep = {configured} exceeds the maximum of {MAX_LOG_KEEP} \
-             and is being clamped",
-        ));
-        return MAX_LOG_KEEP;
-    }
-    configured
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -180,7 +173,7 @@ pub struct LoggingConfig {
     pub max_bytes: u64,
     /// How many rotated copies to keep, numbered `dux.log.1` upwards. The
     /// oldest is deleted. `0` rotates and discards. Read through
-    /// [`normalized_log_keep`].
+    /// [`effective_log_keep`].
     pub keep: u32,
     /// Whether a rotated copy is gzipped to `dux.log.N.gz` in the background.
     pub compress: bool,
@@ -220,24 +213,6 @@ pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
 /// value can't ask the app to keep unbounded live PTYs per agent.
 pub const MAX_AGENT_TABS_MAX: u16 = 100;
 
-/// The effective per-agent tab cap: `0` (or an absent key) means "use the
-/// default"; larger values are clamped to [`MAX_AGENT_TABS_MAX`] with a warning,
-/// mirroring [`shutdown_grace`]'s clamp-at-use discipline so a bad value degrades
-/// gracefully instead of nuking the setting.
-pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
-    if configured == 0 {
-        return DEFAULT_AGENT_TABS_MAX;
-    }
-    if configured > MAX_AGENT_TABS_MAX {
-        crate::logger::warn(&format!(
-            "[ui] agent_tabs_max = {configured} exceeds the maximum of \
-             {MAX_AGENT_TABS_MAX} and is being clamped",
-        ));
-        return MAX_AGENT_TABS_MAX;
-    }
-    configured
-}
-
 /// Default cap on the file-search index flat walk (see
 /// [`crate::git::worktree_files`]). The web editor's file TREE is a lazy,
 /// per-directory browser and is never capped; this only bounds the flat list
@@ -254,12 +229,6 @@ pub const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
 /// The viewer keeps every line wrapped and ready to draw, so the bound is what
 /// keeps its memory and a resize's re-wrap small.
 pub const LOG_VIEWER_LINES_MAX: usize = 20_000;
-
-/// `[server] log_viewer_lines` as the viewer reads it: at least 1, at most
-/// [`LOG_VIEWER_LINES_MAX`].
-pub fn log_viewer_capacity(configured: usize) -> usize {
-    configured.clamp(1, LOG_VIEWER_LINES_MAX)
-}
 
 /// Default visible-time wait, in seconds, for a terminal pane's screen to
 /// arrive after its socket opens, before the pane stops waiting and offers
@@ -387,31 +356,6 @@ pub const MAX_PR_POLL_INTERVAL_SECONDS: u16 = 21_600;
 /// `1`) can't hammer the GitHub API every second.
 pub const MIN_PR_POLL_INTERVAL_SECONDS: u16 = 30;
 
-/// Normalize a configured `pr_poll_interval_seconds`: `0` is a valid
-/// "disable the blind poll" value and is preserved; any other value is clamped
-/// into `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INTERVAL_SECONDS]` (with a
-/// warning) so a fat-fingered entry can't hammer the API or neuter the backstop.
-pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
-    if seconds == 0 {
-        return 0;
-    }
-    if seconds > MAX_PR_POLL_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_interval_seconds = {seconds} exceeds the maximum of \
-             {MAX_PR_POLL_INTERVAL_SECONDS}s and is being clamped."
-        ));
-        return MAX_PR_POLL_INTERVAL_SECONDS;
-    }
-    if seconds < MIN_PR_POLL_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_interval_seconds = {seconds} is below the minimum of \
-             {MIN_PR_POLL_INTERVAL_SECONDS}s and is being clamped (use 0 to disable the poll)."
-        ));
-        return MIN_PR_POLL_INTERVAL_SECONDS;
-    }
-    seconds
-}
-
 /// Default seconds between blind GitHub PR-status polls for INACTIVE agents
 /// (twelve hours). An agent the sidebar has put under Inactive is one nobody is
 /// working in, so its pull request moves rarely and nothing on screen is waiting
@@ -423,36 +367,6 @@ pub const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
 /// useful backstop already, so a fat-fingered value is clamped rather than
 /// silently turning the slow clock off; `0` is how you turn it off on purpose.
 pub const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
-
-/// Normalize a configured `pr_poll_inactive_interval_seconds`: `0` means "never
-/// poll an inactive agent" and is preserved; any other value is clamped into
-/// `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS]`.
-///
-/// It shares the ACTIVE poll's floor deliberately: the floor exists to stop dux
-/// hammering the GitHub API, which is the same concern whichever clock the
-/// entries are on, and a second, different number would be one more thing to
-/// keep in step for no gain.
-pub fn normalized_pr_poll_inactive_interval(seconds: u32) -> u32 {
-    if seconds == 0 {
-        return 0;
-    }
-    if seconds > MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_inactive_interval_seconds = {seconds} exceeds the maximum of \
-             {MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS}s and is being clamped."
-        ));
-        return MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS;
-    }
-    let floor = u32::from(MIN_PR_POLL_INTERVAL_SECONDS);
-    if seconds < floor {
-        crate::logger::warn(&format!(
-            "pr_poll_inactive_interval_seconds = {seconds} is below the minimum of \
-             {floor}s and is being clamped (use 0 to stop polling inactive agents)."
-        ));
-        return floor;
-    }
-    seconds
-}
 
 /// Default seconds between re-checks of `gh` while dux cannot use it. Five
 /// minutes is short enough that a rate limit or a brief outage clears itself
@@ -569,20 +483,14 @@ pub fn normalized_terminal_font_size(size: u16) -> u16 {
 pub const MAX_ATTENTION_GRACE_SECONDS: u64 = 300;
 
 /// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
-/// every shutdown path uses, clamped to [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. Logs a
-/// warning when the configured value is above the ceiling so the operator learns
-/// their setting is being capped (and is nudged that the unit is seconds, not
-/// milliseconds). Centralized so the TUI quit, the web flip, and `dux server`
-/// all derive the grace identically.
+/// every shutdown path uses, through
+/// [`crate::config_effective::effective_shutdown_timeout_seconds`], so the TUI
+/// quit, the web flip, and `dux server` all derive the grace identically. Pure:
+/// a value above the ceiling is said once, when the config loads.
 pub fn shutdown_grace(seconds: u16) -> std::time::Duration {
-    if seconds > MAX_SHUTDOWN_TIMEOUT_SECONDS {
-        crate::logger::warn(&format!(
-            "shutdown_timeout_seconds = {seconds} exceeds the maximum of \
-             {MAX_SHUTDOWN_TIMEOUT_SECONDS}s and is being clamped (the value is in \
-             SECONDS, not milliseconds)."
-        ));
-    }
-    std::time::Duration::from_secs(u64::from(seconds.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)))
+    std::time::Duration::from_secs(u64::from(
+        crate::config_effective::effective_shutdown_timeout_seconds(seconds),
+    ))
 }
 
 /// Whether the server binds this machine's Tailscale address alongside the
@@ -930,7 +838,7 @@ pub struct ServerConfig {
     /// scrolling back. Older lines are dropped once it is full. `dux server`
     /// prints the same lines to its terminal, whose scrollback is the host
     /// terminal's own, so this only sizes the flip's viewer. Read through
-    /// [`log_viewer_capacity`]: 0 is read as 1 and values above
+    /// [`effective_log_viewer_lines`]: 0 is read as 1 and values above
     /// [`LOG_VIEWER_LINES_MAX`] (20000) as 20000. A negative value is not a valid
     /// value for it, so loading resets this one setting to its default (2000)
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
@@ -1856,7 +1764,7 @@ pub const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 /// fail every drop into it, once per drop, with a message about the wrong subject
 /// (`Invalid argument` for a NUL, `File name too long` for an over-long path).
 /// Refusing them at load is what the warn-once-and-degrade design exists to do.
-fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
+pub(crate) fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     let trimmed = configured.trim();
     if trimmed.is_empty() {
         return Some("it is empty");
@@ -1907,32 +1815,6 @@ fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     None
 }
 
-/// Normalize a configured `ui.upload_directory` into the relative path dux will
-/// actually create: the configured value with its components rejoined, or
-/// [`DEFAULT_UPLOAD_DIRECTORY`] when the configured one is unusable.
-///
-/// Deliberately PURE: it does not log. The on-disk value is warned about and
-/// corrected exactly once, at load, in [`load_config`]; this is then called from
-/// read paths (every upload resolves its destination through it) that run far
-/// more often than the config loads. Same split as
-/// [`normalized_terminal_font_size`].
-pub fn normalized_upload_directory(configured: &str) -> String {
-    if upload_directory_rejection(configured).is_some() {
-        return DEFAULT_UPLOAD_DIRECTORY.to_string();
-    }
-    // NORMAL components only. Anything a usable value can still hold at this
-    // point is a `.`, which names the directory it sits in and so contributes
-    // nothing to the walk that creates the path.
-    std::path::Path::new(configured.trim())
-        .components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 /// Default `ui.upload_pasted_text_chars`, chosen from what the measured CLIs
 /// actually do with a long paste rather than from caution about it.
 ///
@@ -1973,7 +1855,7 @@ pub const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
 /// Deliberately PURE: it does not log. The on-disk value is warned about and
 /// corrected exactly once, at load, in [`load_config`]; this is then called
 /// from read paths (the bootstrap projection) that run far more often than the
-/// config loads. Same split as [`normalized_upload_directory`].
+/// config loads. Same split as [`effective_upload_directory`].
 pub fn normalized_upload_pasted_text_chars(configured: usize) -> usize {
     if configured == 0 {
         return 0;
@@ -3029,6 +2911,13 @@ pub(crate) fn problem_kind(message: &str) -> String {
             };
         }
     }
+    // The name serde reports missing is a field of dux's own schema, never
+    // anything the file wrote, so it is kept: `missing field surface`.
+    if let Some(rest) = message.strip_prefix("missing field `")
+        && let Some((field, _)) = rest.split_once('`')
+    {
+        return format!("missing field {field}");
+    }
     if let Some(rest) = message.strip_prefix("unknown variant") {
         return match rest.find(", expected ") {
             Some(at) => format!(
@@ -3320,27 +3209,24 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
 /// Every key holding a password hash in `value` (a whole config file at
 /// `path`), with its path: a key named `password_hash` in any case, or one
 /// whose dotted name ends in it (`"auth.password_hash"`), anywhere but the
-/// real `[server.auth] password_hash`. Never inside a table whose keys are
-/// names the user chose (`[env]`, a provider, a project, `[macros]`,
-/// `[keys]`): there `password_hash` is just the name someone picked.
+/// real `[server.auth] password_hash`. Never where the key is a NAME the
+/// user chose (see [`names_a_user_entry`]): `[env] password_hash`, a provider
+/// or a macro called that, is just the name someone picked. A field INSIDE
+/// such an entry (a provider's, a macro's, a project's) is a field of dux's
+/// schema, so a `password_hash` there is misplaced like anywhere else.
 fn stray_password_hashes(
     value: &toml::Value,
     path: &mut Vec<String>,
     found: &mut Vec<Vec<String>>,
 ) {
-    if path
-        .first()
-        .is_some_and(|section| user_name_rule(section).is_some())
-    {
-        return;
-    }
     match value {
         toml::Value::Table(table) => {
             for (key, child) in table {
+                let a_name = names_a_user_entry(path);
                 path.push(key.clone());
                 let lower = key.to_lowercase();
                 let names_a_hash = lower == "password_hash" || lower.ends_with(".password_hash");
-                if names_a_hash && *path != ["server", "auth", "password_hash"] {
+                if names_a_hash && !a_name && *path != ["server", "auth", "password_hash"] {
                     found.push(path.clone());
                 }
                 stray_password_hashes(child, path, found);
@@ -3353,6 +3239,19 @@ fn stray_password_hashes(
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a key directly under `parent` (a path of keys, array entries
+/// left out) is a name the user chose: an entry of a map of user-chosen
+/// names (`[env]`, `[providers]`, `[macros]`, `[keys]`) or of a project's
+/// `env`. `[[projects]]` is a list, so a key directly in a project is one of
+/// a project's fields, never a name.
+fn names_a_user_entry(parent: &[String]) -> bool {
+    match parent {
+        [section] => user_name_rule(section).is_some_and(|rule| rule != NameRule::Any),
+        [projects, env] => projects == "projects" && env == "env",
+        _ => false,
     }
 }
 
@@ -4078,30 +3977,54 @@ fn schema_step(parent: &[String], segment: &str) -> SchemaStep {
 /// printed (they may under an entry whose name breaks its rule, when the
 /// schema knows each of them there; never under an unknown key).
 fn first_hidden(segments: &[String]) -> Option<(usize, bool)> {
+    let parts: Vec<PathPart<'_>> = segments.iter().map(|s| PathPart::Key(s)).collect();
+    first_hidden_part(&parts)
+}
+
+/// [`first_hidden`] for a path that may run through arrays, giving the
+/// index among `parts` of the first key it may not print. A key of an
+/// array's element is judged against the schema's element type: an entry of
+/// `[[projects]]` against a project's fields, and an element of any other
+/// array (a list setting, or an array where the schema has a table or a
+/// value) has no keys in the schema, so each of its keys is unknown.
+fn first_hidden_part(parts: &[PathPart<'_>]) -> Option<(usize, bool)> {
     let mut parent: Vec<String> = Vec::new();
-    for (index, segment) in segments.iter().enumerate() {
-        match schema_step(&parent, segment) {
-            SchemaStep::Known | SchemaStep::Entry { follows_rule: true } => {
-                parent.push(segment.clone());
+    // Whether the next key is a key of an array's element, and if so
+    // whether that array's elements have keys in the schema.
+    let mut element: Option<bool> = None;
+    let mut hidden: Option<(usize, SchemaStep)> = None;
+    for (index, part) in parts.iter().enumerate() {
+        let key = match part {
+            PathPart::Index(_) => {
+                element = Some(parent == ["projects"]);
+                continue;
             }
-            SchemaStep::Entry {
-                follows_rule: false,
-            } => {
-                parent.push(segment.clone());
-                let rest_known = segments[index + 1..].iter().all(|next| {
-                    let step = schema_step(&parent, next);
-                    parent.push(next.clone());
-                    matches!(
-                        step,
-                        SchemaStep::Known | SchemaStep::Entry { follows_rule: true }
-                    )
-                });
-                return Some((index, rest_known));
+            PathPart::Key(key) => *key,
+        };
+        let step = match element.take() {
+            Some(false) => SchemaStep::Unknown,
+            _ => schema_step(&parent, key),
+        };
+        parent.push(key.to_string());
+        let shown = matches!(
+            step,
+            SchemaStep::Known | SchemaStep::Entry { follows_rule: true }
+        );
+        match hidden {
+            None if !shown => hidden = Some((index, step)),
+            // Past a hidden key, the rest may be printed only under an entry
+            // whose name breaks its rule, when the schema knows each of them
+            // there.
+            Some((at, SchemaStep::Entry { .. })) if !shown => {
+                return Some((at, false));
             }
-            SchemaStep::Unknown => return Some((index, false)),
+            _ => {}
+        }
+        if matches!(hidden, Some((_, SchemaStep::Unknown))) {
+            break;
         }
     }
-    None
+    hidden.map(|(at, step)| (at, matches!(step, SchemaStep::Entry { .. })))
 }
 
 /// The entry at `segments` (its last one hidden), placed by its line in
@@ -4132,26 +4055,12 @@ pub enum PathPart<'a> {
     Index(usize),
 }
 
-/// [`shown_path`] for a path that may run through arrays of tables. An
-/// index takes nothing from the schema: the keys of an entry are judged
-/// against that array's own schema (`[[projects]]` against a project's), so
-/// an array the schema does not know is itself placed by its line, and so is
-/// every key under it.
+/// [`shown_path`] for a path that may run through arrays. The keys of an
+/// element are judged against the schema's element type (see
+/// [`first_hidden_part`]): `[[projects]]` against a project's fields, and
+/// any other array's elements have no keys in the schema, so each is placed
+/// by its line.
 pub fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
-    let keys: Vec<String> = parts
-        .iter()
-        .filter_map(|part| match part {
-            PathPart::Key(key) => Some((*key).to_string()),
-            PathPart::Index(_) => None,
-        })
-        .collect();
-    // Where each key sits among the parts.
-    let at: Vec<usize> = parts
-        .iter()
-        .enumerate()
-        .filter(|(_, part)| matches!(part, PathPart::Key(_)))
-        .map(|(index, _)| index)
-        .collect();
     let printed = |parts: &[PathPart<'_>]| {
         let mut out = String::new();
         for part in parts {
@@ -4167,10 +4076,9 @@ pub fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
         }
         out
     };
-    let Some((hidden, rest_known)) = first_hidden(&keys) else {
+    let Some((part, rest_known)) = first_hidden_part(parts) else {
         return printed(parts);
     };
-    let part = at[hidden];
     // The steps to the hidden key, an index taken with the key before it.
     let mut steps: Vec<KeyStep<'_>> = Vec::new();
     for (index, step) in parts[..=part].iter().enumerate() {
@@ -4220,6 +4128,12 @@ pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
     first_hidden(segments).is_some_and(|(index, _)| index + 1 == segments.len())
 }
 
+/// [`name_is_hidden`] for a path that may run through arrays: whether its
+/// last part, a key, is one the formatter never prints.
+pub fn part_is_hidden(parts: &[PathPart<'_>]) -> bool {
+    first_hidden_part(parts).is_some_and(|(index, _)| index + 1 == parts.len())
+}
+
 /// A setting's place in a problem sentence: `[ui] left_width_pct`, or
 /// `[env] the entry on line 2` where a segment may not be repeated.
 fn shown_place(raw: &str, segments: &[String]) -> String {
@@ -4265,7 +4179,14 @@ pub(crate) fn line_of_key(raw: &str, steps: &[KeyStep<'_>]) -> Option<usize> {
     for step in walk {
         table = match step {
             KeyStep::Key(key) => table.get(key)?.as_table_like()?,
-            KeyStep::Entry(key, index) => table.get(key)?.as_array_of_tables()?.get(*index)?,
+            KeyStep::Entry(key, index) => {
+                let item = table.get(key)?;
+                match item.as_array_of_tables() {
+                    Some(entries) => entries.get(*index)?,
+                    // An inline array of inline tables.
+                    None => item.as_array()?.get(*index)?.as_inline_table()?,
+                }
+            }
         };
     }
     let KeyStep::Key(name) = last else {
@@ -4297,7 +4218,17 @@ fn wrong_typed_inside(
     if let toml::Value::Table(entries) = value {
         for (key, entry) in entries {
             inner.push(key.clone());
-            if !section_solo_ok(section, alone(inner, entry)) {
+            // A field missing from the table holding `entry` makes `entry`
+            // fail alone too, but it is the table's problem, never its
+            // sibling's. A value that is not a table has no fields to miss,
+            // so one failing only that way is not descended into, and the
+            // table holding it is reported below; a table is descended into,
+            // where the same holds of its own values.
+            let alone_entry = alone(inner, entry);
+            if !section_solo_ok(section, alone_entry.clone())
+                && (entry.is_table()
+                    || !section_solo_problem(section, alone_entry).starts_with("missing field"))
+            {
                 wrong_typed_inside(section, inner, entry, found);
             }
             inner.pop();
@@ -4888,30 +4819,21 @@ fn config_from_text(raw: &str, report: Report) -> std::result::Result<Config, Co
 
 /// The corrections [`load_config`] makes in memory, each warned about once.
 fn apply_load_corrections(config: Config) -> Config {
-    // Surface a stale/unrecognized editor preference instead of silently falling
-    // back to the first editor detected on PATH, e.g. a config left pointing at a
-    // now-removed editor like "antigravity"/"windsurf".
-    let configured_editor = config.editor.default.trim();
-    if !configured_editor.is_empty() && crate::editor::editor_label(configured_editor).is_none() {
-        crate::logger::warn(&format!(
-            "config editor.default = \"{configured_editor}\" is not a recognized editor; \
-             open-in-editor will fall back to the first one detected on PATH \
-             (supported: cursor, vscode/code, zed, vscodium, sublime)"
-        ));
-    }
-    // Surface an unrecognized clipboard_passthrough here, once at load, so the
-    // per-tick forward path can parse without warning. from_config_str
-    // logs the warning as a side effect and returns the fallback we discard.
-    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
-    // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
-    // rather than on every dropped file, and let the resolution itself stay silent.
-    warn_on_unknown_web_dragdrop_paste_forms(
-        &config.providers,
-        config.source_text.as_str().unwrap_or_default(),
-    );
     let (config, corrections) = load_corrections(config);
     for (_, warning) in corrections {
         crate::logger::warn(&warning);
+    }
+    // Every value dux reads as another where it is used (a level it does not
+    // know, a ceiling, `0` meaning the default, an editor it does not know),
+    // said ONCE here, so the readers themselves stay silent: several of them
+    // run every engine tick or on every bootstrap fetch.
+    let raw = config.source_text.as_str().unwrap_or_default();
+    for correction in crate::config_effective::use_time_corrections(&config) {
+        crate::logger::warn(&format!(
+            "config {}: {}",
+            shown_path(raw, &correction.path),
+            correction.reason
+        ));
     }
     config
 }
@@ -5103,17 +5025,6 @@ fn terminal_font_size_load_warning(size: u16) -> Option<String> {
          {MIN_TERMINAL_FONT_SIZE}..={MAX_TERMINAL_FONT_SIZE} and is being reset to \
          the default of {DEFAULT_TERMINAL_FONT_SIZE}."
     ))
-}
-
-/// Warn once per unrecognized `providers.<name>.web_dragdrop_paste` value, at load.
-/// The value degrades to `bare` rather than failing the config load, exactly as an
-/// unrecognized `capabilities.clipboard_passthrough` does; without this the
-/// degradation would be silent and a user who typed `single-quoted` would never
-/// learn why their dropped path stopped being quoted.
-fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig, raw: &str) {
-    for warning in web_dragdrop_paste_warnings(providers, raw) {
-        crate::logger::warn(&warning);
-    }
 }
 
 /// Every warning a load would emit for an unrecognized
@@ -5800,7 +5711,7 @@ mod tests {
     #[test]
     fn a_usable_upload_directory_is_kept_as_written() {
         for value in [".dux/uploads", "uploads", "tmp/dux/drops", ".uploads"] {
-            assert_eq!(normalized_upload_directory(value), value);
+            assert_eq!(effective_upload_directory(value), value);
             assert_eq!(upload_directory_load_warning(value), None, "for {value:?}");
         }
     }
@@ -5810,9 +5721,9 @@ mod tests {
         // Surrounding whitespace and repeated or trailing separators are
         // cosmetic, not a rejection: the walk that creates the directory works
         // in components anyway, so these all name the same place.
-        assert_eq!(normalized_upload_directory("  uploads  "), "uploads");
-        assert_eq!(normalized_upload_directory("uploads/"), "uploads");
-        assert_eq!(normalized_upload_directory(".dux//uploads"), ".dux/uploads");
+        assert_eq!(effective_upload_directory("  uploads  "), "uploads");
+        assert_eq!(effective_upload_directory("uploads/"), "uploads");
+        assert_eq!(effective_upload_directory(".dux//uploads"), ".dux/uploads");
     }
 
     #[test]
@@ -5824,14 +5735,14 @@ mod tests {
         // position and drops it everywhere else, so `uploads/./x` was already
         // being accepted and quietly normalized to `uploads/x` while the
         // leading form was refused.
-        assert_eq!(normalized_upload_directory("./uploads"), "uploads");
-        assert_eq!(normalized_upload_directory("./"), DEFAULT_UPLOAD_DIRECTORY);
+        assert_eq!(effective_upload_directory("./uploads"), "uploads");
+        assert_eq!(effective_upload_directory("./"), DEFAULT_UPLOAD_DIRECTORY);
         assert_eq!(upload_directory_load_warning("./uploads"), None);
-        assert_eq!(normalized_upload_directory("uploads/./x"), "uploads/x");
+        assert_eq!(effective_upload_directory("uploads/./x"), "uploads/x");
         assert_eq!(upload_directory_load_warning("uploads/./x"), None);
         // A trailing `.` is dropped by `components()` too, leaving the named
         // directory behind, so it names a real place and is kept.
-        assert_eq!(normalized_upload_directory("uploads/."), "uploads");
+        assert_eq!(effective_upload_directory("uploads/."), "uploads");
         assert_eq!(upload_directory_load_warning("uploads/."), None);
     }
 
@@ -5870,7 +5781,7 @@ mod tests {
         ];
         for (value, expected_reason) in cases {
             assert_eq!(
-                normalized_upload_directory(value),
+                effective_upload_directory(value),
                 DEFAULT_UPLOAD_DIRECTORY,
                 "{value:?} must degrade to the default"
             );
@@ -6394,7 +6305,7 @@ mod tests {
             recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n").expect("recovers");
         assert_eq!(recovered.server.log_viewer_lines, DEFAULT_LOG_VIEWER_LINES);
         assert_eq!(recovered.server.port, 4321);
-        assert_eq!(log_viewer_capacity(0), 1);
+        assert_eq!(effective_log_viewer_lines(0), 1);
     }
 
     #[test]
@@ -7755,11 +7666,21 @@ max_websocket_connections = 16
         // section real older configs carry (no password hash in it) still loads.
         recover_config("[ui]\nsomething_new = 1\n[server.limits]\nx = 1\n").expect("loads");
         recover_config("[auth]\nusername = \"ada\"\n").expect("the retired section loads");
+        // A field inside a provider, a macro or a project is a field of
+        // dux's schema, never a name, so a hash there is misplaced.
+        for body in [
+            "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
+            "[macros.greet]\ntext = \"x\"\nsurface = \"agent\"\npassword_hash = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\npassword_hash = \"x\"\n",
+        ] {
+            let problems = misplaced_auth_problems(body);
+            assert_eq!(problems.len(), 1, "{body}: {problems:?}");
+            assert!(problems[0].contains("[server.auth]"), "{problems:?}");
+        }
         // A name the user chose is never a misplaced hash.
         for body in [
             "[env]\npassword_hash = \"x\"\n",
             "[providers.password_hash]\ncommand = \"mytool\"\n",
-            "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
             "[macros.password_hash]\ntext = \"x\"\n",
             "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword_hash = \"x\"\n",
             "[keys]\npassword_hash = [\"x\"]\n",
@@ -8151,32 +8072,32 @@ mod agent_tabs_cap_tests {
 
     #[test]
     fn normalized_agent_tabs_max_substitutes_default_for_zero() {
-        assert_eq!(normalized_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
+        assert_eq!(effective_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
     }
 
     /// `0` is a real answer for `keep` (rotate and discard) rather than "use the
     /// default", which is what tells it apart from the settings above.
     #[test]
     fn normalized_log_keep_passes_zero_and_sane_values_through() {
-        assert_eq!(normalized_log_keep(0), 0);
-        assert_eq!(normalized_log_keep(5), 5);
-        assert_eq!(normalized_log_keep(MAX_LOG_KEEP), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(0), 0);
+        assert_eq!(effective_log_keep(5), 5);
+        assert_eq!(effective_log_keep(MAX_LOG_KEEP), MAX_LOG_KEEP);
     }
 
     #[test]
     fn normalized_log_keep_clamps_an_absurd_value() {
-        assert_eq!(normalized_log_keep(100_000), MAX_LOG_KEEP);
-        assert_eq!(normalized_log_keep(u32::MAX), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(100_000), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(u32::MAX), MAX_LOG_KEEP);
     }
 
     #[test]
     fn normalized_agent_tabs_max_clamps_oversized_values() {
-        assert_eq!(normalized_agent_tabs_max(10_000), MAX_AGENT_TABS_MAX);
+        assert_eq!(effective_agent_tabs_max(10_000), MAX_AGENT_TABS_MAX);
     }
 
     #[test]
     fn normalized_agent_tabs_max_passes_through_sane_values() {
-        assert_eq!(normalized_agent_tabs_max(8), 8);
+        assert_eq!(effective_agent_tabs_max(8), 8);
     }
 
     #[test]
@@ -8227,23 +8148,23 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_inactive_interval_keeps_zero_and_clamps_the_rest() {
         // 0 is the user turning the slow clock off, not a mistake.
-        assert_eq!(normalized_pr_poll_inactive_interval(0), 0);
+        assert_eq!(effective_pr_poll_inactive_interval_seconds(0), 0);
         assert_eq!(
-            normalized_pr_poll_inactive_interval(43_200),
+            effective_pr_poll_inactive_interval_seconds(43_200),
             43_200,
             "a sane value passes through"
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(1),
+            effective_pr_poll_inactive_interval_seconds(1),
             u32::from(MIN_PR_POLL_INTERVAL_SECONDS),
             "the active poll's floor is shared, because it is the same API"
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(u32::MAX),
+            effective_pr_poll_inactive_interval_seconds(u32::MAX),
             MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS),
+            effective_pr_poll_inactive_interval_seconds(MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS),
             MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
             "the ceiling itself is allowed"
         );
@@ -8252,28 +8173,31 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_interval_preserves_zero_as_disabled() {
         // 0 is a valid "disable the blind poll" value, NOT substituted with a default.
-        assert_eq!(normalized_pr_poll_interval(0), 0);
+        assert_eq!(effective_pr_poll_interval_seconds(0), 0);
     }
 
     #[test]
     fn normalized_pr_poll_interval_clamps_oversized_values() {
         assert_eq!(
-            normalized_pr_poll_interval(u16::MAX),
+            effective_pr_poll_interval_seconds(u16::MAX),
             MAX_PR_POLL_INTERVAL_SECONDS
         );
     }
 
     #[test]
     fn normalized_pr_poll_interval_passes_through_sane_values() {
-        assert_eq!(normalized_pr_poll_interval(180), 180);
+        assert_eq!(effective_pr_poll_interval_seconds(180), 180);
     }
 
     #[test]
     fn normalized_pr_poll_interval_clamps_small_nonzero_up_to_floor() {
-        assert_eq!(normalized_pr_poll_interval(1), MIN_PR_POLL_INTERVAL_SECONDS);
+        assert_eq!(
+            effective_pr_poll_interval_seconds(1),
+            MIN_PR_POLL_INTERVAL_SECONDS
+        );
         // The floor itself passes through unchanged.
         assert_eq!(
-            normalized_pr_poll_interval(MIN_PR_POLL_INTERVAL_SECONDS),
+            effective_pr_poll_interval_seconds(MIN_PR_POLL_INTERVAL_SECONDS),
             MIN_PR_POLL_INTERVAL_SECONDS
         );
     }
@@ -8281,7 +8205,7 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_interval_allows_exact_ceiling() {
         assert_eq!(
-            normalized_pr_poll_interval(MAX_PR_POLL_INTERVAL_SECONDS),
+            effective_pr_poll_interval_seconds(MAX_PR_POLL_INTERVAL_SECONDS),
             MAX_PR_POLL_INTERVAL_SECONDS
         );
     }

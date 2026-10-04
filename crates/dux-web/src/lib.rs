@@ -158,11 +158,8 @@ fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
     let setting = &config.server.color;
     let color = crate::console::detect(setting);
     let console = Console::stdout(color, dux_core::serve_log::StdStreams::current());
+    // dux.log already has it: the load logs every value it reads as another.
     if !crate::console::is_known_color_setting(setting) {
-        dux_core::logger::warn(&format!(
-            "[server] color = \"{setting}\" is not one of auto/always/never, so dux is treating \
-             it as \"auto\". Fix [server] color in config.toml to silence this."
-        ));
         console.warn(&crate::console::unknown_color_warning(setting));
     }
     // Only on a terminal: a QR code in a piped log is a screenful of blocks
@@ -2074,8 +2071,17 @@ fn router_params(
             server.max_websocket_tabs_per_agent,
         )
         .with_search_index_max_files(server.search_index_max_files)
-        .with_pty_send_timeout_seconds(server.pty_send_timeout_seconds)
-        .with_heartbeat_deadline_seconds(server.heartbeat_deadline_seconds)
+        .with_pty_send_timeout_seconds(
+            dux_core::config_effective::effective_pty_send_timeout_seconds(
+                server.pty_send_timeout_seconds,
+            ),
+        )
+        .with_heartbeat_deadline_seconds(
+            dux_core::config_effective::effective_heartbeat_deadline_seconds(
+                server.heartbeat_deadline_seconds,
+                server.heartbeat_seconds,
+            ),
+        )
         .with_tree_list_max_concurrency(server.tree_list_max_concurrency)
         .with_release_notes_max_concurrency(server.release_notes_max_concurrency)
         .with_file_drop_limits(server.file_drop_max_bytes, server.file_drop_max_concurrency)

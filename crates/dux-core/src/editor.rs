@@ -160,6 +160,26 @@ pub fn editor_label(name: &str) -> Option<&'static str> {
         .map(|spec| spec.label)
 }
 
+/// The config key of the editor `name` names, by its config key, an alias or
+/// one of its commands, whether or not it is installed; `None` for an empty or
+/// unrecognized value. What [`crate::config_effective::effective_editor_default`]
+/// reads `[editor] default` with.
+pub fn configured_editor_key(name: &str) -> Option<&'static str> {
+    let normalized = normalize_editor_name(name);
+    if normalized.is_empty() {
+        return None;
+    }
+    EDITOR_SPECS
+        .iter()
+        .find(|spec| spec_matches(spec, &normalized))
+        .map(|spec| spec.config_key)
+}
+
+/// Every supported editor's config key, in the order dux prefers them.
+pub fn editor_config_keys() -> Vec<&'static str> {
+    EDITOR_SPECS.iter().map(|spec| spec.config_key).collect()
+}
+
 /// Whether a normalized editor name matches a spec by its config key, an alias,
 /// or one of its commands. `configured` must already be normalized.
 fn spec_matches(spec: &EditorSpec, configured: &str) -> bool {

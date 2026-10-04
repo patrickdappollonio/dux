@@ -2362,7 +2362,8 @@ impl App {
         if !has_terminals {
             return (area, None);
         }
-        let terminals_pct = self.terminal_pane_height_pct.clamp(10, 80);
+        let terminals_pct =
+            dux_core::config_effective::effective_pane_height_pct(self.terminal_pane_height_pct);
         let projects_pct = 100u16.saturating_sub(terminals_pct).max(20);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -4683,7 +4684,8 @@ impl App {
         let focused = self.focus == FocusPane::Files;
 
         if has_staged {
-            let pct = self.staged_pane_height_pct.clamp(10, 80);
+            let pct =
+                dux_core::config_effective::effective_pane_height_pct(self.staged_pane_height_pct);
             let unstaged_pct = 100u16.saturating_sub(pct).max(20);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -4706,7 +4708,8 @@ impl App {
     /// Render the "Staged Changes" file list and the commit input as two
     /// separate bordered blocks (bubbles).
     fn render_staged_with_commit(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
-        let commit_pct = self.commit_pane_height_pct.clamp(10, 80);
+        let commit_pct =
+            dux_core::config_effective::effective_pane_height_pct(self.commit_pane_height_pct);
         let staged_pct = 100u16.saturating_sub(commit_pct).max(20);
         let [files_area, commit_area] = Layout::default()
             .direction(Direction::Vertical)

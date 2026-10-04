@@ -9,6 +9,10 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use chrono::Utc;
 
 use crate::config::{DuxPaths, LoggingConfig};
+// The level type and its parser belong to `[logging] level`, so they live with
+// the setting: `config_effective::effective_log_level` is the one rule for what
+// a value means.
+use crate::config_effective::LogLevel;
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
@@ -28,47 +32,6 @@ static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
 
 struct Logger {
     log: RotatingLog,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-}
-
-impl LogLevel {
-    fn from_str(value: &str) -> Self {
-        match value {
-            "debug" => Self::Debug,
-            "error" => Self::Error,
-            "warn" => Self::Warn,
-            _ => Self::Info,
-        }
-    }
-
-    /// The inverse of the `as u8` cast used to store the level. Exhaustive on
-    /// the stored discriminants; anything else means a corrupted store, which
-    /// degrades to the same default `from_str` uses.
-    fn from_u8(value: u8) -> Self {
-        match value {
-            v if v == Self::Error as u8 => Self::Error,
-            v if v == Self::Warn as u8 => Self::Warn,
-            v if v == Self::Debug as u8 => Self::Debug,
-            _ => Self::Info,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Error => "ERROR",
-            Self::Warn => "WARN",
-            Self::Info => "INFO",
-            Self::Debug => "DEBUG",
-        }
-    }
 }
 
 pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
@@ -136,7 +99,10 @@ pub fn error(message: &str) {
 /// FILE is opened once for the process, so `logging.path` is startup-only and a
 /// reload cannot move it.
 pub fn set_level(level: &str) {
-    LEVEL.store(LogLevel::from_str(level) as u8, Ordering::Relaxed);
+    LEVEL.store(
+        crate::config_effective::effective_log_level(level) as u8,
+        Ordering::Relaxed,
+    );
 }
 
 /// Adopt new rotation settings. They are read afresh on every line written, so
@@ -161,12 +127,7 @@ pub(crate) fn rotation_for_test() -> (u64, u32, bool) {
 
 /// The name of the level `log` currently gates on.
 pub fn current_level() -> &'static str {
-    match LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)) {
-        LogLevel::Error => "error",
-        LogLevel::Warn => "warn",
-        LogLevel::Info => "info",
-        LogLevel::Debug => "debug",
-    }
+    LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)).as_str()
 }
 
 #[cfg(test)]
@@ -190,7 +151,7 @@ fn log(level: LogLevel, message: &str) {
     #[cfg(test)]
     CAPTURED.with(|cell| {
         if let Some(lines) = cell.borrow_mut().as_mut() {
-            lines.push(format!("{} {message}", level.as_str()));
+            lines.push(format!("{} {message}", level.label()));
         }
     });
     if level > LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)) {
@@ -202,7 +163,7 @@ fn log(level: LogLevel, message: &str) {
     let line = format!(
         "{} {:<5} {}\n",
         Utc::now().to_rfc3339(),
-        level.as_str(),
+        level.label(),
         message
     );
     logger.log.write_line(&line);
@@ -220,7 +181,7 @@ impl RotationSettings {
     fn from_config(config: &LoggingConfig) -> Self {
         Self {
             max_bytes: config.max_bytes,
-            keep: crate::config::normalized_log_keep(config.keep),
+            keep: crate::config::effective_log_keep(config.keep),
             compress: config.compress,
         }
     }
