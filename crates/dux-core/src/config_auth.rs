@@ -205,51 +205,74 @@ impl ServerAuthConfig {
     /// Every rule the deserializer enforces beyond types. Public so a writer
     /// can check a candidate before it lands on disk.
     pub fn validate(&self) -> Result<(), String> {
-        if !self.password_hash.is_empty() {
-            crate::auth::validate_password_hash(&self.password_hash).map_err(|e| e.to_string())?;
+        match self.problems().into_iter().next() {
+            Some(problem) => Err(problem),
+            None => Ok(()),
+        }
+    }
+
+    /// Every rule this section breaks, in [`Self::validate`]'s order.
+    /// Problems name settings and positions, never values: they reach the
+    /// status line, toasts and dux.log.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.password_hash.is_empty()
+            && let Err(error) = crate::auth::validate_password_hash(&self.password_hash)
+        {
+            problems.push(error.to_string());
         }
         if self.minimum_password_score > 4 {
-            return Err("minimum_password_score must be 0 to 4".to_string());
+            problems.push("minimum_password_score must be 0 to 4".to_string());
         }
         if self.session_idle_seconds == 0 {
-            return Err("session_idle_seconds must be at least 1".to_string());
+            problems.push("session_idle_seconds must be at least 1".to_string());
         }
         if self.max_concurrent_password_checks == 0 {
-            return Err(
+            problems.push(
                 "max_concurrent_password_checks must be at least 1, or nobody could log in"
                     .to_string(),
             );
         }
-        if self.max_password_bytes == 0 || self.max_password_bytes > MAX_PASSWORD_BYTES_LIMIT {
-            return Err(format!(
+        let max_bytes_valid =
+            self.max_password_bytes != 0 && self.max_password_bytes <= MAX_PASSWORD_BYTES_LIMIT;
+        if !max_bytes_valid {
+            problems.push(format!(
                 "max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"
             ));
         }
-        if self.minimum_password_length > self.max_password_bytes {
-            return Err(
+        if max_bytes_valid && self.minimum_password_length > self.max_password_bytes {
+            problems.push(
                 "minimum_password_length is larger than max_password_bytes, so no \
                  password could meet both"
                     .to_string(),
             );
         }
         if self.max_tracked_addresses == 0 {
-            return Err(
+            problems.push(
                 "max_tracked_addresses must be at least 1, or failed logins would never count"
                     .to_string(),
             );
         }
-        // Errors name settings and positions, never values: they reach the
-        // status line, toasts and dux.log.
         for (index, entry) in self.blocked_addresses.iter().enumerate() {
-            AddressBlock::parse(entry).map_err(|reason| {
-                format!(
+            if let Err(reason) = AddressBlock::parse(entry) {
+                problems.push(format!(
                     "blocked_addresses entry {} (counting from 1): {reason}",
                     index + 1
-                )
-            })?;
+                ));
+            }
         }
-        Ok(())
+        problems
     }
+}
+
+/// Every rule a `server.auth` table breaks (see
+/// [`ServerAuthConfig::problems`]), or the type error that stops it being
+/// read at all.
+pub fn rule_problems_of(auth: toml::Value) -> Result<Vec<String>, String> {
+    let raw: RawServerAuthConfig = auth
+        .try_into()
+        .map_err(|e: toml::de::Error| e.message().to_string())?;
+    Ok(ServerAuthConfig::from_raw(raw).problems())
 }
 
 /// The on-disk shape, read with no rules beyond types and known keys; the
@@ -307,7 +330,16 @@ impl TryFrom<RawServerAuthConfig> for ServerAuthConfig {
     type Error = String;
 
     fn try_from(raw: RawServerAuthConfig) -> Result<Self, String> {
-        let config = Self {
+        let config = Self::from_raw(raw);
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl ServerAuthConfig {
+    /// The section as read, before any rule is checked.
+    fn from_raw(raw: RawServerAuthConfig) -> Self {
+        Self {
             password_hash: raw.password_hash,
             require: raw.require,
             minimum_password_length: raw.minimum_password_length,
@@ -326,9 +358,7 @@ impl TryFrom<RawServerAuthConfig> for ServerAuthConfig {
             max_failed_logins_per_minute: raw.max_failed_logins_per_minute,
             max_tracked_addresses: raw.max_tracked_addresses,
             max_blocked_addresses: raw.max_blocked_addresses,
-        };
-        config.validate()?;
-        Ok(config)
+        }
     }
 }
 
@@ -343,16 +373,21 @@ pub struct AddressBlock {
 impl AddressBlock {
     /// Parse an entry. Surrounding whitespace is not accepted, so what the
     /// file says is exactly what is matched.
+    ///
+    /// An IPv4-mapped IPv6 entry (`::ffff:203.0.113.0/120`) whose prefix
+    /// reaches into the mapped part (96 or more) is the IPv4 range it covers
+    /// (`203.0.113.0/24`), so it reads and matches like the IPv4 form; with
+    /// a shorter prefix it stays an IPv6 range. Its prefix is checked
+    /// against 128, the length of what was written.
     pub fn parse(entry: &str) -> Result<Self, String> {
         let (addr, prefix) = match entry.split_once('/') {
             Some((addr, prefix)) => (addr, Some(prefix)),
             None => (entry, None),
         };
-        let network: IpAddr = addr
+        let written: IpAddr = addr
             .parse()
             .map_err(|_| "not an IP address or CIDR range".to_string())?;
-        let network = canonical(network);
-        let max = if network.is_ipv4() { 32 } else { 128 };
+        let max: u8 = if written.is_ipv4() { 32 } else { 128 };
         let prefix = match prefix {
             None => max,
             Some(text) => {
@@ -365,10 +400,24 @@ impl AddressBlock {
                 value
             }
         };
-        Ok(Self { network, prefix })
+        if let IpAddr::V6(v6) = written
+            && let Some(v4) = v6.to_ipv4_mapped()
+            && prefix >= 96
+        {
+            return Ok(Self {
+                network: IpAddr::V4(v4),
+                prefix: prefix - 96,
+            });
+        }
+        Ok(Self {
+            network: written,
+            prefix,
+        })
     }
 
-    /// Whether `ip` is inside this block.
+    /// Whether `ip` is inside this block. A client address is compared in
+    /// its canonical form ([`canonical`]): an IPv4 client, however it was
+    /// reported, is inside an IPv6 range that covers its mapped form.
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.network, canonical(ip)) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
@@ -377,7 +426,10 @@ impl AddressBlock {
             (IpAddr::V6(net), IpAddr::V6(ip)) => {
                 prefix_match(&net.octets(), &ip.octets(), self.prefix)
             }
-            _ => false,
+            (IpAddr::V6(net), IpAddr::V4(ip)) => {
+                prefix_match(&net.octets(), &ip.to_ipv6_mapped().octets(), self.prefix)
+            }
+            (IpAddr::V4(_), IpAddr::V6(_)) => false,
         }
     }
 }
@@ -530,5 +582,37 @@ mod tests {
         };
         let text = toml::to_string(&config).expect("serialize");
         assert_eq!(parse(&text).expect("parse back"), config);
+    }
+
+    /// An IPv4-mapped IPv6 range is the IPv4 range it covers when its
+    /// prefix reaches into the mapped part, and an IPv6 range otherwise;
+    /// either way it matches the canonical (IPv4) form of a client address.
+    #[test]
+    fn ipv4_mapped_ranges_are_valid_blocked_addresses() {
+        let block = AddressBlock::parse("::ffff:203.0.113.0/120").expect("valid");
+        assert_eq!(block.to_string(), "203.0.113.0/24");
+        assert!(block.contains("203.0.113.9".parse().unwrap()));
+        assert!(block.contains("::ffff:203.0.113.9".parse().unwrap()));
+        assert!(!block.contains("203.0.114.9".parse().unwrap()));
+
+        let all_ipv4 = AddressBlock::parse("::ffff:0:0/96").expect("valid");
+        assert!(all_ipv4.contains("198.51.100.1".parse().unwrap()));
+        assert!(all_ipv4.contains("::ffff:198.51.100.1".parse().unwrap()));
+        assert!(!all_ipv4.contains("2001:db8::1".parse().unwrap()));
+
+        let wide = AddressBlock::parse("::ffff:0:0/80").expect("valid, as an IPv6 range");
+        assert!(wide.contains("198.51.100.1".parse().unwrap()));
+        assert!(!wide.contains("2001:db8::1".parse().unwrap()));
+
+        let error = AddressBlock::parse("::ffff:203.0.113.0/129").expect_err("out of range");
+        assert!(error.contains("0 to 128"), "{error}");
+        assert!(
+            ServerAuthConfig {
+                blocked_addresses: vec!["::ffff:203.0.113.0/120".to_string()],
+                ..ServerAuthConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }

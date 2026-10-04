@@ -74,3 +74,61 @@ impl ConfigSurface for TuiConfigSurface {
         crate::config::render_config_with(config, &bindings)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// config.toml is a symlink whose target vanished while dux runs: the
+    /// terminal UI's reload is refused like a deleted file, the running
+    /// config (password included) stays, and nothing is written over the
+    /// symlink.
+    #[test]
+    fn a_reload_through_a_dangling_symlink_is_refused_and_keeps_the_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().unwrap();
+        let target = root.join("dotfiles-config.toml");
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .unwrap();
+        std::fs::write(
+            &target,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let running = crate::config::ensure_config(&paths).expect("starts");
+        assert!(running.server.auth.has_password());
+
+        std::fs::remove_file(&target).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        TuiConfigSurface.reload(paths.clone(), tx);
+        let result = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("reload ends")
+            {
+                WorkerEvent::ConfigReloadReady(result) => break *result,
+                _ => continue,
+            }
+        };
+        let message = result.expect_err("refused");
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(
+            std::fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!target.exists(), "nothing was created at the target");
+    }
+}

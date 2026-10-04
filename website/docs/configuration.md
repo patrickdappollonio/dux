@@ -64,6 +64,11 @@ dux config set providers.claude.command claude
 - `set` checks the value before writing it: a number has to be a number in range, a
   setting with a fixed set of values has to be one of them, and a list is written whole as
   one TOML array. Only that one line of the file changes; every comment stays.
+- `[server.auth]` settings are also checked against the rest of the section as the file
+  has it, so a `minimum_password_length` that does not fit your own `max_password_bytes`
+  is refused. When the section already has problems, `set` still fixes them one at a
+  time: a change is refused only if it adds a problem, and after each change `set` lists
+  what is still wrong, since dux will not start until all of it is fixed.
 - Providers are named by their name (`providers.<name>.<field>`, a new name adds a
   provider), and environment variables by theirs (`env.<NAME>`).
 - Environment values are treated as secrets, since that is where API tokens live.

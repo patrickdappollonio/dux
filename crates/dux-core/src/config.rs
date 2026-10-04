@@ -2943,6 +2943,30 @@ pub enum ConfigLoadProblem {
     /// The file was there when dux started and is gone now. Only a reload
     /// reports this: a first start with no file is the defaults.
     Missing,
+    /// The path is a symbolic link whose target (held here) does not exist.
+    /// Counted as missing, on a start as well as a reload: the link says
+    /// the user keeps their config somewhere, so the defaults (no password)
+    /// would be a guess.
+    DanglingLink(PathBuf),
+}
+
+/// The target of `path` when `path` is a symbolic link to something that
+/// does not exist, resolved against the link's own directory.
+pub fn dangling_link_target(path: &Path) -> Option<PathBuf> {
+    let link = std::fs::symlink_metadata(path).ok()?;
+    if !link.file_type().is_symlink() {
+        return None;
+    }
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let target = std::fs::read_link(path).ok()?;
+            Some(match path.parent() {
+                Some(dir) if target.is_relative() => dir.join(target),
+                _ => target,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// A config parse or type error, described without any of the file's text.
@@ -3035,6 +3059,7 @@ impl ConfigLoadProblem {
         match self {
             Self::Unreadable(reason) | Self::NotToml(reason) | Self::AuthInvalid(reason) => reason,
             Self::Missing => "the file no longer exists",
+            Self::DanglingLink(_) => "it is a symbolic link to a file that does not exist",
         }
     }
 }
@@ -3066,6 +3091,15 @@ impl std::fmt::Display for ConfigLoadError {
                 "{path} no longer exists, so dux cannot tell whether [server.auth] still sets a \
                  password, and it keeps the running settings, password included. Put the file \
                  back (or use Recover config to write the running settings to it), then reload."
+            ),
+            ConfigLoadProblem::DanglingLink(target) => write!(
+                f,
+                "{path} is a symbolic link to {}, which does not exist, so dux cannot tell \
+                 whether [server.auth] sets a password for the web UI: it does not start, and a \
+                 reload keeps the running settings, password included. Restore {} or point the \
+                 link at your config file, then start dux or reload again.",
+                target.display(),
+                target.display()
             ),
             ConfigLoadProblem::AuthInvalid(reason) => write!(
                 f,
@@ -3177,6 +3211,40 @@ fn is_auth_section_header(line: &str) -> bool {
         .and_then(|server| server.get("auth"))
         .and_then(|auth| auth.as_table())
         .is_some_and(|auth| !auth.is_implicit())
+}
+
+/// Every problem the `[server.auth]` section of a whole config file's text
+/// has, each described without positions (the same problem reads the same
+/// before and after an unrelated edit) and without values. Empty when the
+/// section loads. A `server` or `server.auth` that is not a table, or a
+/// value of the wrong type, is one problem; otherwise every rule the
+/// section breaks is listed.
+pub fn auth_problems_of(raw: &str) -> Vec<String> {
+    let file: toml::Table = match toml::from_str(raw) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![format!(
+                "the file is not valid TOML: {}",
+                problem_kind(error.message())
+            )];
+        }
+    };
+    let Some(server) = file.get("server") else {
+        return Vec::new();
+    };
+    let Some(server) = server.as_table() else {
+        return vec!["[server] is not a table".to_string()];
+    };
+    let Some(auth) = server.get("auth") else {
+        return Vec::new();
+    };
+    if !auth.is_table() {
+        return vec!["server.auth is not a table".to_string()];
+    }
+    match crate::config_auth::rule_problems_of(auth.clone()) {
+        Ok(problems) => problems,
+        Err(error) => vec![problem_kind(&error)],
+    }
 }
 
 /// Read one `server.auth` value through the same deserializer every other
@@ -3308,6 +3376,12 @@ pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, C
 /// reload reads the file its own way (the terminal UI's `ensure_config`,
 /// which would otherwise create a fresh default file).
 pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
+    if let Some(target) = dangling_link_target(&paths.config_path) {
+        return Err(ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: ConfigLoadProblem::DanglingLink(target),
+        });
+    }
     match std::fs::symlink_metadata(&paths.config_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ConfigLoadError {
             path: paths.config_path.clone(),
@@ -3344,6 +3418,10 @@ pub fn load_config_file_as_written(
             config_from_text_as_written(&raw).map_err(fail)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A link to a file that is gone is not "no file yet".
+            if let Some(target) = dangling_link_target(config_path) {
+                return Err(fail(ConfigLoadProblem::DanglingLink(target)));
+            }
             let mut config = Config::default();
             config.providers.ensure_defaults();
             Ok(config)
@@ -3356,6 +3434,10 @@ pub fn load_config_file_as_written(
 /// provider defaults, without the load corrections, and carrying the text
 /// itself as its [`Config::source_text`].
 pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    // `[server.auth]` is read from the user's own text first, so an error in
+    // it names the line in the file they have to fix: the migrations below
+    // rewrite other keys, which moves the lines after them.
+    auth_section_of(raw)?;
     // Apply load-time config migrations IN MEMORY at every entrypoint
     // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
     // retired-provider pruning), so `dux serve` honors deprecated keys
@@ -4741,6 +4823,84 @@ mod tests {
             let base = source.written_base().expect("a written base");
             assert!(base.source_text.as_str().is_none(), "round {round}");
         }
+    }
+
+    fn a_password_hash() -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .expect("hash")
+    }
+
+    /// config.toml kept as a symlink (into a dotfiles repository, say) whose
+    /// target disappears while dux runs: a reload is refused like a deleted
+    /// file, naming the link and its missing target, never read as the
+    /// defaults, which have no password.
+    #[test]
+    fn a_reload_through_a_dangling_symlink_keeps_the_running_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let target = dir.path().join("dotfiles-config.toml");
+        std::fs::write(
+            &target,
+            format!("[server.auth]\npassword_hash = \"{}\"\n", a_password_hash()),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let running = load_config(&paths).expect("starts");
+        assert!(running.server.auth.has_password());
+
+        std::fs::remove_file(&target).unwrap();
+        let error = load_config_for_reload(&paths).expect_err("refused");
+        assert_eq!(
+            error.problem,
+            ConfigLoadProblem::DanglingLink(target.clone())
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&paths.config_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(config_present_for_reload(&paths).is_err());
+        assert!(
+            std::fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// A start through a config.toml symlink whose target is missing is
+    /// refused, naming the link and the target: the defaults would mean no
+    /// password, and nothing is created at either path.
+    #[test]
+    fn a_start_through_a_dangling_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let target = dir.path().join("gone.toml");
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let error = load_config(&paths).expect_err("refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&paths.config_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(!target.exists(), "nothing was created at the target");
+    }
+
+    /// `dux server` refuses an invalid [server.auth] at startup and names the
+    /// line in the user's own file, not in the text the in-memory migrations
+    /// made of it (a deprecated `bind` becomes two keys, shifting lines).
+    #[test]
+    fn the_startup_error_names_the_line_in_the_users_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let body = "[server]\nbind = \"0.0.0.0:9000\"\n\n[server.auth]\nsession_idle_seconds = \"sixty\"\n";
+        std::fs::write(&paths.config_path, body).unwrap();
+        let error = load_config(&paths).expect_err("refused").to_string();
+        assert!(error.contains("line 5,"), "{error}");
     }
 
     #[test]

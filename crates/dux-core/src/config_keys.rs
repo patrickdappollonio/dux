@@ -410,11 +410,26 @@ fn parse_literal(raw: &str) -> Result<Value, String> {
 }
 
 /// Deserialize a config holding only this one value, so the setting's own
-/// type and range decide (a port above 65535, a negative count).
+/// type and range decide (a port above 65535, a negative count). A
+/// `server.auth` setting is checked for its type only here: its rules,
+/// cross-field ones included, are checked against the file's own values
+/// with this one applied, under the lock (see [`write_value`]), never
+/// against the defaults.
 fn check_alone(key: &Key, value: &Value) -> Result<(), String> {
     let mut doc = DocumentMut::new();
     set_in_doc(&mut doc, &key.path, value.clone()).map_err(|e| e.to_string())?;
-    toml::from_str::<Config>(&doc.to_string())
+    let text = doc.to_string();
+    if key
+        .path
+        .starts_with(&["server".to_string(), "auth".to_string()])
+    {
+        let auth = toml::from_str::<toml::Table>(&text)
+            .ok()
+            .and_then(|file| file.get("server")?.get("auth").cloned())
+            .ok_or_else(|| "not a server.auth setting".to_string())?;
+        return crate::config_auth::rule_problems_of(auth).map(|_| ());
+    }
+    toml::from_str::<Config>(&text)
         .map(|_| ())
         .map_err(|e| e.message().to_string())
 }
@@ -478,6 +493,9 @@ pub struct SetReport {
     pub previous: Option<String>,
     /// The value written, as TOML.
     pub now: String,
+    /// What is still wrong with `[server.auth]` after the write: a set may
+    /// repair one of several broken values, and says what is left.
+    pub remaining_problems: Vec<String>,
 }
 
 /// Write one plain setting into the config file at `config_path`, through
@@ -504,15 +522,20 @@ fn write_value(
     value: Value,
 ) -> Result<SetReport> {
     let now = bare(&value);
-    let previous = crate::config_write::mutate_config_file_with(config_path, missing, |doc| {
-        let previous = value_in_doc(doc, path);
-        set_in_doc(doc, path, value)?;
-        Ok(previous)
-    })?;
+    // A set may leave problems `[server.auth]` already had, so a section
+    // with several broken values can be repaired one value at a time; one
+    // that adds a problem is refused.
+    let (previous, remaining_problems) =
+        crate::config_write::mutate_config_file_repairing(config_path, missing, |doc| {
+            let previous = value_in_doc(doc, path);
+            set_in_doc(doc, path, value)?;
+            Ok(previous)
+        })?;
     Ok(SetReport {
         path: path.join("."),
         previous,
         now,
+        remaining_problems,
     })
 }
 
@@ -1007,5 +1030,99 @@ port = 3890
             panic!("a table is printed");
         };
         assert!(table.contains("password_hash"), "{table}");
+    }
+
+    /// A section with two invalid values can be repaired one value at a
+    /// time: a set is refused only for a problem it would ADD, and it says
+    /// which problems are left.
+    #[test]
+    fn a_set_repairs_one_of_two_broken_values_and_names_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[server.auth]\nsession_idle_seconds = 0\nmax_tracked_addresses = 0\n",
+        )
+        .unwrap();
+        let report = set_plain(
+            &path,
+            &lookup("server.auth.session_idle_seconds").unwrap(),
+            "60",
+        )
+        .expect("the first fix is allowed");
+        assert_eq!(
+            report.remaining_problems.len(),
+            1,
+            "{:?}",
+            report.remaining_problems
+        );
+        assert!(report.remaining_problems[0].contains("max_tracked_addresses"));
+        let report = set_plain(
+            &path,
+            &lookup("server.auth.max_tracked_addresses").unwrap(),
+            "10000",
+        )
+        .expect("the second fix is allowed");
+        assert!(
+            report.remaining_problems.is_empty(),
+            "{:?}",
+            report.remaining_problems
+        );
+        crate::config::auth_section_of(&std::fs::read_to_string(&path).unwrap())
+            .expect("the section is valid again");
+    }
+
+    /// A set that adds a problem is refused even while another one is
+    /// already there, and nothing is written.
+    #[test]
+    fn a_set_that_adds_a_problem_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[server.auth]\nsession_idle_seconds = 0\n";
+        std::fs::write(&path, text).unwrap();
+        let error = set_plain(
+            &path,
+            &lookup("server.auth.max_tracked_addresses").unwrap(),
+            "0",
+        )
+        .expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("max_tracked_addresses"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// The rule that minimum_password_length fits in max_password_bytes is
+    /// checked against the file's own values with the new one applied,
+    /// never the defaults, in both directions.
+    #[test]
+    fn cross_field_rules_are_checked_against_the_files_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server.auth]\nminimum_password_length = 8\n").unwrap();
+        set_plain(
+            &path,
+            &lookup("server.auth.max_password_bytes").unwrap(),
+            "8",
+        )
+        .expect("8 fits a minimum of 8");
+        std::fs::write(&path, "[server.auth]\nmax_password_bytes = 4096\n").unwrap();
+        set_plain(
+            &path,
+            &lookup("server.auth.minimum_password_length").unwrap(),
+            "2000",
+        )
+        .expect("2000 fits a maximum of 4096");
+        let error = set_plain(
+            &path,
+            &lookup("server.auth.minimum_password_length").unwrap(),
+            "5000",
+        )
+        .expect_err("5000 does not fit 4096");
+        assert!(
+            format!("{error:#}").contains("max_password_bytes"),
+            "{error:#}"
+        );
     }
 }

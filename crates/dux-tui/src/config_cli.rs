@@ -126,6 +126,16 @@ pub(crate) fn run_set(
                 report.now,
                 paths.config_path.display()
             )?;
+            if !report.remaining_problems.is_empty() {
+                writeln!(
+                    out,
+                    "[server.auth] still has problems, and dux will not start until they are \
+                     fixed:"
+                )?;
+                for problem in &report.remaining_problems {
+                    writeln!(out, "  - {problem}")?;
+                }
+            }
         }
     }
     let outcome = dux_core::reload_signal::signal_running_dux(&paths.lock_path);

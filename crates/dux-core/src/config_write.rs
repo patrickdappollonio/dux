@@ -188,6 +188,8 @@ fn auth_refusal(path: &Path, contents: &str, reason: &str, act: &str) -> anyhow:
 
 /// [`write_config_atomic`] for a caller already holding the lock.
 fn write_config_atomic_unlocked(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    let target = write_target(path)?;
+    let path = target.as_path();
     let dir = path
         .parent()
         .with_context(|| format!("config path {} has no parent directory", path.display()))?;
@@ -213,6 +215,31 @@ fn write_config_atomic_unlocked(path: &Path, contents: &str, durability: Durabil
         .map_err(|e| e.error)
         .with_context(|| format!("failed to rename temp config over {}", path.display()))?;
     Ok(())
+}
+
+/// Where a write of the config at `path` lands. A symbolic link is written
+/// through, to the file it points at (renaming over the link would replace
+/// it with a plain file). A link whose target does not exist is refused,
+/// naming both: nothing is created or replaced at either path, because the
+/// link says the user keeps their config somewhere dux cannot see now.
+fn write_target(path: &Path) -> Result<PathBuf> {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Ok(path.to_path_buf());
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(target) = crate::config::dangling_link_target(path) {
+        anyhow::bail!(
+            "{} is a symbolic link to {}, which does not exist; dux writes only through the \
+             link and will not create or replace either, so nothing was written. Restore {} or \
+             point the link at your config file.",
+            path.display(),
+            target.display(),
+            target.display()
+        );
+    }
+    fs::canonicalize(path).with_context(|| format!("failed to resolve {}", path.display()))
 }
 
 /// Atomic write at the default (Fsync) durability. Kept for existing callers.
@@ -1285,6 +1312,36 @@ pub fn mutate_config_file_with<T>(
     missing: MissingConfig<'_>,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
 ) -> Result<T> {
+    mutate_config_file_ruled(config_path, missing, AuthRule::Valid, change)
+        .map(|(outcome, _)| outcome)
+}
+
+/// [`mutate_config_file_with`] for a change that may leave problems the
+/// file's `[server.auth]` ALREADY has, so a section with several broken
+/// values can be repaired one at a time. A change that adds a problem is
+/// refused, naming it, and nothing is written. Returns the problems left.
+pub fn mutate_config_file_repairing<T>(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<(T, Vec<String>)> {
+    mutate_config_file_ruled(config_path, missing, AuthRule::NoNewProblems, change)
+}
+
+/// What a locked change must leave of `[server.auth]`.
+enum AuthRule {
+    /// A section that loads.
+    Valid,
+    /// No problem the file did not have before the change.
+    NoNewProblems,
+}
+
+fn mutate_config_file_ruled<T>(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    rule: AuthRule,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<(T, Vec<String>)> {
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
@@ -1305,13 +1362,33 @@ pub fn mutate_config_file_with<T>(
             crate::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
+    let before = crate::config::auth_problems_of(&raw);
     let outcome = change(&mut doc)?;
     let text = doc.to_string();
-    if let Err(problem) = crate::config::auth_section_of(&text) {
-        return Err(auth_refusal(config_path, &text, problem.reason(), "change"));
-    }
+    let remaining = match rule {
+        AuthRule::Valid => {
+            if let Err(problem) = crate::config::auth_section_of(&text) {
+                return Err(auth_refusal(config_path, &text, problem.reason(), "change"));
+            }
+            Vec::new()
+        }
+        AuthRule::NoNewProblems => {
+            let after = crate::config::auth_problems_of(&text);
+            let added: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
+            if !added.is_empty() {
+                let added: Vec<&str> = added.iter().map(|p| p.as_str()).collect();
+                return Err(auth_refusal(
+                    config_path,
+                    &text,
+                    &added.join("; "),
+                    "change",
+                ));
+            }
+            after
+        }
+    };
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
-    Ok(outcome)
+    Ok((outcome, remaining))
 }
 
 /// Write the whole `[server.auth]` section from `auth`, for a render of a
@@ -5520,6 +5597,98 @@ second_note = \"nowhere to go\"
                 text,
                 "nothing was written"
             );
+        }
+    }
+
+    /// A config.toml kept as a symlink stays one: every write goes to the
+    /// file the link points at, never replacing the link with a file.
+    #[test]
+    fn writes_go_through_a_config_symlink_to_its_target() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dotfiles = dir.path().join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("dux.toml");
+        let link = dir.path().join("config.toml");
+        fs::write(&target, "[ui]\nleft_width_pct = 20\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let is_link = || {
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        };
+
+        mutate_config_file(&link, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            Ok(())
+        })
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 30")
+        );
+
+        let loaded = crate::config::load_config_file(&link).unwrap();
+        let mut config = loaded.clone();
+        config.ui.left_width_pct = 35;
+        save_config_three_way(
+            &link,
+            Some(SaveBase::read(&loaded)),
+            &config,
+            Durability::NoFsync,
+        )
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 35")
+        );
+
+        replace_config_file(&link, |_| {
+            Ok(("[ui]\nleft_width_pct = 40\n".to_string(), ()))
+        })
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 40")
+        );
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the target is kept owner-only");
+    }
+
+    /// Nothing is created or replaced at a config.toml symlink whose target
+    /// is missing: every writer refuses, naming the link and its target.
+    #[test]
+    fn no_writer_creates_anything_at_a_dangling_config_symlink() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let target = dir.path().join("gone.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let results = [
+            mutate_config_file(&link, |doc| {
+                doc["ui"]["left_width_pct"] = toml_edit::value(30);
+                Ok(())
+            })
+            .map(|_| ()),
+            replace_config_file(&link, |_| Ok(("[ui]\n".to_string(), ()))),
+            write_config_secure(&link, "[ui]\n"),
+            save_config_three_way(&link, None, &Config::default(), Durability::NoFsync).map(|_| ()),
+        ];
+        for result in results {
+            let message = format!("{:#}", result.expect_err("refused"));
+            assert!(message.contains(&target.display().to_string()), "{message}");
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!target.exists(), "nothing was created at the target");
         }
     }
 }

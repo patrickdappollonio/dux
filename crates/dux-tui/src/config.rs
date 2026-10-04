@@ -18,6 +18,15 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // emit the commented template, not a bare one.
     install_canonical_renderer();
     paths.ensure_dirs()?;
+    // A config.toml symlink to a file that is gone is not a first start: it
+    // stops the start, and nothing is created at the link or its target.
+    if let Some(target) = dux_core::config::dangling_link_target(&paths.config_path) {
+        return Err(dux_core::config::ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: dux_core::config::ConfigLoadProblem::DanglingLink(target),
+        }
+        .into());
+    }
     if !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
@@ -363,9 +372,12 @@ fn config_schema() -> Vec<ConfigEntry> {
              #\n\
              # dux leaves the worktrees/ directory, dux.lock, and a themes/ directory you\n\
              # create alone; they are covered by the 0700 on the directory above them.\n\
-             # It never follows a symlink when setting a mode, so if this file is a link\n\
-             # into a dotfiles repository the file in that repository is untouched. And a\n\
-             # mode it cannot set is a warning in dux.log, not an error: dux still starts.",
+             # If this file is a symlink (into a dotfiles repository, say), saves write\n\
+             # through it to the file it points at, and the link stays. If that file is\n\
+             # missing, dux does not start and a reload keeps the running settings; it\n\
+             # never creates the file or replaces the link. The startup pass that sets\n\
+             # modes never follows a symlink. And a mode it cannot set is a warning in\n\
+             # dux.log, not an error: dux still starts.",
         ),
         ConfigEntry::Blank,
         ConfigEntry::Field {
@@ -4161,6 +4173,50 @@ args = [\"-l\"]
         fs::write(&paths.config_path, "[server]\ntailscale_enabled = true\n").expect("seed");
         let err = ensure_config(&paths).expect_err("the migration needs the lock");
         assert!(format!("{err:#}").contains("config lock"), "{err:#}");
+    }
+
+    /// A config.toml symlink whose target is missing stops the start, naming
+    /// the link and the target, and nothing is created at either path; a
+    /// symlink whose target is there stays a symlink when the start migrates
+    /// the file.
+    #[test]
+    fn ensure_config_keeps_a_config_symlink_and_refuses_a_dangling_one() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root: root.clone(),
+        };
+        let target = root.join("dotfiles.toml");
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let error = format!("{:#}", ensure_config(&paths).expect_err("refused"));
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        assert!(
+            error.contains(&paths.config_path.display().to_string()),
+            "{error}"
+        );
+        assert!(!target.exists(), "nothing was created at the target");
+        assert!(
+            fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        fs::write(&target, "[server]\ntailscale_enabled = true\n").unwrap();
+        ensure_config(&paths).expect("starts");
+        assert!(
+            fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the migration wrote through the link"
+        );
+        let migrated = fs::read_to_string(&target).unwrap();
+        assert!(!migrated.contains("tailscale_enabled"), "{migrated}");
     }
 
     #[test]
