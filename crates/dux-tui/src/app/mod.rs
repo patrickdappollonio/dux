@@ -789,9 +789,10 @@ pub struct App {
     /// `reload_config_from_disk` mints a [`dux_core::engine::HandlerStatusOp`]
     /// only when a reload worker actually spawned, shows its keyed busy, and
     /// stashes it here (a reload is terminal, so an `Option` suffices). The
-    /// matching `ApplyReloadedConfig` (success) or `OpenConfigReloadFailedModal`
-    /// (failure) handler pops the op and resolves it against the handler-computed
-    /// [`TuiConfigReloadOutcome`].
+    /// matching `ApplyReloadedConfig` (applied, or adopted with a failed step),
+    /// `ConfigAdopted` (adopted with a failed step) or
+    /// `OpenConfigReloadFailedModal` (refused) handler pops the op and resolves
+    /// it against the handler-computed [`TuiConfigReloadOutcome`].
     /// The shared engine `ConfigReloadReady`/`ApplyReloadedConfig` logic (which
     /// also drives the web and replays deferred commands) is untouched: only the
     /// TUI's view-handler final is routed through the op.
@@ -5755,10 +5756,11 @@ impl App {
         self.apply_reaction(reaction);
         if spawned {
             // Mint the reload's keyed busy op. The TUI view handler for the shared
-            // `ApplyReloadedConfig` (success) / `OpenConfigReloadFailedModal`
-            // (failure) reactions resolves it: a validation failure into this
-            // surface's own error, an apply outcome into a clear, because that
-            // sentence is owed to both surfaces and travels the worker lane.
+            // `ApplyReloadedConfig` / `ConfigAdopted` (applied or adopted) and
+            // `OpenConfigReloadFailedModal` (refused) reactions resolves it: a
+            // refused file into this surface's own error, an apply outcome into
+            // a clear, because that sentence is owed to both surfaces and
+            // travels the worker lane.
             let op = dux_core::engine::status_op("Reloading config.toml.").resolve_in_handler(
                 |o: &TuiConfigReloadOutcome| match o {
                     // Both apply outcomes are authored in `config_reload_status`
@@ -5849,7 +5851,7 @@ impl App {
         )?;
         let before = std::mem::replace(&mut self.engine.config, config);
         self.engine.retune_after_config_swap();
-        self.run_config_swap_effects(&before, github_was_enabled, true);
+        self.run_config_swap_effects(&before, github_was_enabled);
         if let Some(message) = theme_warning {
             self.set_pinned_warning(message);
         }
@@ -5859,18 +5861,13 @@ impl App {
     /// Everything a reload owes once `engine.config` holds the new config,
     /// compared with `before`, the config it replaced: the view, the project
     /// list, the GitHub integration, the serve and Tailscale switches.
-    /// `github_was_enabled` is whether the integration was on before, and
-    /// `gh_probe_owed` whether this caller still owes the fresh `gh` answer
-    /// turning it on asks for (the engine's own apply has already asked).
-    /// Runs after a successful apply and after one that failed but adopted
-    /// the config anyway, so neither claims a setting that is not in force.
-    pub(crate) fn run_config_swap_effects(
-        &mut self,
-        before: &Config,
-        github_was_enabled: bool,
-        gh_probe_owed: bool,
-    ) {
-        if gh_probe_owed && !github_was_enabled && self.engine.github_integration_enabled {
+    /// `github_was_enabled` is whether the integration was on before; the
+    /// `gh` probe turning it on owes is asked for here and nowhere else on
+    /// this surface. Runs after a successful apply and after one that failed
+    /// but adopted the config anyway, so neither claims a setting that is not
+    /// in force.
+    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
+        if !github_was_enabled && self.engine.github_integration_enabled {
             // Off-to-on through a config reload is the same transition as the
             // palette toggle, and needs the same fresh answer from `gh`.
             self.engine.spawn_gh_status_check();

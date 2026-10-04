@@ -862,7 +862,7 @@ impl App {
                 // apply, so no setting is claimed that is not in force; the
                 // failure is said last, so it holds the line.
                 self.engine.keep_reloaded_config(fallback);
-                self.run_config_swap_effects(&before, github_was_enabled, true);
+                self.run_config_swap_effects(&before, github_was_enabled);
                 self.note_config_adopted(&before);
                 TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
             }
@@ -883,14 +883,14 @@ impl App {
     /// reload's swap owes runs against `before`, the config it replaced, and
     /// the reload answers as an apply that failed, the same answer the
     /// terminal UI's own failed apply gives. `github_was_enabled` is the
-    /// engine's own state before its apply, which already asked `gh` for a
-    /// fresh answer where one was owed.
+    /// engine's own state before the reload; its apply asked `gh` for
+    /// nothing, so this surface asks where a reload owes it.
     fn apply_config_adopted(&mut self, before: Config, github_was_enabled: bool, error: String) {
         let adopted = self.engine.config.clone();
         // The failure is the message, so the theme's own warning is left to
         // the next reload.
         let _ = self.take_reload_view_state(&adopted);
-        self.run_config_swap_effects(&before, github_was_enabled, false);
+        self.run_config_swap_effects(&before, github_was_enabled);
         self.note_config_adopted(&before);
         let outcome = TuiConfigReloadOutcome::ApplyFailed(error);
         if let Some(op) = self.pending_config_reload_op.take() {

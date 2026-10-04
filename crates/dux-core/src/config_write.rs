@@ -463,19 +463,6 @@ struct MergeBase<'a> {
     base: &'a Table,
 }
 
-impl<'a> MergeBase<'a> {
-    fn child(&self, key: &str) -> Option<MergeBase<'a>> {
-        let base = self.base.get(key).and_then(Item::as_table)?;
-        Some(MergeBase {
-            raw: self
-                .raw
-                .and_then(|raw| raw.get(key))
-                .and_then(Item::as_table),
-            base,
-        })
-    }
-}
-
 /// Copy into `target` (the file) what memory changed relative to the base,
 /// recursing into tables (see [`patch_config_file_three_way`] for the
 /// rules). `disk` is the file before this save. With no base, everything
@@ -504,10 +491,22 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
         // written.
         if disk.get(key).is_none() {
             match (ours_item, base_item) {
-                (Item::Table(ours_table), Some(Item::Table(_))) => {
+                (Item::Table(ours_table), Some(Item::Table(base_table))) => {
+                    // What dux has seen there, in either form: an inline
+                    // section deleted by hand was seen, so what it held
+                    // stays deleted.
+                    let raw_table = raw_item.and_then(table_like);
                     let empty = Table::new();
                     let mut out = Table::new();
-                    merge_changed(&mut out, &empty, base_side.child(key), ours_table);
+                    merge_changed(
+                        &mut out,
+                        &empty,
+                        Some(MergeBase {
+                            raw: raw_table.as_ref(),
+                            base: base_table,
+                        }),
+                        ours_table,
+                    );
                     if !out.is_empty() {
                         put_in_place(target, key, Item::Table(out));
                     }
@@ -570,7 +569,15 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
             (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
                 if base_item.is_some_and(Item::is_table) =>
             {
-                merge_changed(t, disk_table, base_side.child(key), ours_table);
+                // What dux has seen there, in either form: a section the user
+                // rewrote from inline to a table was seen with every key it
+                // held, so one left out in the rewrite stays out.
+                let raw_table = raw_item.and_then(table_like);
+                let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+                    raw: raw_table.as_ref(),
+                    base,
+                });
+                merge_changed(t, disk_table, child, ours_table);
             }
             // An array the base never had (memory and the file each started
             // one) is merged against an empty one, so the file's own entries
@@ -808,6 +815,21 @@ fn entry_closeness(a: &Table, b: &Table) -> u8 {
     }
 }
 
+/// `entry` with only the keys dux writes for a project (see
+/// [`merge_array_of_tables`]).
+fn managed_keys(entry: &Table) -> Table {
+    let mut managed = entry.clone();
+    let unmanaged: Vec<String> = managed
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| is_unmanaged_project_key(key))
+        .collect();
+    for key in unmanaged {
+        managed.remove(&key);
+    }
+    managed
+}
+
 /// An entry's text for comparing base and memory. When the file's own entry
 /// has no `id`, the id is left out: each parse mints one, so it says nothing
 /// about whether memory changed the entry.
@@ -839,16 +861,26 @@ fn merge_array_of_tables(
         *target = ours.clone();
         return;
     };
+    // Memory and the base are compared on the keys dux manages only. The
+    // user's own keys in an entry (a note, a fork's setting) are carried into
+    // memory's rendering of the file by a guess that cannot tell two id-less
+    // entries at one path apart once one is renamed, so they have no say
+    // here: the file's own entry keeps them, whatever the guess was.
+    let ours_full: Vec<&Table> = ours.iter().collect();
+    let ours_managed: Vec<Table> = ours_full.iter().map(|entry| managed_keys(entry)).collect();
+    let bases_managed: Vec<Table> = base.iter().map(managed_keys).collect();
     let disks: Vec<&Table> = disk.iter().collect();
-    let bases: Vec<&Table> = base.iter().collect();
+    let bases: Vec<&Table> = bases_managed.iter().collect();
     let raws: Vec<&Table> = raw.map(|raw| raw.iter().collect()).unwrap_or_default();
-    let ours: Vec<&Table> = ours.iter().collect();
+    let ours: Vec<&Table> = ours_managed.iter().collect();
     let mut disk_used = vec![false; disks.len()];
     let mut base_used = vec![false; bases.len()];
     let mut raw_used = vec![false; raws.len()];
     // Memory's entries against the base, then against what dux has seen
-    // (through their base entry first), then against the file (through any
-    // of the three).
+    // (through their base entry first), then against the file, through what
+    // dux has seen of the entry first: that is the file's own entry as it
+    // was, the user's keys included, so it finds it even when memory renamed
+    // the project to the name another entry at the same path has.
     let base_of = assign_entries(
         &ours.iter().map(|entry| vec![*entry]).collect::<Vec<_>>(),
         &bases,
@@ -868,9 +900,10 @@ fn merge_array_of_tables(
             .iter()
             .zip(base_of.iter().zip(&raw_of))
             .map(|(entry, (b, r))| {
-                std::iter::once(*entry)
+                r.map(|r| raws[r])
+                    .into_iter()
                     .chain(b.map(|b| bases[b]))
-                    .chain(r.map(|r| raws[r]))
+                    .chain(std::iter::once(*entry))
                     .collect()
             })
             .collect::<Vec<_>>(),
@@ -890,7 +923,7 @@ fn merge_array_of_tables(
             // Not in the file: deleted by hand when the file once had it and
             // memory did not change it; otherwise memory's entry is written.
             if !(unchanged && raw_entry.is_some()) {
-                merged.push(entry.clone());
+                merged.push(ours_full[slot].clone());
             }
             continue;
         };

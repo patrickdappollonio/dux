@@ -2503,6 +2503,9 @@ impl EngineService {
             }
         }
         if let Some((before, github_was_enabled, error)) = adopted {
+            // The engine applied this config only to drain the commands it had
+            // deferred, and left the `gh` probe a reload owes to this apply.
+            engine.probe_gh_after_reload(github_was_enabled);
             self.config_in_force(engine, &before, github_was_enabled);
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&error),

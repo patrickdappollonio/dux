@@ -2597,12 +2597,42 @@ impl Engine {
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
+        self.apply_reloaded_config_probing(config, true)
+    }
+
+    /// [`Self::apply_reloaded_config`] that leaves the `gh` probe a reload
+    /// owes to whoever applies the config next: a coalesced reload applies it
+    /// only to drain the deferred commands, then hands it back to the surface,
+    /// whose own apply asks once.
+    pub(crate) fn apply_reloaded_config_for_drain(&mut self, config: Config) -> anyhow::Result<()> {
+        self.apply_reloaded_config_probing(config, false)
+    }
+
+    fn apply_reloaded_config_probing(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
         let fallback = config.clone();
-        let result = self.apply_reloaded_config_inner(config);
+        let result = self.apply_reloaded_config_inner(config, probe);
         if result.is_err() {
             self.keep_reloaded_config(fallback);
         }
         result
+    }
+
+    /// Ask `gh` for a fresh answer when a reload owes one:
+    /// `github_was_enabled` is whether the integration was on before it.
+    ///
+    /// Off-to-on through a config reload is the same transition as the
+    /// toggle, and needs the same fresh answer from `gh`. A reload while the
+    /// integration was already on re-probes too, but only when `gh` is not
+    /// currently usable: reloading the config is a deliberate act and one of
+    /// the reasons to perform it is having just fixed `gh`, so waiting out the
+    /// timer would be needless. A reload with everything working stays a
+    /// no-op, because there is nothing to recover and a probe costs a process.
+    pub fn probe_gh_after_reload(&mut self, github_was_enabled: bool) {
+        if self.github_integration_enabled
+            && (!github_was_enabled || !matches!(self.gh_status, crate::model::GhStatus::Available))
+        {
+            self.spawn_gh_status_check();
+        }
     }
 
     /// A surface could not finish applying a reloaded config (the error is
@@ -2672,22 +2702,11 @@ impl Engine {
         }
     }
 
-    fn apply_reloaded_config_inner(&mut self, config: Config) -> anyhow::Result<()> {
+    fn apply_reloaded_config_inner(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
         let github_was_enabled = self.github_integration_enabled;
         self.github_integration_enabled = config.ui.github_integration;
-        if self.github_integration_enabled
-            && (!github_was_enabled || !matches!(self.gh_status, crate::model::GhStatus::Available))
-        {
-            // Off-to-on through a config reload is the same transition as the
-            // toggle, and needs the same fresh answer from `gh`.
-            //
-            // A reload while the integration was already on re-probes too, but
-            // only when `gh` is not currently usable: reloading the config is a
-            // deliberate act and one of the reasons to perform it is having just
-            // fixed `gh`, so waiting out the timer would be needless. A reload
-            // with everything working stays a no-op, because there is nothing to
-            // recover and a probe costs a process.
-            self.spawn_gh_status_check();
+        if probe {
+            self.probe_gh_after_reload(github_was_enabled);
         }
         self.projects = crate::project_browser::load_projects(
             &self.session_store.load_projects()?,

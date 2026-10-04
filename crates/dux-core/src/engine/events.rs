@@ -342,8 +342,9 @@ pub enum EventReaction {
     /// force, and reports `error` with
     /// [`crate::config_reload_status::adopted_but_apply_failed`].
     /// `github_was_enabled` is whether the GitHub integration was on before
-    /// the apply started; the apply already asked `gh` for a fresh answer
-    /// when it turned the integration on, so no surface asks again.
+    /// the reload started; the apply asked `gh` for nothing, so the surface
+    /// asks for the fresh answer a reload owes (see
+    /// [`crate::engine::Engine::probe_gh_after_reload`]).
     ConfigAdopted {
         before: Box<Config>,
         github_was_enabled: bool,
@@ -2361,12 +2362,20 @@ impl Engine {
     /// (a queued follow-up reload included) never hides a `[server]` change
     /// from the Tailscale switch, the restart warning or the bind check.
     ///
-    /// On failure, whether the reload could not be parsed or could not be
-    /// applied to engine state, the in-memory config is unchanged, so the
-    /// deferred commands are re-applied against it rather than dropped. The
-    /// reload-failed reaction goes last in the returned `Multi` so its error
-    /// wins the status line over a deferred save's success message.
+    /// The deferred commands are re-applied rather than dropped whatever the
+    /// outcome. A reload that could not be read or parsed changes nothing: the
+    /// commands re-apply against the config in force and the reload-failed
+    /// modal reports it. A reload that parsed but could not be fully applied
+    /// is adopted anyway (see [`Engine::keep_reloaded_config`]): the commands
+    /// re-apply against the new config, and the surface is told so with
+    /// [`EventReaction::ConfigAdopted`]. Either failure goes last in the
+    /// returned `Multi` so it wins the status line over a deferred save's
+    /// success message.
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
+        // The GitHub integration's state before the reload. The drain below
+        // applies the reloaded config, which moves it; it goes back with the
+        // old config, so every surface's apply compares with the true state.
+        let github_before = self.github_integration_enabled;
         let deferred = std::mem::take(&mut self.deferred_commands);
         let has_deferred = !deferred.is_empty();
         // Pre-swap `self.config` to the reloaded config (rather than leaving the
@@ -2379,9 +2388,9 @@ impl Engine {
         // reloaded config to engine state before clearing the barrier, but only
         // when deferred commands must drain, since they re-mutate and re-save
         // the config and need the reloaded one as their base. `failure` carries
-        // a reload-failed reaction whenever the reload could not be applied, a
-        // successful parse that engine state rejected included: that is a real
-        // failure, not a silent success on a stale config.
+        // the reload's failure: the reload-failed modal for a file that could
+        // not be read, or `ConfigAdopted` for one adopted although engine state
+        // could not take all of it, never a silent success.
         let mut failure: Option<EventReaction> = None;
         // The config before this reload. When the engine pre-swaps, it is put
         // back before the surfaces see the result, so each surface still
@@ -2394,7 +2403,6 @@ impl Engine {
             Ok(config) => {
                 if must_preswap {
                     before_reload = Some(self.config.clone());
-                    let github_was_enabled = self.github_integration_enabled;
                     // Apply the reloaded config so the deferred drain re-mutates it
                     // (and the surfaced config carries those edits).
                     // If applying it FAILS, the engine still keeps the new config
@@ -2404,12 +2412,12 @@ impl Engine {
                     // against it, so they are never dropped. The surface is told
                     // the config was adopted and what failed, never that it was
                     // refused.
-                    if let Err(err) = self.apply_reloaded_config(config) {
+                    if let Err(err) = self.apply_reloaded_config_for_drain(config) {
                         failure = Some(EventReaction::ConfigAdopted {
                             before: Box::new(
                                 before_reload.clone().unwrap_or_else(|| self.config.clone()),
                             ),
-                            github_was_enabled,
+                            github_was_enabled: github_before,
                             error: format!("{err:#}"),
                         });
                     }
@@ -2445,10 +2453,11 @@ impl Engine {
         // of writes is noted to learn below whether they wrote.
         let writes_before = self.config_writer.last_written().0;
         // Each re-mutates the current config and eager-writes. The deferred write
-        // is therefore the LAST write to disk. On a failed reload the config is
-        // unchanged/current, so re-applying against it is still correct: deferred
-        // commands are never dropped. Collect status reactions so the
-        // surface still reports each save's success/failure.
+        // is therefore the LAST write to disk. The current config is the one in
+        // force whatever happened (the old one for a refused file, the new one
+        // for an adopted reload), so re-applying against it is correct: deferred
+        // commands are never dropped. Collect status reactions so the surface
+        // still reports each save's success/failure.
         let mut deferred_reactions = Vec::new();
         for command in deferred {
             match self.apply(command) {
@@ -2468,7 +2477,10 @@ impl Engine {
             // engine + disk state and never reverts a deferred change. Snapshot
             // `self.config` AFTER the drain above so it carries the deferred edits.
             let mut reloaded = match before_reload {
-                Some(before) => std::mem::replace(&mut self.config, before),
+                Some(before) => {
+                    self.github_integration_enabled = github_before;
+                    std::mem::replace(&mut self.config, before)
+                }
                 None => self.config.clone(),
             };
             // When the deferred commands wrote, the file now holds the text of
@@ -2486,11 +2498,10 @@ impl Engine {
         }
         reactions.extend(deferred_reactions);
         if let Some(failure) = failure {
-            // Failure: append the reload-failed modal/error LAST so its error
-            // status wins the surface's status line instead of being overwritten by
-            // a deferred save's success message (the deferred saves did land against
-            // the still-current config, but the headline state the user needs is
-            // "reload failed, review the modal").
+            // Failure: append it LAST so it wins the surface's status line
+            // instead of being overwritten by a deferred save's success message
+            // (the deferred saves did land, against the config in force, but the
+            // headline the user needs is the reload's own outcome).
             reactions.push(failure);
         }
 
@@ -9157,6 +9168,65 @@ mod tests {
     fn break_the_session_database(engine: &Engine) {
         let connection = rusqlite::Connection::open(&engine.paths.sessions_db_path).unwrap();
         connection.execute("DROP TABLE projects", []).unwrap();
+    }
+
+    /// A coalesced reload applies the new config to drain the deferred
+    /// commands and then puts the old one back for the surface to apply:
+    /// the GitHub integration's state goes back with it, so the surface's
+    /// apply compares with the state from before the reload, and the `gh`
+    /// probe a reload owes is asked for once, by that apply.
+    #[test]
+    fn a_coalesced_reload_hands_the_surface_the_github_state_from_before_it() {
+        for was_enabled in [false, true] {
+            let (mut engine, _tmp) = test_engine();
+            engine.surface = Box::new(FileReloadSurface);
+            engine.config.ui.github_integration = was_enabled;
+            engine.github_integration_enabled = was_enabled;
+            engine.gh_status = crate::model::GhStatus::Available;
+            std::fs::write(
+                &engine.paths.config_path,
+                "[ui]\ngithub_integration = true\n",
+            )
+            .unwrap();
+            engine
+                .apply(crate::engine::Command::ReloadConfig)
+                .expect("reload");
+            let mut env = BTreeMap::new();
+            env.insert("API".to_string(), "k".to_string());
+            engine
+                .apply(crate::engine::Command::PersistGlobalEnv { env })
+                .expect("deferred");
+            let event = loop {
+                let event = try_recv_worker_event(&engine).expect("reload finishes");
+                if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                    break event;
+                }
+            };
+            let generation = engine.gh_probe.generation;
+            let applied = flatten(engine.process_worker_event(event))
+                .into_iter()
+                .find_map(|reaction| match reaction {
+                    EventReaction::ApplyReloadedConfig(config) => Some(config),
+                    _ => None,
+                })
+                .expect("reloaded config");
+            assert_eq!(
+                engine.github_integration_enabled, was_enabled,
+                "the surface reads the state from before the reload"
+            );
+            assert_eq!(
+                engine.gh_probe.generation, generation,
+                "the coalesced apply leaves the probe to the surface's apply"
+            );
+            engine.apply_reloaded_config(*applied).expect("apply");
+            assert!(engine.github_integration_enabled);
+            let probes = engine.gh_probe.generation.wrapping_sub(generation);
+            assert_eq!(
+                probes,
+                u64::from(!was_enabled),
+                "off to on asks gh once; on to on with a settled answer does not"
+            );
+        }
     }
 
     /// The engine's own apply of a coalesced reload failing still adopts the

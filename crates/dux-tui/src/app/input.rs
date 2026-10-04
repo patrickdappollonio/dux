@@ -13172,7 +13172,7 @@ not_a_real_action = ["x"]
     /// reload failure (the file was refused) leaves the view alone, unsaved
     /// resize included.
     #[test]
-    fn the_reload_failure_modal_brings_the_view_to_the_kept_config() {
+    fn an_adopted_reload_moves_the_view_and_a_refused_one_leaves_it() {
         use dux_core::engine::EventReaction;
         let mut app = test_app(default_bindings());
         assert_ne!(app.left_width_pct, 37);
