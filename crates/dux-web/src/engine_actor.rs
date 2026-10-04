@@ -332,12 +332,16 @@ pub enum EngineRequest {
     /// a plain render of the running config when the file does not exist yet. Any
     /// other read error is an `Err`, so the editor refuses to open rather than let
     /// the user save a blank default over their real config.
-    ReadRawConfig(oneshot::Sender<Result<String, String>>),
+    ReadRawConfig(oneshot::Sender<Result<RawConfig, String>>),
     /// Validate and write raw `config.toml` text: parse as a `Config`, flush any
     /// pending managed writes so they cannot clobber it, then write the file
     /// atomically and verbatim. The caller adopts the change through a config
     /// reload. `Err(message)` for a parse or IO failure.
-    WriteRawConfig(String, oneshot::Sender<Result<(), String>>),
+    WriteRawConfig(
+        String,
+        Option<String>,
+        oneshot::Sender<Result<(), RawWriteError>>,
+    ),
     /// Read everything `dux_core::first_load::plan` needs in one round trip: the
     /// last-seen version, the running display version, the `[ui]` suppression flags,
     /// and the state root the release-notes cache lives under. One trip so the
@@ -1746,7 +1750,7 @@ impl EngineHandle {
     /// render of the running config if the file is missing). `Err` on a read
     /// failure or a dead engine thread, so the editor never opens on blank
     /// content the user could save over their real config.
-    pub async fn read_raw_config(&self) -> Result<String, String> {
+    pub async fn read_raw_config(&self) -> Result<RawConfig, String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -1760,20 +1764,32 @@ impl EngineHandle {
             .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
     }
 
-    /// Validate and write raw `config.toml` text from the Monaco editor. Returns
-    /// `Err(message)` for invalid TOML, an IO failure, or a dead engine thread.
-    pub async fn write_raw_config(&self, content: String) -> Result<(), String> {
+    /// Validate and write raw `config.toml` text from the Monaco editor, over
+    /// the file the editor read: `token` is the one [`Self::read_raw_config`]
+    /// handed out. [`RawWriteError::Changed`] when the file moved since that
+    /// read; [`RawWriteError::Refused`] for no token, invalid TOML, a refused
+    /// change, an IO failure, or a dead engine thread.
+    pub async fn write_raw_config(
+        &self,
+        content: String,
+        token: Option<String>,
+    ) -> Result<(), RawWriteError> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
-            .send(EngineRequest::WriteRawConfig(content, tx))
+            .send(EngineRequest::WriteRawConfig(content, token, tx))
             .await
             .is_err()
         {
-            return Err("the engine is not available".to_string());
+            return Err(RawWriteError::Refused(
+                "the engine is not available".to_string(),
+            ));
         }
-        rx.await
-            .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
+        rx.await.unwrap_or_else(|_| {
+            Err(RawWriteError::Refused(
+                "the engine did not reply".to_string(),
+            ))
+        })
     }
 
     /// Read the inputs `dux_core::first_load::plan` needs. `None` when the engine
@@ -3743,12 +3759,52 @@ fn first_load_inputs(engine: &Engine) -> FirstLoadInputs {
     }
 }
 
-fn read_raw_config(engine: &Engine) -> Result<String, String> {
-    match std::fs::read_to_string(&engine.paths.config_path) {
-        Ok(raw) => Ok(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(dux_core::config_write::render_config_plain(&engine.config))
+/// The raw `config.toml` as the editor opens it, with the proof of what was
+/// read that its save must carry back.
+#[derive(Debug, Clone)]
+pub struct RawConfig {
+    pub content: String,
+    /// [`dux_core::config_write::read_token`] of the file as read (or of "no
+    /// file"). The save is refused unless the file still matches it.
+    pub token: String,
+}
+
+/// Why a raw config save did not land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawWriteError {
+    /// The file changed since the editor read it (a `dux config set`, a ban,
+    /// another editor), so saving would undo that change. Nothing was written;
+    /// the browser offers to reload the file or keep editing.
+    Changed(String),
+    /// Anything else: no token, invalid TOML, a change the editor may not
+    /// make, an IO failure.
+    Refused(String),
+}
+
+impl std::fmt::Display for RawWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(message) | Self::Refused(message) => f.write_str(message),
         }
+    }
+}
+
+/// What the raw editor is told when the file moved under it.
+const RAW_CONFIG_CHANGED: &str = "config.toml changed on disk since you opened it (a `dux \
+     config set`, a blocked address, or another editor), and saving would undo that change, \
+     so nothing was saved. Reload the file to see it as it is now (your edits here are \
+     discarded), or keep editing and copy what you need first.";
+
+fn read_raw_config(engine: &Engine) -> Result<RawConfig, String> {
+    match std::fs::read_to_string(&engine.paths.config_path) {
+        Ok(raw) => Ok(RawConfig {
+            token: dux_core::config_write::read_token(Some(&raw)),
+            content: raw,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RawConfig {
+            content: dux_core::config_write::render_config_plain(&engine.config),
+            token: dux_core::config_write::read_token(None),
+        }),
         Err(error) => Err(format!("Could not read config.toml: {error}")),
     }
 }
@@ -4052,10 +4108,11 @@ fn handle_request(
         EngineRequest::ReadRawConfig(reply) => {
             let _ = reply.send(read_raw_config(engine));
         }
-        EngineRequest::WriteRawConfig(content, reply) => {
+        EngineRequest::WriteRawConfig(content, token, reply) => {
             let _ = reply.send(write_raw_config_on_engine(
                 engine,
                 &content,
+                token.as_deref(),
                 config_disk_ahead,
             ));
         }
@@ -4098,28 +4155,47 @@ const PASSWORD_EDIT_REFUSAL: &str = "The web password cannot be set, changed or 
 fn write_raw_config_on_engine(
     engine: &mut Engine,
     content: &str,
+    token: Option<&str>,
     config_disk_ahead: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), RawWriteError> {
+    let Some(token) = token else {
+        return Err(RawWriteError::Refused(
+            "This save carries no proof of what it read, so it could undo a change made since. \
+             Reopen the config editor and save again."
+                .to_string(),
+        ));
+    };
+    write_raw_config_checked(engine, content, token, config_disk_ahead)
+}
+
+/// [`write_raw_config_on_engine`] once the save's token is in hand.
+fn write_raw_config_checked(
+    engine: &mut Engine,
+    content: &str,
+    token: &str,
+    config_disk_ahead: &mut bool,
+) -> Result<(), RawWriteError> {
+    let refused = RawWriteError::Refused;
     let parsed = dux_core::config::validate_config_str(content)
-        .map_err(|e| format!("config.toml is not valid: {e}"))?;
+        .map_err(|e| refused(format!("config.toml is not valid: {e}")))?;
     // The web editor must not silently weaken the server perimeter, so both
     // halves of it stay a terminal-side edit. `host` binds once and needs a
     // restart; `allowed_hosts` is read live by the Host guard and a reload
     // applies it, so its refusal names the reload rather than a restart nobody
     // needs.
     if parsed.server.host != engine.config.server.host {
-        return Err(
+        return Err(refused(
             "Server host cannot be changed from the web editor; edit config.toml directly \
              and restart."
                 .to_string(),
-        );
+        ));
     }
     if parsed.server.allowed_hosts != engine.config.server.allowed_hosts {
-        return Err(
+        return Err(refused(
             "Server allowed_hosts cannot be changed from the web editor; edit config.toml \
              directly and run Reload config, which applies it to the running server."
                 .to_string(),
-        );
+        ));
     }
     // Flush pending managed writes so a coalesced lazy save cannot clobber the
     // raw write, then persist the user's text verbatim, but only after checking,
@@ -4133,6 +4209,11 @@ fn write_raw_config_on_engine(
     let running_hash = engine.config.server.auth.password_hash.clone();
     let new_hash = parsed.server.auth.password_hash.clone();
     dux_core::config_write::replace_config_file(&engine.paths.config_path, |current| {
+        // The save carries proof of what it read; a file that moved since
+        // (a `dux config set`, a ban, another editor) is not overwritten.
+        if dux_core::config_write::read_token(current) != token {
+            anyhow::bail!(RAW_CONFIG_CHANGED);
+        }
         let current_hash = current
             .and_then(|raw| dux_core::config::auth_section_of(raw).ok())
             .map_or(running_hash, |auth| auth.password_hash);
@@ -4145,10 +4226,12 @@ fn write_raw_config_on_engine(
     // underlying error without the path-annotated context.
     .map_err(|e| {
         let cause = e.root_cause().to_string();
-        if cause == PASSWORD_EDIT_REFUSAL {
-            cause
+        if cause == RAW_CONFIG_CHANGED {
+            RawWriteError::Changed(cause)
+        } else if cause == PASSWORD_EDIT_REFUSAL {
+            refused(cause)
         } else {
-            format!("Could not write config.toml: {cause}")
+            refused(format!("Could not write config.toml: {cause}"))
         }
     })?;
     // Persist-only: the file is on disk, but the running config is left as-is so
@@ -4388,6 +4471,16 @@ fn auto_reopen_log_line(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A raw editor save as the editor makes it: read the file for its token,
+    /// then save over what was read.
+    async fn save_raw(
+        handle: &super::EngineHandle,
+        content: impl Into<String>,
+    ) -> Result<(), super::RawWriteError> {
+        let token = handle.read_raw_config().await.expect("read").token;
+        handle.write_raw_config(content.into(), Some(token)).await
+    }
+
     use super::*;
     // The test flavour: stock provider names, harmless commands.
     use crate::test_support::bootstrap_test_engine as bootstrap_engine;
@@ -7183,15 +7276,14 @@ mod tests {
             "[defaults]\nstart_directory = \"{}\"\n",
             dir_b.path().to_string_lossy()
         );
-        handle
-            .write_raw_config(new_body.clone())
-            .await
-            .expect("write");
+        save_raw(&handle, new_body.clone()).await.expect("write");
 
         // PERSISTED: the file on disk now carries dir B.
         let on_disk = handle.read_raw_config().await.expect("read");
         assert!(
-            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            on_disk
+                .content
+                .contains(dir_b.path().to_string_lossy().as_ref()),
             "disk must hold the saved edit"
         );
 
@@ -7255,8 +7347,7 @@ mod tests {
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (handle, _join) = spawn_engine_thread(engine);
-        handle
-            .write_raw_config("[ui]\nleft_width_pct = 25\n".to_string())
+        save_raw(&handle, "[ui]\nleft_width_pct = 25\n".to_string())
             .await
             .expect("raw save");
         let broken = "[ui]\nleft_width_pct = 26\n\n[server.auth]\nrequire = \"lan\"\n";
@@ -7430,18 +7521,21 @@ mod tests {
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (handle, _join) = spawn_engine_thread(engine);
-        let refusal = handle
-            .write_raw_config("[server]\nallowed_hosts = [\"box.example.com\"]\n".to_string())
-            .await
-            .expect_err("an allowed_hosts edit from the browser is refused");
+        let refusal = save_raw(
+            &handle,
+            "[server]\nallowed_hosts = [\"box.example.com\"]\n".to_string(),
+        )
+        .await
+        .expect_err("an allowed_hosts edit from the browser is refused")
+        .to_string();
         assert!(refusal.contains("allowed_hosts"), "{refusal}");
         assert!(refusal.to_lowercase().contains("reload"), "{refusal}");
         assert!(!refusal.contains("restart"), "{refusal}");
 
-        let refusal = handle
-            .write_raw_config("[server]\nhost = \"0.0.0.0\"\n".to_string())
+        let refusal = save_raw(&handle, "[server]\nhost = \"0.0.0.0\"\n".to_string())
             .await
-            .expect_err("a host edit from the browser is refused");
+            .expect_err("a host edit from the browser is refused")
+            .to_string();
         assert!(
             refusal.contains("restart"),
             "host still needs a restart: {refusal}"
@@ -7463,7 +7557,7 @@ mod tests {
             "[defaults]\nstart_directory = \"{}\"\n",
             dir_b.path().to_string_lossy()
         );
-        handle.write_raw_config(new_body).await.expect("write");
+        save_raw(&handle, new_body).await.expect("write");
 
         // Now toggle a config-static setting. Its wholesale toml_edit patch would
         // serialize the (stale) in-memory config over the file, reverting the
@@ -7476,11 +7570,15 @@ mod tests {
         // The saved edit survived on disk: the toggle reconciled instead of clobbering.
         let on_disk = handle.read_raw_config().await.expect("read");
         assert!(
-            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            on_disk
+                .content
+                .contains(dir_b.path().to_string_lossy().as_ref()),
             "the config-static mutation must not clobber the saved start_directory"
         );
         assert!(
-            !on_disk.contains(dir_a.path().to_string_lossy().as_ref()),
+            !on_disk
+                .content
+                .contains(dir_a.path().to_string_lossy().as_ref()),
             "the stale dir A must not have been written back"
         );
 
@@ -7819,7 +7917,7 @@ mod tests {
             ),
             (
                 "WriteRawConfig",
-                EngineRequest::WriteRawConfig("x = 1".into(), dead_reply()),
+                EngineRequest::WriteRawConfig("x = 1".into(), None, dead_reply()),
                 false,
             ),
             (
@@ -8078,5 +8176,121 @@ mod tests {
                 fixture.name
             );
         }
+    }
+
+    // ── The raw editor's save carries proof of what it read ────────────────
+
+    /// Review probe (ported): a password set with `dux config set` while a
+    /// browser has the raw editor open must not be undone when that editor
+    /// saves an unrelated change. The save carries the read's token, the file
+    /// moved, so the save is refused as a conflict and nothing is written.
+    #[tokio::test]
+    async fn review17_raw_editor_save_keeps_a_password_set_meanwhile() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        dux_core::config_keys::set_password(
+            &paths.config_path,
+            &dux_core::auth::Password::new("correct horse battery staple 77".to_string()),
+            &[],
+        )
+        .expect("set password");
+        let saved = handle
+            .write_raw_config(
+                opened
+                    .content
+                    .replace("left_width_pct = 20", "left_width_pct = 25"),
+                Some(opened.token),
+            )
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        let auth = dux_core::config::auth_section_of(&after).expect("loads");
+        assert!(
+            auth.has_password(),
+            "the password set meanwhile was erased by the raw editor save:\n{after}"
+        );
+    }
+
+    /// A ban appended while the editor was open is kept the same way.
+    #[tokio::test]
+    async fn a_raw_save_never_undoes_a_ban_appended_meanwhile() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        dux_core::config_keys::append_blocked_address(
+            &paths.config_path,
+            "203.0.113.9".parse().unwrap(),
+            10,
+        )
+        .unwrap();
+        let saved = handle
+            .write_raw_config(opened.content.clone(), Some(opened.token.clone()))
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("203.0.113.9")
+        );
+
+        // Read again: the fresh token saves.
+        let fresh = handle.read_raw_config().await.expect("read");
+        assert_ne!(fresh.token, opened.token);
+        handle
+            .write_raw_config(
+                fresh
+                    .content
+                    .replace("left_width_pct = 20", "left_width_pct = 25"),
+                Some(fresh.token),
+            )
+            .await
+            .expect("a save over what it read");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(after.contains("left_width_pct = 25") && after.contains("203.0.113.9"));
+    }
+
+    /// A save that carries no proof of what it read is refused: the raw editor
+    /// is its only client, and it always has one.
+    #[tokio::test]
+    async fn a_raw_save_with_no_token_is_refused() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let saved = handle
+            .write_raw_config("[ui]\nleft_width_pct = 25\n".to_string(), None)
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Refused(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("= 20")
+        );
+    }
+
+    /// With no file yet, the token names that, and a save that finds a file
+    /// written meanwhile is a conflict too.
+    #[tokio::test]
+    async fn a_raw_save_over_a_file_that_appeared_meanwhile_is_a_conflict() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let _ = std::fs::remove_file(&paths.config_path);
+        let opened = handle.read_raw_config().await.expect("read");
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 31\n").unwrap();
+        let saved = handle
+            .write_raw_config(opened.content, Some(opened.token))
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("= 31")
+        );
     }
 }

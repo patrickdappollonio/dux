@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { configApi } from "./configApi"
+import { ConfigChangedError, configApi } from "./configApi"
 
 // The CustomizeWebappDialog test mocks the store wholesale, so this is the one
 // place the REAL client → wire shape is pinned: a swapped field, wrong path, or
@@ -52,5 +52,57 @@ describe("configApi.setInstanceIdentity", () => {
 
     const [, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(opts.body as string)).toEqual({ title: "", favicon: "" })
+  })
+})
+
+describe("configApi raw config", () => {
+  it("reads the content and the token the save must carry back", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: "[ui]\n", token: "abc" }),
+        text: async () => "",
+      })),
+    )
+    expect(await configApi.readRawConfig()).toEqual({ content: "[ui]\n", token: "abc" })
+  })
+
+  it("sends the token with the save", async () => {
+    const fetchMock = stubFetchOk()
+    await configApi.writeRawConfig("[ui]\n", "abc")
+    const [path, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe("/api/v1/config/raw")
+    expect(opts.method).toBe("PUT")
+    expect(JSON.parse(opts.body as string)).toEqual({ content: "[ui]\n", token: "abc" })
+  })
+
+  it("throws a ConfigChangedError with the server's sentence on a 409 conflict", async () => {
+    const body = JSON.stringify({ error: "config_changed", message: "config.toml changed on disk" })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 409,
+        text: async () => body,
+        clone() {
+          return this
+        },
+      })),
+    )
+    const err = await configApi.writeRawConfig("[ui]\n", "abc").catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ConfigChangedError)
+    expect((err as Error).message).toBe("config.toml changed on disk")
+  })
+
+  it("keeps a plain 400 as an ordinary error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, status: 400, text: async () => "bad toml" })),
+    )
+    const err = await configApi.writeRawConfig("x", "abc").catch((e: unknown) => e)
+    expect(err).not.toBeInstanceOf(ConfigChangedError)
+    expect((err as Error).message).toBe("bad toml")
   })
 })

@@ -402,11 +402,17 @@ struct RawConfigBody {
     /// The raw `config.toml` text, verbatim from disk (or the plain render of the
     /// running config when no file exists yet).
     content: String,
+    /// Proof of what was read, which the save must send back: the save is
+    /// refused when the file changed since.
+    token: String,
 }
 
 #[derive(Deserialize)]
 struct WriteRawConfigBody {
     content: String,
+    /// The token the read handed out. A save without one is refused.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the editor. A
@@ -414,22 +420,40 @@ struct WriteRawConfigBody {
 /// instead of opening on blank content.
 async fn read_raw_config(State(state): State<AppState>) -> Response {
     match state.engine.read_raw_config().await {
-        Ok(content) => Json(RawConfigBody { content }).into_response(),
+        Ok(raw) => Json(RawConfigBody {
+            content: raw.content,
+            token: raw.token,
+        })
+        .into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }
 }
 
 /// `PUT /api/v1/config/raw`. Validate and write the raw `config.toml` text
-/// verbatim, `400` with the parse or IO error otherwise. Persists only: the
+/// verbatim, over the file the editor read: `409 {error:"config_changed",
+/// message}` when the file changed since that read (nothing written; the
+/// editor offers to reload or keep editing), and a plain-text `400` with the
+/// reason for anything else, a missing token included. Persists only: the
 /// running config is untouched and no `config.changed` fires until
 /// `POST /api/v1/config/reload`, which is the single apply point.
 async fn write_raw_config(
     State(state): State<AppState>,
     Json(body): Json<WriteRawConfigBody>,
 ) -> Response {
-    match state.engine.write_raw_config(body.content).await {
+    match state
+        .engine
+        .write_raw_config(body.content, body.token)
+        .await
+    {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(crate::engine_actor::RawWriteError::Changed(message)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "config_changed", "message": message })),
+        )
+            .into_response(),
+        Err(crate::engine_actor::RawWriteError::Refused(message)) => {
+            (StatusCode::BAD_REQUEST, message).into_response()
+        }
     }
 }
 
@@ -978,7 +1002,8 @@ mod tests {
 
         // Write it back unchanged: valid TOML with an unchanged [server] section,
         // so the happy path returns 200 (exercises the Ok arm of the persist).
-        let body = serde_json::json!({ "content": content }).to_string();
+        let token = parsed["token"].as_str().expect("a token").to_string();
+        let body = serde_json::json!({ "content": content, "token": token }).to_string();
         let put = app
             .oneshot(json_req("PUT", "/api/v1/config/raw", &body))
             .await
@@ -998,14 +1023,14 @@ mod tests {
         // From this machine, which the default `require` asks for nothing: the
         // editor is open to it, and this is about what the editor may write.
         let put = |app: Router, content: String| async move {
-            let body = serde_json::json!({ "content": content }).to_string();
+            let local = axum::extract::ConnectInfo(crate::auth::Arrival {
+                peer: "127.0.0.1:40000".parse().unwrap(),
+                local: "127.0.0.1:3890".parse().unwrap(),
+            });
+            let token = raw_token_from(&app, Some(local)).await;
+            let body = serde_json::json!({ "content": content, "token": token }).to_string();
             let mut request = json_req("PUT", "/api/v1/config/raw", &body);
-            request
-                .extensions_mut()
-                .insert(axum::extract::ConnectInfo(crate::auth::Arrival {
-                    peer: "127.0.0.1:40000".parse().unwrap(),
-                    local: "127.0.0.1:3890".parse().unwrap(),
-                }));
+            request.extensions_mut().insert(local);
             let answer = app.oneshot(request).await.unwrap();
             let status = answer.status();
             let text = axum::body::to_bytes(answer.into_body(), usize::MAX)
@@ -1086,6 +1111,66 @@ mod tests {
         }
         let on_disk = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
         assert!(!on_disk.contains("$argon2id$"), "{on_disk}");
+    }
+
+    /// The token the raw read hands out, read as the editor reads it.
+    async fn raw_token_from(
+        app: &Router,
+        from: Option<axum::extract::ConnectInfo<crate::auth::Arrival>>,
+    ) -> String {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/config/raw")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        if let Some(from) = from {
+            request.extensions_mut().insert(from);
+        }
+        let answer = app.clone().oneshot(request).await.unwrap();
+        let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        parsed["token"].as_str().expect("a token").to_string()
+    }
+
+    /// A save over a file that moved since it was read is a conflict the
+    /// browser can tell apart, and writes nothing; one with no token is
+    /// refused.
+    #[tokio::test]
+    async fn a_raw_save_over_a_changed_file_is_a_409_and_one_without_a_token_a_400() {
+        let (tmp, app) = router_no_auth();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let token = raw_token_from(&app, None).await;
+        std::fs::write(&path, "[ui]\nleft_width_pct = 22\n").unwrap();
+        let body = serde_json::json!({ "content": "[ui]\nleft_width_pct = 25\n", "token": token });
+        let answer = app
+            .clone()
+            .oneshot(json_req("PUT", "/api/v1/config/raw", &body.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(answer.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["error"], "config_changed");
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was saved")
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().contains("= 22"));
+
+        let no_token = serde_json::json!({ "content": "[ui]\nleft_width_pct = 25\n" });
+        let answer = app
+            .oneshot(json_req("PUT", "/api/v1/config/raw", &no_token.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(answer.status(), StatusCode::BAD_REQUEST);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("= 22"));
     }
 
     #[tokio::test]

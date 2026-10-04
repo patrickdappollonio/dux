@@ -5937,3 +5937,32 @@ second_note = \"nowhere to go\"
         }
     }
 }
+
+/// The token a reader of `config.toml` hands back with a whole-file write, so
+/// the write can be refused when the file changed since the read: a digest of
+/// the text as read, or of "no file" when there was none. Compared under the
+/// [`ConfigFileLock`] by the writer (see the web's raw config editor).
+pub fn read_token(current: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = match current {
+        Some(text) => Sha256::new()
+            .chain_update(b"file\0")
+            .chain_update(text.as_bytes()),
+        None => Sha256::new().chain_update(b"missing\0"),
+    }
+    .finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod read_token_tests {
+    use super::read_token;
+
+    #[test]
+    fn the_token_follows_the_text_and_tells_no_file_from_an_empty_one() {
+        assert_eq!(read_token(Some("a = 1\n")), read_token(Some("a = 1\n")));
+        assert_ne!(read_token(Some("a = 1\n")), read_token(Some("a = 2\n")));
+        assert_ne!(read_token(Some("")), read_token(None));
+        assert_eq!(read_token(None).len(), 64);
+    }
+}

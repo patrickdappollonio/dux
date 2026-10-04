@@ -1,4 +1,4 @@
-import { Info, Loader2 } from "lucide-react"
+import { Info, Loader2, TriangleAlert } from "lucide-react"
 
 import { lazy, Suspense, useState } from "react"
 
@@ -15,6 +15,7 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   closeConfigEditor,
+  dismissConfigEditorConflict,
   openConfigEditor,
   saveConfigEditor,
   useDux,
@@ -32,9 +33,11 @@ const CodeEditor = lazy(() => import("@/components/CodeEditor"))
 function ConfigEditorForm({
   initial,
   error,
+  conflict,
 }: {
   initial: string
   error: string | null
+  conflict: string | null
 }) {
   const [text, setText] = useState(() => initial)
 
@@ -61,6 +64,28 @@ function ConfigEditorForm({
           </Suspense>
         </ChunkBoundary>
       </div>
+      {conflict ? (
+        // The file changed on disk since it was opened, and nothing was saved.
+        // A choice, not an error: reloading discards these edits, so "Keep
+        // editing" has focus and the reload is styled as the destructive one.
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
+        >
+          <div className="flex items-start gap-2">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+            <span>{conflict}</span>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="outline" autoFocus onClick={dismissConfigEditorConflict}>
+              Keep editing
+            </Button>
+            <Button variant="destructive" onClick={() => openConfigEditor()}>
+              Reload the file
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {error ? (
         <p className="max-h-24 overflow-y-auto font-mono text-sm break-words whitespace-pre-wrap text-destructive">
           {error}
@@ -94,6 +119,7 @@ export function ConfigEditorDialog() {
     configEditorContent,
     configEditorLoading,
     configEditorError,
+    configEditorConflict,
   } = useDux()
 
   return (
@@ -137,6 +163,7 @@ export function ConfigEditorDialog() {
           <ConfigEditorForm
             initial={configEditorContent}
             error={configEditorError}
+            conflict={configEditorConflict ?? null}
           />
         )}
       </DialogContent>
