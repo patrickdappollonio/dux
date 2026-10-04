@@ -477,14 +477,30 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
 /// Fresh defaults have no password, so regenerating a config that has one
 /// opens the web UI to whoever can reach it. Said in words rather than left
 /// to one line of the diff.
+///
+/// Looks at the text itself too, so a password inside a section dux cannot
+/// load (or a file that is not TOML) is still warned about.
 fn regenerate_password_note(current: &str) -> Option<&'static str> {
-    dux_core::config::auth_section_of(current)
+    let loaded = dux_core::config::auth_section_of(current)
         .ok()
-        .filter(|auth| auth.has_password())
-        .map(|_| {
-            "Note: this removes the web UI password (server.auth.password_hash). Set it again \
+        .is_some_and(|auth| auth.has_password());
+    let written = current.lines().any(|line| {
+        let Some(at) = line.find("password_hash") else {
+            return false;
+        };
+        let Some(value) = line[at + "password_hash".len()..]
+            .trim_start()
+            .strip_prefix('=')
+        else {
+            return false;
+        };
+        let value = value.trim();
+        !value.is_empty() && !value.starts_with("\"\"") && !value.starts_with("''")
+    });
+    (loaded || written).then_some(()).map(|_| {
+        "Note: this removes the web UI password (server.auth.password_hash). Set it again \
              afterwards with `dux config set server.auth.password`."
-        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1387,19 @@ mod tests {
         );
         assert!(regenerate_password_note(&with).is_some_and(|n| n.contains("password")));
         assert_eq!(regenerate_password_note("[server]\nport = 1\n"), None);
+        // Still warned about when the section around it is invalid, or the
+        // file is not even TOML: the password is in there either way.
+        for broken in [
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$whatever\"\nrequire = \"lan\"\n",
+            "[server.auth\npassword_hash = \"x\"\n",
+        ] {
+            assert!(regenerate_password_note(broken).is_some(), "{broken}");
+        }
+        assert_eq!(
+            regenerate_password_note("[server.auth]\npassword_hash = \"\"\n"),
+            None,
+            "an empty hash is no password"
+        );
     }
 
     #[test]

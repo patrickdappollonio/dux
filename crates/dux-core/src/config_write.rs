@@ -79,14 +79,27 @@ impl ConfigFileLock {
     pub fn acquire_within(config_path: &Path, wait: Duration) -> Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
         let lock_path = Self::lock_path(config_path);
-        let file = fs::OpenOptions::new()
-            .read(true)
+        // flock needs only a readable descriptor, so the file is opened
+        // read-only: a lock file left read-only, or owned by root after a
+        // `sudo dux`, still locks. It is created (owner-only) when missing.
+        if let Err(error) = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(false)
+            .create_new(true)
             .mode(CONFIG_FILE_MODE)
             .open(&lock_path)
-            .with_context(|| format!("failed to open the config lock {}", lock_path.display()))?;
+            && error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(error).with_context(|| {
+                format!("failed to create the config lock {}", lock_path.display())
+            });
+        }
+        let file = fs::File::open(&lock_path).with_context(|| {
+            format!(
+                "failed to open the config lock {}; it must be readable by you, its owner \
+                 (if another user owns it, `chown` it back or delete it)",
+                lock_path.display()
+            )
+        })?;
         let deadline = Instant::now() + wait;
         loop {
             let outcome = crate::io_retry::retry_on_interrupt_errno(|| {
@@ -4044,6 +4057,26 @@ second_note = \"nowhere to go\"
                 .unwrap()
                 .contains("port = 4002")
         );
+    }
+
+    /// The lock needs only read access to its file, so a lock file left
+    /// read-only (or owned by root after a `sudo dux`) still works, and one
+    /// that cannot be opened at all says how to fix it.
+    #[test]
+    fn the_lock_file_needs_only_read_access_and_says_when_it_has_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let lock = ConfigFileLock::lock_path(&path);
+        std::fs::write(&lock, "").expect("lock file");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o400)).unwrap();
+        drop(ConfigFileLock::acquire(&path).expect("a read-only lock file locks"));
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = ConfigFileLock::acquire(&path).expect_err("unreadable");
+        let text = format!("{err:#}");
+        assert!(text.contains(&lock.display().to_string()), "{text}");
+        assert!(text.contains("owner"), "{text}");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]
