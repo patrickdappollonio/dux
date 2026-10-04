@@ -4072,6 +4072,13 @@ fn handle_request(
     }
 }
 
+/// Why the raw config editor refused an edit that sets, changes or clears the
+/// web password.
+const PASSWORD_EDIT_REFUSAL: &str = "The web password cannot be set, changed or removed \
+     from the config editor, so nothing was written. Change it from Preferences, which asks \
+     for the current password, or with `dux config set server.auth.password` on the machine \
+     dux runs on, and keep password_hash as it is in this edit.";
+
 /// Validate and persist a raw `config.toml` edit from the web Monaco editor, on
 /// the engine thread. Runs as a free function (not an inline closure) so the `?`
 /// short-circuits read cleanly.
@@ -4115,16 +4122,35 @@ fn write_raw_config_on_engine(
         );
     }
     // Flush pending managed writes so a coalesced lazy save cannot clobber the
-    // raw write, then persist the user's text verbatim.
+    // raw write, then persist the user's text verbatim, but only after checking,
+    // under the config write lock and against the file as it is NOW, that it
+    // leaves the web password exactly as it is. The editor is a page anyone the
+    // login lets in can use; setting, changing or clearing the password needs
+    // the current one (Preferences) or the machine itself (`dux config set`).
+    // Checked against the file rather than memory, so a `dux config set` that
+    // landed before its reload is the password the edit must keep.
     engine.config_writer.flush();
-    dux_core::config_write::write_config_atomic(
-        &engine.paths.config_path,
-        content,
-        dux_core::config_write::Durability::Fsync,
-    )
+    let running_hash = engine.config.server.auth.password_hash.clone();
+    let new_hash = parsed.server.auth.password_hash.clone();
+    dux_core::config_write::replace_config_file(&engine.paths.config_path, |current| {
+        let current_hash = current
+            .and_then(|raw| dux_core::config::auth_section_of(raw).ok())
+            .map_or(running_hash, |auth| auth.password_hash);
+        if new_hash != current_hash {
+            anyhow::bail!(PASSWORD_EDIT_REFUSAL);
+        }
+        Ok((content.to_string(), ()))
+    })
     // Don't leak the absolute config-dir path to the client: return the
-    // underlying OS error without the path-annotated context.
-    .map_err(|e| format!("Could not write config.toml: {}", e.root_cause()))?;
+    // underlying error without the path-annotated context.
+    .map_err(|e| {
+        let cause = e.root_cause().to_string();
+        if cause == PASSWORD_EDIT_REFUSAL {
+            cause
+        } else {
+            format!("Could not write config.toml: {cause}")
+        }
+    })?;
     // Persist-only: the file is on disk, but the running config is left as-is so
     // nothing applies until an explicit reload. Mark disk as ahead of memory so a
     // later config-static mutation reconciles before its wholesale patch (which

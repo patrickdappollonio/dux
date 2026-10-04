@@ -986,6 +986,108 @@ mod tests {
         assert_eq!(put.status(), StatusCode::OK);
     }
 
+    /// The raw editor writes whatever an authenticated (or unprotected) page
+    /// sends, so it is where a password could be swapped or dropped without
+    /// the current one. It refuses every change to the credential, and lets
+    /// everything else through, the rest of `[server.auth]` included.
+    #[tokio::test]
+    async fn the_raw_editor_cannot_add_change_or_remove_the_password() {
+        let hash = |p: &str| {
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(p.to_string())).unwrap()
+        };
+        // From this machine, which the default `require` asks for nothing: the
+        // editor is open to it, and this is about what the editor may write.
+        let put = |app: Router, content: String| async move {
+            let body = serde_json::json!({ "content": content }).to_string();
+            let mut request = json_req("PUT", "/api/v1/config/raw", &body);
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(crate::auth::Arrival {
+                    peer: "127.0.0.1:40000".parse().unwrap(),
+                    local: "127.0.0.1:3890".parse().unwrap(),
+                }));
+            let answer = app.oneshot(request).await.unwrap();
+            let status = answer.status();
+            let text = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&text).into_owned())
+        };
+
+        // No password yet: adding one through the editor is refused.
+        let (tmp, app) = router_no_auth();
+        let added = format!(
+            "[server.auth]\npassword_hash = \"{}\"\n",
+            hash("orbit velvet quarry lantern cobalt")
+        );
+        let (status, said) = put(app.clone(), added).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{said}");
+        assert!(said.contains("password"), "{said}");
+        let on_disk = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
+        assert!(!on_disk.contains("$argon2id$"), "{on_disk}");
+
+        // A password set: changing it and removing it are refused; an edit that
+        // keeps it, even one tightening the rest of the section, is not.
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let current = hash("orbit velvet quarry lantern cobalt");
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            format!("[server.auth]\npassword_hash = \"{current}\"\n"),
+        )
+        .unwrap();
+        let app = crate::server::router(crate::test_support::test_engine_handle(tmp.path()));
+        let other = hash("harbor cinnamon glacier tundra mosaic");
+        for (content, what) in [
+            (
+                format!("[server.auth]\npassword_hash = \"{other}\"\n"),
+                "changed",
+            ),
+            (
+                "[server.auth]\npassword_hash = \"\"\n".to_string(),
+                "cleared",
+            ),
+            ("[ui]\n".to_string(), "section removed"),
+        ] {
+            let (status, said) = put(app.clone(), content).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {said}");
+            assert!(said.contains("current password"), "{what}: {said}");
+            let on_disk = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+            assert!(on_disk.contains(&current), "{what}: nothing was written");
+        }
+        let kept =
+            format!("[server.auth]\npassword_hash = \"{current}\"\nrequire = \"everywhere\"\n");
+        let (status, said) = put(app, kept).await;
+        assert_eq!(status, StatusCode::OK, "{said}");
+        let on_disk = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        assert!(on_disk.contains("require = \"everywhere\""), "{on_disk}");
+    }
+
+    /// The structured settings write has no field for anything in
+    /// `[server.auth]`, and a body that names one is refused whole, so the
+    /// password can never ride in on a settings patch.
+    #[tokio::test]
+    async fn a_settings_patch_cannot_reach_the_password() {
+        let (tmp, app) = router_no_auth();
+        for body in [
+            serde_json::json!({ "server": { "auth": { "password_hash": "$argon2id$x" } } }),
+            serde_json::json!({ "ui": { "password_hash": "$argon2id$x" } }),
+            serde_json::json!({ "auth": { "password": "orbit velvet quarry lantern" } }),
+        ] {
+            let answer = app
+                .clone()
+                .oneshot(json_req(
+                    "PATCH",
+                    "/api/v1/config/settings",
+                    &body.to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(answer.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        let on_disk = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
+        assert!(!on_disk.contains("$argon2id$"), "{on_disk}");
+    }
+
     #[tokio::test]
     async fn write_raw_config_rejects_invalid_toml_with_400() {
         let (_tmp, app) = router_no_auth();
