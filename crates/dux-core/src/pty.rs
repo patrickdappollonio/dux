@@ -2224,14 +2224,20 @@ impl TerminalState {
         // sync buffer filling, and both are pure functions of the bytes. Feed
         // both parsers the same bytes and they buffer and release in lockstep.
         self.scroll_region.advance(data);
-        let pending = self.event_proxy.take_pending();
-        let mut replies = pending.bytes;
-
-        for request in pending.color_requests {
-            let rgb = resolve_color_request_rgb(request.index, self.term.colors());
-            replies.extend_from_slice((request.formatter)(rgb).as_bytes());
+        // Resolve every reply in the order its query arrived. A child that
+        // fences a color query with a cursor report (termenv's background
+        // probe, which `gh` runs) reads the first reply to decide whether the
+        // color query was understood at all, so the order is part of the answer.
+        let mut replies = Vec::new();
+        for reply in self.event_proxy.take_pending() {
+            match reply {
+                PendingReply::Bytes(bytes) => replies.extend_from_slice(&bytes),
+                PendingReply::Color { index, formatter } => {
+                    let rgb = resolve_color_request_rgb(index, self.term.colors());
+                    replies.extend_from_slice(formatter(rgb).as_bytes());
+                }
+            }
         }
-
         replies
     }
 
@@ -2672,31 +2678,23 @@ impl TerminalState {
 
 #[derive(Clone)]
 struct EventProxy {
-    pending: Arc<Mutex<PendingEvents>>,
+    pending: Arc<Mutex<Vec<PendingReply>>>,
 }
 
 impl EventProxy {
     fn new() -> Self {
         Self {
-            pending: Arc::new(Mutex::new(PendingEvents::default())),
+            pending: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn push_bytes(&self, bytes: &[u8]) {
+    fn push(&self, reply: PendingReply) {
         if let Ok(mut pending) = self.pending.lock() {
-            pending.bytes.extend_from_slice(bytes);
+            pending.push(reply);
         }
     }
 
-    fn push_color_request(&self, index: usize, formatter: ColorRequestFormatter) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending
-                .color_requests
-                .push(PendingColorRequest { index, formatter });
-        }
-    }
-
-    fn take_pending(&self) -> PendingEvents {
+    fn take_pending(&self) -> Vec<PendingReply> {
         self.pending
             .lock()
             .map(|mut pending| std::mem::take(&mut *pending))
@@ -2707,14 +2705,16 @@ impl EventProxy {
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
-            Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
+            Event::PtyWrite(text) => self.push(PendingReply::Bytes(text.into_bytes())),
             // The terminal ding (`Event::Bell`) is deliberately NOT handled here.
             // The raw-byte `AttentionScanner` in the reader loop is the single
             // bell-detection path, because it is already the ONLY path for the
             // notification and progress sequences this enum has no variant for.
             // Taking the bell from both places would arm the flag twice for one
             // ding and split one signal set across two mechanisms.
-            Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
+            Event::ColorRequest(index, formatter) => {
+                self.push(PendingReply::Color { index, formatter })
+            }
             // `Event::TextAreaSizeRequest` (the child's `CSI 14 t`, the text area
             // measured in PIXELS) is deliberately NOT answered. This emulator is
             // headless: there is no window, no font and no cell box, and the two
@@ -2735,15 +2735,20 @@ impl EventListener for EventProxy {
 
 type ColorRequestFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 
-#[derive(Default)]
-struct PendingEvents {
-    bytes: Vec<u8>,
-    color_requests: Vec<PendingColorRequest>,
-}
-
-struct PendingColorRequest {
-    index: usize,
-    formatter: ColorRequestFormatter,
+/// One reply the emulator owes the child, queued in the order its query was
+/// parsed. Both kinds share one queue because a child may read the replies as a
+/// sequence: a color reply resolved after the fact must still leave in its
+/// query's place, not after every reply that was ready sooner.
+enum PendingReply {
+    /// A reply the emulator formatted itself (a cursor report, device
+    /// attributes, a status report).
+    Bytes(Vec<u8>),
+    /// A color query, answered from the palette once the chunk is parsed,
+    /// because the emulator cannot be read while it is still parsing.
+    Color {
+        index: usize,
+        formatter: ColorRequestFormatter,
+    },
 }
 
 struct TerminalDimensions {
@@ -3644,6 +3649,125 @@ mod tests {
                 String::from_utf8_lossy(reply),
             );
         }
+    }
+
+    /// Replies leave in the order their queries arrived, whatever kind of
+    /// reply each one is. A color query is answered through a different event
+    /// than a cursor report, and the two used to be collected separately, so a
+    /// chunk holding both came back with every cursor-style reply first.
+    #[test]
+    fn a_color_reply_precedes_a_cursor_report_queried_after_it() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert_eq!(
+            String::from_utf8_lossy(&terminal.process(b"\x1b]11;?\x1b\\\x1b[6n")),
+            "\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[1;1R",
+        );
+    }
+
+    #[test]
+    fn stacked_queries_are_answered_in_arrival_order() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c",
+                "\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?6c",
+            ),
+            (
+                b"\x1b[c\x1b]10;?\x1b\\\x1b]11;?\x1b\\",
+                "\x1b[?6c\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\",
+            ),
+            (
+                b"\x1b[5n\x1b]11;?\x07\x1b[6n\x1b]10;?\x07\x1b[5n",
+                "\x1b[0n\x1b]11;rgb:0000/0000/0000\x07\x1b[1;1R\x1b]10;rgb:ffff/ffff/ffff\x07\x1b[0n",
+            ),
+            (
+                b"\x1b]4;1;?\x1b\\\x1b[5n\x1b]12;?\x1b\\\x1b[6n",
+                "\x1b]4;1;rgb:cdcd/0000/0000\x1b\\\x1b[0n\x1b]12;rgb:ffff/ffff/ffff\x1b\\\x1b[1;1R",
+            ),
+        ];
+        for (queries, replies) in cases {
+            let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+            assert_eq!(
+                String::from_utf8_lossy(&terminal.process(queries)),
+                *replies,
+                "queries {:?} must be answered in the order they arrived",
+                String::from_utf8_lossy(queries),
+            );
+        }
+    }
+
+    /// The order holds when the queries straddle chunk boundaries too: each
+    /// chunk's replies leave before the next chunk is parsed, and a query split
+    /// mid-sequence is answered in the chunk that completes it.
+    #[test]
+    fn queries_split_across_chunks_are_answered_in_arrival_order() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        let mut replies = Vec::new();
+        for chunk in [
+            &b"\x1b]11"[..],
+            b";?\x1b",
+            b"\\\x1b[",
+            b"6n\x1b]10;?",
+            b"\x07",
+        ] {
+            replies.extend(terminal.process(chunk));
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&replies),
+            "\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[1;1R\x1b]10;rgb:ffff/ffff/ffff\x07",
+        );
+    }
+
+    /// `gh auth login` failed with `could not prompt: unexpected escape
+    /// sequence from terminal: ['\x1b' ']']`. gh detects the background
+    /// through termenv, which writes `OSC 11 ; ? ST` and then `CSI 6n` as a
+    /// fence, and reads ONE response: an OSC reply means the terminal supports
+    /// the query, anything else means it does not, and termenv stops reading.
+    /// A cursor report arriving first therefore left the OSC 11 reply in the
+    /// tty for the next reader, survey's own cursor query, to choke on. This
+    /// replays that read: the first reply must be the OSC one, the second the
+    /// cursor report, and nothing may follow.
+    #[test]
+    fn termenv_background_probe_reads_the_osc_reply_before_its_fence() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        let replies = terminal.process(b"\x1b]11;?\x1b\\\x1b[6n");
+
+        // termenv's readNextResponse: an OSC reply ends at ST or BEL, a CSI
+        // reply at its final byte `R`.
+        fn next_response(input: &[u8]) -> Option<(&[u8], bool, &[u8])> {
+            if input.len() < 2 || input[0] != 0x1b {
+                return None;
+            }
+            let is_osc = input[1] == b']';
+            let end = if is_osc {
+                (2..input.len()).find_map(|i| match input[i] {
+                    0x07 => Some(i + 1),
+                    b'\\' if input[i - 1] == 0x1b => Some(i + 1),
+                    _ => None,
+                })?
+            } else {
+                input.iter().position(|&b| b == b'R')? + 1
+            };
+            Some((&input[..end], is_osc, &input[end..]))
+        }
+
+        let (first, first_is_osc, rest) =
+            next_response(&replies).expect("termenv must read a first response");
+        assert!(
+            first_is_osc,
+            "termenv takes a non-OSC first response to mean no OSC 11 support and stops \
+             reading, stranding the OSC reply; got {:?} first",
+            String::from_utf8_lossy(first),
+        );
+        assert_eq!(first, b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+        let (fence, fence_is_osc, rest) =
+            next_response(rest).expect("termenv reads the cursor report fence next");
+        assert!(!fence_is_osc);
+        assert_eq!(fence, b"\x1b[1;1R");
+        assert!(
+            rest.is_empty(),
+            "nothing may be left in the tty for the next reader, got {:?}",
+            String::from_utf8_lossy(rest),
+        );
     }
 
     /// Geometry IN PIXELS is a fact a headless emulator does not hold: there is
