@@ -4144,6 +4144,13 @@ fn dotted(segments: &[String]) -> String {
         .join(".")
 }
 
+/// Whether any segment of `segments` is one the formatter never prints: then
+/// no value at that path is printed either (see
+/// [`crate::config_keys::printed_value`]).
+pub fn path_is_hidden(segments: &[String]) -> bool {
+    first_hidden(segments).is_some()
+}
+
 /// Whether the last segment of `segments` is one the formatter never prints.
 pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
     first_hidden(segments).is_some_and(|(index, _)| index + 1 == segments.len())
@@ -4920,11 +4927,25 @@ pub fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
                 ],
             )
             .map_or_else(String::new, |line| format!(" (line {line})"));
+            // Through the one value printer, at the deprecated key's path.
+            let old_value = toml::from_str::<toml::Table>(&format!("v = {}", carried.old_value))
+                .ok()
+                .and_then(|mut read| read.remove("v"))
+                .and_then(|value| {
+                    crate::config_keys::printed_value(
+                        raw,
+                        &key_path(&[carried.old_section, carried.old_key]),
+                        &value,
+                        crate::config_keys::ValueForm::Line,
+                    )
+                })
+                .unwrap_or_else(|| crate::config_keys::NOT_SHOWN.to_string());
             found.push(LoadCorrection {
                 path: carried.key,
                 reason: format!(
-                    "carried over from the deprecated [{}] {} = {}{line}; replace it with {}",
-                    carried.old_section, carried.old_key, carried.old_value, carried.replace_with
+                    "carried over from the deprecated [{}] {} = {old_value}{line}; replace it \
+                     with {}",
+                    carried.old_section, carried.old_key, carried.replace_with
                 ),
                 from: Some(key_path(&[carried.old_section, carried.old_key])),
             });

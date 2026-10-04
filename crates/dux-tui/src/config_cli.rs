@@ -150,7 +150,28 @@ pub(crate) fn run_get(
     for correction in &report.corrections {
         let at = dux_core::config::shown_path(&raw, &correction.path);
         let reason = correction.reason.trim_end_matches('.');
-        // A correction only one surface makes says it all in its reason.
+        // An entry the formatter does not name has no value printed, at it
+        // or below it (see `config_keys::printed_value`): only that the file
+        // has one there, and what dux does with it.
+        if correction.value_hidden {
+            let who = match correction.surface {
+                Some(Surface::TerminalUi) => "the terminal UI",
+                Some(Surface::DuxServer) => "dux server",
+                None => users,
+            };
+            match &correction.used {
+                None => writeln!(
+                    err,
+                    "({at}: config.toml has a value here, but {who} drops that entry when it \
+                     loads the file, so it is not set: {reason})"
+                )?,
+                Some(_) => writeln!(
+                    err,
+                    "({at}: config.toml has a value here; {who} uses another because {reason})"
+                )?,
+            }
+            continue;
+        }
         // A correction only one surface makes is said for that surface.
         if let Some(surface) = correction.surface {
             let name = match surface {
@@ -2049,5 +2070,8 @@ mod inline_keys_set_tests;
 
 #[cfg(test)]
 mod names_under_unknown_keys_tests;
+
+#[cfg(test)]
+mod hidden_values_tests;
 #[cfg(test)]
 mod restore_report_and_unknown_path_tests;

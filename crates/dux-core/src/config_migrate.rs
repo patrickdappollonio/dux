@@ -317,8 +317,16 @@ fn migrate_server_bind(
     if !table.contains_key("port") {
         table["port"] = toml_edit::value(i64::from(addr.port()));
     }
+    // Through the one value printer, at the deprecated key's path.
+    let bind = crate::config_keys::printed_value(
+        "",
+        &[old.section.to_string(), old.key.to_string()],
+        &toml::Value::String(raw.to_string()),
+        crate::config_keys::ValueForm::Line,
+    )
+    .unwrap_or_else(|| crate::config_keys::NOT_SHOWN.to_string());
     crate::logger::warn(&format!(
-        "[server] migrated the deprecated `bind = \"{raw}\"` to host = \"{}\" and port = {}. \
+        "[server] migrated the deprecated `bind = {bind}` to host = \"{}\" and port = {}. \
          This server listens on a non-loopback address; only run it on a network you trust.",
         addr.ip(),
         addr.port()

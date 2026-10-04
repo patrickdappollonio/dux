@@ -357,8 +357,8 @@ fn diff_node(
                 let dotted = dux_core::config::shown_path(raw, path);
                 let line = format!(
                     "{dotted}: {} -> {}",
-                    format_value(default),
-                    format_value(current)
+                    format_value(raw, path, default),
+                    format_value(raw, path, current)
                 );
                 found.push((dotted, line));
             }
@@ -385,10 +385,10 @@ fn push_missing(
         (MissingStyle::Marker, Side::CurrentOnly) => format!("{dotted}: (added)"),
         (MissingStyle::Marker, Side::DefaultOnly) => format!("{dotted}: (removed)"),
         (MissingStyle::Valued, Side::CurrentOnly) => {
-            format!("{dotted}: (new) -> {}", format_value(value))
+            format!("{dotted}: (new) -> {}", format_value(raw, path, value))
         }
         (MissingStyle::Valued, Side::DefaultOnly) => {
-            format!("{dotted}: {} -> (removed)", format_value(value))
+            format!("{dotted}: {} -> (removed)", format_value(raw, path, value))
         }
     };
     found.push((dotted, line));
@@ -402,30 +402,24 @@ fn collection_len(value: &serde_json::Value) -> usize {
     }
 }
 
-/// Render one value the way the summary shows it: unquoted, one line, truncated.
-fn format_value(value: &serde_json::Value) -> String {
+/// Render one value the way the summary shows it: through the one value
+/// printer (so a value at or below a key the formatter does not name is
+/// never printed), unquoted, one line, truncated.
+fn format_value(raw: &str, path: &[String], value: &serde_json::Value) -> String {
+    use dux_core::config_keys::{NOT_SHOWN, ValueForm, printed_value};
+    if dux_core::config::path_is_hidden(path) {
+        return NOT_SHOWN.to_string();
+    }
     let rendered = match value {
-        serde_json::Value::Array(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(format_element)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        other => format_element(other),
-    };
-    truncate_display(&rendered, 40)
-}
-
-fn format_element(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
         // An absent optional setting. Matches what this command has always
         // printed for an unset `defaults.start_directory`.
         serde_json::Value::Null => "(unset)".to_string(),
-        other => other.to_string(),
-    }
+        value => toml::Value::try_from(value)
+            .ok()
+            .and_then(|value| printed_value(raw, path, &value, ValueForm::Summary))
+            .unwrap_or_else(|| NOT_SHOWN.to_string()),
+    };
+    truncate_display(&rendered, 40)
 }
 
 // ---------------------------------------------------------------------------

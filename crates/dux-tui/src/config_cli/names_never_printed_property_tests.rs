@@ -6,7 +6,9 @@
 //! names, under values that are not tables, and under misplaced password
 //! hashes.
 use super::*;
-use dux_core::start_check_fixtures::{NAME_POSITIONS as POSITIONS, name_tokens as tokens};
+use dux_core::start_check_fixtures::{
+    NAME_POSITIONS as POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
+};
 
 /// Every table `get` is asked for.
 const TABLES: &[&str] = &[
@@ -92,6 +94,21 @@ fn printed(body: &str) -> Vec<(String, String)> {
         text.push_str(&format!("{error:#}"));
     }
     said.push(("set".to_string(), text));
+    // A set over a setting the file may have written as a table, or with a
+    // table in it, reports what it replaced.
+    std::fs::write(&paths.config_path, body).expect("seed");
+    let mut out = Vec::new();
+    let result = run_set(
+        &["ui.theme".to_string(), "dux_dark".to_string()],
+        &paths,
+        &mut NoSecrets,
+        &mut out,
+    );
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if let Err(error) = result {
+        text.push_str(&format!("{error:#}"));
+    }
+    said.push(("set ui.theme".to_string(), text));
     if let Ok(mut config) = toml::from_str::<dux_core::config::Config>(body) {
         config.source_text = dux_core::config::SourceText::of(body);
         said.push((
@@ -112,6 +129,29 @@ fn a_name_that_is_not_a_setting_name_never_reaches_a_printer() {
         let bare = &quoted[1..quoted.len() - 1];
         for position in POSITIONS {
             let body = position.replace("{T}", bare);
+            assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
+            for (printer, text) in printed(&body) {
+                if text.contains(fragment) {
+                    leaks.push(format!("{printer} on {body:?}:\n{text}"));
+                }
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// A VALUE below a key the formatter does not name is never printed either:
+/// nothing at or below a hidden key reaches a printer without `--show`.
+#[test]
+fn a_value_below_a_hidden_key_never_reaches_a_printer() {
+    crate::config::install_canonical_renderer();
+    let mut leaks = Vec::new();
+    for token in tokens() {
+        let fragment = &token[..12];
+        let quoted = toml::Value::String(token.clone()).to_string();
+        let bare = &quoted[1..quoted.len() - 1];
+        for position in VALUE_POSITIONS {
+            let body = position.replace("{V}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             for (printer, text) in printed(&body) {
                 if text.contains(fragment) {

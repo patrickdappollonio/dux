@@ -561,7 +561,10 @@ fn write_value(
     path: &[String],
     value: Value,
 ) -> Result<SetReport> {
-    let now = bare(&value);
+    // Through the one value printer, as `get` prints too.
+    let now = toml_value(&Item::Value(value.clone()))
+        .and_then(|now| printed_value("", path, &now, ValueForm::Line))
+        .unwrap_or_else(|| NOT_SHOWN.to_string());
     // A set may leave problems `[server.auth]` already had, so a section
     // with several broken values can be repaired one value at a time; one
     // that adds a problem is refused.
@@ -699,32 +702,33 @@ fn check_provider_command(
     Ok(())
 }
 
-/// The value at `path` in `doc`, as `set` reports what it replaced: a value
-/// that is itself a table is never printed, since its keys are names the
-/// file chose where a value goes, and may be anything.
+/// What `doc` holds at `path`, however it is written (a value, an inline
+/// table, a `[section]`, an array of tables), as `set` reports what it
+/// replaced, through the one value printer: a value that is or holds a table
+/// at any depth is said to be one, never printed, since its keys are names
+/// the file chose. `None` only when nothing is there.
 fn value_in_doc(doc: &DocumentMut, path: &[String]) -> Option<String> {
     let mut item = doc.as_item();
     for segment in path {
         item = item.as_table_like()?.get(segment)?;
     }
-    let value = item.as_value()?;
-    let holds_a_table = match value {
-        Value::InlineTable(_) => true,
-        Value::Array(items) => items.iter().any(|item| item.is_inline_table()),
-        _ => false,
-    };
-    Some(if holds_a_table {
-        "(a table, not shown)".to_string()
-    } else {
-        bare(value)
-    })
+    if item.is_none() {
+        return None;
+    }
+    Some(
+        toml_value(item)
+            .and_then(|value| printed_value(&doc.to_string(), path, &value, ValueForm::Line))
+            .unwrap_or_else(|| NOT_SHOWN.to_string()),
+    )
 }
 
-/// A value's TOML text without the comments and spacing around it.
-fn bare(value: &Value) -> String {
-    let mut value = value.clone();
-    value.decor_mut().clear();
-    value.to_string()
+/// `item` as a plain TOML value, read back from the text it writes.
+fn toml_value(item: &Item) -> Option<toml::Value> {
+    let mut holder = DocumentMut::new();
+    holder.insert("value", item.clone());
+    toml::from_str::<toml::Table>(&holder.to_string())
+        .ok()?
+        .remove("value")
 }
 
 /// Why a password was not set.
@@ -944,6 +948,11 @@ pub struct Correction {
     pub in_file: Option<String>,
     /// What dux uses, or `None` when the load drops the entry holding it.
     pub used: Option<String>,
+    /// The setting sits where the formatter names no key (see
+    /// [`printed_value`]), so no value is printed for it: `in_file` is then
+    /// `None` although the file has a value there, and `used` is
+    /// [`NOT_SHOWN`] when dux uses one.
+    pub value_hidden: bool,
     /// Why dux uses something else: the load's own sentence.
     pub reason: String,
     /// The one surface that uses something else, when only one does (the
@@ -1017,15 +1026,79 @@ fn stored_path(key: &Key) -> Vec<String> {
 /// it does not name.
 pub const NOT_SHOWN: &str = "(not shown)";
 
-/// `value`, at `path` in the file `raw`, as `get` prints it: every key the
-/// formatter may not print (a name that breaks its map's rule, a key the
-/// schema has no place for, a key inside an element of an array whose
-/// elements have no keys in the schema) is a marker naming its line (the
-/// formatter's own words), never the name, which may be a token pasted in
-/// the wrong place, and its whole value is [`NOT_SHOWN`], since a table or
-/// an array under it can hold more such names. Arrays are walked too,
-/// element by element.
-fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
+/// What `set` prints in place of a value that is, or holds, a table.
+pub const A_TABLE_NOT_SHOWN: &str = "(a table, not shown)";
+
+/// How [`printed_value`] writes a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueForm {
+    /// As `get` prints it: a string as its text, a table as the lines of
+    /// TOML it is.
+    Get,
+    /// As one line of TOML, as `set` reports what it replaced and wrote. A
+    /// value that is, or holds at any depth, a table is
+    /// [`A_TABLE_NOT_SHOWN`]: a table's keys are names the file chose.
+    Line,
+    /// As `dux config diff` summarizes it: one line, strings unquoted, a list
+    /// as `[a, b]`, and a value that is or holds a table
+    /// [`A_TABLE_NOT_SHOWN`].
+    Summary,
+}
+
+/// THE value printer: every value dux prints from a config file goes through
+/// here, with the full key path of where it sits in the file `raw`.
+///
+/// `None` when any segment of `path` is one the formatter does not name (a
+/// key the schema has no place for, a name that breaks its map's rule): such
+/// a key may be a token pasted where a name goes, and its value then may be
+/// too, so nothing at or below it is printed and the caller says the file has
+/// a value there instead. Below a path it does name, every key it does not
+/// name is a marker naming its line with its whole value [`NOT_SHOWN`],
+/// arrays walked element by element at every depth.
+pub fn printed_value(
+    raw: &str,
+    path: &[String],
+    value: &toml::Value,
+    form: ValueForm,
+) -> Option<String> {
+    if crate::config::path_is_hidden(path) {
+        return None;
+    }
+    Some(match form {
+        ValueForm::Get => render(&names_hidden(raw, path, value)),
+        ValueForm::Line | ValueForm::Summary if holds_a_table(value) => {
+            A_TABLE_NOT_SHOWN.to_string()
+        }
+        ValueForm::Line => value.to_string(),
+        ValueForm::Summary => summarized(value),
+    })
+}
+
+/// A value with no table in it, as [`ValueForm::Summary`] writes it.
+fn summarized(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(text) => text.clone(),
+        toml::Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(summarized).collect::<Vec<_>>().join(", ")
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// Whether `value` is a table or holds one, in an array at any depth.
+fn holds_a_table(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(_) => true,
+        toml::Value::Array(items) => items.iter().any(holds_a_table),
+        _ => false,
+    }
+}
+
+/// `value`, at `path`, with every key below it the formatter does not name
+/// replaced by a marker naming its line, whose whole value is
+/// [`NOT_SHOWN`].
+fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value {
     /// One step of the walk: a key, or an element of an array.
     enum Step {
         Key(String),
@@ -1077,13 +1150,13 @@ fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
         }
     }
     let mut start: Vec<Step> = path.iter().map(|key| Step::Key(key.clone())).collect();
-    render(&shown(raw, &mut start, value))
+    shown(raw, &mut start, value)
 }
 
 /// The table `in_use` (what dux uses at `path`) as `get` prints it: every
 /// entry, each one the file `file` leaves out marked with where it came
 /// from, and, with `hide_names`, every name that breaks its map's rule a
-/// marker naming its line (see [`render_shown`]). The mark comes from the
+/// marker naming its line (see [`printed_value`]). The mark comes from the
 /// same corrections the lines on stderr say (`corrections`), so the two
 /// never disagree: an entry a correction wrote from another setting is
 /// `# from <that setting>`, and only one no correction wrote is
@@ -1114,7 +1187,7 @@ fn render_in_use(
         })
         .collect();
     let text = if hide_names {
-        render_shown(raw, path, in_use)
+        printed_value(raw, path, in_use, ValueForm::Get).unwrap_or_else(|| NOT_SHOWN.to_string())
     } else {
         render(in_use)
     };
@@ -1156,8 +1229,10 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     let file = toml::Value::Table(doc);
     let node = value_at(&file, &path);
     // A table is printed through the one formatter: a name that breaks its
-    // map's rule is a marker naming its line (see [`render_shown`]).
-    let in_file = node.map(|node| render_shown(raw, &path, node));
+    // map's rule is a marker naming its line (see [`printed_value`]).
+    let in_file = node.map(|node| {
+        printed_value(raw, &path, node, ValueForm::Get).unwrap_or_else(|| NOT_SHOWN.to_string())
+    });
     let problems = crate::config::start_problems_of(raw);
     let refusal = |surface: Surface| {
         let reasons: Vec<&str> = problems
@@ -1299,6 +1374,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                     surface: surface_of(&path),
                     path: path.clone(),
                     in_file: None,
+                    value_hidden: false,
                     used: used.clone(),
                     reason: reason.clone(),
                 })
@@ -1354,22 +1430,33 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                     from: None,
                     surface: surface_of(scope),
                     path: scope.clone(),
-                    // Printed through the formatter: the entry's own keys
-                    // may not all be setting names.
-                    in_file: value_at(&file, scope).map(|value| render_shown(raw, scope, value)),
+                    // Through the one value printer: the entry's own keys may
+                    // not all be setting names, nor the entry's name itself.
+                    in_file: value_at(&file, scope)
+                        .and_then(|value| printed_value(raw, scope, value, ValueForm::Get)),
                     used: None,
+                    value_hidden: crate::config::path_is_hidden(scope),
                     reason: reason.clone(),
                 },
-                None => Correction {
-                    from: None,
-                    surface: surface_of(&at),
-                    reason: reason_at(&at),
-                    path: at.clone(),
-                    // Printed through the formatter: a list may hold tables
-                    // whose keys are no setting names.
-                    in_file: Some(render_shown(raw, &at, value)),
-                    used,
-                },
+                None => {
+                    let value_hidden = crate::config::path_is_hidden(&at);
+                    Correction {
+                        from: None,
+                        surface: surface_of(&at),
+                        reason: reason_at(&at),
+                        // Through the one value printer: a list may hold
+                        // tables whose keys are no setting names, and a key
+                        // it does not name prints no value at all.
+                        in_file: printed_value(raw, &at, value, ValueForm::Get),
+                        used: if value_hidden {
+                            used.map(|_| NOT_SHOWN.to_string())
+                        } else {
+                            used
+                        },
+                        value_hidden,
+                        path: at.clone(),
+                    }
+                }
             });
         }
         // Entries the file leaves out that the load writes from a
@@ -1383,6 +1470,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                         surface: surface_of(key),
                         path: key.clone(),
                         in_file: None,
+                        value_hidden: false,
                         used,
                         reason: reason.clone(),
                     });
@@ -1417,6 +1505,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             reason: reason_at(&path),
             path: path.clone(),
             in_file: Some(in_file),
+            value_hidden: false,
             used,
         }],
         refused_by,
