@@ -29,6 +29,8 @@ rust-embed = { version = "8", features = [
     "debug-embed",
     "interpolate-folder-path",
 ] }
+# Wipes a login request's body once the password is out of it (auth/routes.rs).
+zeroize = "1.9"
 # Decompress embedded assets on the fly for the rare client that doesn't accept
 # br (build.rs stores them Brotli-compressed to shrink the binary).
 brotli = "8"

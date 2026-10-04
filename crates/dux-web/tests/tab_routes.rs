@@ -60,6 +60,15 @@ async fn boot_tuned(
     tab_per_agent: u32,
     tune: impl FnOnce(RouterParams) -> RouterParams,
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
+    boot_full(tab_per_agent, None, tune).await
+}
+
+/// [`boot_tuned`], with the web password set to `password` when one is given.
+async fn boot_full(
+    tab_per_agent: u32,
+    password: Option<&str>,
+    tune: impl FnOnce(RouterParams) -> RouterParams,
+) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
@@ -107,6 +116,11 @@ async fn boot_tuned(
             ..Default::default()
         },
     );
+    if let Some(password) = password {
+        engine.config.server.auth.password_hash =
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(password.to_string()))
+                .unwrap();
+    }
     let (handle, _join) = spawn_engine_thread(engine);
     let params = RouterParams::plain_http().with_max_websocket_connections(
         dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
@@ -118,10 +132,12 @@ async fn boot_tuned(
     let app = build_app(handle, Router::<AppState>::new(), tune(params));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // Served the way every serve leg is, with both ends of each connection
+    // recorded for the auth layer.
     tokio::spawn(async move {
         axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            dux_web::auth::provenance::Recorded(listener),
+            app.into_make_service_with_connect_info::<dux_web::auth::Arrival>(),
         )
         .await
         .unwrap();
@@ -952,36 +968,45 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     );
 }
 
-/// A socket opened while dux served must not outlive the moment dux stops
-/// serving: when the Funnel lockout leaves Open (a Funnel to dux appears, or
-/// dux can no longer confirm there is none), every established socket, the
-/// events stream and every PTY alike, is closed, and a new one is refused.
+/// A socket passes the auth layer once, at its upgrade, so every established
+/// socket, the events stream and every PTY alike, must close itself the moment
+/// its client stops being allowed. Here a password is set and this machine
+/// stops being trusted (a Funnel to dux appears, or dux can no longer confirm
+/// there is none): each socket closes with 4401, the code the browser answers
+/// with its login page, and a new one is accepted and closed the same way.
 #[tokio::test]
-async fn every_established_socket_closes_when_the_funnel_lockout_engages() {
-    use dux_web::host_guard::{FunnelLockout, FunnelLockoutCell};
+async fn every_established_socket_closes_when_its_client_stops_being_allowed() {
+    use dux_web::exposure::{ExposureCell, FunnelState};
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
-    async fn closes<S>(ws: &mut S, what: &str)
+    async fn closes_signed_out<S>(ws: &mut S, what: &str)
     where
         S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
     {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
-                Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => return,
+                Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                    assert_eq!(u16::from(frame.code), 4401, "{what}");
+                    return;
+                }
+                Ok(Some(Ok(Message::Close(None)))) | Ok(None) | Ok(Some(Err(_))) => {
+                    panic!("the {what} socket ended without the auth close code")
+                }
                 _ => continue,
             }
         }
-        panic!("the {what} socket stayed open under the Funnel lockout");
+        panic!("the {what} socket stayed open after its client stopped being allowed");
     }
 
-    for locked in [FunnelLockout::Funnel, FunnelLockout::Unconfirmed] {
-        let lockout = FunnelLockoutCell::new(FunnelLockout::Open);
-        let cell = lockout.clone();
-        let (addr, _tmp) = boot_tuned(
+    for distrusted in [FunnelState::Funnel, FunnelState::Unconfirmed] {
+        let exposure = ExposureCell::new(FunnelState::Open);
+        let cell = exposure.clone();
+        let (addr, _tmp) = boot_full(
             dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
-            move |params| params.with_live_funnel_lockout(cell),
+            Some("orbit velvet quarry lantern cobalt"),
+            move |params| params.with_live_exposure(cell),
         )
         .await;
         let client = reqwest::Client::new();
@@ -995,15 +1020,13 @@ async fn every_established_socket_closes_when_the_funnel_lockout_engages() {
                 .await
                 .expect("connect the tab's pty socket");
 
-        lockout.set(locked);
-        closes(&mut events, "events").await;
-        closes(&mut pty, "pty").await;
-        assert!(
-            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
-                .await
-                .is_err(),
-            "{locked:?}: a new socket must be refused too"
-        );
+        exposure.set_funnel(distrusted);
+        closes_signed_out(&mut events, "events").await;
+        closes_signed_out(&mut pty, "pty").await;
+        let (mut again, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+            .await
+            .expect("a new socket is accepted, so the browser hears why it closes");
+        closes_signed_out(&mut again, "new events").await;
     }
 }
 

@@ -274,6 +274,11 @@ pub struct Strength {
     /// zxcvbn's own advice (its warning, then its suggestions), or `None`
     /// when it has none, which it usually does not for a strong password.
     pub hint: Option<String>,
+    /// zxcvbn's warning alone, for a caller that shows it apart from the
+    /// suggestions (the web's strength feedback).
+    pub warning: Option<String>,
+    /// zxcvbn's suggestions alone.
+    pub suggestions: Vec<String>,
 }
 
 /// Score `password` with zxcvbn. `user_inputs` are words a guesser would try
@@ -282,18 +287,32 @@ pub struct Strength {
 pub fn strength(password: &Password, user_inputs: &[&str]) -> Strength {
     let entropy = zxcvbn::zxcvbn(password.expose(), user_inputs);
     let score = u8::from(entropy.score());
-    let hint = entropy.feedback().and_then(|feedback| {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(warning) = feedback.warning() {
-            parts.push(warning.to_string());
-        }
-        parts.extend(feedback.suggestions().iter().map(ToString::to_string));
-        (!parts.is_empty()).then(|| parts.join(" "))
-    });
+    let warning = entropy
+        .feedback()
+        .and_then(|feedback| feedback.warning())
+        .map(|warning| warning.to_string());
+    let suggestions: Vec<String> = entropy
+        .feedback()
+        .map(|feedback| {
+            feedback
+                .suggestions()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let parts: Vec<String> = warning
+        .iter()
+        .cloned()
+        .chain(suggestions.iter().cloned())
+        .collect();
+    let hint = (!parts.is_empty()).then(|| parts.join(" "));
     Strength {
         score,
         label: StrengthLabel::from_score(score),
         hint,
+        warning,
+        suggestions,
     }
 }
 
@@ -568,6 +587,16 @@ mod tests {
 
         let phrase = strength(&pw(STRONG), &[]);
         assert_eq!(phrase.label, StrengthLabel::Excellent, "{phrase:?}");
+    }
+
+    #[test]
+    fn the_warning_and_suggestions_are_kept_apart_as_well_as_joined() {
+        let weak = strength(&pw("password"), &[]);
+        assert!(weak.warning.is_some(), "{weak:?}");
+        assert!(!weak.suggestions.is_empty(), "{weak:?}");
+        let hint = weak.hint.clone().unwrap();
+        assert!(hint.starts_with(weak.warning.as_deref().unwrap()), "{hint}");
+        assert!(hint.contains(&weak.suggestions[0]), "{hint}");
     }
 
     #[test]

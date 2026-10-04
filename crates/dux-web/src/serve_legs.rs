@@ -514,7 +514,7 @@ pub(crate) enum WatchEvent {
     /// A look at the identity FAILED, and why. The serve loop stops admitting
     /// the name until a look succeeds again (the look that failed is the one
     /// that would have seen a Funnel switched on), and the reason decides the
-    /// Funnel lockout: no CLI or no daemon means nothing can be published, while
+    /// Funnel state: no CLI or no daemon means nothing can be published, while
     /// a CLI that fails leaves it unknown.
     IdentityFailed(TailscaleUnavailable),
 }
@@ -774,17 +774,20 @@ pub(crate) const TAILSCALE_IDENTITY_KEY: &str = "tailscale-identity";
 
 /// The name the Host guard admits for this identity: this machine's MagicDNS
 /// name, only when Tailscale assigned it (under the tailnet's `.ts.net`
-/// suffix), and never while Funnel is switched on for ANYTHING on this machine.
+/// suffix), and never while Funnel is switched on for ANYTHING on this machine
+/// with no password set.
 ///
-/// Funnel withdraws the name so dux does not offer one a Funnel is using. That
-/// is not what keeps a Funnel out: Tailscale's serve proxy forwards the public
-/// client's own Host, so a request through Funnel can claim `localhost` and
-/// never needs this name. The Funnel marker and the Funnel lockout in the Host
-/// guard are the protections (see `host_guard`). The check is any Funnel at
-/// all, whatever it forwards to. A name from another control server sits in a
-/// domain its operator chose, so it goes through `allowed_hosts` instead.
-pub(crate) fn admitted_own_name(identity: &TailscaleIdentity) -> Option<String> {
-    if identity.funnel {
+/// With no password a Funnel withdraws the name so dux does not offer one a
+/// Funnel is using while nothing would stop its visitors. With a password the
+/// name stays, because a Funnel's visitors must reach the login page, and the
+/// password is what stops them (`crate::auth`). A name from another control
+/// server sits in a domain its operator chose, so it goes through
+/// `allowed_hosts` instead.
+pub(crate) fn admitted_own_name(
+    identity: &TailscaleIdentity,
+    password_set: bool,
+) -> Option<String> {
+    if identity.funnel && !password_set {
         return None;
     }
     identity
@@ -837,6 +840,7 @@ pub(crate) fn tailnet_urls(
     legs: &[SocketAddr],
     identity: Option<&TailscaleIdentity>,
     tailscale_wanted: bool,
+    password_set: bool,
 ) -> TailnetUrls {
     let on_tailscale = |addr: &&SocketAddr| match addr.ip() {
         IpAddr::V4(v4) => dux_core::tailscale::is_tailscale_cgnat(v4),
@@ -846,9 +850,9 @@ pub(crate) fn tailnet_urls(
         .iter()
         .find(on_tailscale)
         .map(|addr| format!("http://{addr}"));
-    let admitted = identity
-        .filter(|_| tailscale_wanted)
-        .and_then(|identity| admitted_own_name(identity).map(|name| (identity, name)));
+    let admitted = identity.filter(|_| tailscale_wanted).and_then(|identity| {
+        admitted_own_name(identity, password_set).map(|name| (identity, name))
+    });
     let Some((identity, name)) = admitted else {
         return TailnetUrls {
             ip,
@@ -904,39 +908,55 @@ pub(crate) fn serve_hint(identity: &TailscaleIdentity, port: u16) -> Option<Stri
 pub(crate) fn identity_news(
     previous: Option<&TailscaleIdentity>,
     next: &TailscaleIdentity,
+    password_set: bool,
 ) -> Vec<(dux_core::statusline::StatusTone, String)> {
     use dux_core::statusline::StatusTone;
     let mut news = Vec::new();
-    // A Funnel that forwards to dux's port is the lockout's news (see
-    // `lockout_news`), said once there; this only speaks for a Funnel elsewhere,
+    // A Funnel that forwards to dux's port is the Funnel state's news (see
+    // `funnel_state_news`), said once there; this only speaks for a Funnel elsewhere,
     // which withdraws the name and nothing more.
     let name_funnel = |id: &TailscaleIdentity| id.funnel && !id.funnel_to_dux;
     let funnel_before = previous.is_some_and(name_funnel);
     let funnel_now = name_funnel(next);
-    let admitted_before = previous.and_then(admitted_own_name);
-    let admitted_now = admitted_own_name(next);
+    let admitted_before = previous.and_then(|id| admitted_own_name(id, password_set));
+    let admitted_now = admitted_own_name(next, password_set);
     if funnel_now && !funnel_before {
         let name = next
             .status
             .tailscale_assigned_name()
             .unwrap_or("this machine's tailnet name");
-        news.push((
-            StatusTone::Warning,
-            format!(
-                "A Tailscale Funnel route on this machine publishes it to the public internet, \
-                 and dux has no login, so dux stopped answering to {name}. That Funnel does \
-                 not forward to dux's port, but dux cannot tell whether it reaches dux through \
-                 another program on this machine; if it does, anyone on the internet can drive your \
-                 terminals. Turn the Funnel route off (`tailscale funnel status` lists it) and \
-                 dux answers to {name} again by itself."
-            ),
-        ));
+        news.push(if password_set {
+            (
+                StatusTone::Warning,
+                "A Tailscale Funnel route on this machine publishes it to the public \
+                     internet. It does not forward to dux's port, but if it reaches dux through \
+                     another program on this machine, its visitors are asked for dux's \
+                     password like anyone else from the network. `tailscale funnel status` \
+                     lists it."
+                    .to_string(),
+            )
+        } else {
+            (
+                StatusTone::Warning,
+                format!(
+                    "A Tailscale Funnel route on this machine publishes it to the public \
+                     internet and no password is set, so dux stopped answering to {name}. That \
+                     Funnel does not forward to dux's port, but dux cannot tell whether it \
+                     reaches dux through another program on this machine; if it does, anyone on \
+                     the internet can drive your terminals. Set a password \
+                     (`dux config set server.auth.password`), or turn the Funnel route off \
+                     (`tailscale funnel status` lists it) and dux answers to {name} again by \
+                     itself."
+                ),
+            )
+        });
     }
     let Some(previous) = previous else {
         return news;
     };
     if funnel_before
         && !next.funnel
+        && !password_set
         && let Some(name) = admitted_now.as_deref()
     {
         news.push((
@@ -995,7 +1015,7 @@ pub(crate) fn identity_news(
     news
 }
 
-/// Why the lockout moved, for the one case where that changes the sentence: a
+/// Why the Funnel state moved, for the one case where that changes the sentence: a
 /// lift to open after a look that SAW no Funnel, against one made because
 /// Tailscale is not running here at all, or not installed (nothing was
 /// confirmed then).
@@ -1010,28 +1030,38 @@ pub(crate) enum Because {
 /// from in here, and publishing a containerised dux through one is a setup the
 /// operator chose, so this says what dux cannot know and what that means rather
 /// than refusing.
-pub(crate) const CONTAINER_WARNING: &str = "dux is running inside a container and sees no \
-     Tailscale here. It cannot see a Tailscale outside this container, so it cannot tell \
-     whether something outside publishes this port, and dux has no login: anything that can \
-     reach this port can drive your terminals. Keep the port private to your own network; dux \
-     is not meant to be exposed publicly.";
+pub(crate) fn container_warning(password_set: bool) -> String {
+    let consequence = if password_set {
+        "so keep [server.auth] require = \"everywhere\" if anything outside could publish it: \
+         a request forwarded onto this port can look like this machine"
+    } else {
+        "and no password is set: anything that can reach this port can drive your terminals. Set \
+         one with `dux config set server.auth.password`, or keep the port private to your own \
+         network"
+    };
+    format!(
+        "dux is running inside a container and sees no Tailscale here. It cannot see a \
+         Tailscale outside this container, so it cannot tell whether something outside \
+         publishes this port, {consequence}."
+    )
+}
 
-/// Where a FAILED look leaves the lockout.
+/// Where a FAILED look leaves the Funnel state.
 ///
-/// - A Funnel already seen stays refused through anything that is not a look
-///   that SEES it gone: a daemon outage, a CLI that fails. Only a successful
-///   look lifts it.
+/// - A Funnel already seen stays one through anything that is not a look that
+///   SEES it gone: a daemon outage, a CLI that fails. Only a successful look
+///   clears it.
 /// - An unknown answer (the CLI failed, timed out, could not reach a daemon, or
-///   is missing while Tailscale is evidently here) refuses everything, from
-///   open too, not only before the first look.
+///   is missing while Tailscale is evidently here) is unknown, from open too,
+///   not only before the first look; loopback is not trusted meanwhile.
 /// - An answer: no Tailscale here at all, or a daemon the CLI says is not
 ///   running, with nothing else of Tailscale on the machine (the probe reports
-///   these only then). Nothing can publish dux, so it serves.
-pub(crate) fn lockout_after_failure(
-    current: crate::host_guard::FunnelLockout,
+///   these only then). Nothing can publish dux, so loopback is this machine.
+pub(crate) fn funnel_state_after_failure(
+    current: crate::exposure::FunnelState,
     reason: &TailscaleUnavailable,
-) -> crate::host_guard::FunnelLockout {
-    use crate::host_guard::FunnelLockout::{CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed};
+) -> crate::exposure::FunnelState {
+    use crate::exposure::FunnelState::{CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed};
     if matches!(current, Funnel | FunnelSaved) {
         return current;
     }
@@ -1044,10 +1074,12 @@ pub(crate) fn lockout_after_failure(
     }
 }
 
-/// Where a SUCCESSFUL look leaves the lockout: refused while a Funnel publishes
+/// Where a SUCCESSFUL look leaves the Funnel state: a Funnel while one publishes
 /// dux, with its own way out when the node is down and the Funnel only saved.
-pub(crate) fn lockout_after_look(identity: &TailscaleIdentity) -> crate::host_guard::FunnelLockout {
-    use crate::host_guard::FunnelLockout::{Funnel, FunnelSaved, Open};
+pub(crate) fn funnel_state_after_look(
+    identity: &TailscaleIdentity,
+) -> crate::exposure::FunnelState {
+    use crate::exposure::FunnelState::{Funnel, FunnelSaved, Open};
     match (identity.funnel_to_dux, identity.node_down) {
         (true, true) => FunnelSaved,
         (true, false) => Funnel,
@@ -1055,52 +1087,85 @@ pub(crate) fn lockout_after_look(identity: &TailscaleIdentity) -> crate::host_gu
     }
 }
 
-/// What one change of the Funnel lockout is worth saying, if anything. Quiet
+/// What one change of the Funnel state is worth saying, if anything. Quiet
 /// when the first look finds nothing (the expected outcome) or nothing changed.
-pub(crate) fn lockout_news(
-    before: crate::host_guard::FunnelLockout,
-    after: crate::host_guard::FunnelLockout,
+/// What a Funnel means depends on whether a password is set: with one, its
+/// visitors and this machine's own requests must sign in; with none, dux serves
+/// them and says so loudly.
+pub(crate) fn funnel_state_news(
+    before: crate::exposure::FunnelState,
+    after: crate::exposure::FunnelState,
     because: Because,
+    password_set: bool,
 ) -> Option<(dux_core::statusline::StatusTone, String)> {
-    use crate::host_guard::FunnelLockout::{
+    use crate::exposure::FunnelState::{
         Checking, CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed,
     };
     use dux_core::statusline::StatusTone;
     if before == after {
         return None;
     }
+    let meanwhile = if password_set {
+        "Until then dux treats requests from this machine as coming from the network, so they \
+         are asked for the password like the rest."
+    } else {
+        "No password is set, so anything such a Funnel publishes can drive your terminals: set \
+         one with `dux config set server.auth.password`."
+    };
+    let sentence = |what: &str| format!("{what} {meanwhile}");
     match (before, after) {
         (_, Funnel) => Some((
             StatusTone::Warning,
-            "A Tailscale Funnel forwards connections from the public internet to dux's port, \
-             and dux has no login, so dux is refusing every request until that Funnel is \
-             turned off (`tailscale funnel status` lists it)."
-                .to_string(),
+            if password_set {
+                "A Tailscale Funnel forwards connections from the public internet to dux's port. \
+                 Every request through it, and every request from this machine while it stands, \
+                 is asked for the password (`tailscale funnel status` lists the Funnel)."
+                    .to_string()
+            } else {
+                "A Tailscale Funnel forwards connections from the public internet to dux's port \
+                 and no password is set: anyone on the internet who finds it can drive your \
+                 terminals. Set a password now with `dux config set server.auth.password`, or \
+                 turn the Funnel off (`tailscale funnel status` lists it)."
+                    .to_string()
+            },
         )),
         (_, Unconfirmed) => Some((
             StatusTone::Warning,
-            "dux could not confirm that no Tailscale Funnel publishes it to the public internet \
-             (the tailscale CLI failed, did not answer, or cannot reach its daemon), and dux has \
-             no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection."
-                .to_string(),
+            sentence(
+                "dux could not confirm that no Tailscale Funnel publishes it to the public \
+                 internet (the tailscale CLI failed, did not answer, or cannot reach its \
+                 daemon). Fix tailscaled on this machine (`tailscale status` shows what it \
+                 says).",
+            ),
         )),
         (_, FunnelSaved) => Some((
             StatusTone::Warning,
-            crate::host_guard::FUNNEL_SAVED_REFUSAL.to_string(),
+            sentence(
+                "Tailscale is down on this machine, but its saved settings Funnel this dux \
+                 server to the public internet, and Tailscale brings that Funnel back the \
+                 moment it is up again. Bring Tailscale up (`tailscale up`), then turn the \
+                 Funnel off (`tailscale funnel status` lists it).",
+            ),
         )),
         (_, CliNotFound) => Some((
             StatusTone::Warning,
-            crate::host_guard::CLI_NOT_FOUND_REFUSAL.to_string(),
+            sentence(
+                "Tailscale is running on this machine, but dux cannot find the tailscale \
+                 command to ask it whether a Tailscale Funnel publishes this server to the \
+                 public internet. dux looks for it on your PATH, in /usr/local/bin, and in \
+                 /Applications/Tailscale.app/Contents/MacOS/Tailscale.",
+            ),
         )),
         (Funnel | FunnelSaved | Unconfirmed | CliNotFound, Open) => Some((
             StatusTone::Info,
             match because {
-                Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and \
-                                  serves requests again."
+                Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and takes \
+                                  requests from this machine for this machine again."
                     .to_string(),
                 Because::NoTailscaleHere => "Tailscale is not running on this machine (or \
                                              not installed), so nothing can publish dux \
-                                             through Funnel; dux serves requests again."
+                                             through Funnel; dux takes requests from this \
+                                             machine for this machine again."
                     .to_string(),
             },
         )),
@@ -1119,18 +1184,20 @@ pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
         "[server] tailscale = \"no\""
     };
     format!(
-        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel \
-         publishing it to the public internet, and dux has no login. Keep this port private to \
-         your own network."
+        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel or \
+         forward publishing it to the public internet, and a request through one would look \
+         like this machine. Keep this port private to your own network, or set a password \
+         with [server.auth] require = \"everywhere\"."
     )
 }
 
 /// What dux says when a switch to `tailscale = "no"` lifts a refusal: an
 /// explicit choice, but one that serves whatever a Funnel publishes.
-pub(crate) fn lockout_lifted_by_no() -> String {
-    "[server] tailscale is now \"no\", so dux no longer checks for Tailscale Funnel and serves \
-     every request again, including any a Funnel publishes from the public internet with no \
-     login. Turn the Funnel off, or set tailscale back to \"auto\"."
+pub(crate) fn no_longer_checking_funnel() -> String {
+    "[server] tailscale is now \"no\", so dux no longer checks for Tailscale Funnel and takes \
+     requests from this machine for this machine again, including any a Funnel forwards from \
+     the public internet. Turn the Funnel off, set tailscale back to \"auto\", or set \
+     [server.auth] require = \"everywhere\"."
         .to_string()
 }
 
@@ -1196,10 +1263,18 @@ pub struct TailscaleModeControl {
     /// The MagicDNS name the Host guard admits (rule 6). The serve loop is its
     /// only writer; the guard reads it per request.
     own_name: crate::host_guard::LiveHostNames,
-    /// Whether the Host guard serves at all, as far as Funnel goes. Starts
-    /// CHECKING on every mode but `no`, so nothing is served before the first
-    /// look at Tailscale lands. The serve loop is its only writer.
-    funnel_lockout: crate::host_guard::FunnelLockoutCell,
+    /// What the serve knows about a Funnel or forward to dux. Starts CHECKING
+    /// on every mode but `no`, so loopback is not taken for this machine
+    /// before the first look at Tailscale lands. The serve loop is its only
+    /// writer.
+    exposure: crate::exposure::ExposureCell,
+    /// The Tailscale leg bound right now. The serve loop is its only writer;
+    /// the auth layer reads it to know whether dux is reachable beyond this
+    /// machine.
+    bound: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    /// Whether a password is set, which decides whether a Funnel withdraws the
+    /// name. Defaults to "no", the strict answer.
+    password_set: crate::host_guard::PasswordSet,
 }
 
 /// The identity a serve currently holds, shared between the serve loop that
@@ -1214,11 +1289,11 @@ impl TailscaleModeControl {
         host_literals: Arc<AtomicBool>,
     ) -> (Self, tokio::sync::mpsc::Receiver<ModeRequest>) {
         let (tx, rx) = tokio::sync::mpsc::channel(MODE_REQUEST_QUEUE);
-        let funnel_lockout =
-            crate::host_guard::FunnelLockoutCell::new(if host_literals.load(Ordering::SeqCst) {
-                crate::host_guard::FunnelLockout::Checking
+        let exposure =
+            crate::exposure::ExposureCell::new(if host_literals.load(Ordering::SeqCst) {
+                crate::exposure::FunnelState::Checking
             } else {
-                crate::host_guard::FunnelLockout::Open
+                crate::exposure::FunnelState::Open
             });
         (
             Self {
@@ -1228,7 +1303,9 @@ impl TailscaleModeControl {
                 host_literals,
                 identity: IdentityCell::default(),
                 own_name: crate::host_guard::LiveHostNames::default(),
-                funnel_lockout,
+                exposure,
+                bound: Arc::new(std::sync::Mutex::new(None)),
+                password_set: Arc::new(|| false),
             },
             rx,
         )
@@ -1245,10 +1322,25 @@ impl TailscaleModeControl {
         self.own_name.clone()
     }
 
-    /// The cell the Host guard reads to refuse every request while a Tailscale
-    /// Funnel forwards raw TCP to dux's port.
-    pub fn funnel_lockout(&self) -> crate::host_guard::FunnelLockoutCell {
-        self.funnel_lockout.clone()
+    /// What the serve knows about a Funnel or forward to dux.
+    pub fn exposure(&self) -> crate::exposure::ExposureCell {
+        self.exposure.clone()
+    }
+
+    /// The Tailscale leg the serve loop has bound, shared with it.
+    pub(crate) fn bound_leg(&self) -> Arc<std::sync::Mutex<Option<SocketAddr>>> {
+        Arc::clone(&self.bound)
+    }
+
+    /// Read whether a password is set from `password_set`.
+    pub fn with_password_set(mut self, password_set: crate::host_guard::PasswordSet) -> Self {
+        self.password_set = password_set;
+        self
+    }
+
+    /// Whether a password is set right now.
+    pub(crate) fn password_set(&self) -> crate::host_guard::PasswordSet {
+        Arc::clone(&self.password_set)
     }
 
     /// The identity the serve loop holds, for the URL lists.
@@ -1268,6 +1360,7 @@ impl TailscaleModeControl {
             legs,
             identity.as_ref(),
             self.host_literals.load(Ordering::SeqCst),
+            (self.password_set)(),
         )
     }
 
@@ -1858,28 +1951,37 @@ mod tests {
     #[test]
     fn the_guard_admits_the_name_unless_funnel_publishes_a_route_to_dux() {
         assert_eq!(
-            admitted_own_name(&identity("box.tail.ts.net", &[])).as_deref(),
+            admitted_own_name(&identity("box.tail.ts.net", &[]), false).as_deref(),
             Some("box.tail.ts.net")
         );
         assert_eq!(
-            admitted_own_name(&identity(
-                "box.tail.ts.net",
-                &[("https://box.tail.ts.net", false)]
-            ))
+            admitted_own_name(
+                &identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]),
+                false
+            )
             .as_deref(),
             Some("box.tail.ts.net")
         );
         assert_eq!(
-            admitted_own_name(&identity(
-                "box.tail.ts.net",
-                &[("https://box.tail.ts.net", true)]
-            )),
+            admitted_own_name(
+                &identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]),
+                false
+            ),
             None,
-            "a public, login-free dux is never something rule 6 hands out"
+            "a public dux with no password is never something rule 6 hands out"
+        );
+        assert_eq!(
+            admitted_own_name(
+                &identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]),
+                true
+            )
+            .as_deref(),
+            Some("box.tail.ts.net"),
+            "with a password the Funnel's visitors must reach the login page"
         );
         let mut nameless = identity("box.tail.ts.net", &[]);
         nameless.status.dns_name = None;
-        assert_eq!(admitted_own_name(&nameless), None);
+        assert_eq!(admitted_own_name(&nameless, false), None);
     }
 
     #[test]
@@ -1888,7 +1990,7 @@ mod tests {
         let loopback = addr("127.0.0.1:3890");
         let leg = addr("100.64.0.5:3890");
 
-        let urls = tailnet_urls(&[loopback, leg], Some(&id), true);
+        let urls = tailnet_urls(&[loopback, leg], Some(&id), true, false);
         assert_eq!(urls.ip.as_deref(), Some("http://100.64.0.5:3890"));
         assert_eq!(urls.name.as_deref(), Some("http://box.tail.ts.net:3890"));
         assert_eq!(urls.magic_dns(), Some("http://box.tail.ts.net:3890"));
@@ -1899,11 +2001,11 @@ mod tests {
 
         // Loopback only (the leg is away): the name resolves to an address
         // nothing is listening on, so it is not offered.
-        let urls = tailnet_urls(&[loopback], Some(&id), true);
+        let urls = tailnet_urls(&[loopback], Some(&id), true, false);
         assert_eq!(urls, TailnetUrls::default());
 
         // A wildcard listener covers the Tailscale address too.
-        let urls = tailnet_urls(&[addr("0.0.0.0:3890")], Some(&id), true);
+        let urls = tailnet_urls(&[addr("0.0.0.0:3890")], Some(&id), true, false);
         assert_eq!(urls.name.as_deref(), Some("http://box.tail.ts.net:3890"));
         assert_eq!(urls.ip, None, "no Tailscale address is known from the legs");
     }
@@ -1913,7 +2015,7 @@ mod tests {
         // `tailscale serve` proxies to loopback, so it reaches dux whatever the
         // Tailscale leg is doing.
         let id = identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]);
-        let urls = tailnet_urls(&[addr("127.0.0.1:3890")], Some(&id), true);
+        let urls = tailnet_urls(&[addr("127.0.0.1:3890")], Some(&id), true, false);
         assert_eq!(urls.serve, vec!["https://box.tail.ts.net".to_string()]);
         assert_eq!(urls.magic_dns(), Some("https://box.tail.ts.net"));
 
@@ -1921,6 +2023,7 @@ mod tests {
             &[addr("127.0.0.1:3890"), addr("100.64.0.5:3890")],
             Some(&id),
             true,
+            false,
         );
         assert_eq!(urls.magic_dns(), Some("https://box.tail.ts.net"));
         assert_eq!(
@@ -1937,26 +2040,26 @@ mod tests {
         let legs = [addr("127.0.0.1:3890"), addr("100.64.0.5:3890")];
         let id = identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]);
 
-        let urls = tailnet_urls(&legs, Some(&id), false);
+        let urls = tailnet_urls(&legs, Some(&id), false, false);
         assert_eq!((urls.name, urls.serve), (None, vec![]), "mode no");
 
         let mut off = id.clone();
         off.status.magic_dns_enabled = false;
-        let urls = tailnet_urls(&legs, Some(&off), true);
+        let urls = tailnet_urls(&legs, Some(&off), true, false);
         assert_eq!(
             urls.name, None,
             "the name does not resolve with MagicDNS off"
         );
 
         let funnelled = identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]);
-        let urls = tailnet_urls(&legs, Some(&funnelled), true);
+        let urls = tailnet_urls(&legs, Some(&funnelled), true, false);
         assert_eq!(
             (urls.name, urls.serve),
             (None, vec![]),
             "the guard refuses the name, so no URL that uses it is offered"
         );
 
-        let urls = tailnet_urls(&legs, None, true);
+        let urls = tailnet_urls(&legs, None, true, false);
         assert_eq!(urls.ip.as_deref(), Some("http://100.64.0.5:3890"));
         assert_eq!(urls.name, None, "nothing read yet");
     }
@@ -1991,12 +2094,12 @@ mod tests {
         use dux_core::statusline::StatusTone;
         let first = identity("demo-box.old-tailnet.ts.net", &[]);
         assert!(
-            identity_news(None, &first).is_empty(),
+            identity_news(None, &first, false).is_empty(),
             "the banner already said it"
         );
 
         let renamed = identity("demo-box.example-tailnet.ts.net", &[]);
-        let news = identity_news(Some(&first), &renamed);
+        let news = identity_news(Some(&first), &renamed, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(news[0].0, StatusTone::Info);
         assert!(
@@ -2012,7 +2115,7 @@ mod tests {
             "demo-box.example-tailnet.ts.net",
             &[("https://demo-box.example-tailnet.ts.net", false)],
         );
-        let news = identity_news(Some(&renamed), &served);
+        let news = identity_news(Some(&renamed), &served, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert!(
             news[0]
@@ -2020,7 +2123,7 @@ mod tests {
                 .contains("https://demo-box.example-tailnet.ts.net"),
             "{news:?}"
         );
-        let news = identity_news(Some(&served), &renamed);
+        let news = identity_news(Some(&served), &renamed, false);
         assert_eq!(news.len(), 1, "a route leaving is said too: {news:?}");
         assert!(news[0].1.contains("no longer"), "{news:?}");
 
@@ -2028,17 +2131,20 @@ mod tests {
             "demo-box.example-tailnet.ts.net",
             &[("https://demo-box.example-tailnet.ts.net", true)],
         );
-        let news = identity_news(Some(&served), &funnelled);
+        let news = identity_news(Some(&served), &funnelled, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(news[0].0, StatusTone::Warning);
         assert!(news[0].1.contains("Funnel"), "{news:?}");
-        assert!(news[0].1.contains("no login"), "says why: {news:?}");
+        assert!(
+            news[0].1.contains("no password is set"),
+            "says why: {news:?}"
+        );
         assert!(news[0].1.contains("off"), "says how to stop it: {news:?}");
         assert!(
             !news[0].1.contains("allowed_hosts"),
             "never offers a way to keep Funnel working: {news:?}"
         );
-        let news = identity_news(Some(&funnelled), &served);
+        let news = identity_news(Some(&funnelled), &served, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(
             news[0].0,
@@ -2050,8 +2156,8 @@ mod tests {
     #[test]
     fn funnel_on_a_route_dux_does_not_show_still_withdraws_the_name_and_warns() {
         let elsewhere = funnelled_elsewhere("box.tail.ts.net");
-        assert_eq!(admitted_own_name(&elsewhere), None);
-        let news = identity_news(Some(&identity("box.tail.ts.net", &[])), &elsewhere);
+        assert_eq!(admitted_own_name(&elsewhere, false), None);
+        let news = identity_news(Some(&identity("box.tail.ts.net", &[])), &elsewhere, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(news[0].0, dux_core::statusline::StatusTone::Warning);
         assert!(!news[0].1.contains("allowed_hosts"), "{news:?}");
@@ -2061,7 +2167,7 @@ mod tests {
             news[0].1.contains("cannot tell whether") && news[0].1.contains("another program"),
             "{news:?}"
         );
-        assert!(news[0].1.contains("no login"), "{news:?}");
+        assert!(news[0].1.contains("no password is set"), "{news:?}");
         assert_eq!(
             serve_hint(&elsewhere, 3890),
             None,
@@ -2070,56 +2176,66 @@ mod tests {
     }
 
     #[test]
-    fn every_change_of_the_lockout_is_said_once_with_why_and_the_way_out() {
-        use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+    fn every_change_of_the_funnel_state_is_said_once_with_what_it_means() {
+        use crate::exposure::FunnelState::{Checking, Funnel, Open, Unconfirmed};
         use dux_core::statusline::StatusTone;
         let look = Because::Look;
-        assert_eq!(
-            lockout_news(Checking, Open, look),
-            None,
-            "the expected outcome is quiet"
-        );
-        assert_eq!(lockout_news(Open, Open, look), None);
-        assert_eq!(lockout_news(Funnel, Funnel, look), None);
-
-        for before in [Checking, Open] {
-            let (tone, text) = lockout_news(before, Unconfirmed, look).expect("refusing is news");
-            assert_eq!(tone, StatusTone::Warning);
-            assert!(text.contains("could not confirm"), "{text}");
-            let fix = text.find("tailscaled").expect("names tailscaled");
-            let no = text.find("tailscale = \"no\"").expect("names the way out");
-            assert!(fix < no, "fixing tailscaled comes first: {text}");
-            assert!(text.contains("turns off"), "says what `no` costs: {text}");
-        }
-
-        for before in [Open, Checking, Unconfirmed] {
-            let (tone, text) = lockout_news(before, Funnel, look).expect("a Funnel is news");
-            assert_eq!(tone, StatusTone::Warning);
-            assert!(text.contains("every request"), "{text}");
-            assert!(text.contains("no login"), "{text}");
-            assert!(text.contains("tailscale funnel status"), "{text}");
-            assert!(!text.contains("allowed_hosts"), "{text}");
-        }
-
-        for before in [Funnel, Unconfirmed] {
-            let (tone, text) = lockout_news(before, Open, look).expect("lifting is news");
-            assert_eq!(tone, StatusTone::Info);
-            assert!(text.contains("confirmed"), "a look did confirm it: {text}");
-            assert!(text.contains("serves requests again"), "{text}");
-
-            let (_, text) =
-                lockout_news(before, Open, Because::NoTailscaleHere).expect("lifting is news");
-            assert!(
-                !text.contains("confirmed"),
-                "nothing was confirmed when there is no Tailscale to ask: {text}"
+        for password in [false, true] {
+            assert_eq!(
+                funnel_state_news(Checking, Open, look, password),
+                None,
+                "the expected outcome is quiet"
             );
-            assert!(text.contains("not running on this machine"), "{text}");
+            assert_eq!(funnel_state_news(Open, Open, look, password), None);
+            assert_eq!(funnel_state_news(Funnel, Funnel, look, password), None);
+
+            for before in [Checking, Open] {
+                let (tone, text) =
+                    funnel_state_news(before, Unconfirmed, look, password).expect("news");
+                assert_eq!(tone, StatusTone::Warning);
+                assert!(text.contains("could not confirm"), "{text}");
+                assert!(text.contains("tailscaled"), "names tailscaled: {text}");
+                assert!(!text.contains("no login"), "{text}");
+            }
+
+            for before in [Open, Checking, Unconfirmed] {
+                let (tone, text) =
+                    funnel_state_news(before, Funnel, look, password).expect("a Funnel is news");
+                assert_eq!(tone, StatusTone::Warning);
+                assert!(text.contains("tailscale funnel status"), "{text}");
+                assert!(!text.contains("allowed_hosts"), "{text}");
+                if password {
+                    assert!(text.contains("asked for the password"), "{text}");
+                } else {
+                    assert!(text.contains("no password is set"), "{text}");
+                    assert!(
+                        text.contains("dux config set server.auth.password"),
+                        "{text}"
+                    );
+                }
+            }
+
+            for before in [Funnel, Unconfirmed] {
+                let (tone, text) =
+                    funnel_state_news(before, Open, look, password).expect("lifting is news");
+                assert_eq!(tone, StatusTone::Info);
+                assert!(text.contains("confirmed"), "a look did confirm it: {text}");
+                assert!(text.contains("for this machine again"), "{text}");
+
+                let (_, text) = funnel_state_news(before, Open, Because::NoTailscaleHere, password)
+                    .expect("lifting is news");
+                assert!(
+                    !text.contains("confirmed"),
+                    "nothing was confirmed when there is no Tailscale to ask: {text}"
+                );
+                assert!(text.contains("not running on this machine"), "{text}");
+            }
         }
     }
 
     #[test]
     fn a_failed_look_never_lifts_a_refusal_and_refuses_while_unknown() {
-        use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+        use crate::exposure::FunnelState::{Checking, Funnel, Open, Unconfirmed};
         use TailscaleUnavailable::{
             CommandFailed, CommandMissing, DaemonStopped, DaemonUnreachable, NoAddress,
         };
@@ -2128,12 +2244,16 @@ mod tests {
         for reason in [CommandFailed, NoAddress, DaemonUnreachable] {
             for before in [Checking, Open, Unconfirmed] {
                 assert_eq!(
-                    lockout_after_failure(before, &reason),
+                    funnel_state_after_failure(before, &reason),
                     Unconfirmed,
                     "{before:?} {reason:?}"
                 );
             }
-            assert_eq!(lockout_after_failure(Funnel, &reason), Funnel, "{reason:?}");
+            assert_eq!(
+                funnel_state_after_failure(Funnel, &reason),
+                Funnel,
+                "{reason:?}"
+            );
         }
         // An answer: no Tailscale here at all, or a daemon that is definitely
         // stopped (the probe only reports these when nothing else of Tailscale
@@ -2142,13 +2262,13 @@ mod tests {
         for reason in [CommandMissing, DaemonStopped] {
             for before in [Checking, Open, Unconfirmed] {
                 assert_eq!(
-                    lockout_after_failure(before, &reason),
+                    funnel_state_after_failure(before, &reason),
                     Open,
                     "{before:?} {reason:?}"
                 );
             }
             assert_eq!(
-                lockout_after_failure(Funnel, &reason),
+                funnel_state_after_failure(Funnel, &reason),
                 Funnel,
                 "a Funnel survives a daemon outage: {reason:?}"
             );
@@ -2160,37 +2280,32 @@ mod tests {
     /// command where dux looks.
     #[test]
     fn a_missing_cli_with_tailscale_here_refuses_with_its_own_way_out() {
-        use crate::host_guard::FunnelLockout::{Checking, CliNotFound, Funnel, Open, Unconfirmed};
+        use crate::exposure::FunnelState::{Checking, CliNotFound, Funnel, Open, Unconfirmed};
         for before in [Checking, Open, Unconfirmed, CliNotFound] {
             assert_eq!(
-                lockout_after_failure(before, &TailscaleUnavailable::Unverifiable),
+                funnel_state_after_failure(before, &TailscaleUnavailable::Unverifiable),
                 CliNotFound,
                 "{before:?}"
             );
         }
         assert_eq!(
-            lockout_after_failure(Funnel, &TailscaleUnavailable::Unverifiable),
+            funnel_state_after_failure(Funnel, &TailscaleUnavailable::Unverifiable),
             Funnel
         );
         let (tone, text) =
-            lockout_news(Open, CliNotFound, Because::NoTailscaleHere).expect("refusing is news");
+            funnel_state_news(Open, CliNotFound, Because::NoTailscaleHere, false).expect("news");
         assert_eq!(tone, dux_core::statusline::StatusTone::Warning);
-        let refusal = CliNotFound.refusal().expect("it refuses");
-        for body in [text.as_str(), refusal] {
-            for needle in [
-                "PATH",
-                "/usr/local/bin",
-                "/Applications/Tailscale.app",
-                "tailscale = \"no\"",
-                "turns off",
-                "no login",
-            ] {
-                assert!(body.contains(needle), "{needle}: {body}");
-            }
-            assert!(!body.contains("tailscale status"), "{body}");
+        for needle in [
+            "PATH",
+            "/usr/local/bin",
+            "/Applications/Tailscale.app",
+            "No password is set",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
         }
-        assert!(lockout_news(CliNotFound, Open, Because::Look).is_some());
-        assert!(lockout_news(Unconfirmed, CliNotFound, Because::Look).is_some());
+        assert!(!text.contains("tailscale status"), "{text}");
+        assert!(funnel_state_news(CliNotFound, Open, Because::Look, false).is_some());
+        assert!(funnel_state_news(Unconfirmed, CliNotFound, Because::Look, true).is_some());
     }
 
     /// A node that is down cannot run `tailscale funnel ... off` (it needs the
@@ -2198,21 +2313,21 @@ mod tests {
     /// `tailscale up` first, then the Funnel off, then `no` as a last resort.
     #[test]
     fn a_saved_funnel_on_a_node_that_is_down_says_to_bring_it_up_first() {
-        use crate::host_guard::FunnelLockout::{Checking, Funnel, FunnelSaved, Open, Unconfirmed};
+        use crate::exposure::FunnelState::{Checking, Funnel, FunnelSaved, Open, Unconfirmed};
         let down = TailscaleIdentity {
             node_down: true,
             ..tcp_funnelled("box.tail.ts.net")
         };
-        assert_eq!(lockout_after_look(&down), FunnelSaved);
+        assert_eq!(funnel_state_after_look(&down), FunnelSaved);
         assert_eq!(
-            lockout_after_look(&tcp_funnelled("box.tail.ts.net")),
+            funnel_state_after_look(&tcp_funnelled("box.tail.ts.net")),
             Funnel
         );
         let down_clear = TailscaleIdentity {
             node_down: true,
             ..identity("box.tail.ts.net", &[])
         };
-        assert_eq!(lockout_after_look(&down_clear), Open);
+        assert_eq!(funnel_state_after_look(&down_clear), Open);
         // It survives anything short of a look that shows the Funnel gone.
         for reason in [
             TailscaleUnavailable::CommandMissing,
@@ -2220,61 +2335,56 @@ mod tests {
             TailscaleUnavailable::CommandFailed,
             TailscaleUnavailable::Unverifiable,
         ] {
-            assert_eq!(lockout_after_failure(FunnelSaved, &reason), FunnelSaved);
-        }
-        let (tone, news) = lockout_news(Open, FunnelSaved, Because::Look).expect("news");
-        assert_eq!(tone, dux_core::statusline::StatusTone::Warning);
-        let refusal = FunnelSaved.refusal().expect("it refuses");
-        for body in [news.as_str(), refusal] {
-            let up = body.find("tailscale up").expect("names tailscale up");
-            let off = body
-                .find("tailscale funnel")
-                .expect("names turning the Funnel off");
-            let no = body
-                .find("tailscale = \"no\"")
-                .expect("names the last resort");
-            assert!(up < off && off < no, "{body}");
-            assert!(
-                body.contains("no login") && body.contains("turns off"),
-                "{body}"
+            assert_eq!(
+                funnel_state_after_failure(FunnelSaved, &reason),
+                FunnelSaved
             );
         }
+        let (tone, news) =
+            funnel_state_news(Open, FunnelSaved, Because::Look, false).expect("news");
+        assert_eq!(tone, dux_core::statusline::StatusTone::Warning);
+        let up = news.find("tailscale up").expect("names tailscale up");
+        let off = news
+            .find("tailscale funnel")
+            .expect("names turning the Funnel off");
+        assert!(up < off, "{news}");
+        assert!(news.contains("No password is set"), "{news}");
         for before in [Checking, Open, Unconfirmed, Funnel] {
-            assert!(lockout_news(before, FunnelSaved, Because::Look).is_some());
+            assert!(funnel_state_news(before, FunnelSaved, Because::Look, true).is_some());
         }
-        assert!(lockout_news(FunnelSaved, Open, Because::Look).is_some());
-        assert!(lockout_news(FunnelSaved, Checking, Because::Look).is_none());
+        assert!(funnel_state_news(FunnelSaved, Open, Because::Look, true).is_some());
+        assert!(funnel_state_news(FunnelSaved, Checking, Because::Look, true).is_none());
     }
 
     #[test]
-    fn a_funnel_to_dux_is_the_lockouts_news_not_the_names() {
-        // One sentence for one event: the lockout says it, the name news does not
-        // say it again.
+    fn a_funnel_to_dux_is_the_funnel_states_news_not_the_names() {
+        // One sentence for one event: the Funnel state says it, the name news
+        // does not say it again.
         let plain = identity("box.tail.ts.net", &[]);
-        assert!(identity_news(Some(&plain), &tcp_funnelled("box.tail.ts.net")).is_empty());
-        assert!(identity_news(Some(&tcp_funnelled("box.tail.ts.net")), &plain).is_empty());
+        assert!(identity_news(Some(&plain), &tcp_funnelled("box.tail.ts.net"), false).is_empty());
+        assert!(identity_news(Some(&tcp_funnelled("box.tail.ts.net")), &plain, false).is_empty());
     }
 
     #[test]
-    fn switching_to_no_says_out_loud_that_it_lifted_a_refusal() {
-        let text = lockout_lifted_by_no();
+    fn switching_to_no_says_out_loud_what_it_stops_noticing() {
+        let text = no_longer_checking_funnel();
         assert!(text.contains("no longer checks"), "{text}");
         assert!(text.contains("Funnel"), "{text}");
-        assert!(text.contains("no login"), "{text}");
+        assert!(text.contains("require = \"everywhere\""), "{text}");
     }
 
     #[test]
     fn the_news_follows_the_name_dux_admits_not_the_one_tailscale_reports() {
         // A Headscale rename: dux never answered to either name.
-        assert!(identity_news(Some(&headscale("box")), &headscale("box2")).is_empty());
+        assert!(identity_news(Some(&headscale("box")), &headscale("box2"), false).is_empty());
         // A Headscale name going away: dux never answered to it.
         let mut gone = headscale("box");
         gone.status.dns_name = None;
-        assert!(identity_news(Some(&headscale("box")), &gone).is_empty());
+        assert!(identity_news(Some(&headscale("box")), &gone, false).is_empty());
         // A rename under Funnel: dux answers to neither, and only Funnel is news.
         let before = identity("box.old-tailnet.ts.net", &[]);
         let after = funnelled_elsewhere("box.example-tailnet.ts.net");
-        let news = identity_news(Some(&before), &after);
+        let news = identity_news(Some(&before), &after, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert!(news[0].1.contains("Funnel"), "{news:?}");
         assert!(!news[0].1.contains("now answers"), "{news:?}");
@@ -2284,10 +2394,10 @@ mod tests {
     fn a_name_tailscale_did_not_assign_is_never_admitted_by_itself() {
         let mut headscale = identity("box.vpn.example.com", &[]);
         headscale.status.magic_dns_suffix = Some("vpn.example.com".to_string());
-        assert_eq!(admitted_own_name(&headscale), None);
+        assert_eq!(admitted_own_name(&headscale, false), None);
         let mut no_suffix = identity("box.tail.ts.net", &[]);
         no_suffix.status.magic_dns_suffix = None;
-        assert_eq!(admitted_own_name(&no_suffix), None);
+        assert_eq!(admitted_own_name(&no_suffix, false), None);
     }
 
     #[test]
@@ -2375,7 +2485,7 @@ mod tests {
     #[test]
     fn a_first_look_that_finds_funnel_warns_at_once() {
         let funnelled = identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]);
-        let news = identity_news(None, &funnelled);
+        let news = identity_news(None, &funnelled, false);
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(news[0].0, dux_core::statusline::StatusTone::Warning);
     }

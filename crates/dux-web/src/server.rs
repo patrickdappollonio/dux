@@ -3,8 +3,10 @@
 //! REST (`/api/v1/*`); the sockets carry only change events + status (events) and
 //! terminal byte streams (PTY).
 //!
-//! There is no login gate: static assets, `/healthz`, every `/api/v1/*` route and
-//! every WS upgrade are served plainly.
+//! Every request passes the auth layer (`crate::auth`): the blocklist always,
+//! and, once a password is set, a session check on everything but the declared
+//! public routes (the page and its assets, `/healthz`, the auth status and the
+//! login). With no password every route is served plainly, as it always was.
 //!
 //! Every WS upgrade still runs an Origin check against cross-site WebSocket
 //! hijacking, allowing same-host origins only. A client that sends no `Origin` is
@@ -152,23 +154,13 @@ pub struct AppState {
     /// [`crate::rest_common::FROM_PR_CREATE_AWAIT_TIMEOUT`]; a test sets a short
     /// window so the deferred reply is exercised without waiting out the real one.
     pub create_await_timeout: Option<std::time::Duration>,
-    /// The serve's Funnel lockout, so every long-lived socket can close itself
-    /// the moment dux stops serving (the Host guard refuses new requests, but
-    /// a socket already upgraded never passes it again). `None` when nothing
-    /// consults Tailscale.
-    pub funnel_lockout: Option<crate::host_guard::FunnelLockoutCell>,
+    /// The web login: who each request is, the sessions, the blocklist and the
+    /// password checks. Every request passes its layer; every open socket
+    /// holds a watch on it (see [`crate::auth`]).
+    pub auth: Arc<crate::auth::AuthState>,
 }
 
 impl AppState {
-    /// What a long-lived socket holds to learn that dux stopped serving.
-    pub fn funnel_lockout_watch(&self) -> crate::host_guard::FunnelLockoutWatch {
-        self.funnel_lockout
-            .as_ref()
-            .map_or_else(crate::host_guard::FunnelLockoutWatch::never, |cell| {
-                cell.watch()
-            })
-    }
-
     /// Whether some OTHER connection currently holds input on `pty_id`, so the
     /// file-drop route can refuse a read-only viewer's drop instead of saving a file
     /// it cannot paste. A COURTESY, not the protection: only the websocket's own
@@ -234,8 +226,8 @@ fn captured_user_agent(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.chars().take(MAX_CAPTURED_USER_AGENT_CHARS).collect())
 }
 
-/// Build the router. dux is trusted-local with no login gate, so every route is
-/// plain. The single-argument entry the test harnesses and any caller use.
+/// Build the router with the plain defaults. The single-argument entry the test
+/// harnesses and any caller use.
 pub fn router(engine: EngineHandle) -> Router {
     build_app(engine, Router::new(), RouterParams::plain_http())
 }
@@ -246,19 +238,36 @@ pub fn router(engine: EngineHandle) -> Router {
 /// Pong at the protocol layer, so the ping both keeps an idle connection from being
 /// reaped by a NAT/proxy and surfaces a dead peer.
 ///
-/// LIVENESS APPROACH (deliberately the smallest correct one, see the task brief's
-/// YAGNI note): this is a SEND-FAILURE reap, not a pong-deadline reap. A ping that
-/// fails to send (the TCP send buffer has backed up against a dead/half-open peer,
-/// or the socket is already closed) breaks the socket's loop, which drops the
-/// connection-cap permit and the `ConnectionGuard` (deregistering the id), freeing
-/// the slot. We do NOT track pong receipt against a grace window: doing so would
-/// add per-socket pong-timestamp state for marginal benefit on a trusted,
-/// single-tenant tool, and the brief explicitly permits the send-failure reap. The
-/// reuse of each socket's existing per-socket `select!` loop keeps sinks out of the
-/// registry and avoids any lock-across-await. Upgradeable to a true pong-deadline
-/// reaper later if a half-open connection that still accepts buffered writes proves
-/// to be a problem in practice.
+/// LIVENESS: two reaps, both inside each socket's own `select!` loop (which keeps
+/// sinks out of the registry and avoids any lock-across-await). A ping that fails
+/// to send (the TCP send buffer has backed up against a dead peer, or the socket is
+/// already closed) breaks the loop at once. And a peer that has sent nothing, not
+/// even the pong every browser answers a ping with, for [`PONG_DEADLINE`] is closed
+/// as half-open: a socket like that still accepts buffered writes, and with a
+/// password set an open socket is what keeps a signed-in session from going idle,
+/// so it must not hold one for long. Either way the loop's end drops the
+/// connection-cap permit, the `ConnectionGuard` and the session's lease.
 const WS_LIVENESS_PING_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a socket's peer may send nothing at all, not even the pong a
+/// browser answers every ping with, before the socket is closed as half-open:
+/// two missed pings and some slack. It bounds how long a dead connection can
+/// keep holding a connection slot and, with a password set, keep a signed-in
+/// session from going idle.
+const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// Whether a peer last heard at `heard` has been quiet past [`PONG_DEADLINE`].
+fn peer_went_quiet(heard: std::time::Instant) -> bool {
+    heard.elapsed() > PONG_DEADLINE
+}
+
+/// The close frame for an auth close code (see [`crate::auth::socket`]).
+fn auth_close(code: u16) -> Message {
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: crate::auth::socket::close_reason(code).into(),
+    }))
+}
 
 /// Knobs for the serve paths.
 #[derive(Clone)]
@@ -351,10 +360,16 @@ pub struct RouterParams {
     /// a serve is behind this router. The Host guard admits that one name while
     /// the Tailscale mode is not `no` (rule 6). `None` admits no tailnet name.
     pub live_own_magicdns_name: Option<crate::host_guard::LiveHostNames>,
-    /// The serve's Funnel-lockout cell: while it is set, the Host guard refuses
-    /// every request (a raw TCP Funnel forwards to dux's port). `None` in tests
-    /// and on any path with no serve loop behind it.
-    pub live_funnel_lockout: Option<crate::host_guard::FunnelLockoutCell>,
+    /// What the serve knows about a Funnel or forward to dux, which decides
+    /// how a loopback request is classified and whether a Funnel withdraws the
+    /// MagicDNS name. `None` in tests and on any path with no serve loop behind
+    /// it, which reads as nothing published.
+    pub live_exposure: Option<crate::exposure::ExposureCell>,
+    /// What the auth layer calls after dux wrote `config.toml` itself (a
+    /// password, a ban, the no-password warning's dismissal), so the running
+    /// config catches up the way it does after `dux config set`. Defaults to
+    /// raising SIGUSR1 at this process, which every serving mode reloads on.
+    pub auth_reload: Arc<dyn Fn() + Send + Sync>,
     /// The handle the Tailscale-mode route changes `[server] tailscale` through
     /// while dux serves. `None` on any path with no serve loop behind it, and in
     /// tests.
@@ -417,7 +432,10 @@ impl RouterParams {
             tailscale_host_literals: false,
             live_tailscale_host_literals: None,
             live_own_magicdns_name: None,
-            live_funnel_lockout: None,
+            live_exposure: None,
+            auth_reload: Arc::new(|| {
+                dux_core::reload_signal::request_reload();
+            }),
             tailscale_mode_control: None,
             tailscale_forced_no: false,
             create_await_timeout: None,
@@ -614,18 +632,23 @@ impl RouterParams {
         self
     }
 
-    /// Let the Host guard refuse every request while the serve's Funnel-lockout
-    /// cell is set.
-    pub fn with_live_funnel_lockout(mut self, cell: crate::host_guard::FunnelLockoutCell) -> Self {
-        self.live_funnel_lockout = Some(cell);
+    /// Classify requests and admit the MagicDNS name by the serve's live
+    /// exposure.
+    pub fn with_live_exposure(mut self, cell: crate::exposure::ExposureCell) -> Self {
+        self.live_exposure = Some(cell);
+        self
+    }
+
+    /// Replace what the auth layer calls after it writes `config.toml`.
+    pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.auth_reload = reload;
         self
     }
 }
 
-/// Build the dux web router. dux is trusted-local: there is no login gate, so
-/// every route is served plainly. `extra_gated` is merged into the router as-is
-/// (a test seam for an injected probe route); production callers pass an empty
-/// router.
+/// Build the dux web router. `extra_gated` is merged into the router as-is (a
+/// test seam for an injected probe route); production callers pass an empty
+/// router. It is "gated" by the same auth layer as every other route.
 ///
 /// ## Middleware stack (outermost to innermost)
 ///
@@ -635,14 +658,17 @@ impl RouterParams {
 ///    the access log runs, so they are never logged.
 /// 2. **Access log**: logs every request (method, path, status, latency) when
 ///    the console records and `access_log` is on. Sees the final status
-///    produced by every inner layer, including the REST mutation check's 403.
-/// 3. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
+///    produced by every inner layer, including the auth layer's refusals and
+///    the REST mutation check's 403.
+/// 3. **Auth** (`crate::auth::middleware`): the blocklist, and with a password
+///    set the session check, for HTTP and WebSocket upgrades alike.
+/// 4. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
 ///    requests (cross-site request forgery defense). A missing `Origin` (curl,
 ///    CLI clients) is allowed; a present but unparseable `Origin` (including the
 ///    literal `"null"` from sandboxed iframes) is treated as a mismatch and
 ///    rejected. Shares the `same_origin_allowed` helper with the WS upgrade
 ///    handlers so REST and WS use one authority-comparison implementation.
-/// 4. **Handlers**: the actual route logic.
+/// 5. **Handlers**: the actual route logic.
 pub fn build_app(
     engine: EngineHandle,
     extra_gated: Router<AppState>,
@@ -746,6 +772,22 @@ pub fn build_app(
     live_limits.set_pty_send_timeout_seconds(params.pty_send_timeout_seconds as usize);
     live_limits.set_heartbeat_deadline_seconds(params.heartbeat_deadline_seconds as usize);
     let guard_allowed_hosts = live_limits.allowed_hosts();
+    let live_auth = live_limits.auth();
+    let paths = engine.paths();
+    let auth = crate::auth::AuthState::start(crate::auth::AuthSetup {
+        live: Arc::clone(&live_auth),
+        exposure: params.live_exposure.clone(),
+        bound_ips: params.bound_ips.clone(),
+        tailscale_leg: params
+            .tailscale_mode_control
+            .as_ref()
+            .map(crate::serve_legs::TailscaleModeControl::bound_leg),
+        config_path: Some(paths.config_path.clone()),
+        sessions_db: Some(paths.sessions_db_path.clone()),
+        console: params.console.clone(),
+        engine: Some(engine.clone()),
+        reload: Arc::clone(&params.auth_reload),
+    });
     let state = AppState {
         engine,
         console: params.console,
@@ -810,11 +852,11 @@ pub fn build_app(
         first_load,
         tailscale_mode: params.tailscale_mode_control.clone(),
         tailscale_forced_no: params.tailscale_forced_no,
-        funnel_lockout: params.live_funnel_lockout.clone(),
+        auth,
     };
 
-    // Every route is served plainly (trusted-local: no login gate). `extra_gated`
-    // is merged as-is so a test can inject a probe route.
+    // Every route sits behind the auth layer added below. `extra_gated` is
+    // merged as-is so a test can inject a probe route.
     let router = Router::new()
         .route("/ws/events", get(ws_events_upgrade))
         // Nested per-PTY byte-stream sockets. One socket per attached PTY: the
@@ -851,6 +893,7 @@ pub fn build_app(
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
         .merge(crate::first_load_routes::routes())
+        .merge(crate::auth::routes::routes())
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(crate::web_assets::static_handler)
@@ -861,6 +904,14 @@ pub fn build_app(
         // with the WS upgrade handlers for one authority-comparison path.
         // Sits INSIDE the access-log layer so 403s are access-logged.
         .layer(middleware::from_fn(rest_mutation_origin_check))
+        // The ONE auth layer: classification, the blocklist (with or without a
+        // password), and the session check with its declared public routes.
+        // Inside the access log, so its refusals are logged like any other
+        // answer, and inside the Host guard, so a foreign Host never reaches it.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::middleware::auth_layer,
+        ))
         // The access log is the OUTERMOST layer OF THIS inner app, so it sees the
         // final status every layer it wraps produced (including the mutation 403).
         // It is gated inside on `access_log && console.is_recording`, so a
@@ -875,11 +926,10 @@ pub fn build_app(
     // Host allowlist (DNS-rebinding defense): outermost layer so it runs before
     // the access log. Active when bound_ips is non-empty; tests that do not
     // exercise the host guard leave bound_ips empty, keeping the guard off.
-    // Installed on every router: the Funnel lockout and the Funnel marker hold
-    // whatever was recorded about the bound addresses. The Host rules need a
-    // bound address to mean anything, and every serve path passes its own; a
-    // router built with neither bound addresses nor configured hosts (the
-    // in-crate test routers) skips the Host rules alone.
+    // Installed on every router. The Host rules need a bound address to mean
+    // anything, and every serve path passes its own; a router built with
+    // neither bound addresses nor configured hosts (the in-crate test routers)
+    // skips the Host rules.
     let host_rules = !params.bound_ips.is_empty() || !params.configured_hosts.is_empty();
     {
         // Rule 4 reads the live limits' set rather than the list handed in, so
@@ -896,8 +946,8 @@ pub fn build_app(
         if let Some(names) = params.live_own_magicdns_name {
             allowlist = allowlist.with_live_own_magicdns_name(names);
         }
-        if let Some(cell) = params.live_funnel_lockout {
-            allowlist = allowlist.with_funnel_lockout(cell);
+        if let Some(cell) = params.live_exposure {
+            allowlist = allowlist.with_exposure(cell, Arc::new(move || live_auth.has_password()));
         }
         if !host_rules {
             allowlist = allowlist.without_host_rules();
@@ -975,7 +1025,7 @@ async fn log_request(
 // Host and the `https` Origin unchanged, so the authority comparison below holds
 // for it as it does for a direct request. This
 // same-origin check remains the WS-specific defense layered on top.
-fn same_origin_allowed(headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
         return true;
@@ -1302,6 +1352,7 @@ fn upgrade_pty_socket(
     peer_ip: IpAddr,
     permit: tokio::sync::OwnedSemaphorePermit,
     headers: &HeaderMap,
+    socket_auth: crate::auth::SocketAuth,
 ) -> Response {
     let engine = state.engine.clone();
     let console = state.console.clone();
@@ -1310,7 +1361,6 @@ fn upgrade_pty_socket(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let live_limits = Arc::clone(&state.live_limits);
-    let lockout = state.funnel_lockout_watch();
     let user_agent = captured_user_agent(headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -1327,7 +1377,7 @@ fn upgrade_pty_socket(
                 connections,
                 user_agent,
                 live_limits,
-                lockout,
+                socket_auth,
             )
         })
         .into_response()
@@ -1340,6 +1390,7 @@ fn upgrade_pty_socket(
 async fn ws_session_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     Path(id): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1386,6 +1437,7 @@ async fn ws_session_pty_upgrade(
         peer.ip(),
         permit,
         &headers,
+        socket_auth,
     )
 }
 
@@ -1397,6 +1449,7 @@ async fn ws_session_pty_upgrade(
 async fn ws_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     Path((id, tid)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1443,6 +1496,7 @@ async fn ws_terminal_pty_upgrade(
         peer.ip(),
         permit,
         &headers,
+        socket_auth,
     )
 }
 
@@ -1454,6 +1508,7 @@ async fn ws_terminal_pty_upgrade(
 async fn ws_project_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     Path((id, tid)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1500,6 +1555,7 @@ async fn ws_project_terminal_pty_upgrade(
         peer.ip(),
         permit,
         &headers,
+        socket_auth,
     )
 }
 
@@ -1512,6 +1568,7 @@ async fn ws_project_terminal_pty_upgrade(
 async fn ws_standalone_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     Path(tid): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1552,6 +1609,7 @@ async fn ws_standalone_terminal_pty_upgrade(
         peer.ip(),
         permit,
         &headers,
+        socket_auth,
     )
 }
 
@@ -1621,6 +1679,7 @@ impl Drop for TabWsGuard {
 async fn ws_tab_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     Path((id, tab)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1692,7 +1751,6 @@ async fn ws_tab_pty_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let live_limits = Arc::clone(&state.live_limits);
-    let lockout = state.funnel_lockout_watch();
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1713,7 +1771,7 @@ async fn ws_tab_pty_upgrade(
                 connections,
                 user_agent,
                 live_limits,
-                lockout,
+                socket_auth,
             )
             .await
         })
@@ -1756,8 +1814,9 @@ async fn handle_pty_socket(
     // socket rather than frozen at bind, so a config reload retimes the next
     // connection.
     live_limits: Arc<crate::engine_actor::LiveServerLimits>,
-    // Ends the socket the moment dux stops serving under the Funnel lockout.
-    lockout: crate::host_guard::FunnelLockoutWatch,
+    // Closes the socket the moment its session ends or its client stops being
+    // allowed, and holds the session's lease while it is open.
+    socket_auth: crate::auth::SocketAuth,
 ) {
     console.client_connected(peer_ip);
     // Register this PTY socket as a live connection (its class depends on which PTY
@@ -1965,7 +2024,7 @@ async fn handle_pty_socket(
             user_agent: user_agent.as_deref(),
             live_limits: &live_limits,
         }
-        .run(stream, rx, grid_changes, handshake_grid_seq, lockout)
+        .run(stream, rx, grid_changes, handshake_grid_seq, socket_auth)
         .await;
     }
 
@@ -1996,33 +2055,44 @@ impl AttachedPtySocket<'_> {
         rx: std::sync::mpsc::Receiver<Vec<u8>>,
         mut grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
         mut last_grid_seq: u64,
-        mut lockout: crate::host_guard::FunnelLockoutWatch,
+        mut socket_auth: crate::auth::SocketAuth,
     ) {
         let mut pty_forwarder =
             spawn_pty_forwarder(Arc::clone(self.sink), rx, self.engine.shutdown_flag());
         let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
         ping.tick().await;
+        let mut heard = std::time::Instant::now();
 
         loop {
             // Handle each received value inside its selected branch. A combined
             // receive-and-handle future could consume a value and then be cancelled.
-            // Biased, with the lockout first: once dux stops serving, no queued
-            // keystroke may reach the PTY and no further frame may be sent.
+            // Biased, with the revocation first: once this socket's session has
+            // ended, no queued keystroke may reach the PTY and no further frame
+            // may be sent.
             let action = tokio::select! {
                 biased;
-                () = lockout.engaged() => {
+                code = socket_auth.revoked() => {
                     // The forwarder writes output on its own task, so it is
                     // stopped before the close rather than after the loop.
                     pty_forwarder.abort();
-                    self.close_under_lockout().await
+                    self.close_for_auth(code).await
                 }
-                _ = ping.tick() => self.send_liveness_ping().await,
+                _ = ping.tick() => {
+                    if peer_went_quiet(heard) {
+                        self.close_quiet_peer().await
+                    } else {
+                        self.send_liveness_ping().await
+                    }
+                }
                 change = grid_changes.recv() => {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
                 _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
                 next = stream.next() => match next {
-                    Some(Ok(message)) => self.handle_client_message(message).await,
+                    Some(Ok(message)) => {
+                        heard = std::time::Instant::now();
+                        self.handle_client_message(message).await
+                    }
                     _ => PtyLoopAction::Break,
                 },
             };
@@ -2047,12 +2117,23 @@ impl AttachedPtySocket<'_> {
         PtyLoopAction::Break
     }
 
-    /// The forwarder has ended, so no more PTY bytes can arrive on this socket.
-    /// dux stopped serving (a Funnel to it, or no way to confirm there is
-    /// none), so a socket opened before must not keep driving this PTY. A plain
-    /// close, like a shutdown: the client's ordinary reconnect then meets the
-    /// guard's refusal and says why.
-    async fn close_under_lockout(&self) -> PtyLoopAction {
+    /// The socket's session ended or its client stopped being allowed (see
+    /// [`crate::auth::socket`]), so it must not keep driving this PTY. Closed with
+    /// the auth code the browser recognizes.
+    async fn close_for_auth(&self, code: u16) -> PtyLoopAction {
+        let mut guard = self.sink.lock().await;
+        let _ = guard.send(auth_close(code)).await;
+        PtyLoopAction::Break
+    }
+
+    /// The peer has sent nothing, not even a pong, for longer than
+    /// [`PONG_DEADLINE`]: a half-open connection. Ended so it stops holding a
+    /// connection slot and the session's lease.
+    async fn close_quiet_peer(&self) -> PtyLoopAction {
+        dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
+            self.conn_id,
+            crate::pty_log::FailedSend::LivenessPing,
+        ));
         let mut guard = self.sink.lock().await;
         let _ = guard.send(Message::Close(None)).await;
         PtyLoopAction::Break
@@ -2671,6 +2752,7 @@ struct WireStatusClearedEvent {
 async fn ws_events_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    socket_auth: crate::auth::SocketAuth,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -2701,7 +2783,6 @@ async fn ws_events_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let changes = Arc::clone(&state.changes);
     let connections = Arc::clone(&state.connections);
-    let lockout = state.funnel_lockout_watch();
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -2714,7 +2795,7 @@ async fn ws_events_upgrade(
                 peer_ip,
                 permit,
                 connections,
-                lockout,
+                socket_auth,
             )
         })
         .into_response()
@@ -2739,8 +2820,10 @@ async fn handle_events_socket(
     peer_ip: std::net::IpAddr,
     _permit: tokio::sync::OwnedSemaphorePermit,
     connections: Arc<crate::rest_common::ConnectionRegistry>,
-    // Ends the socket the moment dux stops serving under the Funnel lockout.
-    lockout: crate::host_guard::FunnelLockoutWatch,
+    // Closes the socket the moment its session ends or its client stops being
+    // allowed, and holds the session's lease while it is open: an open tab is
+    // what keeps a signed-in browser from going idle.
+    socket_auth: crate::auth::SocketAuth,
 ) {
     console.client_connected(peer_ip);
     // A server-assigned random id correlating REST actions with the statuses they
@@ -2854,7 +2937,8 @@ async fn handle_events_socket(
         connection_id,
         connections,
         peer_ip,
-        lockout,
+        socket_auth,
+        heard: std::time::Instant::now(),
     };
     let _ = connection.run().await;
     drop(connection);
@@ -2878,13 +2962,16 @@ struct EventsSocketLoop {
     /// has gone can fall back to a broadcast instead of reaching nobody.
     connections: Arc<crate::rest_common::ConnectionRegistry>,
     peer_ip: IpAddr,
-    lockout: crate::host_guard::FunnelLockoutWatch,
+    socket_auth: crate::auth::SocketAuth,
+    /// When the peer last sent anything, a pong included.
+    heard: std::time::Instant,
 }
 
 enum EventsLoopInput {
     Ping,
-    /// dux stopped serving under the Funnel lockout.
-    LockedOut,
+    /// This socket's session ended or its client stopped being allowed; the
+    /// close code says which.
+    Revoked(u16),
     Workspace(Result<(), tokio::sync::watch::error::RecvError>),
     Resource(Result<Event, tokio::sync::broadcast::error::RecvError>),
     Status(Result<WireStatus, tokio::sync::broadcast::error::RecvError>),
@@ -2895,16 +2982,21 @@ enum EventsLoopInput {
 impl EventsLoopInput {
     async fn apply(self, connection: &mut EventsSocketLoop) -> Result<(), ()> {
         match self {
-            Self::Ping => send_ping(&connection.sink).await,
-            Self::LockedOut => {
-                // A plain close, like a shutdown: the reconnect meets the
-                // guard's refusal, which says why.
-                let _ = connection
-                    .sink
-                    .lock()
-                    .await
-                    .send(Message::Close(None))
-                    .await;
+            Self::Ping => {
+                if peer_went_quiet(connection.heard) {
+                    // Half-open: nothing, not even a pong, for too long.
+                    let _ = connection
+                        .sink
+                        .lock()
+                        .await
+                        .send(Message::Close(None))
+                        .await;
+                    return Err(());
+                }
+                send_ping(&connection.sink).await
+            }
+            Self::Revoked(code) => {
+                let _ = connection.sink.lock().await.send(auth_close(code)).await;
                 Err(())
             }
             Self::Workspace(changed) => connection.handle_workspace_change(changed).await,
@@ -2922,11 +3014,12 @@ impl EventsSocketLoop {
         ping.tick().await;
 
         loop {
-            // Biased, with the lockout first: once dux stops serving, no queued
-            // frame is sent and no queued client message is acted on.
+            // Biased, with the revocation first: once this socket's session has
+            // ended, no queued frame is sent and no queued client message is
+            // acted on.
             let input = tokio::select! {
                 biased;
-                () = self.lockout.engaged() => EventsLoopInput::LockedOut,
+                code = self.socket_auth.revoked() => EventsLoopInput::Revoked(code),
                 _ = ping.tick() => EventsLoopInput::Ping,
                 changed = self.workspace_rx.changed(), if self.workspace_alive => {
                     EventsLoopInput::Workspace(changed)
@@ -2936,7 +3029,10 @@ impl EventsSocketLoop {
                 cleared = self.status_clear_rx.recv() => {
                     EventsLoopInput::StatusCleared(cleared)
                 }
-                next = self.stream.next() => EventsLoopInput::Client(next),
+                next = self.stream.next() => {
+                    self.heard = std::time::Instant::now();
+                    EventsLoopInput::Client(next)
+                }
             };
 
             input.apply(self).await?;
@@ -6161,135 +6257,6 @@ mod tests {
             status("demo-box.example-tailnet.ts.net:3890").await,
             StatusCode::FORBIDDEN,
             "tailscale = \"no\" refuses the tailnet name with the tailnet literals"
-        );
-    }
-
-    /// A request that came through Tailscale Funnel is refused whatever its
-    /// Host, so the moment between a Funnel being switched on and the watcher's
-    /// next look is not a window into dux. Tailscale's serve proxy marks every
-    /// Funnel request with `Tailscale-Funnel-Request: ?1` and strips any copy a
-    /// client sent, so the marker cannot be forged in or out from the tailnet.
-    #[tokio::test]
-    async fn a_request_that_came_through_funnel_is_refused_whatever_its_host() {
-        let tmp = dux_core::test_scratch::ScratchDir::new();
-        let handle = test_engine_handle(tmp.path());
-        let own_name =
-            crate::host_guard::LiveHostNames::new(&["demo-box.example-tailnet.ts.net".to_string()]);
-        let app = build_app(
-            handle,
-            Router::new(),
-            RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
-                .with_live_own_magicdns_name(own_name),
-        );
-        for host in [
-            "demo-box.example-tailnet.ts.net",
-            "127.0.0.1:3890",
-            "localhost",
-        ] {
-            let request = axum::http::Request::builder()
-                .uri("/healthz")
-                .header("Host", host)
-                .header("Tailscale-Funnel-Request", "?1")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            let answer = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(answer.status(), StatusCode::FORBIDDEN, "{host}");
-            let body = axum::body::to_bytes(answer.into_body(), 4096)
-                .await
-                .unwrap();
-            assert!(
-                String::from_utf8_lossy(&body).contains("Funnel"),
-                "the refusal says why"
-            );
-        }
-        // The same request from the tailnet, without the marker, is served.
-        let tailnet = axum::http::Request::builder()
-            .uri("/healthz")
-            .header("Host", "demo-box.example-tailnet.ts.net")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert_eq!(app.oneshot(tailnet).await.unwrap().status(), StatusCode::OK);
-    }
-
-    /// A raw TCP Funnel to dux's port carries no marker and can claim any Host,
-    /// so while one stands dux refuses every request on every listener, and
-    /// serves again the moment it goes.
-    #[tokio::test]
-    async fn every_request_is_refused_while_the_funnel_state_is_not_known_to_be_clear() {
-        use crate::host_guard::{FunnelLockout, FunnelLockoutCell};
-        let tmp = dux_core::test_scratch::ScratchDir::new();
-        let handle = test_engine_handle(tmp.path());
-        let lockout = FunnelLockoutCell::new(FunnelLockout::Funnel);
-        let app = build_app(
-            handle,
-            Router::new(),
-            RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
-                .with_live_funnel_lockout(lockout.clone()),
-        );
-        let probe = |host: &'static str| {
-            axum::http::Request::builder()
-                .uri("/healthz")
-                .header("Host", host)
-                .body(axum::body::Body::empty())
-                .unwrap()
-        };
-        // Each refusing state says its own why, on every Host a request through
-        // Funnel could claim.
-        for (state, says) in [
-            (FunnelLockout::Funnel, "no login"),
-            (FunnelLockout::Checking, "checking"),
-            (FunnelLockout::Unconfirmed, "tailscale = \"no\""),
-            (FunnelLockout::CliNotFound, "/usr/local/bin"),
-            (FunnelLockout::FunnelSaved, "tailscale up"),
-        ] {
-            lockout.set(state);
-            for host in ["localhost", "127.0.0.1:3890", "100.101.102.103:3890"] {
-                let answer = app.clone().oneshot(probe(host)).await.unwrap();
-                assert_eq!(
-                    answer.status(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "{state:?} {host}"
-                );
-                let body = axum::body::to_bytes(answer.into_body(), 4096)
-                    .await
-                    .unwrap();
-                let body = String::from_utf8_lossy(&body);
-                assert!(
-                    body.contains("Funnel") && body.contains(says),
-                    "{state:?}: {body}"
-                );
-            }
-        }
-        lockout.set(FunnelLockout::Open);
-        assert_eq!(
-            app.oneshot(probe("localhost")).await.unwrap().status(),
-            StatusCode::OK
-        );
-    }
-
-    /// The guard is installed on every router, so the Funnel lockout and the
-    /// marker check hold even for a serve with no bound address recorded.
-    #[tokio::test]
-    async fn the_guard_runs_even_with_no_bound_address_or_configured_host() {
-        use crate::host_guard::{FunnelLockout, FunnelLockoutCell};
-        let tmp = dux_core::test_scratch::ScratchDir::new();
-        let handle = test_engine_handle(tmp.path());
-        let app = build_app(
-            handle,
-            Router::new(),
-            RouterParams::plain_http()
-                .with_live_funnel_lockout(FunnelLockoutCell::new(FunnelLockout::Funnel)),
-        );
-        let request = axum::http::Request::builder()
-            .uri("/healthz")
-            .header("Host", "localhost")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

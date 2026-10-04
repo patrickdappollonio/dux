@@ -556,9 +556,18 @@ pub struct LiveServerLimits {
     /// `[server] allowed_hosts`, which the Host guard reads per request, so a
     /// reload that edits the list applies to the running listener.
     allowed_hosts: crate::host_guard::LiveHostNames,
+    /// `[server.auth]`, which the auth layer reads per request. Every reload
+    /// path adopts it here (see [`Self::store_from`]), so the password, the
+    /// blocklist and every limit apply to the running server with no restart.
+    auth: Arc<crate::auth::LiveAuth>,
 }
 
 impl LiveServerLimits {
+    /// The live `[server.auth]` section. Shared, not copied.
+    pub fn auth(&self) -> Arc<crate::auth::LiveAuth> {
+        Arc::clone(&self.auth)
+    }
+
     /// The Host guard's configured-hosts set. Shared, not copied: the guard
     /// holds this same set and sees every later [`Self::set_allowed_hosts`].
     pub fn allowed_hosts(&self) -> crate::host_guard::LiveHostNames {
@@ -636,6 +645,7 @@ impl LiveServerLimits {
             ) as usize,
         );
         self.set_allowed_hosts(&server.allowed_hosts);
+        self.auth.store(&server.auth);
     }
 }
 
@@ -685,6 +695,9 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // Built here for the same reason as `pty_input_owners`: the loop starts
     // before the router exists, so both sides have to be handed the same Arc.
     let live_limits = Arc::new(LiveServerLimits::default());
+    // The password and the rest of `[server.auth]` hold from the first request,
+    // before any router seeds the other limits.
+    live_limits.auth().store(&engine.config.server.auth);
     // Filled by the serve path once its loop exists, which is after the actor is
     // already running on `dux server`. A `OnceLock` rather than a constructor
     // argument for exactly that reason; empty means nothing is serving, which is
@@ -706,6 +719,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             pty_input_owners: Arc::clone(&pty_input_owners),
             live_limits: Arc::clone(&live_limits),
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
+            paths: Arc::new(engine.paths.clone()),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -806,6 +820,10 @@ pub struct EngineHandle {
     /// The `[server]` limits a reload can move on a bound listener, shared with
     /// the router the same way and for the same reason as `pty_input_owners`.
     live_limits: Arc<LiveServerLimits>,
+    /// Where this engine's config and session database live, for the auth
+    /// layer's own writes (a password, a ban, the warning's dismissal) and its
+    /// stored sessions.
+    paths: Arc<dux_core::config::DuxPaths>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1573,6 +1591,11 @@ impl EngineHandle {
     /// router clones this into `AppState`; the actor stores each reload into it.
     pub fn live_limits(&self) -> Arc<LiveServerLimits> {
         Arc::clone(&self.live_limits)
+    }
+
+    /// Where this engine's config and session database live.
+    pub fn paths(&self) -> Arc<dux_core::config::DuxPaths> {
+        Arc::clone(&self.paths)
     }
 
     /// The configured preferred editor name for the "open in editor" action
