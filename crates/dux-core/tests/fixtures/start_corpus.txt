@@ -51,6 +51,14 @@
 #   name, and stops `dux server` too (the terminal UI already refused these
 #   files on their types). A variable named like one in a project's own
 #   `env` table, inside the `[[projects]]` list, is still just a name.
+#   A `[projects]` written as a table is no list of projects, so its `env`
+#   holds no names either.
+# - A plaintext `password` (the setting `dux config set server.auth.password`
+#   takes, which dux stores only as its hash) is never read from the file, so
+#   it stops both surfaces wherever it is written, `[server.auth]` and the
+#   retired `[auth]` included: the user meant to protect the web UI, and
+#   7437238c started with no password at all. An `[env]` variable named
+#   `password` is still just a variable.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -524,6 +532,15 @@ refuse refuse(was:start) "[[macros]]\nrequire = \"everywhere\"\n"
 refuse refuse(was:start) "keys = [{ require = \"everywhere\" }]\n"
 refuse refuse(was:start) "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\nenv = [{ password_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }]\n"
 start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\nrequire = \"x\"\n"
+refuse(was:start) refuse(was:start) "password = \"correct horse battery staple veranda\"\n"
+refuse(was:start) refuse(was:start) "[server]\npassword = \"correct horse battery staple veranda\"\n"
+refuse(was:start) refuse(was:start) "[server.auth]\npassword = \"correct horse battery staple veranda\"\n"
+refuse(was:start) refuse(was:start) "[server.Auth]\npassword = \"correct horse battery staple veranda\"\n"
+refuse(was:start) refuse(was:start) "[auth]\nusername = \"ada\"\npassword = \"correct horse battery staple veranda\"\n"
+start start "[env]\npassword = \"correct horse battery staple veranda\"\n"
+start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\npassword = \"correct horse battery staple veranda\"\n"
+refuse refuse(was:start) "[projects.env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n\n[projects.env]\nrequire = \"everywhere\"\n"
 
 # Every case above that is TOML with at least one table, written again twice:
 # once with each section as an inline table (`server = { port = 4000 }`,

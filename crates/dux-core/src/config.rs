@@ -3105,8 +3105,32 @@ fn is_auth_key(name: &str) -> bool {
     let form = auth_key_form(name);
     crate::config_auth::auth_setting_names()
         .iter()
-        .chain(std::iter::once(&"password_hash".to_string()))
+        .map(String::as_str)
+        .chain(std::iter::once("password_hash"))
+        .chain(virtual_auth_settings().map(|(name, _)| name))
         .any(|known| auth_key_form(known) == form)
+}
+
+/// The `[server.auth]` settings the command line takes that are never read
+/// from the file (`password`, which dux stores only as its hash), each with
+/// its whole path, from the one list the command line uses
+/// ([`crate::config_keys::VIRTUAL_KEYS`]), so a new one cannot be missed.
+fn virtual_auth_settings() -> impl Iterator<Item = (&'static str, &'static [&'static str])> {
+    crate::config_keys::VIRTUAL_KEYS
+        .iter()
+        .filter_map(|(path, _)| match path {
+            ["server", "auth", name] => Some((*name, *path)),
+            _ => None,
+        })
+}
+
+/// The virtual setting `name` is, in [`auth_key_form`], with its whole
+/// path, if it is one.
+fn virtual_auth_setting(name: &str) -> Option<&'static [&'static str]> {
+    let form = auth_key_form(name);
+    virtual_auth_settings()
+        .find(|(known, _)| auth_key_form(known) == form)
+        .map(|(_, path)| path)
 }
 
 /// Whether `name` is, exactly as written, a setting `[server.auth]` has: the
@@ -3137,9 +3161,13 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// `["server.auth"]`, `[server.auths]`, `require` directly under `[server]`
 /// or at the top level all hold misplaced settings.
 ///
+/// A plaintext `password` (the setting the command line takes and stores only
+/// as its hash) is never read from the file, so it stops the start wherever
+/// it is written, `[server.auth]` included, saying how to set one.
+///
 /// Two places are exempt. A NAME the user chose (an `[env]` variable, a
-/// provider, a macro or a binding's action, a variable in a project's `env`)
-/// is just a name: a provider called `password_hash` is not a password hash,
+/// provider, a macro or a binding's action, a variable in a project's `env`
+/// inside the `[[projects]]` list) is just a name: a provider called `password_hash` is not a password hash,
 /// though a field inside it is a field of dux's schema like anywhere else.
 /// A key reached through an array is never such a name (the top-level
 /// `[[projects]]` list aside, whose entries are projects): a map of names
@@ -3175,7 +3203,14 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
                 })
                 .collect();
             let shown = shown_parts(raw, &parts);
-            let message = if misplaced.a_hash {
+            let message = if let Some(path) = misplaced.virtual_path {
+                format!(
+                    "{shown} is not read: a plaintext password is not read from config.toml; set \
+                     one with `dux config set {}` and remove this line, so dux will not start \
+                     until it is removed",
+                    path.join(".")
+                )
+            } else if misplaced.a_hash {
                 format!(
                     "{shown} is not read: a password hash belongs in [server.auth] as \
                      password_hash, so dux will not start until it is moved there or removed"
@@ -3226,6 +3261,9 @@ struct MisplacedAuth {
     keys: Vec<String>,
     /// Whether it is a password hash, which is said as one.
     a_hash: bool,
+    /// The setting's whole path when it is one the command line takes and
+    /// the file never holds (a plaintext password), said as one.
+    virtual_path: Option<&'static [&'static str]>,
 }
 
 fn misplaced_auth_settings(
@@ -3241,8 +3279,12 @@ fn misplaced_auth_settings(
                 // The name position of a map of user-chosen names, reached
                 // without a quoted dotted key: the key is the name the user
                 // chose, never a setting.
+                // A project's `env` holds names only inside the `[[projects]]`
+                // list: a `[projects]` table is no list of projects.
                 let a_name = !walk.through_split
                     && !walk.through_other_array
+                    && (walk.through_array
+                        || walk.keys.first().map(String::as_str) != Some("projects"))
                     && names_a_user_entry(&walk.keys);
                 walk.shown.push(AuthStep::Key(key.clone()));
                 walk.keys.push(key.clone());
@@ -3272,6 +3314,7 @@ fn misplaced_auth_settings(
                                     .collect(),
                                 keys: walk.keys.clone(),
                                 a_hash: auth_key_form(piece) == auth_key_form("password_hash"),
+                                virtual_path: virtual_auth_setting(piece),
                             });
                             break;
                         }
@@ -7756,6 +7799,50 @@ max_websocket_connections = 16
                 "{body}"
             );
         }
+    }
+
+    /// A plaintext password is never read from the file, wherever it is
+    /// written, `[server.auth]` included: the start stops, the sentence names
+    /// the command that sets one, and it never repeats the password. A name
+    /// the user chose stays a name, and the retired `[auth]` holding only its
+    /// `username` still loads.
+    #[test]
+    fn a_plaintext_password_stops_the_start_wherever_it_is_written() {
+        const SECRET: &str = "correct horse battery staple veranda";
+        for body in [
+            format!("password = \"{SECRET}\"\n"),
+            format!("[server]\npassword = \"{SECRET}\"\n"),
+            format!("[server.auth]\npassword = \"{SECRET}\"\n"),
+            format!("[server.Auth]\nPassword = \"{SECRET}\"\n"),
+            format!("[auth]\nusername = \"ada\"\npassword = \"{SECRET}\"\n"),
+            format!("[ui]\nx = [{{ password = \"{SECRET}\" }}]\n"),
+        ] {
+            let problems = misplaced_auth_problems(&body);
+            assert!(
+                problems.iter().any(|p| p.contains(
+                    "a plaintext password is not read from \
+                     config.toml; set one with `dux config set server.auth.password`"
+                )),
+                "{body}: {problems:?}"
+            );
+            assert!(
+                problems.iter().all(|p| !p.contains("staple")),
+                "{problems:?}"
+            );
+        }
+        for body in [
+            "[auth]\nusername = \"ada\"\n",
+            "[env]\npassword = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword = \"x\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+        // A `[projects]` table is no list of projects: its `env` holds no names.
+        assert!(!misplaced_auth_problems("[projects.env]\nrequire = \"everywhere\"\n").is_empty());
     }
 
     #[test]

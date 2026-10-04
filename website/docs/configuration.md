@@ -259,9 +259,11 @@ address from `blocked_addresses` and the block lifts at once.
 > A mistake in `[server.auth]` is never read as "no password". A misspelled key, a value
 > of the wrong type, a `password_hash` dux will not use, a password setting written
 > outside `[server.auth]` (`require` directly under `[server]`, a `password-hash` under
-> any spelling, a `[server.authentication]` table), or a `config.toml` that is not
-> valid TOML at all stops dux from starting, with a message naming the file and the
-> problem, and a reload while it runs changes nothing until the file is fixed.
+> any spelling, a `[server.authentication]` table), a plaintext `password` written
+> anywhere in the file (dux keeps only the hash; set it with `dux config set
+> server.auth.password`), or a `config.toml` that is not valid TOML at all stops dux
+> from starting, with a message naming the file and the problem, and a reload while it
+> runs changes nothing until the file is fixed.
 > When the section is invalid, `dux config get` and `dux config set` keep working, so
 > you can inspect and repair it from the command line. When the file is not valid TOML,
 > they refuse it too; fix the line the error names by hand. `dux config set` itself
