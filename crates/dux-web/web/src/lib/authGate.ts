@@ -74,6 +74,8 @@ export type SignOutReason =
   | "signed_out"
   /** The password changed, which signs every browser out. */
   | "password_changed"
+  /** The first password was set from here, and it applies here. */
+  | "password_set"
 
 export type AuthPhase =
   | { kind: "checking" }
@@ -102,6 +104,10 @@ let phase: AuthPhase = { kind: "checking" }
 let epoch = 0
 let generation = 0
 let probeSeq = 0
+// How many times the page has moved INTO `open`. An act's own status read
+// (sign-out, password change) is asked before it, and must not undo a session
+// that began while it was out.
+let opens = 0
 let appliedProbeSeq = 0
 const listeners = new Set<() => void>()
 const openListeners = new Set<() => void>()
@@ -110,6 +116,7 @@ function setPhase(next: AuthPhase, fromProbe = false): void {
   const wasOpen = phase.kind === "open"
   const isOpen = next.kind === "open"
   if (wasOpen && !isOpen) epoch++
+  if (isOpen && !wasOpen) opens++
   if (!fromProbe) generation++
   phase = next
   for (const l of [...listeners]) l()
@@ -299,10 +306,12 @@ export function probeAuth(
 // reads as the act it is, not as a session that ended by itself, and the act's
 // own outcome is what the page settles on.
 let signingOut = false
-let changingPassword = false
+// While a password change is out, the reason its sign-out will show: a first
+// password was set, or an existing one changed.
+let changingPassword: "password_set" | "password_changed" | null = null
 
 function actInFlight(): boolean {
-  return signingOut || changingPassword
+  return signingOut || changingPassword !== null
 }
 
 /// The app socket dropped: if the page thinks it is signed in, check, because
@@ -324,8 +333,8 @@ export function reportUnauthorized(): void {
   if (phase.kind !== "open" && phase.kind !== "checking") return
   const reason: SignOutReason = signingOut
     ? "signed_out"
-    : changingPassword
-      ? "password_changed"
+    : changingPassword !== null
+      ? changingPassword
       : "expired"
   setPhase({ kind: "signed_out", status: currentAuthStatus(), reason })
   // Refresh what the login page shows (the transport warning, the first
@@ -411,7 +420,10 @@ export async function signOut(): Promise<SignOutAnswer> {
   try {
     const answer = await postLogout()
     if (answer.kind !== "ok") return answer
+    const at = opens
     const after = await fetchAuthStatus()
+    // Signed in again meanwhile: that session is newer than this read.
+    if (opens !== at) return { kind: "ok" }
     if (after.kind === "blocked" || after.kind === "broken") {
       applyAnswer(after, "signed_out", "direct")
       return { kind: "gate" }
@@ -445,18 +457,23 @@ export async function changePassword(write: {
   current?: string
   next: string
 }): Promise<PasswordAnswer> {
-  changingPassword = true
+  const reason = write.current === undefined ? "password_set" : "password_changed"
+  changingPassword = reason
   try {
     const answer = await postPassword(write)
     if (answer.kind !== "ok") return answer
+    const at = opens
     const after = await fetchAuthStatus()
+    // Signed in again meanwhile (with the new password): that session is
+    // newer than this read.
+    if (opens !== at) return answer
     if (after.kind === "status" && after.status.required_here && !after.status.signed_in) {
-      setPhase({ kind: "signed_out", status: after.status, reason: "password_changed" })
+      setPhase({ kind: "signed_out", status: after.status, reason })
     } else if (after.kind === "status" || after.kind === "blocked" || after.kind === "broken") {
-      applyAnswer(after, "password_changed", "direct")
+      applyAnswer(after, reason, "direct")
     }
     return answer
   } finally {
-    changingPassword = false
+    changingPassword = null
   }
 }

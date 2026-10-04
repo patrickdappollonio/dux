@@ -242,3 +242,11 @@ describe("after a wrong password", () => {
     expect(document.activeElement).toBe(field)
   })
 })
+
+describe("after the first password was set", () => {
+  it("says it was set and to sign in with it", () => {
+    render(<LoginPage status={status()} reason="password_set" />)
+    expect(screen.getByText("Password set. Sign in with it to continue.")).toBeTruthy()
+    expect(screen.queryByText(/signs every browser out/)).toBeNull()
+  })
+})

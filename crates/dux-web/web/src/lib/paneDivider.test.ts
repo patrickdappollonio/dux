@@ -82,6 +82,20 @@ describe("dividerPressHits", () => {
     ).toBe(true)
   })
 
+  // The sign-in gate covers the page while the app is hidden underneath it, and
+  // a press on the login page is never a press on a divider it happens to sit
+  // over.
+  it("refuses a press inside the band that landed on the sign-in gate", () => {
+    const el = divider(200, 201)
+    const gate = document.createElement("div")
+    gate.setAttribute("data-auth-gate-layer", "")
+    const field = document.createElement("input")
+    gate.append(field)
+    document.body.append(gate)
+    expect(dividerPressHits(el, press(field, 200), DIVIDER_TARGET_MIN.coarse)).toBe(false)
+    gate.remove()
+  })
+
   it("refuses a press outside the band that landed on something else", () => {
     const el = divider(200, 201)
     expect(

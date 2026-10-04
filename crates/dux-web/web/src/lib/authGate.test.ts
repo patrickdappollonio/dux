@@ -561,3 +561,68 @@ describe("refreshAuthStatus", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe("an act's own status read landing after a fresh sign-in", () => {
+  // A status read that hangs until released; everything else answers at once.
+  function holdNextStatus(body: unknown) {
+    let release!: () => void
+    let held = false
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const url = String(input)
+        if (url.endsWith("/auth/status") && !held) {
+          held = true
+          return new Promise<Response>((resolve) => {
+            release = () => resolve(json(200, body))
+          })
+        }
+        if (url.endsWith("/auth/status")) return Promise.resolve(json(200, SIGNED_IN))
+        return Promise.resolve(json(204, undefined))
+      }),
+    )
+    return () => release
+  }
+
+  it("does not sign out a session that started after the sign-out's read was asked", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    const releaseOf = holdNextStatus(SIGNED_OUT)
+    const out = g.signOut()
+    await vi.waitFor(() => expect(releaseOf()).toBeTypeOf("function"))
+    // The server's close lands, the page shows the login, and the user signs
+    // straight back in before the sign-out's own read has answered.
+    g.reportSocketAuthClose(4401)
+    await g.signIn("pw")
+    expect(g.getAuthPhase().kind).toBe("open")
+    releaseOf()()
+    await out
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+
+  it("does not sign out a session that started after the password change's read was asked", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    const releaseOf = holdNextStatus(SIGNED_OUT)
+    const change = g.changePassword({ current: "old", next: "a much longer new one" })
+    await vi.waitFor(() => expect(releaseOf()).toBeTypeOf("function"))
+    g.reportSocketAuthClose(4401)
+    await g.signIn("the new one")
+    expect(g.getAuthPhase().kind).toBe("open")
+    releaseOf()()
+    await change
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+})
+
+describe("setting the first password from somewhere it then applies", () => {
+  it("says the password was set, not that it changed", async () => {
+    const g = await load()
+    statusBody = NO_PASSWORD
+    await g.initAuthGate()
+    // From here on the password applies to this connection.
+    statusBody = SIGNED_OUT
+    expect(await g.changePassword({ next: "a first password here" })).toEqual({ kind: "ok" })
+    expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "password_set" })
+  })
+})

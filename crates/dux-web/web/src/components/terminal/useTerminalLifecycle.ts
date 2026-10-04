@@ -12,6 +12,7 @@
 // Everything below registers inside the one effect and is disposed by the one
 // cleanup. The pane's own separate registration effects are inventoried in
 // `TerminalPane` beside their code.
+import { resyncOnSignIn } from "./authResync"
 import { useEffect, useRef, type RefObject } from "react"
 import type { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
@@ -396,6 +397,14 @@ export function useTerminalLifecycle(
     }
     document.addEventListener("visibilitychange", noteVisibility)
 
+    // Every resize sent while the page was signed out was refused; the window
+    // may have moved meanwhile. Re-asserted through the coordinator, so a
+    // watcher still sends nothing and an unowned pty is not claimed.
+    const stopAuthResync = resyncOnSignIn({
+      isOpen: () => pty.isOpen,
+      resync: () => resize.resyncToForeground(),
+    })
+
     // An animated layout gesture outside this pane moves the host box on every
     // frame, and the ResizeObserver would answer each with a fit. The gesture
     // holds for its whole transition, so those coalesce into one fit and one
@@ -409,6 +418,7 @@ export function useTerminalLifecycle(
     })
 
     return () => {
+      stopAuthResync()
       unregisterLayoutGesture()
       disposeTerminalLifecycle({
         resize,

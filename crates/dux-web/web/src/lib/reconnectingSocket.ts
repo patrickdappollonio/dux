@@ -506,7 +506,6 @@ export abstract class ReconnectingSocket {
     if (this.authUnsubscribe !== null) return
     this.authUnsubscribe = onAuthOpen(() => {
       this.resumeNow()
-      this.onAuthResumed()
     })
   }
 
@@ -581,10 +580,6 @@ export abstract class ReconnectingSocket {
     void closeCode
     return true
   }
-
-  // The page signed in again. Runs after `resumeNow`, so a socket that stayed
-  // open can deliver what it held back while signed out. Default: no-op.
-  protected onAuthResumed(): void {}
 
   // React to the socket's `error` event. Default: no-op. (`void event` keeps the
   // param without tripping the unused-vars lint.)

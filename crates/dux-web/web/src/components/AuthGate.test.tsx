@@ -29,6 +29,7 @@ vi.mock("@/lib/notify", () => ({ notifySuccess, notifyError }))
 
 const { AuthGate } = await import("./AuthGate")
 const { Dialog, DialogContent, DialogTitle } = await import("@/components/ui/dialog")
+const { useDividerDrag } = await import("@/hooks/use-divider-drag")
 const { resetBannerDismissals } = await import("@/lib/bannerDismissals")
 
 function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
@@ -436,5 +437,79 @@ describe("the gate layer", () => {
     } finally {
       window.removeEventListener("keydown", onWindow)
     }
+  })
+})
+
+describe("the hidden sidebar's divider under the login page", () => {
+  // The real divider hook, which takes presses on the document in the capture
+  // phase by rectangle. jsdom lays everything out at 0,0, so the login field
+  // sits right inside the divider's grab band.
+  const onGrab = vi.fn()
+  const onDrag = vi.fn()
+  const onDrop = vi.fn()
+  const onReset = vi.fn()
+  function Divider() {
+    const ref = useDividerDrag({ onGrab, onDrag, onDrop, onReset })
+    return <div ref={ref} data-testid="divider" />
+  }
+
+  it("does nothing on a press, a drag or a double-click on the login field", async () => {
+    await signOutOver(<Divider />)
+    const field = screen.getByLabelText("Password")
+    fireEvent.pointerDown(field, { pointerId: 1, pointerType: "mouse", button: 0, clientX: 0, clientY: 0 })
+    fireEvent.pointerMove(field, { pointerId: 1, pointerType: "mouse", buttons: 1, clientX: 40, clientY: 0 })
+    fireEvent.pointerUp(field, { pointerId: 1, pointerType: "mouse", clientX: 40, clientY: 0 })
+    fireEvent.doubleClick(field, { clientX: 0, clientY: 0 })
+    expect(onGrab).not.toHaveBeenCalled()
+    expect(onDrag).not.toHaveBeenCalled()
+    expect(onDrop).not.toHaveBeenCalled()
+    expect(onReset).not.toHaveBeenCalled()
+  })
+
+  it("still works once signed in, so the guard is the gate and not the hook", async () => {
+    const r = await signOutOver(<Divider />)
+    phase = { kind: "open", status: status() }
+    r.rerender(<AuthGate><Divider /></AuthGate>)
+    fireEvent.doubleClick(screen.getByTestId("divider"), { clientX: 0, clientY: 0 })
+    expect(onReset).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("the gate layer's own events", () => {
+  it("keeps a file dropped on the login page from navigating away", async () => {
+    await signOutOver(<div>the app</div>)
+    const field = screen.getByLabelText("Password")
+    const over = new Event("dragover", { bubbles: true, cancelable: true })
+    field.dispatchEvent(over)
+    const drop = new Event("drop", { bubbles: true, cancelable: true })
+    field.dispatchEvent(drop)
+    expect(over.defaultPrevented).toBe(true)
+    expect(drop.defaultPrevented).toBe(true)
+  })
+
+  it("keeps IME composition on the login page away from the hidden terminal", async () => {
+    const onDocument = vi.fn()
+    document.addEventListener("compositionstart", onDocument, true)
+    try {
+      await signOutOver(<div>the app</div>)
+      fireEvent.compositionStart(screen.getByLabelText("Password"))
+      expect(onDocument).not.toHaveBeenCalled()
+    } finally {
+      document.removeEventListener("compositionstart", onDocument, true)
+    }
+  })
+
+  it("takes the hiding marks off again if something puts them back while it is up", async () => {
+    await signOutOver(<div>the app</div>)
+    const layer = screen.getByLabelText("Password").closest("[data-auth-gate-layer]") as HTMLElement
+    layer.setAttribute("aria-hidden", "true")
+    layer.setAttribute("data-base-ui-inert", "")
+    layer.setAttribute("inert", "")
+    await act(async () => {
+      await new Promise((res) => setTimeout(res, 0))
+    })
+    expect(layer.hasAttribute("aria-hidden")).toBe(false)
+    expect(layer.hasAttribute("data-base-ui-inert")).toBe(false)
+    expect(layer.hasAttribute("inert")).toBe(false)
   })
 })

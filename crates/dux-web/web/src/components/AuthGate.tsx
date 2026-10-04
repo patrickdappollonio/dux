@@ -14,6 +14,7 @@ import { Toaster } from "@/components/ui/sonner"
 import type { AuthStatus } from "@/lib/authApi"
 import { assertNever } from "@/lib/assertNever"
 import { useAuthPhase, type AuthPhase } from "@/lib/authGate"
+import { GATE_LAYER_ATTR, setGateUp } from "@/lib/gateLayer"
 
 // The root of the page: the app, and over it whatever page the sign-in gate
 // needs (the login, blocked, broken, unreachable or stuck page).
@@ -36,10 +37,13 @@ import { useAuthPhase, type AuthPhase } from "@/lib/authGate"
 // - the same modal's outside-press dismissal ignores an element added after it
 //   opened, so a press on the login page does not close it and throw away
 //   what was typed in it;
-// - key, pointer and focus events stop at the layer, so the app's document and
-//   window listeners (a dialog's Escape, the sidebar's Ctrl/Cmd-B, theater's
-//   Escape) never see what is typed on the login page. The layer's own
-//   handlers run before that, on the layer itself.
+// - key, pointer, focus, composition and file-drag events stop at the layer,
+//   so the app's bubbling document and window listeners (a dialog's Escape,
+//   the sidebar's Ctrl/Cmd-B, theater's Escape) never see what happens on the
+//   login page; the layer's own handlers run first, on the layer itself. The
+//   app's CAPTURE-phase listeners would see an event before it got here, so
+//   `lib/gateLayer.ts` stops the gestures among them earlier still, on the
+//   window, for anything aimed at this layer while it is up.
 //
 // The toaster lives here, outside the app, so a toast on screen (a sticky one
 // above all) outlives whatever the gate does.
@@ -98,9 +102,26 @@ const CONTAINED_EVENTS = [
   "copy",
   "cut",
   "wheel",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+  "dragenter",
+  "dragover",
+  "drop",
 ] as const
 
-const GATE_LAYER_ATTR = "data-auth-gate-layer"
+// The attributes that hide an element from people: what a modal's
+// `markOthers` sets, and `inert`.
+const HIDING_ATTRS = ["aria-hidden", "data-base-ui-inert", "inert"]
+
+// Take the hiding marks off the layer and every ancestor.
+function unhide(host: HTMLElement): void {
+  for (let el: HTMLElement | null = host; el; el = el.parentElement) {
+    if (el.getAttribute("aria-hidden") === "true") el.removeAttribute("aria-hidden")
+    el.removeAttribute("data-base-ui-inert")
+    el.removeAttribute("inert")
+  }
+}
 
 // The layer's host, a direct child of the body, made on first use and kept.
 // Attached before anything renders into it, so a field's autofocus lands.
@@ -118,17 +139,29 @@ function attachedGateHost(): HTMLDivElement {
 function GateLayer({ children }: { children: ReactNode }) {
   const host = attachedGateHost()
   useLayoutEffect(() => {
-    // Nothing above the layer may hide it: whatever a modal marked while the
-    // layer was empty is taken off the layer and its ancestors.
+    // Nothing above the layer may hide it, now or while it is up: a modal that
+    // marked the empty layer earlier, or anything marking it meanwhile, is
+    // undone on the spot.
+    unhide(host)
+    const observer =
+      typeof MutationObserver === "undefined" ? null : new MutationObserver(() => unhide(host))
     for (let el: HTMLElement | null = host; el; el = el.parentElement) {
-      if (el.getAttribute("aria-hidden") === "true") el.removeAttribute("aria-hidden")
-      el.removeAttribute("data-base-ui-inert")
-      el.removeAttribute("inert")
+      observer?.observe(el, { attributes: true, attributeFilter: HIDING_ATTRS })
     }
-    const stop = (e: Event) => e.stopPropagation()
-    for (const type of CONTAINED_EVENTS) host.addEventListener(type, stop)
+    const contain = (e: Event) => {
+      // A file dropped here would otherwise navigate the tab away, and the
+      // page's unsaved state with it.
+      if (e.type === "dragenter" || e.type === "dragover" || e.type === "drop") {
+        e.preventDefault()
+      }
+      e.stopPropagation()
+    }
+    for (const type of CONTAINED_EVENTS) host.addEventListener(type, contain)
+    setGateUp(true)
     return () => {
-      for (const type of CONTAINED_EVENTS) host.removeEventListener(type, stop)
+      setGateUp(false)
+      observer?.disconnect()
+      for (const type of CONTAINED_EVENTS) host.removeEventListener(type, contain)
     }
   }, [host])
   return createPortal(

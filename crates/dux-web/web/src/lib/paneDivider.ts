@@ -8,6 +8,8 @@
 
 // The smallest a divider's grab band may be, per pointer kind: the library's own
 // `resizeTargetMinimumSize` defaults, passed straight back by `ResizablePanelGroup`.
+import { isInGateLayer } from "./gateLayer"
+
 export const DIVIDER_TARGET_MIN = { coarse: 20, fine: 10 } as const
 
 // The transparent grab band, painted as a centred ::after so the visible line
@@ -115,6 +117,9 @@ export function dividerPressHits(
 ): boolean {
   if (el === null) return false
   const target = event.target
+  // The sign-in gate's page sits over the hidden app; nothing pressed on it is
+  // a press on a divider underneath, whatever the rectangle says.
+  if (isInGateLayer(target)) return false
   if (target === el || (target instanceof Node && el.contains(target))) {
     return true
   }

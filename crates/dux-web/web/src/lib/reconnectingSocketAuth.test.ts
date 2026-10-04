@@ -209,7 +209,7 @@ describe("a PTY socket while signed out", () => {
 })
 
 describe("a PTY socket that stayed open across a sign-out", () => {
-  it("delivers the size it could not send once signed in again", async () => {
+  it("does not replay a refused size by itself: the resize coordinator owns that", async () => {
     const gate = await import("./authGate")
     const { PtySocket } = await import("./ptySocket")
     const { noteServerValidated } = await import("./serverValidated")
@@ -223,12 +223,12 @@ describe("a PTY socket that stayed open across a sign-out", () => {
 
     statusBody = { password_set: true, required_here: true, signed_in: false }
     gate.reportUnauthorized()
-    // The window changed while the login page was up.
     expect(sock.sendResize(30, 100)).toBe(false)
-    expect(ws.sent).toHaveLength(0)
 
     statusBody = { password_set: true, required_here: true, signed_in: true }
     await gate.signIn("pw")
-    expect(ws.sent.map((f) => JSON.parse(String(f)))).toEqual([{ rows: 30, cols: 100 }])
+    // A replay from here would skip the ownership check and could claim a pty
+    // nobody owns; `authResync.ts` asks the coordinator instead.
+    expect(ws.sent).toHaveLength(0)
   })
 })

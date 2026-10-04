@@ -1,3 +1,4 @@
+import { isInGateLayer } from "@/lib/gateLayer"
 import { useEffect, useRef, useState } from "react"
 import type {
   GroupProps,
@@ -160,6 +161,8 @@ export function useChangesPaneController(showChanges: boolean) {
   // bad zero-width report can arrive later; the next pointerdown resets it.
   useEffect(() => {
     const onDown = (event: Event) => {
+      // A press on the sign-in gate's page is no gesture on the panes it hides.
+      if (isInGateLayer(event.target)) return
       const gesture = gestureRef.current
       gesture.pointerDown = true
       gesture.pointerMoved = false

@@ -35,6 +35,9 @@ const REASON: Record<SignOutReason, string> = {
   signed_out: "You signed out. Sign in again to pick up where you left off.",
   password_changed:
     "The password changed, which signs every browser out. Sign in with the new one.",
+  // The one confirmation of a first password that now applies here: notices
+  // are held while the gate is up, so the page itself says it.
+  password_set: "Password set. Sign in with it to continue.",
 }
 
 // Shown only when the server says this connection is NOT encrypted: not on
