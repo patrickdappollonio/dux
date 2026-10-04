@@ -678,6 +678,12 @@ impl Engine {
         if attached {
             return Some(RemovalAdmission::Refused(RemovalOutcome::Attached));
         }
+        // Something dux started still runs in the folder though no listed agent
+        // holds it: a deleted agent's CLI still stopping, a terminal. Refused
+        // and named, never removed under it.
+        if let Some(reason) = self.folder_busy_reason(requested) {
+            return Some(RemovalAdmission::Refused(RemovalOutcome::Busy { reason }));
+        }
         match self.removal_coordination.ops.announce_removal(requested) {
             RemovalClaim::Join(_) => Some(RemovalAdmission::Refused(RemovalOutcome::BeingRemoved)),
             RemovalClaim::Lead(lease) => {
@@ -689,6 +695,12 @@ impl Engine {
                     requested: requested.to_path_buf(),
                     delete_branch,
                     wait: self.removal_wait(),
+                    processes: super::RemovalProcesses {
+                        sessions: self.process_sessions_in(requested),
+                        grace: self.individual_close_grace(),
+                        ..super::RemovalProcesses::none()
+                    },
+                    registry: self.process_registry.clone(),
                 })))
             }
         }

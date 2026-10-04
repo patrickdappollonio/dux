@@ -784,3 +784,47 @@ fn a_resumed_removal_claims_the_folder_and_waits_for_work_in_it() {
     }
     assert!(!fx.worktree.exists(), "removed once the pull let go");
 }
+
+/// The removal's last look under its claim: a session started in the folder
+/// that the removal did not already end, and that is still running, keeps the
+/// folder, with what is running named.
+#[test]
+fn the_last_look_keeps_a_folder_something_new_runs_in() {
+    let fx = fixture();
+    let mut sleeper = std::process::Command::new("sh");
+    sleeper.args(["-c", "sleep 30"]).current_dir(&fx.worktree);
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        sleeper.pre_exec(|| {
+            rustix::process::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    let mut sleeper = sleeper.spawn().expect("spawn");
+    let registry = crate::process_sessions::AgentProcessRegistry::default();
+    let late = crate::process_sessions::ProcessSession::started_now(sleeper.id());
+    registry.register("someone-else", late, &fx.worktree);
+    let crate::worktree_ops::RemovalClaim::Lead(lease) =
+        fx.engine.worktree_ops().announce_removal(&fx.worktree)
+    else {
+        panic!("the only removal leads");
+    };
+
+    let known = crate::engine::RemovalProcesses::none();
+    let occupant = crate::engine::occupant_after_wait(&lease, &registry, &known);
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    let occupant = occupant.expect("the folder is occupied");
+    assert!(
+        occupant.contains("sleep") || occupant.contains("sh"),
+        "{occupant}"
+    );
+
+    // The same session, once the removal has ended it itself, is not news.
+    let ended = crate::engine::RemovalProcesses {
+        sessions: vec![late],
+        ..crate::engine::RemovalProcesses::none()
+    };
+    assert!(crate::engine::occupant_after_wait(&lease, &registry, &ended).is_none());
+}

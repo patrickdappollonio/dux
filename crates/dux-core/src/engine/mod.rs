@@ -20,6 +20,8 @@ mod spawn_worker;
 pub mod status_op;
 
 #[cfg(test)]
+mod removal_review_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod worktree_removal_race_tests;
@@ -33,6 +35,9 @@ pub use events::{
     EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
     survivors_kept_worktree_message,
+};
+pub(crate) use events::{
+    end_agent_processes_before_removal, occupant_after_wait, occupied_after_wait_message,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
@@ -3594,6 +3599,7 @@ impl Engine {
         let paths = self.paths.clone();
         let sessions = self.sessions.clone();
         let ops = self.worktree_ops().clone();
+        let busy = self.busy_folders();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
         self.spawn_background_worker(
@@ -3609,8 +3615,8 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let result = crate::worktree_manager::list_manageable_worktrees(
-                    &project, &paths, &sessions, &ops,
+                let result = crate::worktree_manager::list_manageable_worktrees_with_busy(
+                    &project, &paths, &sessions, &ops, &busy,
                 );
                 let _ = tx.send(WorkerEvent::ManageableWorktreesReady {
                     project_id: project.id,

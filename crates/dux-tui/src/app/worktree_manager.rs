@@ -204,6 +204,12 @@ fn worktree_removal_final(
                  so remove that one yourself."
             ))
         }
+        dux_core::worktree_manager::RemovalOutcome::Busy { reason } => {
+            dux_core::engine::Final::warning(format!(
+                "Nothing was removed: {reason} in {display_path}. Try again once it has stopped \
+                 (close that terminal, or wait for the deleted agent to finish stopping)."
+            ))
+        }
         dux_core::worktree_manager::RemovalOutcome::BeingRemoved => {
             dux_core::engine::Final::warning(format!(
                 "Nothing more was done: {display_path} is already being removed, because the \
@@ -286,6 +292,7 @@ mod tests {
             dirty,
             attached_session_id: agent.map(str::to_string),
             being_removed: false,
+            busy: None,
         }
     }
 

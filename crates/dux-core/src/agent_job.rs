@@ -184,9 +184,25 @@ struct CreatePlanContext<'a> {
     worker_tx: &'a Sender<WorkerEvent>,
     create_key: &'a str,
     creation_notes: &'a mut Vec<crate::status_text::StatusText>,
+    worktrees: &'a crate::worktree_ops::WorktreeOps,
 }
 
 impl CreatePlanContext<'_> {
+    /// Hold `path` for this create, from before `git worktree add` until the
+    /// create ends (released by the engine when its launch lands or fails).
+    /// Refused once a removal has claimed the path.
+    fn claim_worktree_path(&self, path: &Path) -> anyhow::Result<()> {
+        self.worktrees
+            .hold_as(
+                crate::worktree_ops::HoldOwner::CreateOp(self.create_key.to_string()),
+                path,
+                crate::worktree_ops::WorktreeOpKind::CreateAgent,
+            )
+            .map_err(|refused| {
+                anyhow::anyhow!(refused.sentence("create an agent there").to_string())
+            })
+    }
+
     fn plan(&mut self, request: CreateAgentRequest) -> Option<ManagedCreatePlan> {
         match request {
             CreateAgentRequest::Standalone { .. } => {
@@ -347,20 +363,23 @@ impl CreatePlanContext<'_> {
         resolved_name: &str,
         attach_existing: bool,
     ) -> Option<(String, PathBuf)> {
+        let claim = |path: &Path| self.claim_worktree_path(path);
         let result = if attach_existing {
-            git::create_worktree_existing_branch(
+            git::create_worktree_existing_branch_claimed(
                 repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 resolved_name,
+                &claim,
             )
         } else {
-            git::create_worktree_from_start_point(
+            git::create_worktree_from_start_point_claimed(
                 repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(leading_branch),
                 Some(resolved_name),
+                &claim,
             )
         };
         match result {
@@ -800,11 +819,13 @@ impl CreatePlanContext<'_> {
                 }
             }
 
-            let (branch_name, worktree_path) = match git::create_worktree_existing_branch(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_existing_branch_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 &resolved_name,
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -960,12 +981,14 @@ impl CreatePlanContext<'_> {
                 }
             };
             let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(&source_head),
                 Some(&custom_name),
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1112,12 +1135,14 @@ impl CreatePlanContext<'_> {
                 }
             };
             let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(&source_head),
                 custom_name.as_deref(),
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1737,6 +1762,15 @@ fn launch_managed_create(
     run_agent_launch_job(request, worker_tx);
 }
 
+/// The shared registries an agent create reports into: the process sessions
+/// its startup command runs in, and the per-worktree registry its folder is
+/// held in from before `git worktree add` until its launch lands.
+#[derive(Clone, Default)]
+pub struct CreateJobRegistries {
+    pub processes: crate::process_sessions::AgentProcessRegistry,
+    pub worktrees: crate::worktree_ops::WorktreeOps,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
@@ -1746,8 +1780,12 @@ pub fn run_create_agent_job(
     term_size: (u16, u16),
     status_op_id: String,
     identity: crate::term_identity::TerminalIdentity,
-    registry: crate::process_sessions::AgentProcessRegistry,
+    registries: CreateJobRegistries,
 ) {
+    let CreateJobRegistries {
+        processes: registry,
+        worktrees,
+    } = registries;
     // The opaque id of the shared create-agent `HandlerStatusOp` keys every
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
     // launch-ready/failed handler can resolve the op's final on the same id.
@@ -1774,6 +1812,7 @@ pub fn run_create_agent_job(
             worker_tx: &worker_tx,
             create_key: &create_key,
             creation_notes: &mut creation_notes,
+            worktrees: &worktrees,
         };
         let Some(plan) = context.plan(request) else {
             return;

@@ -248,11 +248,16 @@ impl Engine {
         let _ = self
             .worker_tx
             .send(WorkerEvent::PollerStatus(op.pending_status()));
+        let mut sessions = row.process_sessions.clone();
+        sessions.extend(self.process_sessions_in(std::path::Path::new(&row.managed.worktree_path)));
+        sessions.sort_by_key(|session| session.sid);
+        sessions.dedup();
         let processes = RemovalProcesses {
-            sessions: row.process_sessions.clone(),
+            sessions,
             grace: self.individual_close_grace(),
             ..RemovalProcesses::none()
         };
+        let registry = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
         // The same claim a delete takes, so nothing new starts in the folder
         // while it is being finished, and a second removal of it joins this one.
@@ -272,10 +277,109 @@ impl Engine {
                     claim,
                     wait,
                     waiting_tx: None,
+                    registry,
                 },
             );
             super::events::forget_pending_removal_in(&db_path, &row.session_id);
             result
         });
+    }
+}
+
+impl Engine {
+    /// Every PTY dux still has a process for in `folder`, whoever owns it: a
+    /// live agent tab, a terminal, or one that is terminating (an agent deleted
+    /// a moment ago, worktree kept, whose CLI is still stopping). Read from the
+    /// engine's own maps, so it needs no look at the process table and is
+    /// cheap on the engine thread. Each comes with what to call it.
+    pub fn pty_occupants_in(
+        &self,
+        folder: &std::path::Path,
+    ) -> Vec<(
+        Option<crate::process_sessions::ProcessSession>,
+        &'static str,
+    )> {
+        let key = crate::worktree_ops::path_key(folder);
+        let here = |client: &crate::pty::PtyClient| {
+            crate::worktree_ops::path_key(client.spawn_dir()) == key
+        };
+        let mut found = Vec::new();
+        for client in self.providers.values().filter(|client| here(client)) {
+            found.push((client.process_session(), "an agent running in it"));
+        }
+        for terminal in self
+            .companion_terminals
+            .values()
+            .filter(|terminal| here(&terminal.client))
+        {
+            found.push((terminal.client.process_session(), "a terminal open in it"));
+        }
+        for entry in self
+            .terminating_ptys
+            .iter()
+            .filter(|entry| here(&entry.client))
+        {
+            found.push((
+                entry.client.process_session(),
+                "a process dux started there that is still stopping",
+            ));
+        }
+        found
+    }
+
+    /// Every process session a removal of `folder` must end first: each one
+    /// dux registered as started there (any agent, a deleted one included,
+    /// terminals and startup commands too) and each PTY still running there.
+    pub fn process_sessions_in(
+        &self,
+        folder: &std::path::Path,
+    ) -> Vec<crate::process_sessions::ProcessSession> {
+        let mut sessions = self.process_registry.sessions_in(folder);
+        sessions.extend(
+            self.pty_occupants_in(folder)
+                .into_iter()
+                .filter_map(|(session, _)| session),
+        );
+        sessions.sort_by_key(|session| session.sid);
+        sessions.dedup();
+        sessions
+    }
+
+    /// Why the worktree manager may not remove `folder` right now because
+    /// something dux started is still running in it, or `None`.
+    pub fn folder_busy_reason(&self, folder: &std::path::Path) -> Option<String> {
+        self.pty_occupants_in(folder)
+            .first()
+            .map(|(_, what)| (*what).to_string())
+    }
+
+    /// Every folder something dux started is still running in, with why: the
+    /// worktree manager's listing shows each as busy.
+    pub fn busy_folders(&self) -> Vec<(std::path::PathBuf, String)> {
+        let mut found: Vec<(std::path::PathBuf, String)> = Vec::new();
+        let dirs = self
+            .providers
+            .values()
+            .map(|client| client.spawn_dir().to_path_buf())
+            .chain(
+                self.companion_terminals
+                    .values()
+                    .map(|terminal| terminal.client.spawn_dir().to_path_buf()),
+            )
+            .chain(
+                self.terminating_ptys
+                    .iter()
+                    .map(|entry| entry.client.spawn_dir().to_path_buf()),
+            );
+        for dir in dirs {
+            let key = crate::worktree_ops::path_key(&dir);
+            if found.iter().any(|(known, _)| *known == key) {
+                continue;
+            }
+            if let Some(reason) = self.folder_busy_reason(&dir) {
+                found.push((key, reason));
+            }
+        }
+        found
     }
 }

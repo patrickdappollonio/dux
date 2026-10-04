@@ -229,6 +229,7 @@ fn managed_worktree(name: &str) -> dux_core::worktree_manager::ManagedWorktree {
         dirty: false,
         attached_session_id: None,
         being_removed: false,
+        busy: None,
     }
 }
 

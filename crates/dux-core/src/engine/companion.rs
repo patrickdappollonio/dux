@@ -37,6 +37,16 @@ impl Engine {
         if let Some(reason) = self.missing_directory_reason(session_id) {
             anyhow::bail!("{reason}");
         }
+        // Nothing new may start in a folder a removal has claimed.
+        if self.worktree_ops().is_being_removed(session.directory()) {
+            anyhow::bail!(
+                "{}",
+                crate::worktree_ops::HoldRefused {
+                    path: crate::worktree_ops::path_key(std::path::Path::new(session.directory())),
+                }
+                .sentence("open a terminal there")
+            );
+        }
 
         // A standalone agent belongs to no project, so a terminal opened on it
         // gets the global environment with no project overlay. Falling through
@@ -174,7 +184,7 @@ impl Engine {
                     crate::process_sessions::UNOWNED_PTYS
                 }
             };
-            self.process_registry.register(key, process);
+            self.process_registry.register(key, process, cwd);
         }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);

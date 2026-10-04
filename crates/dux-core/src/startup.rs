@@ -309,9 +309,10 @@ pub fn run_claimed_startup_command(
         let child = command
             .spawn()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
-        guard.register_session(crate::process_sessions::ProcessSession::started_now(
-            child.id(),
-        ));
+        guard.register_session(
+            crate::process_sessions::ProcessSession::started_now(child.id()),
+            std::path::Path::new(&run.managed.worktree_path),
+        );
         let output = child
             .wait_with_output()
             .with_context(|| format!("failed to run startup command through {shell}"))?;

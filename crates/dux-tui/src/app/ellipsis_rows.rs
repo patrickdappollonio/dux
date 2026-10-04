@@ -207,6 +207,7 @@ fn managed(name: &str, branch: &str) -> dux_core::worktree_manager::ManagedWorkt
         dirty: false,
         attached_session_id: None,
         being_removed: false,
+        busy: None,
     }
 }
 

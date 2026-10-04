@@ -1714,8 +1714,31 @@ pub fn create_worktree_existing_branch(
     project_name: &str,
     branch_name: &str,
 ) -> Result<(String, PathBuf)> {
-    fs::create_dir_all(worktrees_root.join(project_name))?;
+    create_worktree_existing_branch_claimed(
+        repo_path,
+        worktrees_root,
+        project_name,
+        branch_name,
+        &|_| Ok(()),
+    )
+}
+
+/// [`create_worktree_existing_branch`], calling `claim` with the worktree's
+/// path once it is known and BEFORE `git worktree add` runs. An agent create
+/// takes its hold on the folder there, so a removal claimed on the same path
+/// refuses the create rather than having the folder created under it, and the
+/// worktree manager sees the folder as occupied for the whole create. An `Err`
+/// from `claim` stops the create with nothing made.
+pub fn create_worktree_existing_branch_claimed(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    branch_name: &str,
+    claim: &dyn Fn(&Path) -> Result<()>,
+) -> Result<(String, PathBuf)> {
     let worktree_path = managed_worktree_path(worktrees_root, project_name, branch_name);
+    claim(&worktree_path)?;
+    fs::create_dir_all(worktrees_root.join(project_name))?;
     let canonical = add_worktree_existing_branch_at(repo_path, &worktree_path, branch_name)?;
     Ok((branch_name.to_string(), canonical))
 }
@@ -1935,12 +1958,34 @@ pub fn create_worktree_from_start_point(
     start_point: Option<&str>,
     custom_name: Option<&str>,
 ) -> Result<(String, PathBuf)> {
+    create_worktree_from_start_point_claimed(
+        repo_path,
+        worktrees_root,
+        project_name,
+        start_point,
+        custom_name,
+        &|_| Ok(()),
+    )
+}
+
+/// [`create_worktree_from_start_point`], calling `claim` with the worktree's
+/// path once it is known (a generated name included) and BEFORE
+/// `git worktree add` runs. See [`create_worktree_existing_branch_claimed`].
+pub fn create_worktree_from_start_point_claimed(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    start_point: Option<&str>,
+    custom_name: Option<&str>,
+    claim: &dyn Fn(&Path) -> Result<()>,
+) -> Result<(String, PathBuf)> {
     let branch_name = custom_name
         .map(|s| s.to_string())
         .unwrap_or_else(docker_style_name);
     let project_root = worktrees_root.join(project_name);
-    fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
+    claim(&worktree_path)?;
+    fs::create_dir_all(&project_root)?;
     let canonical =
         add_worktree_new_branch_at(repo_path, &worktree_path, &branch_name, start_point)?;
     Ok((branch_name, canonical))

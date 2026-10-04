@@ -3098,6 +3098,9 @@ pub(crate) fn manage_worktree_visual_rows(
         rows.extend(removable.into_iter().map(ManageWorktreeVisualRow::Entry));
     }
     if !held.is_empty() {
+        // A busy row (an agent being created in it, a deleted agent's CLI
+        // still stopping) sits here too: something is using the folder, and
+        // the row's own suffix says what.
         rows.push(ManageWorktreeVisualRow::Header("Held By An Agent"));
         rows.extend(held.into_iter().map(ManageWorktreeVisualRow::Entry));
     }

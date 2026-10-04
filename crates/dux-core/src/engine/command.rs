@@ -389,15 +389,23 @@ impl Engine {
                         ],
                     )));
                 }
-                // An agent created on a worktree that already exists holds it
-                // from now until its launch lands, so a removal of that folder
-                // waits for it (or keeps it), and a folder already being
-                // removed is refused rather than adopted.
+                // An agent created on a folder that already exists (an
+                // existing worktree it adopts, or the user's own folder for a
+                // standalone agent) holds it from now until its launch lands,
+                // so a removal of that folder waits for it (or keeps it), and a
+                // folder already being removed is refused rather than adopted:
+                // dux never removes a folder a standalone agent runs in. A
+                // create that makes a NEW worktree holds its path from inside
+                // the job, the moment the path is known and before
+                // `git worktree add` runs.
                 let existing_worktree = match request.as_ref() {
                     crate::worker::CreateAgentRequest::ExistingManagedWorktree {
                         worktree_path,
                         ..
                     } => Some(worktree_path.clone()),
+                    crate::worker::CreateAgentRequest::Standalone { folder, .. } => {
+                        Some(folder.clone())
+                    }
                     _ => None,
                 };
                 if let Some(path) = &existing_worktree
@@ -495,7 +503,10 @@ impl Engine {
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let identity = self.resolved_identity();
-                let registry = self.process_registry.clone();
+                let registry = crate::agent_job::CreateJobRegistries {
+                    processes: self.process_registry.clone(),
+                    worktrees: self.worktree_ops().clone(),
+                };
                 let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: "create-agent".into(),
@@ -563,6 +574,31 @@ impl Engine {
                                 q(branch_name),
                                 " is being deleted and cannot be launched."
                             ])),
+                        },
+                    )));
+                }
+                // Nothing new may start in a folder a removal has claimed,
+                // whoever's it is: another agent sharing it, a standalone agent
+                // in it. The removal's last look relies on this.
+                if self
+                    .worktree_ops()
+                    .is_being_removed(request.session.directory())
+                {
+                    let refusal = crate::worktree_ops::HoldRefused {
+                        path: crate::worktree_ops::path_key(std::path::Path::new(
+                            request.session.directory(),
+                        )),
+                    }
+                    .sentence("start this agent there");
+                    crate::logger::warn(&format!(
+                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": its folder is being removed"
+                    ));
+                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            session_id,
+                            tab_id: tab_id_view,
+                            launched: false,
+                            status: Some(StatusUpdate::error(refusal)),
                         },
                     )));
                 }

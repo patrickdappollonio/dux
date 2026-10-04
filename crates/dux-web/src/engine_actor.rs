@@ -46,6 +46,16 @@ pub enum SpineChange {
     Sessions,
 }
 
+/// What the worktree manager's listing needs from the engine for one project:
+/// the classification inputs, and every folder something dux started is still
+/// running in (so such a row is shown busy rather than removable).
+pub struct ProjectWorktreeInputs {
+    pub project: dux_core::model::Project,
+    pub paths: dux_core::config::DuxPaths,
+    pub sessions: Vec<dux_core::model::AgentSession>,
+    pub busy: Vec<(std::path::PathBuf, String)>,
+}
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
@@ -291,16 +301,7 @@ pub enum EngineRequest {
     /// project, the dux paths, and the current sessions. Instant clones, because the
     /// classification shells to git and runs off-thread in the server handler.
     /// `None` when the project id is unknown.
-    ProjectWorktreeInputs(
-        String,
-        oneshot::Sender<
-            Option<(
-                dux_core::model::Project,
-                dux_core::config::DuxPaths,
-                Vec<dux_core::model::AgentSession>,
-            )>,
-        >,
-    ),
+    ProjectWorktreeInputs(String, oneshot::Sender<Option<ProjectWorktreeInputs>>),
     /// Decide a worktree-manager removal against the engine's LIVE state and
     /// announce it, `None` when the project id is unknown. The slow part (the
     /// wait for operations in the worktree, then git) is the admitted ticket's,
@@ -1656,11 +1657,7 @@ impl EngineHandle {
     pub async fn project_worktree_inputs(
         &self,
         project_id: String,
-    ) -> Option<(
-        dux_core::model::Project,
-        dux_core::config::DuxPaths,
-        Vec<dux_core::model::AgentSession>,
-    )> {
+    ) -> Option<ProjectWorktreeInputs> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -3973,7 +3970,12 @@ fn handle_request(
                 .iter()
                 .find(|p| p.id == project_id)
                 .cloned()
-                .map(|project| (project, engine.paths.clone(), engine.sessions.clone()));
+                .map(|project| ProjectWorktreeInputs {
+                    project,
+                    paths: engine.paths.clone(),
+                    sessions: engine.sessions.clone(),
+                    busy: engine.busy_folders(),
+                });
             let _ = reply.send(inputs);
         }
         EngineRequest::SessionStartupLogContext(session_id, reply) => {

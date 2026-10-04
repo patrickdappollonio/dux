@@ -298,7 +298,12 @@ pub struct AgentProcessRegistry {
 
 #[derive(Default)]
 struct RegistryInner {
-    sessions: HashMap<String, Vec<ProcessSession>>,
+    /// Each owner's sessions, with the folder each was started in.
+    sessions: HashMap<String, Vec<(ProcessSession, std::path::PathBuf)>>,
+    /// Sessions of agents already deleted, kept (bounded) so a removal of the
+    /// folder they ran in still ends what they left behind: a "keep the
+    /// worktree" delete forgets the agent while its CLI is still stopping.
+    retired: std::collections::VecDeque<(ProcessSession, std::path::PathBuf)>,
     /// Agents whose startup command is running right now, and whether the
     /// agent has been deleted under it.
     startup_runs: HashMap<String, bool>,
@@ -309,6 +314,9 @@ struct RegistryInner {
 /// agent's old session number, reused for one of these, is recognised as
 /// somebody else's.
 pub const UNOWNED_PTYS: &str = "\u{0}unowned";
+
+/// How many sessions of deleted agents are remembered, newest kept.
+const RETIRED_SESSIONS: usize = 1024;
 
 /// How many sessions are remembered per agent. An agent that has opened and
 /// closed more terminals than this over its life keeps the newest; the purge
@@ -323,12 +331,13 @@ impl AgentProcessRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Remember that `session` was started for agent `agent_id`.
-    pub fn register(&self, agent_id: &str, session: ProcessSession) {
+    /// Remember that `session` was started for agent `agent_id` in `folder`.
+    pub fn register(&self, agent_id: &str, session: ProcessSession, folder: &std::path::Path) {
+        let folder = crate::worktree_ops::path_key(folder);
         let mut inner = self.lock();
         let list = inner.sessions.entry(agent_id.to_string()).or_default();
-        if !list.contains(&session) {
-            list.push(session);
+        if !list.iter().any(|(known, _)| *known == session) {
+            list.push((session, folder));
         }
         if list.len() > SESSIONS_PER_AGENT {
             let excess = list.len() - SESSIONS_PER_AGENT;
@@ -341,8 +350,29 @@ impl AgentProcessRegistry {
         self.lock()
             .sessions
             .get(agent_id)
-            .cloned()
+            .map(|list| list.iter().map(|(session, _)| *session).collect())
             .unwrap_or_default()
+    }
+
+    /// Every session started in `folder`, whoever started it: a live agent, a
+    /// sibling agent sharing the folder, an agent already deleted whose
+    /// processes may still be stopping, a terminal, a startup command. A
+    /// removal of the folder ends all of them, and its last look before git
+    /// runs asks this again to see whether anything new arrived.
+    pub fn sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
+        let folder = crate::worktree_ops::path_key(folder);
+        let inner = self.lock();
+        let mut found: Vec<ProcessSession> = inner
+            .sessions
+            .values()
+            .flatten()
+            .chain(inner.retired.iter())
+            .filter(|(_, started_in)| *started_in == folder)
+            .map(|(session, _)| *session)
+            .collect();
+        found.sort_by_key(|session| session.sid);
+        found.dedup();
+        found
     }
 
     /// Forget an agent that has been deleted, handing back what it had, and
@@ -360,13 +390,21 @@ impl AgentProcessRegistry {
             *deleted = true;
         }
         let mine = inner.sessions.remove(agent_id).unwrap_or_default();
-        mine.into_iter()
-            .filter(|session| {
-                !inner.sessions.values().flatten().any(|other| {
+        let mine: Vec<(ProcessSession, std::path::PathBuf)> = mine
+            .into_iter()
+            .filter(|(session, _)| {
+                !inner.sessions.values().flatten().any(|(other, _)| {
                     other.sid == session.sid && other.started_at_secs > session.started_at_secs
                 })
             })
-            .collect()
+            .collect();
+        for entry in &mine {
+            inner.retired.push_back(entry.clone());
+        }
+        while inner.retired.len() > RETIRED_SESSIONS {
+            inner.retired.pop_front();
+        }
+        mine.into_iter().map(|(session, _)| session).collect()
     }
 
     /// Claim the one startup-command run an agent may have at a time. `None`
@@ -398,8 +436,8 @@ pub struct StartupRunGuard {
 }
 
 impl StartupRunGuard {
-    pub fn register_session(&self, session: ProcessSession) {
-        self.registry.register(&self.agent_id, session);
+    pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) {
+        self.registry.register(&self.agent_id, session, folder);
     }
 
     /// Whether the agent was deleted while this run was in progress.
@@ -419,8 +457,9 @@ impl Drop for StartupRunGuard {
         let deleted = inner.startup_runs.remove(&self.agent_id).unwrap_or(false);
         if deleted {
             // The agent's own forget already ran; a session registered after
-            // it must not linger under an id nothing will ever ask about.
-            inner.sessions.remove(&self.agent_id);
+            // it moves to the retired list, still findable by its folder.
+            let late = inner.sessions.remove(&self.agent_id).unwrap_or_default();
+            inner.retired.extend(late);
         }
     }
 }
@@ -635,9 +674,10 @@ mod tests {
             sid: 100,
             started_at_secs: 2_000,
         };
-        registry.register("a1", old);
-        registry.register("a1", session(101));
-        registry.register(UNOWNED_PTYS, newer);
+        let here = std::path::Path::new("/work/a1");
+        registry.register("a1", old, here);
+        registry.register("a1", session(101), here);
+        registry.register(UNOWNED_PTYS, newer, here);
         assert_eq!(registry.forget_agent("a1"), vec![session(101)]);
     }
 
@@ -650,12 +690,30 @@ mod tests {
             "a second run is refused"
         );
         assert!(registry.begin_startup_run("a2").is_some(), "per agent");
-        guard.register_session(session(100));
+        guard.register_session(session(100), std::path::Path::new("/work/a1"));
         assert!(!guard.agent_deleted());
         assert_eq!(registry.forget_agent("a1"), vec![session(100)]);
         assert!(guard.agent_deleted());
         drop(guard);
         assert!(!registry.startup_running("a1"));
         assert!(registry.sessions_of("a1").is_empty());
+        assert_eq!(
+            registry.sessions_in(std::path::Path::new("/work/a1")),
+            vec![session(100)],
+            "a deleted agent's session is still found by its folder"
+        );
+    }
+
+    #[test]
+    fn sessions_are_found_by_folder_whoever_started_them() {
+        let registry = AgentProcessRegistry::default();
+        let shared = std::path::Path::new("/work/shared");
+        registry.register("a1", session(100), shared);
+        registry.register("a2", session(200), shared);
+        registry.register("a2", session(300), std::path::Path::new("/work/other"));
+        assert_eq!(
+            registry.sessions_in(shared),
+            vec![session(100), session(200)]
+        );
     }
 }

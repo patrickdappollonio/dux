@@ -683,6 +683,9 @@ pub(crate) struct RemovalCoordinationInputs<'a> {
     pub(crate) claim: crate::worktree_ops::RemovalClaim,
     pub(crate) wait: std::time::Duration,
     pub(crate) waiting_tx: Option<&'a std::sync::mpsc::Sender<crate::worker::WorkerEvent>>,
+    /// The process registry, for the last look before git runs: a session
+    /// started in the folder that this removal did not already end.
+    pub(crate) registry: crate::process_sessions::AgentProcessRegistry,
 }
 
 /// The removal itself, shared by the delete's worker and the next start's
@@ -711,6 +714,7 @@ pub(crate) fn perform_deferred_removal(
         claim,
         wait,
         waiting_tx,
+        registry,
     } = coordination;
     // Held outside the unwind boundary, so even a panic below finishes it.
     let mut lease = None;
@@ -753,6 +757,16 @@ pub(crate) fn perform_deferred_removal(
                 leading.path(),
                 wait,
                 &crate::worktree_ops::describe_holders(&still),
+            ));
+        }
+        // The last look, under the claim: nothing new can take the folder any
+        // more (every create, launch and terminal is refused once a removal
+        // has claimed it), so whatever is found here arrived before the claim
+        // and has not gone. Anything that still occupies the folder keeps it.
+        if let Some(occupant) = occupant_after_wait(leading, &registry, processes) {
+            return Err(occupied_after_wait_message(
+                &managed.worktree_path,
+                &occupant,
             ));
         }
         // A rename that landed while this removal waited moved the branch, so
@@ -799,6 +813,53 @@ pub(crate) fn perform_deferred_removal(
     result
 }
 
+/// What still occupies a folder once a removal has waited for everything it
+/// knew of: an agent being created in it, or a process session started there
+/// that the removal did not end (with what is running in it). `None` when the
+/// folder is free.
+pub(crate) fn occupant_after_wait(
+    lease: &crate::worktree_ops::RemovalLease,
+    registry: &crate::process_sessions::AgentProcessRegistry,
+    processes: &crate::engine::RemovalProcesses,
+) -> Option<String> {
+    if lease
+        .holders()
+        .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+    {
+        return Some("an agent is being created in it".to_string());
+    }
+    let unknown: Vec<_> = registry
+        .sessions_in(lease.path())
+        .into_iter()
+        .filter(|session| !processes.sessions.contains(session))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    let alive = crate::process_sessions::members(
+        &crate::process_sessions::read_process_table(),
+        &unknown,
+        &[],
+        std::process::id(),
+    );
+    (!alive.is_empty()).then(|| {
+        format!(
+            "something dux started there after the delete is running in it ({})",
+            crate::process_sessions::describe(&alive)
+        )
+    })
+}
+
+/// The final when the folder turned out to be in use after the removal's
+/// wait: it is kept, whole.
+pub(crate) fn occupied_after_wait_message(worktree_path: &str, occupant: &str) -> String {
+    format!(
+        "the worktree at {} was kept: {occupant}. Remove it from the worktree manager once \
+         that has finished, if you still want it gone.",
+        crate::home_path::shorten_home(std::path::Path::new(worktree_path))
+    )
+}
+
 /// Clear a pending removal's row from a worker thread, on a connection of its
 /// own. A failure is logged: the cost is the next start running a removal that
 /// is already done, which git answers as a no-op.
@@ -824,7 +885,7 @@ const REMOVAL_SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// An `Err` keeps the worktree: removing a folder something is still writing
 /// into is exactly the half-done removal this exists to prevent, and the
 /// message names what refused to die.
-fn end_agent_processes_before_removal(
+pub(crate) fn end_agent_processes_before_removal(
     processes: &crate::engine::RemovalProcesses,
     worktree_path: &str,
 ) -> Result<(), String> {
@@ -1243,7 +1304,8 @@ impl Engine {
             self.owning_session_for_tab(tab_id.as_str()),
             client.process_session(),
         ) {
-            self.process_registry.register(&session_id, process);
+            self.process_registry
+                .register(&session_id, process, client.spawn_dir());
         }
         self.providers.insert(tab_id.clone(), client);
         LaunchedProviderInsert::Kept
@@ -2561,6 +2623,17 @@ impl Engine {
             .insert(session_id.clone(), busy_message.clone());
         let wait = self.removal_wait();
         let tx = self.worker_tx.clone();
+        // Every process session on the path, whoever started it: a sibling
+        // agent sharing the folder that is still stopping, an agent deleted
+        // with its worktree kept a moment ago, a terminal. The removal ends
+        // them all before git runs, not only its own agent's.
+        let mut processes = processes;
+        processes
+            .sessions
+            .extend(self.process_sessions_in(std::path::Path::new(&worktree_path)));
+        processes.sessions.sort_by_key(|session| session.sid);
+        processes.sessions.dedup();
+        let registry = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
         let handle = std::thread::spawn(move || {
             let result = perform_deferred_removal(
@@ -2573,6 +2646,7 @@ impl Engine {
                     claim,
                     wait,
                     waiting_tx: Some(&tx),
+                    registry,
                 },
             );
             // Finished one way or the other: a failure has told the user what

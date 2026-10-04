@@ -6649,6 +6649,11 @@ impl App {
                             "  being removed",
                             Style::default().fg(self.theme.hint_dim_desc_fg),
                         ));
+                    } else if let Some(busy) = &entry.busy {
+                        suffix_spans.push(Span::styled(
+                            format!("  in use: {busy}"),
+                            Style::default().fg(self.theme.hint_dim_desc_fg),
+                        ));
                     } else if !removable {
                         suffix_spans.push(Span::styled(
                             "  held by an agent",
