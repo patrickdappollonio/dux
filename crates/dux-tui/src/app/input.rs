@@ -13106,6 +13106,33 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// `dux config set` signals the running dux with SIGUSR1; the terminal UI
+    /// answers with its ordinary reload, so the change is live at once.
+    #[test]
+    fn a_sigusr1_runs_the_ordinary_config_reload() {
+        dux_core::reload_signal::install().expect("install the handler");
+        let mut app = test_app(default_bindings());
+        let mut config = Config::default();
+        config.ui.right_width_pct = 38;
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        std::fs::write(
+            &app.engine.paths.config_path,
+            crate::config::render_config_with(&config, &bindings),
+        )
+        .expect("write valid config");
+
+        assert!(
+            !app.reload_config_on_signal(),
+            "nothing to do before a signal"
+        );
+        // SAFETY: raising a signal whose handler only sets an atomic flag.
+        unsafe { libc::raise(libc::SIGUSR1) };
+        assert!(app.reload_config_on_signal(), "the signal starts a reload");
+        drain_until(&mut app, |app| app.engine.config.ui.right_width_pct == 38);
+        assert_eq!(app.engine.config.ui.right_width_pct, 38);
+        assert!(!app.reload_config_on_signal(), "one signal is one reload");
+    }
+
     #[test]
     fn reload_config_applies_a_valid_new_password() {
         let mut app = test_app(default_bindings());

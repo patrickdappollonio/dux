@@ -4599,6 +4599,10 @@ impl App {
 
     fn prepare_run_tick(&mut self) {
         self.drain_events();
+        // A `dux config set` (or a hand-run `kill -USR1`) asks for a reload.
+        if self.reload_config_on_signal() {
+            self.mark_frame_dirty();
+        }
         // Browser requests observe this tick's worker results and render in the same frame.
         self.service_companion();
         self.note_visible_pty_output();
@@ -5720,6 +5724,23 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    /// Run the ordinary config reload when a SIGUSR1 has arrived since the
+    /// last tick (`dux config set` sends one; see
+    /// [`dux_core::reload_signal`]). Returns whether one had. The reload
+    /// itself runs on a worker, never on this thread. While the background
+    /// server is up this one reload is its reload too, because the terminal
+    /// UI drives the engine both serve from.
+    pub(crate) fn reload_config_on_signal(&mut self) -> bool {
+        if !dux_core::reload_signal::take_pending() {
+            return false;
+        }
+        dux_core::logger::info("SIGUSR1 received: reloading config.toml");
+        if let Err(err) = self.reload_config_from_disk() {
+            self.report_runtime_error("config reload on SIGUSR1 failed", err.as_ref());
+        }
+        true
     }
 
     pub(crate) fn reload_config_from_disk(&mut self) -> Result<()> {

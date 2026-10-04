@@ -1043,6 +1043,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "signal-hook 0.4.4",
  "socket2",
  "sysinfo",
  "tempfile",

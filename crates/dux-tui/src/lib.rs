@@ -110,6 +110,14 @@ pub fn run(
         return Ok(TuiExit::Done);
     }
 
+    // The SIGUSR1 (reload config) handler goes in BEFORE the lock: `dux
+    // config set` signals whoever holds the lock, and the signal's default
+    // action would end this process. Idempotent, so the binary having
+    // installed it already is fine.
+    if let Err(err) = dux_core::reload_signal::install() {
+        eprintln!("warning: {err}; `dux config set` cannot reach this dux, so reload by hand");
+    }
+
     // TUI: always create the root directory (so the lockfile can be
     // opened), acquire the lock, then let bootstrap create everything
     // else. A losing process never touches shared state beyond the

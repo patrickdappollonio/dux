@@ -45,6 +45,7 @@ pub(crate) mod pty_owners {
     pub(crate) use dux_core::pty_owners::*;
 }
 pub(crate) mod pty_sizes;
+pub(crate) mod reload_signal;
 pub mod resource_routes;
 pub mod rest_common;
 pub mod serve_legs;
@@ -603,6 +604,12 @@ fn run_plain_http(
                     shutdown.trigger();
                 });
             }
+            // SIGUSR1 (`dux config set`, or `kill -USR1`) runs the engine
+            // actor's reload, until the serve stops.
+            tokio::spawn(reload_signal::reload_on_signal(
+                handle.clone(),
+                shutdown.subscribe(),
+            ));
 
             // Serve every BOUND address, each on its own leg (its own stop lane), so
             // the Tailscale leg can be added and dropped later without disturbing the
@@ -2343,6 +2350,9 @@ impl ServeCore {
                 tailscale_loop,
             ))
         };
+        // Kept for the SIGUSR1 reload task, which ends with the serve and so
+        // never holds the request side open past it.
+        let reload_handle = handle.clone();
         // The router holds its own cloned handle(s); drop ours so only the serve
         // tasks keep the request side alive.
         drop(handle);
@@ -2358,6 +2368,12 @@ impl ServeCore {
                     shutdown_signal(force_exit).await;
                     flag.store(true, Ordering::SeqCst);
                 });
+                // The flip owns the engine, so SIGUSR1 runs the engine actor's
+                // reload here; the terminal UI's loop is not running to do it.
+                runtime.spawn(reload_signal::reload_on_signal(
+                    reload_handle,
+                    shutdown.subscribe(),
+                ));
                 true
             }
             // Nothing installed on purpose. See `SignalPolicy::Inherited`.

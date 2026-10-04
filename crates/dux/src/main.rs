@@ -20,6 +20,12 @@ Options:
   -h, --help              Print this help and exit.";
 
 fn main() -> Result<()> {
+    // First of all: `dux config set` sends SIGUSR1 to whichever dux holds the
+    // single-instance lock, and the signal's default action would end a dux
+    // that had not installed its handler yet. The handler only sets a flag;
+    // each serving mode reloads on it. A failure is reported where the mode
+    // starts (both entry points install it again and say so).
+    let _ = dux_core::reload_signal::install();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("server") => run_server(args),
