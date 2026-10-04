@@ -610,6 +610,17 @@ pub enum WorkerEvent {
         session_id: String,
         result: Result<crate::engine::RemovedBranches, String>,
     },
+    /// A worktree removal found operations still running in the worktree and
+    /// is waiting for them. `waiting_for` names them ("a pull and a push").
+    WorktreeRemoveWaiting {
+        session_id: String,
+        waiting_for: String,
+    },
+    /// A project deletion that was waiting for an agent being created in the
+    /// project may go on: the create finished, or the wait ran out.
+    ProjectDeletionContinue {
+        project_id: String,
+    },
     /// Background `git switch <target_branch>` run from a non-default branch
     /// warning modal has finished. On `Ok`, the main loop continues the
     /// original action. On `Err`, the formatted git error is surfaced.

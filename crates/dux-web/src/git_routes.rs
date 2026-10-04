@@ -222,6 +222,27 @@ pub(crate) async fn resolve_mutation_worktree(
     resolve_git_directory(state, session_id, GitAsk::Mutate).await
 }
 
+/// Register a write into `root` for as long as the returned guard lives, so a
+/// removal of that worktree waits for it. Refused with a 409 that says why once
+/// the worktree's removal has begun: nothing new may start in a folder that is
+/// about to go, and nothing may bring it back.
+pub(crate) fn hold_root_for_write(
+    state: &AppState,
+    root: &Path,
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<dux_core::worktree_ops::WorktreeOpGuard, RouteRejection> {
+    state
+        .engine
+        .worktree_ops()
+        .hold(root, kind)
+        .map_err(|refused| {
+            (StatusCode::CONFLICT, refused.sentence(what).to_string())
+                .into_response()
+                .into()
+        })
+}
+
 /// Which of the two engine predicates a resolution asks.
 #[derive(Clone, Copy)]
 enum GitAsk {
@@ -308,13 +329,26 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
 ///
 /// The ordinary refusals do not come through here: `git::commit_preflight` catches
 /// the empty-message and nothing-staged cases and answers 400 in its own wording.
-async fn run_git<F, T>(action: &'static str, worktree: &Path, op: F) -> Result<T, RouteRejection>
+async fn run_git<F, T>(
+    action: &'static str,
+    worktree: &Path,
+    hold: dux_core::worktree_ops::WorktreeOpGuard,
+    op: F,
+) -> Result<T, RouteRejection>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
     let worktree = worktree.to_path_buf();
-    match tokio::task::spawn_blocking(op).await {
+    // The hold rides INTO the blocking task: a client that disconnects drops
+    // this future, and the git work it started must still keep its worktree
+    // registered until it has actually finished.
+    match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
+        op()
+    })
+    .await
+    {
         Ok(Ok(value)) => Ok(value),
         // A refusal is a sentence the user can act on (look again, act on a
         // row inside), not a git failure.
@@ -358,6 +392,15 @@ async fn stage(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     if let Err(r) = validate_changed_path(&worktree, &op.path).await {
         return r.into_response();
     }
@@ -368,7 +411,7 @@ async fn stage(
     // says how many it left out, so the browser can say so.
     let wt = worktree.clone();
     let paths = vec![op.path];
-    let report = match run_git(STAGE_ACTION, &worktree, move || {
+    let report = match run_git(STAGE_ACTION, &worktree, hold, move || {
         dux_core::git::stage_with_report(&wt, &paths)
     })
     .await
@@ -424,6 +467,15 @@ async fn discard(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     // Discard is destructive (deletes untracked files / restores tracked ones),
     // so the tracked-vs-untracked distinction is derived SERVER-SIDE from live
     // git status, never trusted from the client. This also rejects staged files
@@ -457,7 +509,7 @@ async fn discard(
     let path = op.path;
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
-    let files_deleted = match run_git("discard the file's changes", &worktree, move || {
+    let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
         dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
     })
     .await
@@ -558,6 +610,15 @@ async fn files_op(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
 
     let wt = worktree.clone();
     let requested = paths.clone();
@@ -628,7 +689,7 @@ async fn files_op(
     // sentence, and the rest of the batch goes ahead.
     let wt = worktree.clone();
     let batch = done.clone();
-    let partition = match run_git(section.action(), &worktree, move || match section {
+    let partition = match run_git(section.action(), &worktree, hold, move || match section {
         Section::Staged => {
             dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
                 staged: batch,
@@ -691,11 +752,20 @@ where
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
         return r.into_response();
     }
     let wt = worktree.clone();
-    if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {
+    if let Err(r) = run_git(action, &worktree, hold, move || op(wt, path)).await {
         return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
@@ -724,6 +794,15 @@ async fn commit(
     let session_id = id.clone();
     let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::Commit,
+        "commit in it",
+    ) {
+        Ok(hold) => hold,
         Err(r) => return r.into_response(),
     };
     // The empty-message and nothing-staged refusals are the shared core decision
@@ -756,7 +835,7 @@ async fn commit(
     }
     let wt = worktree.clone();
     let message = op.message;
-    if let Err(r) = run_git("commit the staged changes", &worktree, move || {
+    if let Err(r) = run_git("commit the staged changes", &worktree, hold, move || {
         dux_core::git::commit(&wt, &message).map(|_| ())
     })
     .await
@@ -1239,7 +1318,10 @@ mod tests {
         let worktree = PathBuf::from("/home/someone/.config/dux/worktrees/proj/agent");
         let stderr = "error: 'trailing-whitespace' hook failed; \
                       see /home/someone/.config/dux/worktrees/proj/agent/out.log";
-        let err = super::run_git("commit the staged changes", &worktree, move || {
+        let hold = dux_core::worktree_ops::WorktreeOps::new()
+            .hold(&worktree, dux_core::worktree_ops::WorktreeOpKind::Commit)
+            .unwrap();
+        let err = super::run_git("commit the staged changes", &worktree, hold, move || {
             Err::<(), _>(anyhow::anyhow!("git commit failed: {stderr}"))
         })
         .await

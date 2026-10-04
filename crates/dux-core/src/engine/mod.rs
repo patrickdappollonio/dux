@@ -13,6 +13,7 @@ mod in_flight;
 mod lifecycle;
 mod pr_sync_control;
 mod project_base;
+pub(crate) mod removal;
 mod resume_fallback;
 mod spawn_worker;
 pub mod status_op;
@@ -43,6 +44,9 @@ pub use lifecycle::{
     detach_status_key, detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
 pub use pr_sync_control::PrSyncControl;
+pub use removal::{
+    ProjectDeletionOutcome, RemovalCoordination, project_deletion_final, removal_waiting_message,
+};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
@@ -758,6 +762,11 @@ pub struct Engine {
     /// past [`CREATED_SESSION_TTL`] or whose session no longer exists, so a
     /// long-running server cannot accumulate stale entries.
     pub created_session_by_op: HashMap<String, (String, Instant)>,
+
+    /// Removal coordination: the per-worktree registry of operations in flight,
+    /// the removals announced on it, and the project-delete cascades waiting
+    /// on them. See [`removal`].
+    pub removal_coordination: RemovalCoordination,
 }
 
 /// Handler-computed outcome for a create-agent op (see
@@ -1859,6 +1868,11 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+        // A worktree held for this operation is released with its key, so
+        // every completion path that clears the key frees the path too.
+        self.removal_coordination
+            .ops
+            .release_owner(&crate::worktree_ops::HoldOwner::InFlight(key.clone()));
     }
 
     /// Record that the create op `op_id` produced session `session_id` (stamped
@@ -3565,6 +3579,7 @@ impl Engine {
     ) {
         let paths = self.paths.clone();
         let sessions = self.sessions.clone();
+        let ops = self.worktree_ops().clone();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
         self.spawn_background_worker(
@@ -3580,8 +3595,9 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let result =
-                    crate::worktree_manager::list_manageable_worktrees(&project, &paths, &sessions);
+                let result = crate::worktree_manager::list_manageable_worktrees(
+                    &project, &paths, &sessions, &ops,
+                );
                 let _ = tx.send(WorkerEvent::ManageableWorktreesReady {
                     project_id: project.id,
                     result,
@@ -4377,6 +4393,17 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
             return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
         }
+        // A worktree being removed takes no rename: nothing new may start in a
+        // folder that is about to go.
+        if self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.workspace.as_managed())
+            .is_some_and(|managed| self.worktree_ops().is_being_removed(&managed.worktree_path))
+        {
+            return BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved);
+        }
 
         // Capture the previous title before mutating, in case a failed branch
         // rename has to revert it.
@@ -4428,6 +4455,15 @@ impl Engine {
             };
         }
         let worktree_path = managed.worktree_path.clone();
+        // The rename holds its worktree until its completion lands, so a removal
+        // that begins meanwhile waits for it and then deletes the branch by its
+        // new name.
+        // Checked above on this same thread, so this cannot be refused.
+        let _ = self.hold_path_for_in_flight(
+            &InFlightKey::BranchRename(session_id.to_string()),
+            &worktree_path,
+            crate::worktree_ops::WorktreeOpKind::BranchRename,
+        );
 
         // Stash the expected branches so `BranchSyncReady` can distinguish our
         // own in-progress rename (silently skip) from an unrelated external

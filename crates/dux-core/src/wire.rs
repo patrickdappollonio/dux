@@ -2864,6 +2864,17 @@ impl Engine {
                 )
             })?;
 
+        // The run holds the worktree until it ends, so a removal waits for it,
+        // and a worktree already being removed is not provisioned again.
+        let hold = self
+            .worktree_ops()
+            .hold(
+                &managed.worktree_path,
+                crate::worktree_ops::WorktreeOpKind::StartupCommand,
+            )
+            .map_err(|refused| {
+                anyhow::anyhow!(refused.sentence("rerun its startup command").to_string())
+            })?;
         let paths = self.paths.clone();
         let terminal = self.config.startup_command_terminal.clone();
         let env =
@@ -2903,6 +2914,7 @@ impl Engine {
             env,
         };
         let reaction = self.spawn_status_op(op, move || {
+            let _hold = hold;
             crate::startup::run_startup_command(&paths, run).status
         });
         // `spawn_status_op` returns the pending Busy as an `EventReaction::Status`;
@@ -4055,6 +4067,16 @@ impl Engine {
                     self.resolve_web_delete_op(session_id, &outcome)
                 }
             }
+            EventReaction::WorktreeRemoveWaiting {
+                session_id,
+                message,
+            } => match self.pending_delete_ops_web.get(session_id) {
+                // The delete's own toast says what the removal is waiting for.
+                Some(op) => wire_statuses_from_reaction(&EventReaction::Status(
+                    op.progress(message.clone()),
+                )),
+                None => vec![],
+            },
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,

@@ -223,6 +223,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: std::collections::HashMap::new(),
+        removal_coordination: Default::default(),
     };
     let app_live_status_keys = engine.live_status_keys.clone();
     let mut app = App {

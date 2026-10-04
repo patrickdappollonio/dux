@@ -214,6 +214,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "shutdown_timeout_seconds",
         config.shutdown_timeout_seconds,
     );
+    patch_root_u16(doc, "removal_wait_seconds", config.removal_wait_seconds);
 
     // --- [defaults] ---
     patch_table_str(doc, "defaults", "provider", &config.defaults.provider);

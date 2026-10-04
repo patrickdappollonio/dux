@@ -301,6 +301,16 @@ pub enum EngineRequest {
             )>,
         >,
     ),
+    /// Decide a worktree-manager removal against the engine's LIVE state and
+    /// announce it, `None` when the project id is unknown. The slow part (the
+    /// wait for operations in the worktree, then git) is the admitted ticket's,
+    /// run by the handler off-thread.
+    AdmitManagerRemoval {
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branch: bool,
+        reply: oneshot::Sender<Option<dux_core::worktree_manager::RemovalAdmission>>,
+    },
     /// Everything the pull-request reference resolver needs: the live project list
     /// and the GitHub host policy. Instant clones, because reading a project's
     /// configured address shells to git and must not run on the engine loop or the
@@ -677,6 +687,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             pty_input_owners: Arc::clone(&pty_input_owners),
             live_limits: Arc::clone(&live_limits),
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
+            worktree_ops: engine.worktree_ops().clone(),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -730,6 +741,11 @@ struct PendingSubscribe {
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
+    /// The engine's per-worktree registry of operations in flight, shared by
+    /// handle: the editor, upload and git routes run off the engine thread and
+    /// still register the worktree they write into, so a removal waits for
+    /// them and refuses them once it has begun.
+    worktree_ops: dux_core::worktree_ops::WorktreeOps,
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
@@ -1542,6 +1558,11 @@ impl EngineHandle {
 
     /// The `[server]` limits a config reload can move without a restart. The
     /// router clones this into `AppState`; the actor stores each reload into it.
+    /// See the `worktree_ops` field.
+    pub fn worktree_ops(&self) -> &dux_core::worktree_ops::WorktreeOps {
+        &self.worktree_ops
+    }
+
     pub fn live_limits(&self) -> Arc<LiveServerLimits> {
         Arc::clone(&self.live_limits)
     }
@@ -1608,6 +1629,30 @@ impl EngineHandle {
     /// paths, sessions). Instant: the git classification runs off-thread in the
     /// caller. `None` when the project id is unknown.
     #[allow(clippy::type_complexity)]
+    /// See [`EngineRequest::AdmitManagerRemoval`].
+    pub async fn admit_manager_removal(
+        &self,
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branch: bool,
+    ) -> Option<dux_core::worktree_manager::RemovalAdmission> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::AdmitManagerRemoval {
+                project_id,
+                path,
+                delete_branch,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn project_worktree_inputs(
         &self,
         project_id: String,
@@ -1961,6 +2006,9 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::FileDropRefreshTarget(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
+        // Announces a removal in the worktree registry; no spine row changes
+        // until the removal finishes and the listing is asked again.
+        | EngineRequest::AdmitManagerRemoval { .. }
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
@@ -3910,6 +3958,14 @@ fn handle_request(
                 engine.github_host_policy(),
                 engine.pr_agent_command_available(),
             ));
+        }
+        EngineRequest::AdmitManagerRemoval {
+            project_id,
+            path,
+            delete_branch,
+            reply,
+        } => {
+            let _ = reply.send(engine.admit_manager_removal(&project_id, &path, delete_branch));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine
@@ -7365,6 +7421,16 @@ mod tests {
                 false,
             ),
             (
+                "AdmitManagerRemoval",
+                EngineRequest::AdmitManagerRemoval {
+                    project_id: "p1".into(),
+                    path: "/tmp/wt".into(),
+                    delete_branch: false,
+                    reply: dead_reply(),
+                },
+                false,
+            ),
+            (
                 "SessionStartupLogContext",
                 EngineRequest::SessionStartupLogContext("s1".into(), dead_reply()),
                 false,
@@ -7498,7 +7564,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            43,
+            44,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

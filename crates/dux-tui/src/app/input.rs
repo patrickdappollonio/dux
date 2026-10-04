@@ -24178,6 +24178,7 @@ cyan = "#00ffff"
             branch: Some(name.to_string()),
             dirty: false,
             attached_session_id: agent.map(str::to_string),
+            being_removed: false,
         };
         let entries = vec![entry("free", None), entry("held", Some("session-1"))];
         let rows = crate::app::manage_worktree_visual_rows(&entries, false, None);

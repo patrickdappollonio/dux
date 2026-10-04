@@ -123,7 +123,11 @@ deletion (it is checked out somewhere else, say), the worktree still goes and du
 the branch survived and quotes git's reason.
 
 A worktree that already has an agent names that agent and offers no delete. Delete the agent
-instead.
+instead. A worktree whose agent you just deleted is listed under **Being removed** until its
+removal finishes, with no delete of its own: it is already going. The manager checks again
+at the moment you confirm, so a worktree an agent took in the meantime, or one an agent is
+being created on, is refused rather than removed, and a removal that finds work still
+running in the worktree waits for it the same way an agent delete does.
 
 > [!TIP]
 > This is where you remove the branch of a worktree that has no agent. A worktree that does
@@ -276,6 +280,16 @@ together.
 
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.
+
+The agent leaves your list at once, and the worktree goes in the background once the agent
+has stopped. If something else is still working in that worktree (a pull, a push, a commit,
+a branch rename, a recreate of the working copy, a save from the editor), the removal waits
+for it to finish, and the status says what it is waiting for. A branch renamed while the
+delete waited is removed under its new name. From the moment you confirm, nothing new can
+start in that worktree: a save, a dropped file, a pull or a new agent there is refused, and
+says why. If the work still has not finished after `removal_wait_seconds` in your
+`config.toml` (120 seconds by default), dux keeps the worktree and tells you so, and you can
+remove it later from the worktree manager.
 
 > [!IMPORTANT]
 > Worktrees are your data. Deleting an agent leaves its worktree on disk unless you explicitly

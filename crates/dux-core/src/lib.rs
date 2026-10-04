@@ -89,6 +89,7 @@ pub mod working_copy;
 pub mod working_cue;
 pub mod worktree_file;
 pub mod worktree_manager;
+pub mod worktree_ops;
 
 /// Display version string ('vX.Y.Z' for release builds, 'development' otherwise), set by build.rs, mirroring the TUI's `DUX_DISPLAY_VERSION`.
 pub fn display_version() -> &'static str {

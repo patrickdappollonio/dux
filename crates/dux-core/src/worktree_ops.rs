@@ -1,0 +1,740 @@
+//! The one registry of operations in flight on a working copy, keyed by its
+//! path, and the removals that wait for them.
+//!
+//! Every operation that writes into a worktree registers the worktree's path
+//! here for as long as it runs: a pull, a commit, a push, a branch rename, a
+//! recreate, an agent being created there, a startup-command rerun, an editor
+//! save or a file upload. Every removal consults it. The two rules:
+//!
+//! * A removal that finds an operation holding its path WAITS for it, bounded,
+//!   on the removal's own worker thread, never on the engine thread. It is never
+//!   refused silently: a removal that gives up says what it was waiting for.
+//! * Once a removal has been announced for a path, a new operation on that path
+//!   is REFUSED out loud ([`HoldRefused`]). The operations already holding it
+//!   finish first; nothing new can start writing into a directory that is about
+//!   to go, and nothing can recreate it.
+//!
+//! A second removal of a path that is already being removed JOINS the first
+//! ([`RemovalClaim::Join`]) and reports its outcome instead of running git twice.
+//!
+//! A branch rename that lands while a removal of its worktree is pending is
+//! recorded here, so the removal deletes the branch by its CURRENT name rather
+//! than the name it captured when the delete began ([`RemovalLease::renamed`]).
+//!
+//! Shared by handle (`Clone` is an `Arc` clone) between the engine, the workers
+//! it spawns and the web routes, because the web's editor and git routes run
+//! outside the engine thread and still have to register.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use crate::engine::{InFlightKey, RemovedBranches};
+
+/// What is holding a worktree. Each kind names itself in the sentence a waiting
+/// removal shows, so the user is told what dux is waiting for.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub enum WorktreeOpKind {
+    Pull,
+    Commit,
+    Push,
+    BranchRename,
+    RecreateWorkingCopy,
+    CreateAgent,
+    StartupCommand,
+    EditorWrite,
+    Upload,
+    GitChange,
+}
+
+impl WorktreeOpKind {
+    /// The noun phrase a waiting status uses: "waiting for {this} to finish".
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Self::Pull => "a pull",
+            Self::Commit => "a commit",
+            Self::Push => "a push",
+            Self::BranchRename => "a branch rename",
+            Self::RecreateWorkingCopy => "the working copy being recreated",
+            Self::CreateAgent => "an agent being created in it",
+            Self::StartupCommand => "its startup command",
+            Self::EditorWrite => "a save from the editor",
+            Self::Upload => "a file upload",
+            Self::GitChange => "a change to its files from the changes pane",
+        }
+    }
+}
+
+/// "a pull and a push", in a stable order, each kind once.
+pub fn describe_holders(kinds: &[WorktreeOpKind]) -> String {
+    let mut kinds = kinds.to_vec();
+    kinds.sort();
+    kinds.dedup();
+    let phrases: Vec<&str> = kinds.iter().map(|kind| kind.phrase()).collect();
+    match phrases.as_slice() {
+        [] => "nothing".to_string(),
+        [one] => (*one).to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// Who owns a hold that is not an RAII guard: a hold the engine takes on the
+/// engine thread and releases when the operation's completion event lands.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum HoldOwner {
+    /// Released by `Engine::clear_in_flight` for this key, so every completion
+    /// path that already clears the in-flight key releases the hold too.
+    InFlight(InFlightKey),
+    /// An agent being created, by the id of its create op. Released when the
+    /// create's launch reports back, either way.
+    CreateOp(String),
+}
+
+/// A new operation was refused because the worktree is being removed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoldRefused {
+    pub path: PathBuf,
+}
+
+impl HoldRefused {
+    /// "dux is removing the worktree at X, so it did not {what}." Each caller
+    /// says what it was asked to do.
+    pub fn sentence(&self, what: &str) -> crate::status_text::StatusText {
+        crate::status_text![
+            "dux is removing the worktree at ",
+            n(crate::home_path::shorten_home(&self.path)),
+            format!(
+                ", so it did not {what}. The agent that owned it was deleted; nothing \
+                 new can start in that folder while it goes."
+            )
+        ]
+    }
+}
+
+impl std::fmt::Display for HoldRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dux is removing the worktree at {}, so nothing new can start in it",
+            crate::home_path::shorten_home(&self.path)
+        )
+    }
+}
+
+impl std::error::Error for HoldRefused {}
+
+/// What a finished removal reports to the removals that joined it.
+pub type RemovalResult = Result<RemovedBranches, String>;
+
+/// The shared slot a leading removal writes its outcome into and every joiner
+/// waits on.
+#[derive(Default)]
+struct OutcomeSlot {
+    outcome: Mutex<Option<RemovalResult>>,
+    ready: Condvar,
+}
+
+struct Removal {
+    id: u64,
+    slot: Arc<OutcomeSlot>,
+    /// Renames recorded while this removal was pending: old name to new name.
+    renames: Vec<(String, String)>,
+}
+
+#[derive(Default)]
+struct PathEntry {
+    /// RAII holds by id, and owner-keyed holds by owner.
+    guarded: HashMap<u64, WorktreeOpKind>,
+    owned: HashMap<HoldOwner, WorktreeOpKind>,
+    removal: Option<Removal>,
+}
+
+impl PathEntry {
+    fn kinds(&self) -> Vec<WorktreeOpKind> {
+        self.guarded
+            .values()
+            .chain(self.owned.values())
+            .copied()
+            .collect()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.guarded.is_empty() && self.owned.is_empty() && self.removal.is_none()
+    }
+}
+
+#[derive(Default)]
+struct State {
+    paths: HashMap<PathBuf, PathEntry>,
+    /// Owner-keyed holds point back at their path so a release by owner needs
+    /// no path.
+    owners: HashMap<HoldOwner, PathBuf>,
+    next_id: u64,
+}
+
+impl State {
+    fn mint(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    fn tidy(&mut self, key: &Path) {
+        if self.paths.get(key).is_some_and(PathEntry::is_idle) {
+            self.paths.remove(key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct Inner {
+    state: Mutex<State>,
+    /// Notified whenever a hold is released or a removal finishes.
+    changed: Condvar,
+}
+
+/// The registry. `Clone` shares it.
+#[derive(Clone, Default)]
+pub struct WorktreeOps {
+    inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for WorktreeOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorktreeOps").finish_non_exhaustive()
+    }
+}
+
+/// The key a path is registered under. The PARENT is canonicalized and the
+/// final component kept, so the key is the same whether or not the directory
+/// still exists: a removal asks about a path its own git command is about to
+/// delete, and an operation may ask after it is gone.
+pub fn path_key(path: &Path) -> PathBuf {
+    let resolved = path
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .zip(path.file_name())
+        .map(|(parent, name)| parent.join(name));
+    resolved.unwrap_or_else(|| path.to_path_buf())
+}
+
+impl WorktreeOps {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Register an operation on `path` for as long as the returned guard lives.
+    /// Refused once a removal of the path has been announced.
+    pub fn hold(
+        &self,
+        path: impl AsRef<Path>,
+        kind: WorktreeOpKind,
+    ) -> Result<WorktreeOpGuard, HoldRefused> {
+        let key = path_key(path.as_ref());
+        let mut state = self.lock();
+        if state
+            .paths
+            .get(&key)
+            .is_some_and(|entry| entry.removal.is_some())
+        {
+            return Err(HoldRefused { path: key });
+        }
+        let id = state.mint();
+        state
+            .paths
+            .entry(key.clone())
+            .or_default()
+            .guarded
+            .insert(id, kind);
+        Ok(WorktreeOpGuard {
+            ops: self.clone(),
+            key,
+            id,
+        })
+    }
+
+    /// Register an operation on `path` that `owner` releases later with
+    /// [`Self::release_owner`]. Taking a second hold for an owner that already
+    /// holds one replaces it.
+    pub fn hold_as(
+        &self,
+        owner: HoldOwner,
+        path: impl AsRef<Path>,
+        kind: WorktreeOpKind,
+    ) -> Result<(), HoldRefused> {
+        let key = path_key(path.as_ref());
+        let mut state = self.lock();
+        if state
+            .paths
+            .get(&key)
+            .is_some_and(|entry| entry.removal.is_some())
+        {
+            return Err(HoldRefused { path: key });
+        }
+        Self::release_owner_locked(&mut state, &owner);
+        state
+            .paths
+            .entry(key.clone())
+            .or_default()
+            .owned
+            .insert(owner.clone(), kind);
+        state.owners.insert(owner, key);
+        Ok(())
+    }
+
+    fn release_owner_locked(state: &mut State, owner: &HoldOwner) -> bool {
+        let Some(key) = state.owners.remove(owner) else {
+            return false;
+        };
+        if let Some(entry) = state.paths.get_mut(&key) {
+            entry.owned.remove(owner);
+        }
+        state.tidy(&key);
+        true
+    }
+
+    /// Release the hold `owner` took, when it took one. Cheap when it did not.
+    pub fn release_owner(&self, owner: &HoldOwner) {
+        let released = Self::release_owner_locked(&mut self.lock(), owner);
+        if released {
+            self.inner.changed.notify_all();
+        }
+    }
+
+    /// The path `owner` holds, when it holds one.
+    pub fn owner_path(&self, owner: &HoldOwner) -> Option<PathBuf> {
+        self.lock().owners.get(owner).cloned()
+    }
+
+    /// Record that `old` was renamed to `new` in the worktree `owner` holds.
+    /// Kept only while a removal of that worktree is pending, because that
+    /// removal captured the old name and is the only reader.
+    pub fn record_branch_rename(&self, owner: &HoldOwner, old: &str, new: &str) {
+        let mut state = self.lock();
+        let Some(key) = state.owners.get(owner).cloned() else {
+            return;
+        };
+        if let Some(removal) = state
+            .paths
+            .get_mut(&key)
+            .and_then(|entry| entry.removal.as_mut())
+        {
+            removal.renames.push((old.to_string(), new.to_string()));
+        }
+    }
+
+    /// The operations holding `path` right now.
+    pub fn holders(&self, path: impl AsRef<Path>) -> Vec<WorktreeOpKind> {
+        let key = path_key(path.as_ref());
+        self.lock()
+            .paths
+            .get(&key)
+            .map(PathEntry::kinds)
+            .unwrap_or_default()
+    }
+
+    /// Whether a removal of `path` has been announced and not yet finished.
+    pub fn is_being_removed(&self, path: impl AsRef<Path>) -> bool {
+        let key = path_key(path.as_ref());
+        self.lock()
+            .paths
+            .get(&key)
+            .is_some_and(|entry| entry.removal.is_some())
+    }
+
+    /// Announce a removal of `path`. From now on new holds on it are refused.
+    /// The first announcement leads; one made while another is unfinished joins
+    /// it.
+    pub fn announce_removal(&self, path: impl AsRef<Path>) -> RemovalClaim {
+        let key = path_key(path.as_ref());
+        let mut state = self.lock();
+        let id = state.mint();
+        let entry = state.paths.entry(key.clone()).or_default();
+        if let Some(removal) = &entry.removal {
+            return RemovalClaim::Join(RemovalJoin {
+                key,
+                slot: Arc::clone(&removal.slot),
+            });
+        }
+        let slot = Arc::new(OutcomeSlot::default());
+        entry.removal = Some(Removal {
+            id,
+            slot: Arc::clone(&slot),
+            renames: Vec::new(),
+        });
+        RemovalClaim::Lead(RemovalLease {
+            ops: self.clone(),
+            key,
+            id,
+            slot,
+            finished: false,
+        })
+    }
+}
+
+/// An RAII hold. Dropping it releases the path, panics included.
+pub struct WorktreeOpGuard {
+    ops: WorktreeOps,
+    key: PathBuf,
+    id: u64,
+}
+
+impl std::fmt::Debug for WorktreeOpGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorktreeOpGuard")
+            .field("path", &self.key)
+            .finish()
+    }
+}
+
+impl Drop for WorktreeOpGuard {
+    fn drop(&mut self) {
+        {
+            let mut state = self.ops.lock();
+            if let Some(entry) = state.paths.get_mut(&self.key) {
+                entry.guarded.remove(&self.id);
+            }
+            state.tidy(&self.key);
+        }
+        self.ops.inner.changed.notify_all();
+    }
+}
+
+/// What announcing a removal gave the caller.
+pub enum RemovalClaim {
+    /// This removal runs git.
+    Lead(RemovalLease),
+    /// Another removal of the same path is running; wait for its outcome.
+    Join(RemovalJoin),
+}
+
+impl RemovalClaim {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Lead(lease) => &lease.key,
+            Self::Join(join) => &join.key,
+        }
+    }
+}
+
+impl std::fmt::Debug for RemovalClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lead(lease) => f.debug_tuple("Lead").field(&lease.key).finish(),
+            Self::Join(join) => f.debug_tuple("Join").field(&join.key).finish(),
+        }
+    }
+}
+
+/// The right to remove a path. Dropping it unfinished (a panic, a removal that
+/// decided to keep the worktree) withdraws the announcement, so the path is
+/// usable again and any joiner is told nothing was removed.
+pub struct RemovalLease {
+    ops: WorktreeOps,
+    key: PathBuf,
+    id: u64,
+    slot: Arc<OutcomeSlot>,
+    finished: bool,
+}
+
+impl RemovalLease {
+    pub fn path(&self) -> &Path {
+        &self.key
+    }
+
+    /// The operations still holding the path.
+    pub fn holders(&self) -> Vec<WorktreeOpKind> {
+        self.ops.holders(&self.key)
+    }
+
+    /// Block until nothing holds the path, or `timeout` passes. On a timeout,
+    /// answers with what was still holding it. Run it on a worker thread only.
+    pub fn wait_for_holders(&self, timeout: Duration) -> Result<(), Vec<WorktreeOpKind>> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.ops.lock();
+        loop {
+            let kinds = state
+                .paths
+                .get(&self.key)
+                .map(PathEntry::kinds)
+                .unwrap_or_default();
+            if kinds.is_empty() {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(kinds);
+            }
+            state = self
+                .ops
+                .inner
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+
+    /// `branch` as it is called now, following every rename recorded while
+    /// this removal was pending.
+    pub fn renamed(&self, branch: &str) -> String {
+        let state = self.ops.lock();
+        let renames = state
+            .paths
+            .get(&self.key)
+            .and_then(|entry| entry.removal.as_ref())
+            .filter(|removal| removal.id == self.id)
+            .map(|removal| removal.renames.clone())
+            .unwrap_or_default();
+        drop(state);
+        let mut current = branch.to_string();
+        for (old, new) in renames {
+            if current == old {
+                current = new;
+            }
+        }
+        current
+    }
+
+    /// Finish the removal, handing its outcome to every joiner.
+    pub fn finish(mut self, outcome: RemovalResult) {
+        self.finished = true;
+        self.close(outcome);
+    }
+
+    fn close(&mut self, outcome: RemovalResult) {
+        {
+            let mut state = self.ops.lock();
+            if let Some(entry) = state.paths.get_mut(&self.key)
+                && entry.removal.as_ref().is_some_and(|r| r.id == self.id)
+            {
+                entry.removal = None;
+            }
+            state.tidy(&self.key);
+        }
+        *self
+            .slot
+            .outcome
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+        self.slot.ready.notify_all();
+        self.ops.inner.changed.notify_all();
+    }
+}
+
+impl Drop for RemovalLease {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.close(Err(format!(
+                "the removal of {} stopped before it ran",
+                crate::home_path::shorten_home(&self.key)
+            )));
+        }
+    }
+}
+
+/// A removal that joined one already running for the same path.
+pub struct RemovalJoin {
+    key: PathBuf,
+    slot: Arc<OutcomeSlot>,
+}
+
+impl RemovalJoin {
+    pub fn path(&self) -> &Path {
+        &self.key
+    }
+
+    /// Block until the leading removal finishes and take its outcome, or
+    /// `None` when `timeout` passes first. Run it on a worker thread only.
+    pub fn wait(self, timeout: Duration) -> Option<RemovalResult> {
+        let deadline = Instant::now() + timeout;
+        let mut outcome = self
+            .slot
+            .outcome
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(result) = outcome.as_ref() {
+                return Some(result.clone());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            outcome = self
+                .slot
+                .ready
+                .wait_timeout(outcome, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::BranchKeptReason;
+
+    fn kept() -> RemovalResult {
+        Ok(RemovedBranches::Kept(BranchKeptReason::UserDeclined))
+    }
+
+    #[test]
+    fn a_hold_is_refused_once_a_removal_is_announced() {
+        let ops = WorktreeOps::new();
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        let _lease = ops.announce_removal(&wt);
+        let refused = ops.hold(&wt, WorktreeOpKind::EditorWrite).unwrap_err();
+        assert_eq!(refused.path, path_key(&wt));
+        assert!(
+            ops.hold_as(
+                HoldOwner::CreateOp("op-1".into()),
+                &wt,
+                WorktreeOpKind::CreateAgent
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_key_is_the_same_before_and_after_the_directory_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        std::fs::create_dir(dir.path().join("x")).unwrap();
+        let before = path_key(&wt);
+        std::fs::remove_dir(&wt).unwrap();
+        assert_eq!(before, path_key(&wt));
+        assert_eq!(
+            before,
+            path_key(&dir.path().join("x").join("..").join("wt"))
+        );
+    }
+
+    #[test]
+    fn a_removal_waits_for_a_hold_and_wakes_when_it_is_released() {
+        let ops = WorktreeOps::new();
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        let guard = ops.hold(&wt, WorktreeOpKind::Pull).unwrap();
+        let RemovalClaim::Lead(lease) = ops.announce_removal(&wt) else {
+            panic!("the first removal leads");
+        };
+        assert_eq!(lease.holders(), vec![WorktreeOpKind::Pull]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let waited = lease.wait_for_holders(Duration::from_secs(20));
+            tx.send(waited.is_ok()).unwrap();
+            lease
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the removal must still be waiting while the pull holds the path"
+        );
+        drop(guard);
+        assert!(rx.recv_timeout(Duration::from_secs(20)).unwrap());
+        waiter.join().unwrap().finish(kept());
+        assert!(!ops.is_being_removed(&wt));
+        assert!(ops.hold(&wt, WorktreeOpKind::Pull).is_ok());
+    }
+
+    #[test]
+    fn a_wait_that_runs_out_names_what_still_holds_the_path() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let _guard = ops.hold(&wt, WorktreeOpKind::Push).unwrap();
+        let _owned = ops.hold_as(
+            HoldOwner::InFlight(InFlightKey::Pull("x".into())),
+            &wt,
+            WorktreeOpKind::Pull,
+        );
+        let RemovalClaim::Lead(lease) = ops.announce_removal(&wt) else {
+            panic!("leads");
+        };
+        let still = lease
+            .wait_for_holders(Duration::from_millis(20))
+            .unwrap_err();
+        assert_eq!(describe_holders(&still), "a pull and a push");
+    }
+
+    #[test]
+    fn an_owned_hold_is_released_by_its_owner() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let owner = HoldOwner::InFlight(InFlightKey::BranchRename("s1".into()));
+        ops.hold_as(owner.clone(), &wt, WorktreeOpKind::BranchRename)
+            .unwrap();
+        assert_eq!(ops.holders(&wt), vec![WorktreeOpKind::BranchRename]);
+        ops.release_owner(&owner);
+        assert!(ops.holders(&wt).is_empty());
+    }
+
+    #[test]
+    fn a_second_removal_joins_the_first_and_takes_its_outcome() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let RemovalClaim::Lead(lease) = ops.announce_removal(&wt) else {
+            panic!("leads");
+        };
+        let RemovalClaim::Join(join) = ops.announce_removal(&wt) else {
+            panic!("the second removal of the same path joins");
+        };
+        let joined = std::thread::spawn(move || join.wait(Duration::from_secs(20)));
+        lease.finish(Err("boom".into()));
+        assert_eq!(joined.join().unwrap(), Some(Err("boom".into())));
+    }
+
+    #[test]
+    fn a_dropped_lease_withdraws_the_announcement_and_tells_joiners() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let lease = ops.announce_removal(&wt);
+        let RemovalClaim::Join(join) = ops.announce_removal(&wt) else {
+            panic!("joins");
+        };
+        drop(lease);
+        assert!(!ops.is_being_removed(&wt));
+        assert!(matches!(join.wait(Duration::from_secs(1)), Some(Err(_))));
+    }
+
+    #[test]
+    fn a_rename_recorded_while_a_removal_is_pending_is_followed() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let owner = HoldOwner::InFlight(InFlightKey::BranchRename("s1".into()));
+        ops.hold_as(owner.clone(), &wt, WorktreeOpKind::BranchRename)
+            .unwrap();
+        let RemovalClaim::Lead(lease) = ops.announce_removal(&wt) else {
+            panic!("leads");
+        };
+        ops.record_branch_rename(&owner, "old", "new");
+        ops.release_owner(&owner);
+        assert_eq!(lease.renamed("old"), "new");
+        assert_eq!(lease.renamed("other"), "other");
+    }
+
+    #[test]
+    fn a_rename_with_no_removal_pending_is_not_kept() {
+        let ops = WorktreeOps::new();
+        let wt = PathBuf::from("/nonexistent-dux-test/wt");
+        let owner = HoldOwner::InFlight(InFlightKey::BranchRename("s1".into()));
+        ops.hold_as(owner.clone(), &wt, WorktreeOpKind::BranchRename)
+            .unwrap();
+        ops.record_branch_rename(&owner, "old", "new");
+        ops.release_owner(&owner);
+        let RemovalClaim::Lead(lease) = ops.announce_removal(&wt) else {
+            panic!("leads");
+        };
+        assert_eq!(lease.renamed("old"), "old");
+    }
+}

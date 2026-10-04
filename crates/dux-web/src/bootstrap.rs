@@ -143,6 +143,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: HashMap::new(),
+        removal_coordination: Default::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         launched_drop_paste: Default::default(),

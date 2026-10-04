@@ -3242,6 +3242,22 @@ mod tests {
         engine: &mut crate::engine::Engine,
         request: CreateAgentRequest,
     ) -> Vec<crate::engine::EventReaction> {
+        // A surface only creates an agent in a project it lists, and a launch
+        // landing for a project the engine does not list is taken for one
+        // deleted mid-create and stopped.
+        let project = match &request {
+            CreateAgentRequest::NewProject { project, .. }
+            | CreateAgentRequest::PullRequest { project, .. }
+            | CreateAgentRequest::ForkSession { project, .. }
+            | CreateAgentRequest::ExistingManagedWorktree { project, .. }
+            | CreateAgentRequest::ForkExternalWorktree { project, .. } => Some(project.clone()),
+            CreateAgentRequest::Standalone { .. } => None,
+        };
+        if let Some(project) = project
+            && !engine.projects.iter().any(|known| known.id == project.id)
+        {
+            engine.projects.push(project);
+        }
         engine
             .apply(crate::engine::Command::DispatchCreateAgentRequest {
                 request: Box::new(request),

@@ -393,7 +393,9 @@ below them, each row naming its branch and saying whether there is uncommitted w
 ![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
 Worktrees a live agent is holding are listed but unselectable: removing one from under a
-running session leaves it broken. Delete the agent instead.
+running session leaves it broken. Delete the agent instead. A worktree whose agent was just
+deleted is listed under **Being removed** until it is gone, and cannot be removed a second
+time.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the
@@ -416,6 +418,15 @@ project's name, its folder, its base branch and the branch the folder is on righ
   **Environment…**
 - **Startup command logs for all agents…**
 - **Delete project…** and **Remove project…**
+
+**Delete project…** removes the project and every agent's record at once, then each agent's
+worktree in the background, the same way deleting one agent with its worktree does: each one
+waits for its agent to stop and for anything still running in it. One status follows the
+whole delete and, when it ends, names any worktree that could not be removed and why. If an
+agent is still being created in the project when you confirm, the delete waits for it to
+finish (up to `removal_wait_seconds`, 120 seconds by default) and takes it along; no new
+agent can be created in a project while it is being deleted. **Remove project…** forgets the
+project and its agents and leaves every worktree on disk.
 
 Anything you open from the list comes back to it when it closes, whether you cancel it,
 close it or save it: the questions, Project info, the settings editors, the worktree

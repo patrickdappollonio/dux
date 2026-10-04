@@ -133,59 +133,95 @@ impl App {
     /// final that says what actually happened to the branch (never what the
     /// checkbox asked for: `git branch -D` can refuse).
     fn dispatch_worktree_removal(&mut self, prompt: &ConfirmDeleteWorktreePrompt) {
-        let project = prompt.project.clone();
-        let paths = self.engine.paths.clone();
-        let sessions = self.engine.sessions.clone();
         let path = prompt.path.clone();
         let delete_branch = prompt.delete_branch;
         let display_path = path.to_string_lossy().to_string();
         let failure_path = display_path.clone();
-        let op = dux_core::engine::status_op(format!("Removing the worktree at {display_path}..."))
-            .on_success(move |outcome: &dux_core::worktree_manager::RemovalOutcome| match outcome {
-                // Both refusals are decided in core against a listing taken at
-                // removal time, so they can differ from what the manager showed
-                // a moment ago; say which one happened rather than "failed".
-                dux_core::worktree_manager::RemovalOutcome::NotManaged => {
-                    dux_core::engine::Final::warning(format!(
-                        "Nothing was removed: {display_path} is no longer a worktree dux manages \
-                         for this project. Reopen the worktree manager to see the current list."
-                    ))
-                }
-                dux_core::worktree_manager::RemovalOutcome::Attached => {
-                    dux_core::engine::Final::warning(format!(
-                        "Nothing was removed: an agent is attached to {display_path}. Delete that \
-                         agent first. Deleting a managed agent removes its worktree with it; \
-                         deleting a standalone agent leaves its directory in place, so remove \
-                         that one yourself."
-                    ))
-                }
-                dux_core::worktree_manager::RemovalOutcome::Removed { path, branch } => {
-                    let report = dux_core::worktree_manager::removal_report(
-                        path.to_string_lossy().as_ref(),
-                        branch.as_ref(),
-                    );
-                    if report.warning {
-                        dux_core::engine::Final::warning(report.message)
-                    } else {
-                        dux_core::engine::Final::info(report.message)
-                    }
-                }
-            })
+        // Decided by the engine against LIVE state at this moment (the agents
+        // now, an agent being created now, a removal already under way), never
+        // against the listing on screen, and announced before it returns.
+        let admission = self
+            .engine
+            .admit_manager_removal(&prompt.project.id, &path, delete_branch);
+        let outcome_final = move |outcome: &dux_core::worktree_manager::RemovalOutcome| {
+            worktree_removal_final(&display_path, outcome)
+        };
+        let ticket = match admission {
+            None => {
+                self.set_error(format!(
+                    "Nothing was removed: the project that owned {failure_path} is no longer in dux."
+                ));
+                return;
+            }
+            Some(dux_core::worktree_manager::RemovalAdmission::Refused(outcome)) => {
+                let resolved = dux_core::engine::ResolvedFinal::new(
+                    "worktree-removal-refused",
+                    outcome_final(&outcome),
+                );
+                self.apply_reaction(resolved.into_reaction());
+                return;
+            }
+            Some(dux_core::worktree_manager::RemovalAdmission::Admitted(ticket)) => ticket,
+        };
+        let busy = match ticket.waiting_for() {
+            Some(waiting) => format!(
+                "Removing the worktree at {failure_path}: waiting for {waiting} in it to finish first..."
+            ),
+            None => format!("Removing the worktree at {failure_path}..."),
+        };
+        let op = dux_core::engine::status_op(busy)
+            .on_success(outcome_final)
             .on_failure(move |error: &String| {
                 dux_core::engine::Final::error(format!(
                     "Could not remove the worktree at {failure_path}: {error}"
                 ))
             });
-        let reaction = self.engine.spawn_status_op(op, move || {
-            dux_core::worktree_manager::remove_managed_worktree(
-                &project,
-                &paths,
-                &sessions,
-                &path,
-                delete_branch,
-            )
-        });
+        let reaction = self.engine.spawn_status_op(op, move || ticket.run());
         self.apply_reaction(reaction);
+    }
+}
+
+/// The final for a manager removal, said from what actually happened (never
+/// what the checkbox asked for: `git branch -D` can refuse). The refusals are
+/// decided against live state at removal time, so they can differ from what
+/// the manager showed a moment ago; each says which one happened.
+fn worktree_removal_final(
+    display_path: &str,
+    outcome: &dux_core::worktree_manager::RemovalOutcome,
+) -> dux_core::engine::Final {
+    match outcome {
+        dux_core::worktree_manager::RemovalOutcome::NotManaged => {
+            dux_core::engine::Final::warning(format!(
+                "Nothing was removed: {display_path} is no longer a worktree dux manages \
+                 for this project. Reopen the worktree manager to see the current list."
+            ))
+        }
+        dux_core::worktree_manager::RemovalOutcome::Attached => {
+            dux_core::engine::Final::warning(format!(
+                "Nothing was removed: an agent is attached to {display_path}, or one is being \
+                 created on it. Delete that agent first. Deleting a managed agent removes its \
+                 worktree with it; deleting a standalone agent leaves its directory in place, \
+                 so remove that one yourself."
+            ))
+        }
+        dux_core::worktree_manager::RemovalOutcome::BeingRemoved => {
+            dux_core::engine::Final::warning(format!(
+                "Nothing more was done: {display_path} is already being removed, because the \
+                 agent that owned it was just deleted. It disappears from the manager once \
+                 that removal finishes."
+            ))
+        }
+        dux_core::worktree_manager::RemovalOutcome::Removed { path, branch } => {
+            let report = dux_core::worktree_manager::removal_report(
+                path.to_string_lossy().as_ref(),
+                branch.as_ref(),
+            );
+            if report.warning {
+                dux_core::engine::Final::warning(report.message)
+            } else {
+                dux_core::engine::Final::info(report.message)
+            }
+        }
     }
 }
 
@@ -249,6 +285,7 @@ mod tests {
             branch: branch.map(str::to_string),
             dirty,
             attached_session_id: agent.map(str::to_string),
+            being_removed: false,
         }
     }
 

@@ -273,6 +273,13 @@ pub enum EventReaction {
         session_id: String,
         message: String,
     },
+    /// A deleted agent's worktree removal is waiting for operations still
+    /// running in the worktree. Each surface re-emits its own delete op's busy
+    /// with `message`, so the spinner says what it is waiting for.
+    WorktreeRemoveWaiting {
+        session_id: String,
+        message: StatusText,
+    },
 
     // -- Deletion `Command` view follow-ups (E4a). --
     FinishDeleteSessionView(Box<FinishDeleteSessionView>),
@@ -1041,6 +1048,50 @@ impl Engine {
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
             self.clear_in_flight(&InFlightKey::CreateAgent);
+            self.note_create_finished(&status_op_id);
+            // The defence behind the project deletion's wait: a create that
+            // outlasted it lands for a project that no longer exists. Nothing is
+            // committed; the process is stopped and what this launch made is
+            // taken back.
+            if let Some(project_id) = session.project_id()
+                && !self.projects.iter().any(|project| project.id == project_id)
+            {
+                let AgentLaunchKind::Create {
+                    repo_path,
+                    owns_worktree,
+                    ..
+                } = &request.kind
+                else {
+                    unreachable!("matched AgentLaunchKind::Create above")
+                };
+                let message = self.stop_create_for_deleted_project(
+                    &session,
+                    &tab_id,
+                    client,
+                    repo_path,
+                    *owns_worktree,
+                );
+                let create_final = self.resolve_create_op(
+                    &status_op_id,
+                    CreateLaunchOutcome::Failed {
+                        message: message.clone(),
+                    },
+                );
+                return (
+                    AgentLaunchReadyOutcome {
+                        session,
+                        tab_id: tab_id.as_str().to_string(),
+                        pty_size,
+                        detached_session_id: None,
+                        wants_fullscreen,
+                        status_quiet,
+                        view: AgentLaunchReadyView::CreatePersistFailed {
+                            error: message.to_string(),
+                        },
+                    },
+                    create_final,
+                );
+            }
             // A brand-new agent's session row, its first tab's row and the
             // pointer between them land in one transaction: a session whose slot
             // tab is missing has a PTY address nothing resolves.
@@ -1750,6 +1801,28 @@ impl Engine {
             _ => None,
         };
         let should_remove_worktree = removal_target.is_some();
+        // This path runs git on the calling thread and cannot wait, so it
+        // refuses outright where the deferred path would wait: something is
+        // still working in the worktree, or a removal of it is under way.
+        if let Some((_, managed)) = removal_target {
+            let ops = &self.removal_coordination.ops;
+            let holders = ops.holders(&managed.worktree_path);
+            if ops.is_being_removed(&managed.worktree_path) || !holders.is_empty() {
+                anyhow::bail!(
+                    "dux did not remove the worktree at {}: {}. Delete the agent again once that \
+                     has finished.",
+                    crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path)),
+                    if holders.is_empty() {
+                        "it is already being removed".to_string()
+                    } else {
+                        format!(
+                            "{} is still running in it",
+                            crate::worktree_ops::describe_holders(&holders)
+                        )
+                    }
+                );
+            }
+        }
 
         if self.pending_deletions.contains(session_id) {
             crate::logger::error(&format!(
@@ -2018,6 +2091,17 @@ impl Engine {
             _ => None,
         };
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
+        // Announced NOW, at the start of the delete: from this moment nothing
+        // new may start in the folder (a pull, an editor save, an agent
+        // created on it), while whatever is already running there is waited
+        // for by the removal worker once the agent's processes are gone.
+        if let Some(removal) = &worktree_removal {
+            self.announce_session_removal(
+                &removal.session_id,
+                &removal.managed.worktree_path,
+                session.display_label(),
+            );
+        }
 
         self.begin_session_tab_shutdown(&session, worktree_removal);
         self.begin_close_session_terminals(&session.id);
@@ -2083,42 +2167,126 @@ impl Engine {
         // Re-check the occupancy the decision was made on: this removal was
         // planned when the delete began and runs seconds later, once the
         // agent's PTYs reap, and another agent can occupy the directory in that
-        // window. `closing_sessions` does not cover it, because it blocks new
-        // tabs on the dying agent rather than a new agent pointed at the same
-        // place. Preserving the directory is the safe direction to be wrong in:
-        // the worst case is a leftover the worktree manager can still remove,
-        // against `git worktree remove --force` on a live provider's directory.
-        if let Some(occupant) = self.sessions.iter().find(|s| {
-            s.id != session_id
-                && crate::project_browser::same_directory(s.directory(), &worktree_path)
-        }) {
+        // window, or be on its way to it: an agent being created on this very
+        // worktree holds it in the registry until its launch lands in
+        // `sessions`, so it is counted too. `closing_sessions` does not cover
+        // either, because it blocks new tabs on the dying agent rather than a
+        // new agent pointed at the same place. Preserving the directory is the
+        // safe direction to be wrong in: the worst case is a leftover the
+        // worktree manager can still remove, against `git worktree remove
+        // --force` on a live provider's directory.
+        let occupant = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.id != session_id
+                    && crate::project_browser::same_directory(s.directory(), &worktree_path)
+            })
+            .map(|occupant| {
+                crate::status_text![
+                    "agent ",
+                    q(occupant.display_label()),
+                    " started working in it while this agent was shutting down"
+                ]
+            })
+            .or_else(|| {
+                self.removal_coordination
+                    .ops
+                    .holders(&worktree_path)
+                    .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+                    .then(|| {
+                        crate::status_text![
+                            "an agent is being created in it while this agent was shutting down"
+                        ]
+                    })
+            });
+        if let Some(occupant) = occupant {
             let message = crate::status_text![
                 "Kept the worktree at ",
                 q(crate::home_path::shorten_home(std::path::Path::new(
                     &worktree_path
                 ))),
-                ": agent ",
-                q(occupant.display_label()),
-                " started working in it while this \
-                 agent was shutting down. Remove it from the worktree manager if you still \
-                 want it gone."
+                ": ",
+                occupant,
+                ". Remove it from the worktree manager if you still want it gone."
             ];
             logger::warn(&message);
+            // Withdraw the announcement (the folder stays in use) and answer
+            // the delete's spinner rather than leave it to time out.
+            self.removal_coordination.claims.remove(&session_id);
+            let _ = self
+                .worker_tx
+                .send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                    session_id,
+                    result: Err(message.to_string()),
+                });
             return message;
         }
+        // The claim was announced when the delete began; a removal that never
+        // went through `begin_delete_session` announces it here.
+        let claim = self
+            .removal_coordination
+            .claims
+            .remove(&session_id)
+            .unwrap_or_else(|| {
+                self.removal_coordination
+                    .ops
+                    .announce_removal(&worktree_path)
+            });
         // Guard against a duplicate worker (e.g. a project delete racing the
         // reap); the completion handler clears it.
         self.pending_deletions.insert(session_id.clone());
         self.deletion_busy_messages
             .insert(session_id.clone(), busy_message.clone());
+        let wait = self.removal_wait();
         let tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let job_session = session_id.clone();
+            let job_tx = tx.clone();
+            let result = std::panic::catch_unwind(AssertUnwindSafe(move || {
+                let lease = match claim {
+                    crate::worktree_ops::RemovalClaim::Lead(lease) => lease,
+                    // Another removal of this same worktree is already running
+                    // (two agents shared it): take its outcome rather than run
+                    // git a second time.
+                    crate::worktree_ops::RemovalClaim::Join(join) => {
+                        let path = join.path().to_path_buf();
+                        return join
+                            .wait(wait.saturating_mul(2) + std::time::Duration::from_secs(60))
+                            .unwrap_or_else(|| {
+                                Err(format!(
+                                    "another removal of the worktree at {} is still running; \
+                                     check the worktree manager once it finishes",
+                                    crate::home_path::shorten_home(&path)
+                                ))
+                            });
+                    }
+                };
+                let holders = lease.holders();
+                if !holders.is_empty() {
+                    let _ = job_tx.send(crate::worker::WorkerEvent::WorktreeRemoveWaiting {
+                        session_id: job_session.clone(),
+                        waiting_for: crate::worktree_ops::describe_holders(&holders),
+                    });
+                }
+                if let Err(still) = lease.wait_for_holders(wait) {
+                    let message = crate::engine::removal::removal_wait_expired_message(
+                        lease.path(),
+                        wait,
+                        &crate::worktree_ops::describe_holders(&still),
+                    );
+                    lease.finish(Err(message.clone()));
+                    return Err(message);
+                }
+                // A rename that landed while this removal waited moved the
+                // branch, so it is deleted by the name it has NOW.
+                let branch_name = lease.renamed(&branch_name);
+                let initial_branch = lease.renamed(&initial_branch);
                 // The same gate as the synchronous path: unasked, only branches
                 // dux created are dux's to delete, and the delete dialog's
                 // answer overrides that in either direction.
-                if branch_provenance.resolve_branch_deletion(delete_branch) {
+                let result = if branch_provenance.resolve_branch_deletion(delete_branch) {
                     crate::git::remove_worktree(
                         std::path::Path::new(&project_path),
                         std::path::Path::new(&worktree_path),
@@ -2137,7 +2305,9 @@ impl Engine {
                         RemovedBranches::Kept(branch_kept_reason(branch_provenance, delete_branch))
                     })
                     .map_err(|e| format!("{e:#}"))
-                }
+                };
+                lease.finish(result.clone());
+                result
             }))
             .unwrap_or_else(|payload| {
                 let reason = crate::engine::spawn_worker::format_panic_payload(payload);
@@ -2170,6 +2340,7 @@ impl Engine {
         let outcome = match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
+                self.note_create_finished(&status_op_id);
                 // Resolve the shared create op to its keyed error final so both
                 // surfaces replace the create busy in place with the same message.
                 let create_final = self.resolve_create_op(
@@ -2599,6 +2770,14 @@ impl Engine {
         self.pending_deletions.remove(&session_id);
         self.closing_sessions.remove(&session_id);
         let our_busy_message = self.deletion_busy_messages.remove(&session_id);
+        self.removal_coordination.labels.remove(&session_id);
+        // A removal that was one agent of a project deletion reports into that
+        // deletion's single final rather than as a delete of its own.
+        if let Some(reaction) =
+            self.cascade_removal_completed(&session_id, result.as_ref().err().map(String::as_str))
+        {
+            return reaction;
+        }
         match result {
             Ok(branches) => EventReaction::WorktreeRemoveSucceeded {
                 session_id,
@@ -2609,6 +2788,26 @@ impl Engine {
                 session_id,
                 message,
             },
+        }
+    }
+
+    fn process_worktree_remove_waiting(
+        &mut self,
+        session_id: String,
+        waiting_for: String,
+    ) -> EventReaction {
+        if let Some(reaction) = self.cascade_removal_waiting(&session_id, &waiting_for) {
+            return reaction;
+        }
+        let label = self
+            .removal_coordination
+            .labels
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| session_id.clone());
+        EventReaction::WorktreeRemoveWaiting {
+            message: crate::engine::removal_waiting_message(&label, &waiting_for),
+            session_id,
         }
     }
 
@@ -2661,6 +2860,20 @@ impl Engine {
                     }
                 }
             }
+        }
+        // A removal of this worktree that began while the rename ran captured
+        // the old name; record the new one for it before the hold is released,
+        // so it deletes the branch by the name it has now.
+        if result.is_ok()
+            && let Some(expected) = self.rename_expected.get(&session_id)
+        {
+            self.removal_coordination.ops.record_branch_rename(
+                &crate::worktree_ops::HoldOwner::InFlight(InFlightKey::BranchRename(
+                    session_id.clone(),
+                )),
+                &expected.old_branch,
+                &new_branch,
+            );
         }
         self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
         self.rename_expected.remove(&session_id);
@@ -3475,6 +3688,7 @@ impl Engine {
         message: StatusText,
     ) -> EventReaction {
         self.clear_in_flight(&InFlightKey::CreateAgent);
+        self.note_create_finished(&status_op_id);
         match self.pending_create_ops.remove(&status_op_id) {
             Some(op) => op
                 .resolve(&CreateLaunchOutcome::Failed { message })
@@ -3704,6 +3918,13 @@ impl Engine {
             },
             WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
                 self.process_worktree_remove_completed(session_id, result)
+            }
+            WorkerEvent::WorktreeRemoveWaiting {
+                session_id,
+                waiting_for,
+            } => self.process_worktree_remove_waiting(session_id, waiting_for),
+            WorkerEvent::ProjectDeletionContinue { project_id } => {
+                self.process_project_deletion_continue(&project_id)
             }
             WorkerEvent::ResourceStatsReady(stats, was_baseline) => {
                 self.clear_in_flight(&InFlightKey::ResourceStats);
@@ -4417,8 +4638,10 @@ mod tests {
 
     #[test]
     fn deleting_a_project_keeps_the_branch_of_an_attached_agent() {
-        // The cascade calls `do_delete_session` per agent, so it inherits the
-        // gate: removing a project must not take the user's `develop` with it.
+        // The cascade sends each agent through the same deferred removal a
+        // single delete takes, with nobody asked about the branch, so it
+        // inherits the gate: removing a project must not take the user's
+        // `develop` with it.
         let (mut engine, tmp) = test_engine();
         let repo = repo_with_branches(tmp.path(), &["develop", "dux-made"]);
         let attached = attach_worktree(&repo, "develop");
@@ -4456,6 +4679,18 @@ mod tests {
                 project_name: "repo".to_string(),
             })
             .unwrap();
+        // Both removals run on workers; wait for both to land.
+        let mut landed = 0;
+        while landed < 2 {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("each removal reports");
+            if matches!(event, WorkerEvent::WorktreeRemoveCompleted { .. }) {
+                landed += 1;
+            }
+            engine.process_worker_event(event);
+        }
 
         let branches = branch_list(&repo);
         assert!(
@@ -4839,6 +5074,7 @@ mod tests {
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
+            EventReaction::WorktreeRemoveWaiting { .. } => "WorktreeRemoveWaiting",
             EventReaction::ResourceStatsArrived(_, _) => "ResourceStatsArrived",
             EventReaction::AddProjectAfterBranchCheckout { .. } => "AddProjectAfterBranchCheckout",
             EventReaction::AddProjectAfterInitialCommit { .. } => "AddProjectAfterInitialCommit",

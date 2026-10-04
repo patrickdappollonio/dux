@@ -626,6 +626,16 @@ impl App {
             } => {
                 self.apply_worktree_remove_failed(session_id, message);
             }
+            EventReaction::WorktreeRemoveWaiting {
+                session_id,
+                message,
+            } => {
+                // The delete's own spinner says what the removal is waiting for.
+                if let Some(op) = self.pending_delete_ops.get(&session_id) {
+                    let progress = op.progress(message);
+                    self.apply_reaction(EventReaction::Status(progress));
+                }
+            }
 
             EventReaction::ResourceStatsArrived(stats, was_baseline) => {
                 self.apply_resource_stats(stats, was_baseline);

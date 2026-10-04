@@ -206,6 +206,7 @@ fn managed(name: &str, branch: &str) -> dux_core::worktree_manager::ManagedWorkt
         branch: Some(branch.to_string()),
         dirty: false,
         attached_session_id: None,
+        being_removed: false,
     }
 }
 
