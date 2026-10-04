@@ -3461,14 +3461,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
 /// the unstaged rows, and the other one still has something to say.
 fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
     Command::new("git")
-        .args([
-            "-C",
-            worktree,
-            "diff",
-            "--numstat",
-            "-z",
-            "--ignore-submodules=none",
-        ])
+        .args(["-C", worktree, "diff", "--numstat", "-z"])
         .output()
         .ok()
         .filter(|ns| ns.status.success())
@@ -3489,15 +3482,7 @@ fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
 fn staged_numstat(worktree: &str, skip: &[String]) -> HashMap<String, DiffStat> {
     const MAX_SKIPPED_FOLDERS: usize = 256;
     let mut command = Command::new("git");
-    command.args([
-        "-C",
-        worktree,
-        "diff",
-        "--cached",
-        "--numstat",
-        "-z",
-        "--ignore-submodules=none",
-    ]);
+    command.args(["-C", worktree, "diff", "--cached", "--numstat", "-z"]);
     if !skip.is_empty() && skip.len() <= MAX_SKIPPED_FOLDERS {
         command.args(["--", "."]);
         command.args(skip.iter().map(|dir| format!(":(exclude,literal){dir}")));
@@ -3930,7 +3915,6 @@ pub fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusC
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
-            "--ignore-submodules=none",
             "--",
         ])
         .arg(format!(":(literal){rel_path}"))
@@ -4956,7 +4940,6 @@ pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
             "color.diff=false",
             "diff",
             "--cached",
-            "--ignore-submodules=none",
         ])
         .output()?;
     if !output.status.success() {
@@ -6525,8 +6508,11 @@ mod tests {
         repo
     }
 
+    /// `changed_files` also decides (the discard classification, the commit
+    /// preflight, the paths a stage or unstage may touch), so it lists every
+    /// submodule change whatever the repository says to ignore.
     #[test]
-    fn the_changes_view_sees_a_submodule_the_repository_says_to_ignore() {
+    fn the_changed_files_listing_sees_a_submodule_the_repository_says_to_ignore() {
         let repo = repo_with_an_ignored_submodule_change();
         std::fs::write(repo.path().join("untracked.txt"), "new\n").unwrap();
         let (_, unstaged) = changed_files(repo.path()).unwrap();
@@ -6538,27 +6524,30 @@ mod tests {
             unstaged.iter().any(|file| file.path == "untracked.txt"),
             "and untracked files despite status.showUntrackedFiles=no: {unstaged:?}"
         );
-        assert!(
-            unstaged_numstat(&repo.path().to_string_lossy()).contains_key("sub"),
-            "and its line counts"
-        );
     }
 
     #[test]
     fn a_submodule_the_repository_says_to_ignore_still_makes_a_worktree_dirty() {
         let repo = repo_with_an_ignored_submodule_change();
         assert!(worktree_is_dirty(repo.path()).unwrap());
+    }
+
+    /// The views that only show (line counts, the file-info panel's status,
+    /// the staged diff) keep honouring the repository's own `ignore = all`,
+    /// as they did before the move check existed.
+    #[test]
+    fn the_display_views_honour_a_submodule_the_repository_says_to_ignore() {
+        let repo = repo_with_an_ignored_submodule_change();
+        assert!(
+            !unstaged_numstat(&repo.path().to_string_lossy()).contains_key("sub"),
+            "no line counts for the ignored submodule"
+        );
         assert!(
             file_status(repo.path(), "sub")
                 .unwrap()
-                .is_some_and(|codes| codes.unstaged.is_some()),
-            "its own status is reported"
+                .is_some_and(|codes| codes.staged.is_none() && codes.unstaged.is_none()),
+            "the info panel reads it as clean"
         );
-    }
-
-    #[test]
-    fn the_staged_views_see_a_submodule_the_repository_says_to_ignore() {
-        let repo = repo_with_an_ignored_submodule_change();
         run_git(
             &repo.path().join("sub"),
             &[
@@ -6578,12 +6567,14 @@ mod tests {
             &["update-index", "--cacheinfo", &format!("160000,{id},sub")],
         );
         assert!(
-            staged_diff_text(repo.path()).unwrap().contains("sub"),
-            "the staged diff shows it"
+            !staged_diff_text(repo.path())
+                .unwrap()
+                .contains("Subproject"),
+            "the staged diff leaves it out"
         );
         assert!(
-            staged_numstat(&repo.path().to_string_lossy(), &[]).contains_key("sub"),
-            "with its line counts"
+            !staged_numstat(&repo.path().to_string_lossy(), &[]).contains_key("sub"),
+            "and so do the staged line counts"
         );
     }
 
