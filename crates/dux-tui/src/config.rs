@@ -1727,6 +1727,40 @@ pub fn install_canonical_renderer() {
         prune_retired_key_actions(doc);
         fold_legacy_key_actions(doc);
     });
+    dux_core::config::install_terminal_ui_key_resolution(terminal_ui_keys);
+}
+
+/// The `[keys]` the terminal UI runs with for a whole config file, by its
+/// own resolution: its key migrations, then each action's binding from the
+/// file or, where the file has none, the action's default, written as the
+/// config writes keys. `None` for a `[keys]` it cannot read.
+fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
+    let mut doc = raw.parse::<DocumentMut>().ok()?;
+    prune_retired_key_actions(&mut doc);
+    fold_legacy_key_actions(&mut doc);
+    let mut keys_only = DocumentMut::new();
+    if let Some(keys) = doc.get("keys") {
+        keys_only["keys"] = keys.clone();
+    }
+    let keys = toml::from_str::<Config>(&keys_only.to_string()).ok()?.keys;
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&keys);
+    let mut table = toml::Table::new();
+    table.insert(
+        "show_terminal_keys".to_string(),
+        toml::Value::Boolean(keys.show_terminal_keys),
+    );
+    for binding in bindings.bindings() {
+        let combos = binding
+            .keys
+            .iter()
+            .map(|combo| toml::Value::String(crate::keybindings::format_key_for_config(*combo)))
+            .collect();
+        table.insert(
+            binding.action.config_name().to_string(),
+            toml::Value::Array(combos),
+        );
+    }
+    Some(table)
 }
 
 /// What the terminal UI's start refuses in a whole config file's `[keys]`:
@@ -1740,14 +1774,35 @@ fn keys_start_problems(raw: &str) -> Vec<String> {
     };
     prune_retired_key_actions(&mut doc);
     fold_legacy_key_actions(&mut doc);
+    // A name that is no action name at all may be a token pasted in the
+    // wrong place: it is placed by its line through the one formatter and
+    // never reaches `validate_keys`, whose message would repeat it.
+    let mut problems = Vec::new();
+    if let Some(keys) = doc
+        .get_mut("keys")
+        .and_then(|item| item.as_table_like_mut())
+    {
+        let hidden: Vec<String> = keys
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| {
+                dux_core::config::name_is_hidden(raw, &["keys".to_string(), name.clone()])
+            })
+            .collect();
+        for name in hidden {
+            let shown = dux_core::config::shown_path(raw, &["keys".to_string(), name.clone()]);
+            problems.push(format!("[keys] {shown}: unknown action"));
+            keys.remove(&name);
+        }
+    }
     let mut keys_only = DocumentMut::new();
     if let Some(keys) = doc.get("keys") {
         keys_only["keys"] = keys.clone();
     }
-    match toml::from_str::<Config>(&keys_only.to_string()) {
-        Ok(config) => validate_keys(&config.keys).err().into_iter().collect(),
-        Err(_) => Vec::new(),
+    if let Ok(config) = toml::from_str::<Config>(&keys_only.to_string()) {
+        problems.extend(validate_keys(&config.keys).err());
     }
+    problems
 }
 
 // ---------------------------------------------------------------------------
@@ -4870,6 +4925,30 @@ mod entries_named_password_hash_start_tests {
                 .map_err(|e| format!("{e:#}"));
             assert!(result.is_ok(), "{body:?}: {result:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod keys_names_tests {
+    use super::*;
+
+    /// A token pasted as a `[keys]` name with a binding as its value is
+    /// placed by its line, never quoted, by the terminal UI's own check.
+    #[test]
+    fn an_unknown_action_name_that_breaks_the_rule_is_placed_by_its_line() {
+        install_canonical_renderer();
+        let raw = "[keys]\n\"sk-proj-AbCdEf0123456789\" = [\"x\"]\n";
+        let problems = dux_core::config::start_problems_of(raw);
+        assert!(!problems.is_empty());
+        for problem in &problems {
+            assert!(!problem.message.contains("sk-proj"), "{problem:?}");
+        }
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("the entry on line 2 of [keys]")),
+            "{problems:?}"
+        );
     }
 }
 

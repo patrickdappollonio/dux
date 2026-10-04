@@ -3322,10 +3322,9 @@ fn stray_password_hashes(
     path: &mut Vec<String>,
     found: &mut Vec<Vec<String>>,
 ) {
-    const USER_NAMED: [&str; 5] = ["env", "providers", "projects", "macros", "keys"];
     if path
         .first()
-        .is_some_and(|section| USER_NAMED.contains(&section.as_str()))
+        .is_some_and(|section| user_name_rule(section).is_some())
     {
         return;
     }
@@ -3623,6 +3622,28 @@ pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
         };
         found.push((vec!["keys".to_string(), name.clone()], reason));
     }
+    // And each action that gained the binding of a retired one.
+    for (name, value) in &after {
+        if before.get(name) == Some(value) {
+            continue;
+        }
+        let from: Vec<&String> = before
+            .iter()
+            .filter(|(old, bound)| !after.contains_key(*old) && contains_binding(value, bound))
+            .map(|(old, _)| old)
+            .collect();
+        if from.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = from.iter().map(|name| name.as_str()).collect();
+        found.push((
+            vec!["keys".to_string(), name.clone()],
+            format!(
+                "it also carries the binding of the retired {}",
+                names.join(" and ")
+            ),
+        ));
+    }
     found
 }
 
@@ -3636,6 +3657,28 @@ fn contains_binding(bound: &toml::Value, value: &toml::Value) -> bool {
     };
     let bound = items(bound);
     items(value).iter().all(|item| bound.contains(item))
+}
+
+/// The terminal UI's own resolution of `[keys]` for a whole config file: every
+/// action's binding as it runs (the file's, after its key migrations, or the
+/// action's default), by action name, and `show_terminal_keys`. Installed by
+/// the terminal UI, which alone knows its actions and their defaults, so
+/// `dux config get` reports what it uses by running that resolution, never a
+/// copy of it. `None` for a `[keys]` it cannot read.
+pub type TerminalUiKeyResolution = fn(&str) -> Option<toml::Table>;
+
+static TERMINAL_UI_KEYS: std::sync::OnceLock<TerminalUiKeyResolution> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's key resolution (see
+/// [`TerminalUiKeyResolution`]); a second install is ignored.
+pub fn install_terminal_ui_key_resolution(resolution: TerminalUiKeyResolution) {
+    let _ = TERMINAL_UI_KEYS.set(resolution);
+}
+
+/// The `[keys]` the terminal UI uses with the whole config file `raw`, by
+/// its own resolution, when installed.
+pub fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
+    TERMINAL_UI_KEYS.get().and_then(|resolve| resolve(raw))
 }
 
 /// `table` as the terminal UI's start reads it: with its own migrations
@@ -3862,21 +3905,49 @@ fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, Vec<Stri
 // value pasted in the wrong place, a token above all: it is never printed,
 // and the entry is placed by its line instead.
 
-/// The rule a name in a user-named map must follow, for the maps that have
-/// one: an environment variable name in `[env]`, and the characters a
-/// setting path allows in `[providers]` and `[macros]`.
-fn user_name_rule(section: &str) -> Option<fn(&str) -> bool> {
-    fn plain(name: &str) -> bool {
-        !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+/// The rule a name in a map of user-chosen names must follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameRule {
+    /// An environment variable name.
+    Variable,
+    /// The characters a setting path allows: letters, digits, `_` and `-`.
+    Plain,
+    /// An action name: lowercase letters, digits and `_`.
+    Action,
+    /// None: the entries are a list, not names (`[[projects]]`).
+    Any,
+}
+
+impl NameRule {
+    fn allows(self, name: &str) -> bool {
+        let all = |ok: fn(char) -> bool| !name.is_empty() && name.chars().all(ok);
+        match self {
+            Self::Variable => is_valid_var_name(name),
+            Self::Plain => all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            Self::Action => all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            Self::Any => true,
+        }
     }
-    match section {
-        "env" => Some(is_valid_var_name),
-        "providers" | "macros" => Some(plain),
-        _ => None,
-    }
+}
+
+/// The tables whose keys are names the user chose, each with the rule a name
+/// there follows. The ONE list: the formatter hides a name that breaks its
+/// rule, and the misplaced-password rule leaves these tables alone, both by
+/// it, so the two cannot drift apart.
+const USER_NAMED_MAPS: &[(&str, NameRule)] = &[
+    ("env", NameRule::Variable),
+    ("providers", NameRule::Plain),
+    ("macros", NameRule::Plain),
+    ("keys", NameRule::Action),
+    ("projects", NameRule::Any),
+];
+
+/// The rule a name in the user-named map `section` must follow, if it is one.
+fn user_name_rule(section: &str) -> Option<NameRule> {
+    USER_NAMED_MAPS
+        .iter()
+        .find(|(map, _)| *map == section)
+        .map(|(_, rule)| *rule)
 }
 
 /// When `segments` runs through an entry whose name breaks its map's rule:
@@ -3886,7 +3957,7 @@ fn hidden_entry(raw: &str, segments: &[String]) -> Option<(String, String, Vec<S
         return None;
     };
     let rule = user_name_rule(section)?;
-    if rule(name) {
+    if rule.allows(name) {
         return None;
     }
     let entry = match line_of_key(raw, &[KeyStep::Key(section), KeyStep::Key(name)]) {

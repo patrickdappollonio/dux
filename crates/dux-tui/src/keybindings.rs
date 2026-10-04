@@ -1758,6 +1758,11 @@ impl RuntimeBindings {
         }
     }
 
+    /// Every action's binding, in declaration order.
+    pub fn bindings(&self) -> &[RuntimeBinding] {
+        &self.bindings
+    }
+
     /// Find the action for a key event in the given scope.
     /// Plain bindings (no modifiers) reject Ctrl/Alt combos so that e.g.
     /// Ctrl+d does not accidentally match a plain `d` binding.

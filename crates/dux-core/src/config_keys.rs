@@ -974,48 +974,17 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
 /// wrong-typed value `dux server` reads as its default), or the default when
 /// the file leaves it out. Every surface that starts with a file reads it
 /// through the same load, so they use the same value; a surface that will
-/// not start with it is named with why. A whole table is shown as the file
-/// writes it, with each entry inside it the load changes or drops listed.
+/// not start with it is named with why. A whole table is shown as dux uses
+/// it: every entry, those the file leaves to their defaults (stock providers
+/// among them) marked `# default`, with each entry the file writes that the
+/// load changes or drops listed beside it. `[keys]` is the terminal UI's, so
+/// it is what the terminal UI's own key resolution makes of the file.
 /// Reads the text itself rather than a loaded config, so it works on a file
 /// a surface would refuse to start with: `get` is how you look at the broken
 /// part. For a [`WritePolicy::Secret`] key it reads where the secret is
 /// stored (the password's hash).
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
-    let mut report = get_report_inner(raw, key)?;
-    // The terminal UI's own `[keys]` migrations (a retired action folded
-    // into the one that replaced it, or dropped) are corrections it alone
-    // makes, said for it whenever it starts with the file.
-    let terminal_ui_starts = !report
-        .refused_by
-        .iter()
-        .any(|(surface, _)| *surface == crate::config::Surface::TerminalUi);
-    if terminal_ui_starts && !matches!(report.value, GetValue::Unknown { .. }) {
-        let asked = stored_path(key);
-        for (at, reason) in crate::config::terminal_ui_key_corrections(raw) {
-            if at.starts_with(&asked) {
-                report.corrections.push(Correction {
-                    path: at,
-                    in_file: None,
-                    used: None,
-                    reason,
-                    surface: Some(crate::config::Surface::TerminalUi),
-                });
-            }
-        }
-    }
-    // The table as the file names its entries, for `--show`, when the
-    // formatter replaced any name.
-    let path = stored_path(key);
-    if let Ok(file) = toml::from_str::<toml::Table>(raw)
-        && let Some(node) = value_at(&toml::Value::Table(file), &path)
-        && node.is_table()
-    {
-        let named = render(node);
-        if named != render_shown(raw, &path, node) {
-            report.with_names = Some(named);
-        }
-    }
-    Ok(report)
+    get_report_inner(raw, key)
 }
 
 /// Where `key`'s value is stored in the file: the key itself, or for the
@@ -1055,15 +1024,53 @@ fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
     render(&shown(raw, &mut path.to_vec(), value))
 }
 
+/// The table `in_use` (what dux uses at `path`) as `get` prints it: every
+/// entry, each one the file `file` leaves out (a default, a stock provider)
+/// marked with a trailing `# default`, and, with `hide_names`, every name
+/// that breaks its map's rule a marker naming its line (see
+/// [`render_shown`]).
+fn render_in_use(
+    raw: &str,
+    path: &[String],
+    in_use: &toml::Value,
+    file: &toml::Value,
+    hide_names: bool,
+) -> String {
+    let mut leaves = Vec::new();
+    leaves_of(in_use, &mut path.to_vec(), &mut leaves);
+    let defaults: Vec<Vec<String>> = leaves
+        .into_iter()
+        .filter(|(at, _)| value_at(file, at).is_none())
+        .map(|(at, _)| at)
+        .collect();
+    let text = if hide_names {
+        render_shown(raw, path, in_use)
+    } else {
+        render(in_use)
+    };
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return text;
+    };
+    fn mark(table: &mut dyn toml_edit::TableLike, at: &mut Vec<String>, defaults: &[Vec<String>]) {
+        for (key, item) in table.iter_mut() {
+            at.push(key.get().to_string());
+            match item {
+                Item::Value(value) if defaults.contains(at) => {
+                    value.decor_mut().set_suffix(" # default");
+                }
+                Item::Table(child) => mark(child, at, defaults),
+                _ => {}
+            }
+            at.pop();
+        }
+    }
+    mark(doc.as_table_mut(), &mut path.to_vec(), &defaults);
+    doc.to_string().trim_end().to_string()
+}
+
 fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     use crate::config::Surface;
-    let path: Vec<String> = match key.policy {
-        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => stores_at
-            .iter()
-            .map(|segment| (*segment).to_string())
-            .collect(),
-        WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
-    };
+    let path = stored_path(key);
     let doc: toml::Table = toml::from_str(raw).map_err(|e| {
         anyhow::anyhow!(
             "config.toml is not valid TOML: {}",
@@ -1112,25 +1119,47 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             return Ok(unknown(reason, in_file));
         }
     };
-    let effective = serde_json::to_value(&effective).ok();
-    let used_at = |at: &[String]| -> Option<String> {
+    let mut effective = serde_json::to_value(&effective).ok();
+    // `[keys]` is the terminal UI's alone, so it is what the terminal UI
+    // runs with, by its own resolution: its key migrations, and every
+    // action's default where the file has none.
+    let terminal_ui_starts = !refused_by
+        .iter()
+        .any(|(surface, _)| *surface == Surface::TerminalUi);
+    let keys_resolved = terminal_ui_starts
+        .then(|| crate::config::terminal_ui_keys(raw))
+        .flatten();
+    if let (Some(keys), Some(serde_json::Value::Object(map))) = (&keys_resolved, effective.as_mut())
+        && let Ok(keys) = serde_json::to_value(keys)
+    {
+        map.insert("keys".to_string(), keys);
+    }
+    // The value in use at `at`, as TOML (a table without the nulls its unset
+    // optional settings carry, which TOML has no way to write).
+    let effective_at = |at: &[String]| -> Option<toml::Value> {
         let mut used = effective.clone();
         for segment in at {
             used = used.and_then(|n| n.get(segment).cloned());
         }
         match used {
             Some(serde_json::Value::Null) | None => None,
-            // A table carries its unset optional settings as nulls, which
-            // TOML has no way to write; they are left out, as the file would.
-            Some(json) => toml::Value::try_from(without_nulls(json))
-                .ok()
-                .map(|value| render(&value)),
+            Some(json) => toml::Value::try_from(without_nulls(json)).ok(),
         }
     };
+    let used_at = |at: &[String]| effective_at(at).map(|value| render(&value));
     let used = used_at(&path);
     // Every path below is a list of segments, never a dotted string split
     // again: a name may hold a dot.
-    let corrected: Vec<(Vec<String>, String)> = crate::config::load_corrections_of(raw);
+    let mut corrected: Vec<(Vec<String>, String)> = crate::config::load_corrections_of(raw);
+    // The terminal UI's own `[keys]` migrations are corrections it alone
+    // makes (see `surface_of` below).
+    if keys_resolved.is_some() {
+        corrected.extend(crate::config::terminal_ui_key_corrections(raw));
+    }
+    // A correction under `[keys]` is the terminal UI's alone.
+    let surface_of = |at: &[String]| {
+        (at.first().map(String::as_str) == Some("keys")).then_some(Surface::TerminalUi)
+    };
     let inside =
         |key: &[String], scope: &[String]| key.len() > scope.len() && key.starts_with(scope);
     let Some(in_file) = in_file else {
@@ -1141,7 +1170,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                 .iter()
                 .find(|(key, _)| *key == path)
                 .map(|(_, reason)| Correction {
-                    surface: None,
+                    surface: surface_of(&path),
                     path: path.clone(),
                     in_file: None,
                     used: used.clone(),
@@ -1171,9 +1200,10 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
         )
     };
     if let Some(table) = node.filter(|node| node.is_table()) {
-        // A table is shown as the file writes it (the load filling in its
-        // defaults is not a correction), with every entry inside it whose
-        // value the load changes or drops listed. An entry dropped whole (a
+        // A table is shown as dux uses it: every entry, the ones the file
+        // leaves to their defaults (stock providers among them) marked as
+        // defaults, and every entry the file writes whose value the load
+        // changes or drops listed beside it. An entry dropped whole (a
         // provider, a retired block) is listed once, at the entry.
         let mut leaves = Vec::new();
         leaves_of(table, &mut path.clone(), &mut leaves);
@@ -1195,14 +1225,14 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             });
             corrections.push(match whole {
                 Some((scope, reason)) => Correction {
-                    surface: None,
+                    surface: surface_of(scope),
                     path: scope.clone(),
                     in_file: value_at(&file, scope).map(render),
                     used: None,
                     reason: reason.clone(),
                 },
                 None => Correction {
-                    surface: None,
+                    surface: surface_of(&at),
                     reason: reason_at(&at),
                     path: at,
                     in_file: Some(in_file),
@@ -1217,7 +1247,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                 let used = used_at(key);
                 if used.is_some() {
                     corrections.push(Correction {
-                        surface: None,
+                        surface: surface_of(key),
                         path: key.clone(),
                         in_file: None,
                         used,
@@ -1226,11 +1256,14 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                 }
             }
         }
+        let in_use = effective_at(&path).unwrap_or_else(|| table.clone());
+        let shown = render_in_use(raw, &path, &in_use, &file, true);
+        let named = render_in_use(raw, &path, &in_use, &file, false);
         return Ok(GetReport {
-            value: GetValue::Set(render_shown(raw, &path, table)),
+            with_names: (named != shown).then_some(named),
+            value: GetValue::Set(shown),
             corrections,
             refused_by,
-            with_names: None,
         });
     }
     // A single setting: what the file says, unless the load uses something
@@ -1246,7 +1279,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     Ok(GetReport {
         value: used.clone().map_or(GetValue::Unset, GetValue::Set),
         corrections: vec![Correction {
-            surface: None,
+            surface: surface_of(&path),
             reason: reason_at(&path),
             path: path.clone(),
             in_file: Some(in_file),

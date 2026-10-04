@@ -83,7 +83,9 @@ pub(crate) fn run_get(
     // said once, for the surfaces that use it; each one that will not start
     // is named on its own.
     let refuses = |surface: Surface| report.refused_by.iter().any(|(s, _)| *s == surface);
+    // `[keys]` is the terminal UI's alone.
     let users = match (refuses(Surface::TerminalUi), refuses(Surface::DuxServer)) {
+        _ if key.path.first().map(String::as_str) == Some("keys") => "the terminal UI",
         (false, false) => "dux",
         (true, false) => "dux server",
         (false, true) => "the terminal UI",
@@ -114,6 +116,9 @@ pub(crate) fn run_get(
                 )?,
             }
         }
+        // Where the value came from is said by its correction (carried over
+        // from a deprecated key, or from a retired binding), not as a default.
+        GetValue::Default(value) if corrected => writeln!(out, "{value}")?,
         GetValue::Default(value) => {
             writeln!(out, "{value}")?;
             writeln!(
@@ -146,8 +151,22 @@ pub(crate) fn run_get(
         let at = dux_core::config::shown_path(&raw, &correction.path);
         let reason = correction.reason.trim_end_matches('.');
         // A correction only one surface makes says it all in its reason.
-        if correction.surface.is_some() {
-            writeln!(err, "({at}: {reason})")?;
+        // A correction only one surface makes is said for that surface.
+        if let Some(surface) = correction.surface {
+            let name = match surface {
+                Surface::TerminalUi => "the terminal UI",
+                Surface::DuxServer => "dux server",
+            };
+            match (&correction.in_file, &correction.used) {
+                (Some(in_file), Some(used)) if !hide => writeln!(
+                    err,
+                    "({at}: config.toml says {in_file}; {name} uses {used} because {reason})"
+                )?,
+                (None, Some(used)) if !hide => {
+                    writeln!(err, "({at}: {name} uses {used}: {reason})")?
+                }
+                _ => writeln!(err, "({at}: {reason})")?,
+            }
             continue;
         }
         let Some(in_file) = &correction.in_file else {
@@ -196,6 +215,22 @@ pub(crate) fn run_set(
     secrets: &mut dyn SecretSource,
     out: &mut dyn Write,
 ) -> Result<()> {
+    // A secret setting takes nothing on the command line but itself and
+    // `--stdin`: anything else might be the secret, so it is never repeated.
+    if let Some(first) = args.iter().find(|arg| !arg.starts_with("--"))
+        && let Ok(key) = config_keys::lookup(first)
+        && matches!(key.policy, WritePolicy::Secret(_))
+        && args.iter().any(|arg| arg != first && arg != "--stdin")
+    {
+        let what = match key.policy {
+            WritePolicy::Secret(SecretKind::PasswordHash { .. }) => "the password",
+            _ => "the value",
+        };
+        bail!(
+            "unexpected argument; {what} is never given on the command line, use the prompt \
+             or --stdin. Nothing was changed."
+        );
+    }
     let parsed = parse_set_args(args)?;
     let key = config_keys::lookup(&parsed.path).map_err(|e| anyhow!("{e}"))?;
     // A first `set` on a machine dux never ran on writes the whole commented
@@ -1987,3 +2022,9 @@ mod sets_over_the_start_corpus_tests;
 
 #[cfg(test)]
 mod get_names_every_setting_in_use_tests;
+
+#[cfg(test)]
+mod get_keys_and_effective_tables_tests;
+
+#[cfg(test)]
+mod effective_tables_and_secret_arguments_tests;
