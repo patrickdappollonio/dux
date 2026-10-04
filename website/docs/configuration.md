@@ -87,9 +87,11 @@ Writers take turns on the file, and a save dux makes from its own settings only 
 settings that changed inside dux since it last read the file, keeping the comments around
 them. So a value you `set`, or edit by hand, while dux runs stays as you wrote it unless
 you then change that same setting inside dux before it reloads. Projects are matched by
-their id, so a project you add to the file by hand stays when dux adds one of its own. A
-setting missing from the file is still written in with its current value, which is how a
-new setting reaches an older file. The `[server.auth]` section is only ever changed by an
+their id, or by their path when one has no id, so a project you add to the file by hand
+stays when dux adds one of its own, and a project written without an id is given one the
+first time dux saves. A setting the file has never had (one new in this version of dux) is
+written in with its current value; one you delete from the file while dux runs stays
+deleted. The `[server.auth]` section is only ever changed by an
 explicit change to it (`set`, a password change, a block after failed logins), never by
 dux saving its other settings.
 
