@@ -206,6 +206,15 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
             shape: Shape::Text,
         });
     }
+    if let [table, name] = segments.as_slice()
+        && table == "env"
+        && !crate::config::is_valid_env_name(name)
+    {
+        return Err(KeyError::Malformed(format!(
+            "{path}: an environment variable name must match [A-Za-z_][A-Za-z0-9_]*, the rule \
+             dux starts with"
+        )));
+    }
     match shape_of(&segments) {
         Some(shape) => Ok(Key {
             policy: if segments.len() == 2 && segments[0] == "env" {
@@ -727,15 +736,26 @@ pub fn current_password_policy(config_path: &Path) -> Result<crate::auth::Passwo
         .map_err(anyhow::Error::msg)
 }
 
+/// A password that was stored.
+#[derive(Debug)]
+pub struct PasswordSet {
+    /// How strong it is.
+    pub strength: Strength,
+    /// What still stops dux starting with the file (see
+    /// [`SetReport::remaining_problems`]): while any is left the password is
+    /// stored but not in force.
+    pub remaining_problems: Vec<String>,
+}
+
 /// Check `password` against the minimums in `config_path`, hash it, and store
 /// the hash at `server.auth.password_hash` through the coordinated mutation
 /// path. The hash is made before the file lock is taken, so a slow hash never
-/// holds up another writer. Returns the password's strength.
+/// holds up another writer.
 pub fn set_password(
     config_path: &Path,
     password: &Password,
     user_inputs: &[&str],
-) -> Result<Strength, SetPasswordError> {
+) -> Result<PasswordSet, SetPasswordError> {
     set_password_with(
         config_path,
         MissingConfig::CreateDocumented,
@@ -750,7 +770,7 @@ pub fn set_password_with(
     missing: MissingConfig<'_>,
     password: &Password,
     user_inputs: &[&str],
-) -> Result<Strength, SetPasswordError> {
+) -> Result<PasswordSet, SetPasswordError> {
     let policy = current_password_policy(config_path).map_err(SetPasswordError::Failed)?;
     let check = crate::auth::check_minimums(password, &policy, user_inputs);
     if !check.passes() {
@@ -759,14 +779,18 @@ pub fn set_password_with(
     let hash = crate::auth::hash_password(password)
         .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
     let path: Vec<String> = password_hash_path();
-    write_value(config_path, missing, &path, Value::from(hash))
+    let report = write_value(config_path, missing, &path, Value::from(hash))
         .map_err(SetPasswordError::Failed)?;
-    Ok(check.strength)
+    Ok(PasswordSet {
+        strength: check.strength,
+        remaining_problems: report.remaining_problems,
+    })
 }
 
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
 /// through the coordinated mutation path. The caller never prints it.
-pub fn set_secret_text(config_path: &Path, key: &Key, value: &Password) -> Result<()> {
+/// Returns what still stops dux starting with the file.
+pub fn set_secret_text(config_path: &Path, key: &Key, value: &Password) -> Result<Vec<String>> {
     set_secret_text_with(config_path, MissingConfig::CreateDocumented, key, value)
 }
 
@@ -776,11 +800,12 @@ pub fn set_secret_text_with(
     missing: MissingConfig<'_>,
     key: &Key,
     value: &Password,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if key.policy != WritePolicy::Secret(SecretKind::Text) {
         anyhow::bail!("{} is not a setting stored as typed text", key.dotted());
     }
-    write_value(config_path, missing, &key.path, Value::from(value.expose())).map(|_| ())
+    write_value(config_path, missing, &key.path, Value::from(value.expose()))
+        .map(|report| report.remaining_problems)
 }
 
 fn password_hash_path() -> Vec<String> {
@@ -795,11 +820,20 @@ fn password_hash_path() -> Vec<String> {
 pub enum GetValue {
     /// The file sets it; the TOML text of the value (a string unquoted).
     Set(String),
-    /// The file leaves it out; dux uses this default (as above).
+    /// The file leaves it out; dux uses this (as above), read through the
+    /// same loader a start uses. Empty when that is what dux reads, such as
+    /// the command of a provider the file lists without one.
     Default(String),
-    /// The file leaves it out and it has no default (an optional setting,
-    /// or a provider or env entry that does not exist).
+    /// The file leaves it out and dux has no value for it (an optional
+    /// setting, or a provider or env entry that does not exist).
     Unset,
+    /// dux cannot load the file, so the value it would use cannot be worked
+    /// out: `in_file` is what the file's own text says, if anything, and
+    /// `reason` is the problem that stops the load.
+    Unknown {
+        in_file: Option<String>,
+        reason: String,
+    },
 }
 
 /// The value `key` has in the file `raw`, or its default when the file
@@ -824,14 +858,28 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
     for segment in &path {
         node = node.and_then(|n| n.get(segment).cloned());
     }
-    if let Some(value) = node {
-        return Ok(GetValue::Set(render(&value)));
+    let in_file = node.as_ref().map(render);
+    // What dux runs with: the file through the loader a start uses.
+    let effective = match crate::config::effective_config_from_text(raw) {
+        Ok(config) => config,
+        Err(problem) => {
+            let named = crate::config::start_problems_of(raw);
+            let reason = if named.is_empty() {
+                problem.reason().to_string()
+            } else {
+                named.join("; ")
+            };
+            return Ok(GetValue::Unknown { in_file, reason });
+        }
+    };
+    if let Some(value) = in_file {
+        return Ok(GetValue::Set(value));
     }
-    let mut default = Some(default_tree());
+    let mut used = serde_json::to_value(&effective).ok();
     for segment in &path {
-        default = default.and_then(|n| n.get(segment).cloned());
+        used = used.and_then(|n| n.get(segment).cloned());
     }
-    Ok(match default {
+    Ok(match used {
         Some(serde_json::Value::Null) | None => GetValue::Unset,
         Some(json) => match toml::Value::try_from(json) {
             Ok(value) => GetValue::Default(render(&value)),
@@ -1106,7 +1154,7 @@ port = 3890
         let (_dir, path) = temp_config(COMMENTED);
         let password = Password::new("correct horse battery staple".to_string());
         let strength = set_password(&path, &password, &[]).expect("set");
-        assert!(strength.score >= 2);
+        assert!(strength.strength.score >= 2);
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# How wide the left pane is."), "{after}");
         let auth = crate::config::auth_section_of(&after).expect("valid");
@@ -1142,7 +1190,7 @@ port = 3890
 
     #[test]
     fn get_reads_the_file_falls_back_to_the_default_and_shows_the_password_hash() {
-        let raw = "[server]\nport = 4000\n\n[server.auth]\npassword_hash = \"$argon2id$x\"\n";
+        let raw = "[server]\nport = 4000\n";
         assert_eq!(
             get(raw, &lookup("server.port").unwrap()).unwrap(),
             GetValue::Set("4000".into())
@@ -1152,17 +1200,28 @@ port = 3890
             GetValue::Default("127.0.0.1".into())
         );
         assert_eq!(
-            get(raw, &lookup("server.auth.password").unwrap()).unwrap(),
-            GetValue::Set("$argon2id$x".into()),
-            "get works on a file dux would refuse, and prints the hash"
-        );
-        assert_eq!(
             get(raw, &lookup("providers.nothere.command").unwrap()).unwrap(),
             GetValue::Unset
         );
-        let GetValue::Set(table) = get(raw, &lookup("server.auth").unwrap()).unwrap() else {
-            panic!("a table is printed");
+        // A file dux refuses (this hash is not a real one): `get` still
+        // prints what the file says, and says why the value in use is
+        // unknown.
+        let broken = "[server]\nport = 4000\n\n[server.auth]\npassword_hash = \"$argon2id$x\"\n";
+        let unknown = |path: &str| match get(broken, &lookup(path).unwrap()).unwrap() {
+            GetValue::Unknown { in_file, reason } => {
+                assert!(reason.contains("password_hash"), "{reason}");
+                in_file
+            }
+            other => panic!("{path}: expected Unknown, got {other:?}"),
         };
+        assert_eq!(unknown("server.port").as_deref(), Some("4000"));
+        assert_eq!(unknown("server.host"), None);
+        assert_eq!(
+            unknown("server.auth.password").as_deref(),
+            Some("$argon2id$x")
+        );
+        assert_eq!(unknown("providers.nothere.command"), None);
+        let table = unknown("server.auth").expect("a table is printed");
         assert!(table.contains("password_hash"), "{table}");
     }
 
@@ -1422,5 +1481,103 @@ port = 3890
             assert!(format!("{error:#}").contains("command"), "{error:#}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         }
+    }
+
+    /// `get` reports the value dux runs with: a provider the file lists
+    /// without a command runs an empty one (the shipped command fills only a
+    /// provider the file does not list), never the shipped default.
+    #[test]
+    fn get_reports_the_command_a_listed_provider_actually_runs() {
+        let text = "[providers.claude]\nargs = [\"--verbose\"]\n";
+        let key = lookup("providers.claude.command").unwrap();
+        assert_eq!(get(text, &key).unwrap(), GetValue::Default(String::new()));
+        let unlisted = "[ui]\nleft_width_pct = 20\n";
+        assert_eq!(
+            get(unlisted, &key).unwrap(),
+            GetValue::Default("claude".to_string())
+        );
+    }
+
+    /// On a file dux cannot load, `get` still reads the file's own text, and
+    /// says the value dux would use cannot be worked out, naming why.
+    #[test]
+    fn get_on_a_file_dux_cannot_load_says_the_value_in_use_is_unknown() {
+        let text = "[ui]\nleft_width_pct = 25\n\n[server.auth]\nrequire = \"lan\"\n";
+        let GetValue::Unknown { in_file, reason } =
+            get(text, &lookup("ui.left_width_pct").unwrap()).unwrap()
+        else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(in_file.as_deref(), Some("25"));
+        assert!(reason.contains("require"), "{reason}");
+        let GetValue::Unknown { in_file, .. } =
+            get(text, &lookup("ui.right_width_pct").unwrap()).unwrap()
+        else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(in_file, None);
+    }
+
+    /// A set is refused when the file would then stop dux from starting
+    /// where it did not before, with the start's own words, and nothing is
+    /// written. A problem the file already had does not block an unrelated
+    /// set, and it is listed among the problems left.
+    #[test]
+    fn a_set_that_would_stop_dux_from_starting_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[server]\nport = 3890\n";
+        std::fs::write(&path, text).unwrap();
+        let error = set_plain(&path, &lookup("server.host").unwrap(), "localhost")
+            .expect_err("a hostname is not an IP literal");
+        let start = crate::config::start_check_problems(&{
+            let mut config = Config::default();
+            config.server.host = "localhost".to_string();
+            config
+        });
+        assert!(
+            format!("{error:#}").contains(&start[0]),
+            "{error:#} / {start:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        std::fs::write(&path, "[server]\nhost = \"localhost\"\n").unwrap();
+        let report = set_plain(&path, &lookup("ui.left_width_pct").unwrap(), "30")
+            .expect("an unrelated set is allowed");
+        assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
+        assert!(
+            report.remaining_problems[0].contains("localhost"),
+            "{report:?}"
+        );
+    }
+
+    /// An environment variable is named by the rule dux starts with, so a
+    /// name dux would refuse is refused as a setting path.
+    #[test]
+    fn an_env_name_dux_would_refuse_is_not_a_setting() {
+        assert!(lookup("env.MY-TOKEN").is_err());
+        assert!(lookup("env.1TOKEN").is_err());
+        assert!(lookup("env.MY_TOKEN").is_ok());
+    }
+
+    /// A password stored beside a problem the file already had reports that
+    /// problem, so the caller can say dux will not start with the file.
+    #[test]
+    fn a_password_set_reports_the_problems_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server.auth]\nrequire = \"lan\"\n").unwrap();
+        let password = Password::new("correct horse battery staple".to_string());
+        let set = set_password(&path, &password, &[]).expect("no new problem");
+        assert_eq!(
+            set.remaining_problems.len(),
+            1,
+            "{:?}",
+            set.remaining_problems
+        );
+        assert!(set.remaining_problems[0].contains("require"));
+        let problems = set_secret_text(&path, &lookup("env.TOKEN").unwrap(), &password)
+            .expect("no new problem");
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 }

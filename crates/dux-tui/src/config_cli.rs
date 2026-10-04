@@ -74,11 +74,44 @@ pub(crate) fn run_get(
              print it."
         )?,
         GetValue::Set(value) => writeln!(out, "{value}")?,
+        GetValue::Default(value) if value.is_empty() => {
+            writeln!(out)?;
+            match key.path.as_slice() {
+                [section, name, field] if section == "providers" && field == "command" => writeln!(
+                    err,
+                    "(config.toml lists providers.{name} without a command, so as dux reads it \
+                     the command is empty: that provider has no command and cannot start)"
+                )?,
+                _ => writeln!(
+                    err,
+                    "({path} is not in config.toml; as dux reads the file it is empty)"
+                )?,
+            }
+        }
         GetValue::Default(value) => {
             writeln!(out, "{value}")?;
-            writeln!(err, "({path} is not in config.toml; that is its default)")?;
+            writeln!(
+                err,
+                "({path} is not set in config.toml; dux uses this value)"
+            )?;
         }
         GetValue::Unset => writeln!(err, "{path} is not set")?,
+        GetValue::Unknown { in_file, reason } => {
+            match in_file {
+                Some(_) if key.is_sensitive() && !show => writeln!(
+                    err,
+                    "{path} is set in config.toml; it can hold secrets, so its value is not \
+                     printed. Add --show to print it."
+                )?,
+                Some(value) => writeln!(out, "{value}")?,
+                None => writeln!(err, "{path} is not in config.toml")?,
+            }
+            writeln!(
+                err,
+                "(dux cannot load config.toml ({reason}), so the value it would use cannot be \
+                 worked out; what is shown is what the file says)"
+            )?;
+        }
     }
     Ok(())
 }
@@ -96,7 +129,7 @@ pub(crate) fn run_set(
     // template, as dux itself would, and makes the directory for it.
     crate::config::install_canonical_renderer();
     paths.ensure_dirs()?;
-    match key.policy {
+    let remaining = match key.policy {
         WritePolicy::Secret(_) => set_secret(&key, parsed, paths, secrets, out)?,
         WritePolicy::Plain => {
             if parsed.stdin {
@@ -126,20 +159,28 @@ pub(crate) fn run_set(
                 report.now,
                 paths.config_path.display()
             )?;
-            if !report.remaining_problems.is_empty() {
-                writeln!(
-                    out,
-                    "[server.auth] still has problems, and dux will not start until they are \
-                     fixed:"
-                )?;
-                for problem in &report.remaining_problems {
-                    writeln!(out, "  - {problem}")?;
-                }
-            }
+            write_remaining_problems(out, &report.remaining_problems)?;
+            report.remaining_problems
         }
-    }
+    };
     let outcome = dux_core::reload_signal::signal_running_dux(&paths.lock_path);
-    writeln!(out, "{}", reload_sentence(&outcome))?;
+    writeln!(out, "{}", reload_sentence(&outcome, !remaining.is_empty()))?;
+    Ok(())
+}
+
+/// The problems that still stop dux starting with the file, if any.
+fn write_remaining_problems(out: &mut dyn Write, problems: &[String]) -> Result<()> {
+    if problems.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "config.toml still has problems, and dux will not start with it (a running dux keeps \
+         its current settings) until they are fixed:"
+    )?;
+    for problem in problems {
+        writeln!(out, "  - {problem}")?;
+    }
     Ok(())
 }
 
@@ -194,7 +235,7 @@ fn set_secret(
     paths: &DuxPaths,
     secrets: &mut dyn SecretSource,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if parsed.value.is_some() {
         // The value is deliberately not repeated: it may be the password.
         bail!(
@@ -239,7 +280,7 @@ fn set_secret(
         first
     };
     if !is_password {
-        config_keys::set_secret_text_with(
+        let remaining = config_keys::set_secret_text_with(
             &paths.config_path,
             missing_file_check(paths),
             key,
@@ -251,7 +292,8 @@ fn set_secret(
             key.dotted(),
             paths.config_path.display()
         )?;
-        return Ok(());
+        write_remaining_problems(out, &remaining)?;
+        return Ok(remaining);
     }
     if password.expose().is_empty() {
         bail!(
@@ -265,19 +307,33 @@ fn set_secret(
         &password,
         &inputs,
     ) {
-        Ok(strength) => {
+        Ok(set) if !set.remaining_problems.is_empty() => {
+            // Stored, not in force: dux refuses the file until the problems
+            // are fixed, so no browser has been signed out yet.
+            writeln!(
+                out,
+                "The web UI password is stored (strength: {}): its Argon2id hash is in \
+                 server.auth.password_hash in {}, and the password itself is stored nowhere. It \
+                 is not in force yet.",
+                set.strength.label.as_str(),
+                paths.config_path.display()
+            )?;
+            write_remaining_problems(out, &set.remaining_problems)?;
+            Ok(set.remaining_problems)
+        }
+        Ok(set) => {
             writeln!(
                 out,
                 "The web UI password is set (strength: {}). Its Argon2id hash is in \
                  server.auth.password_hash in {}; the password itself is stored nowhere.",
-                strength.label.as_str(),
+                set.strength.label.as_str(),
                 paths.config_path.display()
             )?;
             writeln!(
                 out,
                 "Every browser signed in to dux is signed out and logs in with the new password."
             )?;
-            Ok(())
+            Ok(Vec::new())
         }
         Err(SetPasswordError::BelowMinimums(check)) => {
             Err(anyhow!("{}", SetPasswordError::BelowMinimums(check)))
@@ -321,7 +377,29 @@ fn user_inputs() -> Vec<String> {
     inputs
 }
 
-fn reload_sentence(outcome: &SignalOutcome) -> String {
+/// What happens next. With `problems_remain`, dux refuses the file: a
+/// running dux rejects the reload and keeps its settings, and a stopped one
+/// will not start, so neither "applied" sentence would be true.
+fn reload_sentence(outcome: &SignalOutcome, problems_remain: bool) -> String {
+    if problems_remain {
+        return match outcome {
+            SignalOutcome::Sent { pid } => format!(
+                "Asked the running dux (PID {pid}) to reload its config; it will reject this \
+                 file and keep its current settings until the problems above are fixed."
+            ),
+            SignalOutcome::NotRunning => "dux is not running, and it will not start with this \
+                                          file until the problems above are fixed."
+                .to_string(),
+            SignalOutcome::Failed { pid, reason } => {
+                let pid = pid.map_or_else(|| "<pid>".to_string(), |pid| pid.to_string());
+                format!(
+                    "The running dux could not be told to reload ({reason}); it would reject this \
+                     file anyway until the problems above are fixed. Then run Reload config in \
+                     dux, or `kill -USR1 {pid}`."
+                )
+            }
+        };
+    }
     match outcome {
         SignalOutcome::Sent { pid } => format!(
             "Asked the running dux (PID {pid}) to reload its config. It says whether the \
@@ -629,7 +707,10 @@ port = 3890
         assert_eq!(get(&paths, "server.port"), ("3890\n".into(), String::new()));
         let (out, err) = get(&paths, "server.host");
         assert_eq!(out, "127.0.0.1\n");
-        assert!(err.contains("default"), "{err}");
+        assert!(
+            err.contains("not set in config.toml") && err.contains("dux uses"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -885,7 +966,7 @@ port = 3890
 
     #[test]
     fn the_reload_sentence_names_each_outcome() {
-        let sent = reload_sentence(&SignalOutcome::Sent { pid: 42 });
+        let sent = reload_sentence(&SignalOutcome::Sent { pid: 42 }, false);
         assert!(sent.contains("PID 42"), "{sent}");
         assert!(
             !sent.contains("live now"),
@@ -895,12 +976,31 @@ port = 3890
             sent.contains("status line") && sent.contains("dux.log"),
             "{sent}"
         );
-        assert!(reload_sentence(&SignalOutcome::NotRunning).contains("next time it starts"));
-        let failed = reload_sentence(&SignalOutcome::Failed {
-            pid: Some(7),
-            reason: "permission denied".to_string(),
-        });
+        assert!(reload_sentence(&SignalOutcome::NotRunning, false).contains("next time it starts"));
+        let failed = reload_sentence(
+            &SignalOutcome::Failed {
+                pid: Some(7),
+                reason: "permission denied".to_string(),
+            },
+            false,
+        );
         assert!(failed.contains("kill -USR1 7"), "{failed}");
+        // With problems left, neither "applied" sentence is said.
+        for outcome in [
+            SignalOutcome::Sent { pid: 42 },
+            SignalOutcome::NotRunning,
+            SignalOutcome::Failed {
+                pid: Some(7),
+                reason: "permission denied".to_string(),
+            },
+        ] {
+            let said = reload_sentence(&outcome, true);
+            assert!(!said.contains("next time it starts"), "{said}");
+            assert!(
+                said.contains("until the problems above are fixed"),
+                "{said}"
+            );
+        }
     }
 
     #[test]
@@ -1031,5 +1131,86 @@ port = 3890
         let text = err.to_string();
         assert!(text.contains("Recover config"), "{text}");
         assert!(!paths.config_path.exists(), "nothing was written");
+    }
+
+    /// A password stored beside a problem the file already had says dux will
+    /// not start with the file (and a running dux keeps its settings) until
+    /// the named problems are fixed, never that the password is in force or
+    /// that browsers were signed out.
+    #[test]
+    fn a_password_set_beside_a_problem_says_dux_will_not_start() {
+        let (_tmp, paths) = setup(Some("[server.auth]\nrequire = \"lan\"\n"));
+        let mut secrets = Canned {
+            stdin: Some("correct horse battery staple\n"),
+            prompts: None,
+        };
+        let said = set(&paths, &["server.auth.password", "--stdin"], &mut secrets)
+            .expect("the set itself adds no problem");
+        assert!(said.contains("will not start"), "{said}");
+        assert!(said.contains("require"), "{said}");
+        assert!(!said.contains("signed out"), "{said}");
+        assert!(!said.contains("is set"), "{said}");
+        assert!(!said.contains("applies the next time it starts"), "{said}");
+        let written = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(written.contains("$argon2id$"), "the password is stored");
+    }
+
+    /// An env value stored beside a problem lists it the same way.
+    #[test]
+    fn an_env_value_set_beside_a_problem_lists_it() {
+        let (_tmp, paths) = setup(Some("[server.auth]\nrequire = \"lan\"\n"));
+        let mut secrets = Canned {
+            stdin: Some("abc\n"),
+            prompts: None,
+        };
+        let said = set(&paths, &["env.TOKEN", "--stdin"], &mut secrets).expect("set");
+        assert!(said.contains("will not start"), "{said}");
+        assert!(said.contains("require"), "{said}");
+    }
+
+    /// What `set` writes is a file dux starts with: a value the start
+    /// refuses (a hostname as server.host, an env name outside the rule) is
+    /// refused by the set, and nothing is written.
+    #[test]
+    fn a_set_never_writes_a_file_dux_refuses_to_start_with() {
+        for (list, stdin) in [
+            (vec!["server.host", "localhost"], None),
+            (vec!["env.MY-TOKEN", "--stdin"], Some("abc\n")),
+        ] {
+            let (_tmp, paths) = setup(Some("[server]\nport = 3890\n"));
+            let mut secrets = Canned {
+                stdin,
+                prompts: None,
+            };
+            set(&paths, &list, &mut secrets).expect_err("refused");
+            assert_eq!(
+                std::fs::read_to_string(&paths.config_path).unwrap(),
+                "[server]\nport = 3890\n"
+            );
+            crate::config::ensure_config(&paths).expect("dux still starts");
+        }
+    }
+
+    /// `get` on a provider the file lists without a command says the command
+    /// is empty as dux reads the file, and that the provider has none.
+    #[test]
+    fn get_says_a_listed_provider_without_a_command_has_none() {
+        let (_tmp, paths) = setup(Some("[providers.claude]\nargs = [\"--verbose\"]\n"));
+        let (out, err) = get(&paths, "providers.claude.command");
+        assert_eq!(out, "\n");
+        assert!(err.contains("no command"), "{err}");
+    }
+
+    /// `get` on a file dux cannot load prints the file's own value and says
+    /// the value dux would use cannot be worked out, and why.
+    #[test]
+    fn get_on_a_file_dux_cannot_load_names_the_problem() {
+        let (_tmp, paths) = setup(Some(
+            "[ui]\nleft_width_pct = 25\n\n[server.auth]\nrequire = \"lan\"\n",
+        ));
+        let (out, err) = get(&paths, "ui.left_width_pct");
+        assert_eq!(out, "25\n");
+        assert!(err.contains("cannot"), "{err}");
+        assert!(err.contains("require"), "{err}");
     }
 }

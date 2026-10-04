@@ -100,8 +100,8 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // The text the file holds now: what the config writer compares saves with.
     config.source_text = dux_core::config::SourceText::of(if migrated { &text } else { &raw });
     config.providers.ensure_defaults();
-    validate_server_host(&config)?;
-    validate_project_envs(&config)?;
+    // The start checks `dux config set` runs too, from one place.
+    dux_core::config::start_check(&config)?;
     // Warn once here (TUI startup and reload both funnel through ensure_config) on
     // an unrecognized clipboard_passthrough so the per-tick host forward can parse
     // silently. The warning is from_config_str's side effect.
@@ -112,28 +112,6 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // the read would be a log flood for the whole run.
     dux_core::config::correct_github_probe_interval(&mut config.ui);
     Ok(config)
-}
-
-/// Reject a `[server] host` that is not an IP literal before the TUI starts.
-/// The TUI flip reads `host` too, so a bad value gets a clear message here
-/// rather than failing later. Delegates to `dux_core::config::parse_server_host`
-/// so this and `resolve_server_plan` accept exactly the same values.
-fn validate_server_host(config: &Config) -> Result<()> {
-    dux_core::config::parse_server_host(&config.server.host).map_err(|e| anyhow::anyhow!(e))?;
-    Ok(())
-}
-
-fn validate_project_envs(config: &Config) -> Result<()> {
-    for project in &config.projects {
-        resolve_agent_env(&config.env, &project.env).with_context(|| {
-            format!(
-                "invalid env for project {}",
-                project.name.as_deref().unwrap_or(&project.path)
-            )
-        })?;
-    }
-    resolve_project_env(&config.env).context("invalid global env")?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2818,7 +2796,8 @@ mod tests {
     fn ensure_config_rejects_non_ip_host() {
         let mut config = Config::default();
         config.server.host = "example.com".to_string();
-        let err = validate_server_host(&config).expect_err("a non-IP host must be rejected");
+        let err =
+            dux_core::config::start_check(&config).expect_err("a non-IP host must be rejected");
         assert!(
             err.to_string().contains("example.com"),
             "the error must name the bad host: {err}"
@@ -2829,9 +2808,9 @@ mod tests {
     fn ensure_config_accepts_ip_hosts() {
         let mut config = Config::default();
         config.server.host = "0.0.0.0".to_string();
-        validate_server_host(&config).expect("0.0.0.0 is a valid host");
+        dux_core::config::start_check(&config).expect("0.0.0.0 is a valid host");
         config.server.host = "127.0.0.1".to_string();
-        validate_server_host(&config).expect("loopback is a valid host");
+        dux_core::config::start_check(&config).expect("loopback is a valid host");
     }
 
     #[test]

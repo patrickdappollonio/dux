@@ -2598,6 +2598,12 @@ pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
+/// Whether `name` is a name dux accepts for an environment variable, in
+/// `[env]` and in a project's `env`: `[A-Za-z_][A-Za-z0-9_]*`.
+pub fn is_valid_env_name(name: &str) -> bool {
+    is_valid_var_name(name)
+}
+
 fn validate_project_env_name(name: &str) -> Result<()> {
     if is_valid_var_name(name) {
         Ok(())
@@ -3211,6 +3217,67 @@ fn is_auth_section_header(line: &str) -> bool {
         .and_then(|server| server.get("auth"))
         .and_then(|auth| auth.as_table())
         .is_some_and(|auth| !auth.is_implicit())
+}
+
+/// Every check a start makes on a config beyond reading it: the server host
+/// must be an IP literal, and every environment variable (global and per
+/// project) must have a valid name and expansion. The terminal UI's start and
+/// `dux config set` both ask this one function, so a value `set` accepts is
+/// one dux starts with.
+pub fn start_check_problems(config: &Config) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Err(error) = parse_server_host(&config.server.host) {
+        problems.push(error);
+    }
+    for project in &config.projects {
+        if let Err(error) = resolve_agent_env(&config.env, &project.env) {
+            problems.push(format!(
+                "invalid env for project {}: {error:#}",
+                project.name.as_deref().unwrap_or(&project.path)
+            ));
+        }
+    }
+    if let Err(error) = resolve_project_env(&config.env) {
+        problems.push(format!("invalid global env: {error:#}"));
+    }
+    problems
+}
+
+/// [`start_check_problems`], failing on the first.
+pub fn start_check(config: &Config) -> Result<()> {
+    match start_check_problems(config).into_iter().next() {
+        Some(problem) => Err(anyhow!(problem)),
+        None => Ok(()),
+    }
+}
+
+/// Every problem that stops dux starting with a whole config file's text:
+/// the `[server.auth]` problems key by key ([`auth_problems_of`]), and the
+/// start checks ([`start_check_problems`]) on the rest of the file as dux
+/// reads it. Empty when dux starts with it.
+pub fn start_problems_of(raw: &str) -> Vec<String> {
+    let mut problems = auth_problems_of(raw);
+    let Ok(mut file) = toml::from_str::<toml::Table>(raw) else {
+        return problems;
+    };
+    // The rest of the file, read the way a start reads it, with the auth
+    // section (already judged key by key above) left out so it cannot stop
+    // the read.
+    if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
+        server.remove("auth");
+    }
+    let rest = toml::to_string(&file).unwrap_or_default();
+    match config_from_text_as_written(&rest) {
+        Ok(config) => problems.extend(start_check_problems(&apply_load_corrections(config))),
+        Err(problem) => problems.push(problem.reason().to_string()),
+    }
+    problems
+}
+
+/// The config dux runs with from a whole file's text: read as a start reads
+/// it, with the corrections a load makes.
+pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text_as_written(raw).map(apply_load_corrections)
 }
 
 /// Every problem the `[server.auth]` section of a whole config file's text

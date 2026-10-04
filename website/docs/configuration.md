@@ -55,10 +55,16 @@ dux config set server.allowed_hosts '["dux.example.com", "box.example.com"]'
 dux config set providers.claude.command claude
 ```
 
-- `get` prints what `config.toml` says, or the default when the file leaves the setting
-  out (a note on stderr says so, so the value alone is what a script captures). It also
-  works when `[server.auth]` is invalid and dux refuses to start, which is how you look at
-  the broken part.
+- `get` prints what `config.toml` says, or, when the file leaves the setting out, the value
+  dux actually uses with that file (a note on stderr says so, so the value alone is what a
+  script captures). A provider listed without a command reads as an empty command, and
+  `get` says that provider cannot start. It also works when dux refuses to start with the
+  file, which is how you look at the broken part: it prints what the file says and names
+  the problem that keeps dux from working out the value it would use.
+- `set` never writes a file dux would refuse to start with: a value that would add such a
+  problem (a host name where `server.host` needs an IP address, an environment variable
+  name dux does not accept) is refused with the same message a start gives, and nothing
+  is written.
 - If `config.toml` is not valid TOML at all, `get` and `set` refuse it too and name the
   line that is wrong. Fix that line by hand (or copy back a backup), then carry on.
 - `set` checks the value before writing it: a number has to be a number in range, a

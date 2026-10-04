@@ -1316,10 +1316,12 @@ pub fn mutate_config_file_with<T>(
         .map(|(outcome, _)| outcome)
 }
 
-/// [`mutate_config_file_with`] for a change that may leave problems the
-/// file's `[server.auth]` ALREADY has, so a section with several broken
-/// values can be repaired one at a time. A change that adds a problem is
-/// refused, naming it, and nothing is written. Returns the problems left.
+/// [`mutate_config_file_with`] for a change that may leave problems the file
+/// ALREADY has, so a file with several can be repaired one at a time. A
+/// problem is anything that stops dux starting with the file
+/// ([`crate::config::start_problems_of`]: `[server.auth]` key by key, then
+/// the start checks), so a change that adds one is refused with the start's
+/// own words, and nothing is written. Returns the problems left.
 pub fn mutate_config_file_repairing<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
@@ -1332,7 +1334,8 @@ pub fn mutate_config_file_repairing<T>(
 enum AuthRule {
     /// A section that loads.
     Valid,
-    /// No problem the file did not have before the change.
+    /// No problem stopping a start that the file did not have before the
+    /// change.
     NoNewProblems,
 }
 
@@ -1362,7 +1365,10 @@ fn mutate_config_file_ruled<T>(
             crate::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
-    let before = crate::config::auth_problems_of(&raw);
+    let before = match rule {
+        AuthRule::Valid => Vec::new(),
+        AuthRule::NoNewProblems => crate::config::start_problems_of(&raw),
+    };
     let outcome = change(&mut doc)?;
     let text = doc.to_string();
     let remaining = match rule {
@@ -1373,16 +1379,19 @@ fn mutate_config_file_ruled<T>(
             Vec::new()
         }
         AuthRule::NoNewProblems => {
-            let after = crate::config::auth_problems_of(&text);
-            let added: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
+            let after = crate::config::start_problems_of(&text);
+            let added: Vec<&str> = after
+                .iter()
+                .filter(|p| !before.contains(p))
+                .map(String::as_str)
+                .collect();
             if !added.is_empty() {
-                let added: Vec<&str> = added.iter().map(|p| p.as_str()).collect();
-                return Err(auth_refusal(
-                    config_path,
-                    &text,
-                    &added.join("; "),
-                    "change",
-                ));
+                anyhow::bail!(
+                    "after that change, dux would refuse to start with {}: {}. Nothing was \
+                     written.",
+                    config_path.display(),
+                    added.join("; ")
+                );
             }
             after
         }
