@@ -45,6 +45,12 @@
 #   holding an auth setting. The real setting written as dotted keys or an
 #   inline table still starts, and the retired `[auth]` holding only its old
 #   `username` still starts.
+# - A map of user-chosen names written as an array (`[[env]]`,
+#   `[[providers]]`, `macros = [{ … }]`, a project's `env` as an array) is no
+#   map of names, so an auth setting inside it is a misplaced setting, not a
+#   name, and stops `dux server` too (the terminal UI already refused these
+#   files on their types). A variable named like one in a project's own
+#   `env` table, inside the `[[projects]]` list, is still just a name.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -510,6 +516,14 @@ refuse start "[env]\n\"auth.require\" = \"x\"\n"
 start start "[server]\nauth.require = \"everywhere\"\n"
 start start "server.auth.require = \"everywhere\"\n"
 start start "[server]\nauth = { require = \"everywhere\" }\n"
+refuse refuse(was:start) "[[env]]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n\n[[providers]]\nrequire = \"everywhere\"\n"
+refuse refuse(was:start) "macros = [{ password_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }]\n"
+refuse refuse(was:start) "env = [{ password_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }]\n"
+refuse refuse(was:start) "[[macros]]\nrequire = \"everywhere\"\n"
+refuse refuse(was:start) "keys = [{ require = \"everywhere\" }]\n"
+refuse refuse(was:start) "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\nenv = [{ password_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }]\n"
+start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\nrequire = \"x\"\n"
 
 # Every case above that is TOML with at least one table, written again twice:
 # once with each section as an inline table (`server = { port = 4000 }`,

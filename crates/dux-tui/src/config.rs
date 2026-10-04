@@ -1823,7 +1823,9 @@ fn keys_start_problems(raw: &str) -> Vec<String> {
         keys_only["keys"] = keys.clone();
     }
     if let Ok(config) = toml::from_str::<Config>(&keys_only.to_string()) {
-        problems.extend(validate_keys(&config.keys).err());
+        problems.extend(key_binding_problems(&config.keys, &|action| {
+            dux_core::config::line_of_setting(raw, &["keys", action])
+        }));
     }
     problems
 }
@@ -2390,41 +2392,59 @@ fn not_a_key_sentence(action: &str, at: Option<usize>) -> String {
 ///    binding that does not is named by its action, never repeated.
 /// 3. No two actions bind the same normalized key in overlapping scopes.
 pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
+    let problems = key_binding_problems(keys, &|_| None);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// Every problem with the bindings in `keys`, none of them repeating a
+/// binding (a value pasted in the wrong place, a token, may be what is
+/// there): an action dux does not have, a binding that is not a key, and two
+/// actions binding the same key in a shared scope, each named by its action.
+/// `line_of` places an action's binding by its line where the file's text is
+/// at hand; an action the file leaves out binds its default key.
+fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usize>) -> Vec<String> {
+    let mut problems = Vec::new();
     for (name, key_strs) in &keys.bindings {
         let valid = keybindings::BINDING_DEFS
             .iter()
             .any(|d| d.action.config_name() == name);
         if !valid {
-            return Err(format!("[keys] unknown action: \"{name}\""));
-        }
-        if !key_strs
+            problems.push(format!("[keys] unknown action: \"{name}\""));
+        } else if !key_strs
             .iter()
             .all(|binding| binding_is_understood(binding))
         {
-            return Err(not_a_key_sentence(name, None));
+            problems.push(not_a_key_sentence(name, line_of(name)));
         }
     }
-
-    // Detect conflicting bindings (same key in overlapping scopes).
-    let conflicts = keybindings::detect_conflicts(keys);
-    if !conflicts.is_empty() {
-        let mut msg = String::from("[keys] conflicting keybindings detected:");
-        for c in &conflicts {
-            msg.push_str(&format!(
-                "\n  - \"{}\" is bound to both \"{}\" and \"{}\" in {}",
-                c.key_label,
-                c.action_a,
-                c.action_b,
-                c.scope.display_name(),
-            ));
-        }
-        msg.push_str(
-            "\nCheck your [keys.bindings] configuration and ensure each key is unique within its scope.",
-        );
-        return Err(msg);
+    // Conflicts are judged once every binding is a key dux understands.
+    if !problems.is_empty() {
+        return problems;
     }
-
-    Ok(())
+    let placed = |action: &str| {
+        if keys.bindings.contains_key(action) {
+            match line_of(action) {
+                Some(line) => format!("{action} (line {line})"),
+                None => action.to_string(),
+            }
+        } else {
+            format!("{action} (its default key)")
+        }
+    };
+    for conflict in keybindings::detect_conflicts(keys) {
+        problems.push(format!(
+            "[keys] two actions bind the same key: {} and {} in the {}; give one of them a \
+             different key in [keys]",
+            placed(conflict.action_a),
+            placed(conflict.action_b),
+            conflict.scope.display_name(),
+        ));
+    }
+    problems
 }
 
 #[cfg(test)]
@@ -3968,17 +3988,40 @@ oneshot_output = "stdout"
         let result = validate_keys(&keys);
         assert!(result.is_err(), "duplicate key in same scope should error");
         let msg = result.unwrap_err();
-        assert!(
-            msg.contains("conflicting"),
-            "error should mention conflict: {msg}"
+        // Named by its actions and scope, never by the key, and pointed at
+        // the table that exists.
+        assert_eq!(
+            msg,
+            "[keys] two actions bind the same key: toggle_project and new_agent in the \
+             Projects pane; give one of them a different key in [keys]"
         );
+    }
+
+    /// The start check places each action of a conflict by its line, or as
+    /// its default key where the file leaves the action out, and never
+    /// repeats the key.
+    #[test]
+    fn a_conflict_is_named_by_its_actions_and_lines() {
+        let raw = "[keys]\nnew_agent = [\"ctrl-alt-y\"]\ntoggle_project = [\"ctrl-alt-y\"]\n";
+        let problems = keys_start_problems(raw);
+        assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            msg.contains("toggle_project"),
-            "error should name first action: {msg}"
+            problems[0].contains("new_agent (line 2)")
+                && problems[0].contains("toggle_project (line 3)")
+                && problems[0].contains("in the Projects pane")
+                && !problems[0].contains("ctrl-alt-y")
+                && !problems[0].contains("keys.bindings"),
+            "{problems:?}"
         );
+        // `n` is new_agent's default key, which the file leaves out.
+        let raw = "[keys]\ntoggle_project = [\"n\"]\n";
+        let problems = keys_start_problems(raw);
         assert!(
-            msg.contains("new_agent"),
-            "error should name second action: {msg}"
+            problems
+                .iter()
+                .any(|p| p.contains("toggle_project (line 2)")
+                    && p.contains("new_agent (its default key)")),
+            "{problems:?}"
         );
     }
 

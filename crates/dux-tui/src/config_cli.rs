@@ -2133,3 +2133,6 @@ mod stdin_limits_tests;
 
 #[cfg(test)]
 mod key_binding_values_tests;
+
+#[cfg(test)]
+mod conflicting_binding_tests;

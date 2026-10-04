@@ -3141,6 +3141,10 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// provider, a macro or a binding's action, a variable in a project's `env`)
 /// is just a name: a provider called `password_hash` is not a password hash,
 /// though a field inside it is a field of dux's schema like anywhere else.
+/// A key reached through an array is never such a name (the top-level
+/// `[[projects]]` list aside, whose entries are projects): a map of names
+/// written as an array (`[[env]]`, `[[providers]]`, `macros = [{…}]`) is no
+/// map of names, so an auth setting in it is misplaced like anywhere else.
 /// And the top-level `[auth]` the retired HTTP basic-auth feature wrote,
 /// which real configs still carry (`username = "…"`), is left alone while it
 /// holds nothing `[server.auth]` has; the documentation restore cleans it up.
@@ -3205,6 +3209,12 @@ struct AuthWalk {
     parts: Vec<String>,
     /// Whether an array was passed on the way.
     through_array: bool,
+    /// Whether an array other than the top-level `[[projects]]` list (the
+    /// one array of tables the schema has, whose entries are projects) was
+    /// passed on the way. Past one, no key is a name the user chose: a map
+    /// of names written as an array (`[[env]]`, `[[providers]]`,
+    /// `macros = [{…}]`) is no map of names at all.
+    through_other_array: bool,
     /// Whether a quoted key holding dots was passed on the way.
     through_split: bool,
 }
@@ -3231,7 +3241,9 @@ fn misplaced_auth_settings(
                 // The name position of a map of user-chosen names, reached
                 // without a quoted dotted key: the key is the name the user
                 // chose, never a setting.
-                let a_name = !walk.through_split && names_a_user_entry(&walk.keys);
+                let a_name = !walk.through_split
+                    && !walk.through_other_array
+                    && names_a_user_entry(&walk.keys);
                 walk.shown.push(AuthStep::Key(key.clone()));
                 walk.keys.push(key.clone());
                 if !a_name {
@@ -3279,13 +3291,17 @@ fn misplaced_auth_settings(
         }
         toml::Value::Array(items) => {
             let array_before = walk.through_array;
+            let other_before = walk.through_other_array;
+            let the_projects_list = !walk.through_array && walk.keys == ["projects"];
             walk.through_array = true;
+            walk.through_other_array |= !the_projects_list;
             for (index, item) in items.iter().enumerate() {
                 walk.shown.push(AuthStep::Index(index));
                 misplaced_auth_settings(item, walk, found);
                 walk.shown.pop();
             }
             walk.through_array = array_before;
+            walk.through_other_array = other_before;
         }
         _ => {}
     }

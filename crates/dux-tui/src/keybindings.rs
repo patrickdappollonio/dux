@@ -2140,6 +2140,10 @@ fn normalize_palette_match(s: &str) -> String {
 /// A detected conflict: the same key is bound to two actions in a shared scope.
 #[derive(Debug, Clone)]
 pub struct KeyConflict {
+    /// The key both bind, as config text. Kept for the tests that check
+    /// which key conflicted: no message prints it, since a binding is never
+    /// repeated in an error (see `config::key_binding_problems`).
+    #[cfg(test)]
     pub key_label: String,
     pub scope: BindingScope,
     pub action_a: &'static str,
@@ -2223,6 +2227,7 @@ fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
 /// winner).
 pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
     let resolved = resolve_keys(keys);
+    #[cfg(test)]
     let format = config_format();
     let mut conflicts = Vec::new();
 
@@ -2251,9 +2256,11 @@ pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
             for ka in keys_a {
                 for kb in keys_b {
                     if keys_conflict(ka, kb) {
+                        #[cfg(test)]
                         let label = format.to_string(ka.normalized()).to_lowercase();
                         for &scope in &shared_scopes {
                             conflicts.push(KeyConflict {
+                                #[cfg(test)]
                                 key_label: label.clone(),
                                 scope,
                                 action_a: action_a.config_name(),
