@@ -189,8 +189,10 @@ async fn login(
     match state.auth.verify(&a.classification, password).await {
         Verify::Right { generation, weak } => {
             state.auth.note_strength(&generation, weak);
-            let token = match state.auth.sessions.issue(&generation).await {
-                Ok(token) => token,
+            let token = match state.auth.issue_session(&a.facts, &generation).await {
+                Ok(super::Issued::Session(token)) => token,
+                Ok(super::Issued::Blocked) => return super::middleware::blocked(),
+                Ok(super::Issued::Stale) => return password_changed_meanwhile(),
                 Err(error) => return server_error(format!("Could not start a session: {error:#}")),
             };
             let secure = cookie::secure(config.cookie_secure, a.classification.https_serve_route);
@@ -215,15 +217,20 @@ async fn login(
                 "message": "No password is set on this dux, so there is nothing to sign in to.",
             }),
         ),
-        Verify::Stale => refusal(
-            StatusCode::CONFLICT,
-            json!({
-                "error": "password_changed",
-                "message": "The password changed while this sign-in was being checked. Sign in with the new one.",
-            }),
-        ),
+        Verify::Stale => password_changed_meanwhile(),
         Verify::Failed(error) => server_error(format!("Could not check the password: {error}")),
     }
+}
+
+/// The answer to a sign-in whose password changed while it was checked.
+fn password_changed_meanwhile() -> Response {
+    refusal(
+        StatusCode::CONFLICT,
+        json!({
+            "error": "password_changed",
+            "message": "The password changed while this sign-in was being checked. Sign in with the new one.",
+        }),
+    )
 }
 
 /// `POST /api/v1/auth/logout`: end this browser's session and clear its

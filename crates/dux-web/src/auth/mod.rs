@@ -279,6 +279,15 @@ pub(crate) enum Verify {
     Failed(String),
 }
 
+/// What [`AuthState::issue_session`] did.
+pub(crate) enum Issued {
+    Session(dux_core::web_sessions::NewToken),
+    /// The address was blocked while the check ran.
+    Blocked,
+    /// The password changed while the check ran.
+    Stale,
+}
+
 /// Where a blocked client is told the block lives. The full path of the file
 /// is in dux's own log line, never in an answer to the client it blocks.
 pub(crate) const BLOCKED_WHERE: &str =
@@ -543,12 +552,16 @@ impl AuthState {
         let Some(hash) = snapshot.config.password_hash().map(str::to_string) else {
             return Verify::NoPassword;
         };
-        if let Err(wait) = self
+        // Reserved at once, so an attempt sent beside this one waits as if
+        // this one had failed; settled when the check is accounted for (or
+        // dropped with the request, if it never got a slot).
+        let reservation = match self
             .admission
             .check_attempt(&snapshot.config, c, Instant::now())
         {
-            return Verify::Wait(wait);
-        }
+            Ok(reservation) => reservation,
+            Err(wait) => return Verify::Wait(wait),
+        };
         let Ok(permit) = self
             .gate
             .enter(
@@ -559,14 +572,6 @@ impl AuthState {
         else {
             return Verify::Busy;
         };
-        // A failure from this address while the check waited in the queue
-        // counts before this one runs.
-        if let Err(wait) = self
-            .admission
-            .check_attempt(&snapshot.config, c, Instant::now())
-        {
-            return Verify::Wait(wait);
-        }
         let state = Arc::clone(self);
         let c = c.clone();
         let check = tokio::spawn(async move {
@@ -584,7 +589,7 @@ impl AuthState {
                 (outcome, weak)
             })
             .await;
-            state.settle(&snapshot, &c, checked).await
+            state.settle(&snapshot, &c, checked, reservation).await
         });
         match check.await {
             Ok(verdict) => verdict,
@@ -600,7 +605,11 @@ impl AuthState {
         snapshot: &AuthSnapshot,
         c: &Classification,
         checked: Result<(Result<bool, dux_core::auth::AuthError>, bool), tokio::task::JoinError>,
+        reservation: admission::Reservation,
     ) -> Verify {
+        // The reservation is given back only once the outcome is counted, so
+        // there is no moment when the check is neither pending nor counted.
+        let _reservation = reservation;
         match checked {
             Ok((Ok(true), weak)) => {
                 if self.snapshot().generation != snapshot.generation {
@@ -721,6 +730,50 @@ impl AuthState {
     }
 
     /// A session ended (sign-out): revoke it and close the sockets that held it.
+    /// Whether the request in `facts` is refused by the blocklist right now,
+    /// judged afresh rather than from its assessment.
+    fn blocked_now(&self, facts: &RequestFacts) -> bool {
+        let snapshot = self.snapshot();
+        let exposure = self.exposure();
+        let interfaces = self.interfaces();
+        let classification = provenance::classify(facts, &exposure, &interfaces);
+        self.admission.is_blocked(
+            &snapshot.blocks,
+            &classification,
+            &own_addresses(&exposure, &interfaces, facts.arrival),
+        )
+    }
+
+    /// Start a session for a sign-in whose password was right under
+    /// `generation`, unless admission changed while its check ran (decided,
+    /// after review): the address was blocked meanwhile, or the password
+    /// changed. Judged when the session is issued and again once it exists,
+    /// so a block landing in between still takes the session back.
+    pub(crate) async fn issue_session(
+        &self,
+        facts: &RequestFacts,
+        generation: &str,
+    ) -> Result<Issued, anyhow::Error> {
+        let refused = |state: &Self| {
+            if state.snapshot().generation != generation {
+                Some(Issued::Stale)
+            } else if state.blocked_now(facts) {
+                Some(Issued::Blocked)
+            } else {
+                None
+            }
+        };
+        if let Some(refused) = refused(self) {
+            return Ok(refused);
+        }
+        let token = self.sessions.issue(generation).await?;
+        if let Some(refused) = refused(self) {
+            self.end_session(token.digest).await;
+            return Ok(refused);
+        }
+        Ok(Issued::Session(token))
+    }
+
     pub(crate) async fn end_session(&self, digest: TokenDigest) {
         self.sessions.revoke(digest).await;
         self.bump();

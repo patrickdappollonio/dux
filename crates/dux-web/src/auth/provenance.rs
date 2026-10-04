@@ -144,12 +144,11 @@ pub struct RequestFacts {
     pub forwarded_client: Option<IpAddr>,
     /// Every address `X-Forwarded-For` names, in order.
     pub forwarded_for: Vec<IpAddr>,
-    /// Every address `X-Real-IP` and RFC 7239 `Forwarded: for=` name.
+    /// Every address `X-Real-IP` and RFC 7239 `Forwarded: for=` name. Only
+    /// ever matched against the blocklist, where they can only make a request
+    /// stricter: Tailscale's serve proxy passes a client's own copies straight
+    /// through, so they prove nothing about where it came from.
     pub other_named: Vec<IpAddr>,
-    /// Whether `X-Real-IP` or `Forwarded` carries a value that names no
-    /// Tailscale address (one that does not read as an address counts).
-    /// Tailscale's serve proxy never sets either to anything else.
-    pub other_names_beyond_tailscale: bool,
     /// The `Host` header, as sent.
     pub host: Option<String>,
     /// Whether Tailscale's identity headers are present.
@@ -180,16 +179,7 @@ impl RequestFacts {
             .filter_map(|part| parse_forwarded_address(part))
             .collect();
         let mut other_named = Vec::new();
-        let mut other_names_beyond_tailscale = false;
-        let mut note = |value: Option<IpAddr>| match value {
-            Some(ip) => {
-                if !is_tailscale(dux_core::config_auth::canonical(ip)) {
-                    other_names_beyond_tailscale = true;
-                }
-                other_named.push(ip);
-            }
-            None => other_names_beyond_tailscale = true,
-        };
+        let mut note = |value: Option<IpAddr>| other_named.extend(value);
         for value in headers.get_all("x-real-ip").iter() {
             note(
                 value
@@ -214,7 +204,6 @@ impl RequestFacts {
             forwarded_client,
             forwarded_for,
             other_named,
-            other_names_beyond_tailscale,
             host: headers
                 .get(axum::http::header::HOST)
                 .and_then(|h| h.to_str().ok())
@@ -347,11 +336,20 @@ const OWN_ADDRESS: &str = "the connection came from one of this machine's own ad
 /// aimed there, so it is the network, never this machine; and it is never
 /// written anywhere or banned, because the address is this machine's.
 fn own_address(peer: IpAddr, local: IpAddr, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
-    peer == local
-        || exposure.own_tailscale_ip(peer)
+    peer == local || is_own(peer, exposure, interfaces)
+}
+
+/// Whether `ip` is one of this machine's own addresses: a Tailscale address
+/// from the current look, or an address on one of its interfaces. The one
+/// own-address check every path asks, a direct peer's and a proven serve
+/// client's alike (decided, after review): this machine opening its own
+/// serve URL arrives as its own Tailscale address, and it is no more the
+/// tailnet, nor more bannable, than this machine on any other path.
+fn is_own(ip: IpAddr, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
+    exposure.own_tailscale_ip(ip)
         || interfaces
             .iter()
-            .any(|own| dux_core::config_auth::canonical(*own) == peer)
+            .any(|own| dux_core::config_auth::canonical(*own) == ip)
 }
 
 /// What a request would be if the exposure gate were open: the only way a
@@ -546,14 +544,17 @@ fn candidate(
     if !facts.forwarded {
         return Ok(Candidate::ThisMachine { peer });
     }
-    // Proven to come through `tailscale serve` only when everything
-    // Tailscale's serve proxy sets is there and nothing it never sets is: the
-    // route's own name and port in the Host, the identity headers, the
-    // nearest hop's X-Forwarded-For naming a Tailscale address (a LAN client
-    // named by another proxy on this machine never is), and no X-Real-IP or
-    // Forwarded naming anything else (decided: a proxy that keeps the
-    // client's Host and passes its headers on is how a LAN client would
-    // otherwise pose as the tailnet).
+    // Proven to come through `tailscale serve` when everything Tailscale's
+    // serve proxy sets is there: a confirmed non-Funnel route's own name and
+    // port in the Host, the identity headers, and the nearest hop's
+    // X-Forwarded-For naming a Tailscale address; the exposure gate is applied
+    // after. That last rule is what stops a LAN client posing through another
+    // proxy on this machine that keeps its Host and passes its headers on:
+    // that proxy appends the LAN address, which tailscale serve never reports.
+    // X-Real-IP and Forwarded play no part (decided, after review): the serve
+    // proxy passes a client's own copies straight through, so on a serve
+    // request they are client-chosen noise, and letting them refuse the proof
+    // let a tailnet guesser turn its verified, bannable address into a claim.
     let route = facts
         .host
         .as_deref()
@@ -563,14 +564,22 @@ fn candidate(
         .map(canonical)
         .filter(|ip| is_tailscale(*ip));
     match (route, tailnet_hop) {
-        (Some(route), Some(client))
-            if facts.identity_headers && !facts.other_names_beyond_tailscale =>
+        (Some(_), Some(client))
+            if facts.identity_headers && is_own(client, exposure, interfaces) =>
         {
-            Ok(Candidate::ServeClient {
-                client,
-                https: route.is_https(),
+            // This machine through its own serve URL: the network, unverified
+            // and never written, slowed with its own addresses' traffic.
+            Err(Classification {
+                loopback_distrusted: Some(OWN_ADDRESS),
+                claimed_ip: None,
+                via: Via::OwnAddress,
+                ..base.clone()
             })
         }
+        (Some(route), Some(client)) if facts.identity_headers => Ok(Candidate::ServeClient {
+            client,
+            https: route.is_https(),
+        }),
         _ => Err(Classification {
             unvouched_proxy: true,
             ..base.clone()
@@ -1080,39 +1089,46 @@ mod tests {
             ClientClass::Tailnet,
             "only the nearest hop decides"
         );
-        assert_eq!(
-            with(&[
-                ("x-forwarded-for", "100.64.0.9"),
-                ("x-real-ip", "192.168.1.9")
-            ])
-            .class,
-            ClientClass::Network
+        // X-Real-IP and Forwarded play no part in the proof: the serve proxy
+        // passes a client's own copies through. They still name addresses the
+        // blocklist matches.
+        for extra in [
+            ("x-real-ip", "192.168.1.9"),
+            ("forwarded", "for=\"[2001:db8::1]:443\""),
+            ("forwarded", "for=unknown"),
+        ] {
+            let c = with(&[("x-forwarded-for", "100.64.0.9"), extra]);
+            assert_eq!(c.class, ClientClass::Tailnet, "{extra:?}");
+            assert_eq!(
+                c.verified_ip,
+                Some("100.64.0.9".parse().unwrap()),
+                "{extra:?}"
+            );
+        }
+        let named = with(&[
+            ("x-forwarded-for", "100.64.0.9"),
+            ("x-real-ip", "192.168.1.9"),
+        ])
+        .named;
+        assert!(named.contains(&"192.168.1.9".parse().unwrap()), "{named:?}");
+    }
+
+    #[test]
+    fn this_machine_through_its_own_serve_url_is_the_network_and_unverified() {
+        let exposure = served("https://box.tail.ts.net", false);
+        let c = class_of(
+            arrival("127.0.0.1:1", LOOPBACK),
+            &[
+                ("host", "box.tail.ts.net"),
+                ("tailscale-user-login", "owner@example.com"),
+                ("x-forwarded-for", OWN_TAILSCALE),
+            ],
+            &exposure,
         );
-        assert_eq!(
-            with(&[
-                ("x-forwarded-for", "100.64.0.9"),
-                ("forwarded", "for=\"[2001:db8::1]:443\"")
-            ])
-            .class,
-            ClientClass::Network
-        );
-        assert_eq!(
-            with(&[
-                ("x-forwarded-for", "100.64.0.9"),
-                ("forwarded", "for=unknown")
-            ])
-            .class,
-            ClientClass::Network,
-            "a name that is not an address fails closed"
-        );
-        assert_eq!(
-            with(&[
-                ("x-forwarded-for", "100.64.0.9"),
-                ("x-real-ip", "100.64.0.9")
-            ])
-            .class,
-            ClientClass::Tailnet
-        );
+        assert_eq!(c.class, ClientClass::Network);
+        assert_eq!(c.verified_ip, None, "never banned");
+        assert_eq!(c.claimed_ip, None, "never written");
+        assert_eq!(c.via, Via::OwnAddress);
     }
 
     #[test]

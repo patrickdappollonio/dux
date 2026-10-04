@@ -1554,22 +1554,21 @@ async fn a_lan_client_through_another_local_proxy_is_not_tailscale_serve() {
         &dux.send(THIS_MACHINE, via("192.168.1.50", None)).await,
         "LAN XFF",
     );
-    assert_auth_required(
-        &dux.send(
-            THIS_MACHINE,
-            via("100.64.0.9", Some(("x-real-ip", "192.168.1.50"))),
-        )
-        .await,
-        "a non-Tailscale X-Real-IP",
-    );
-    assert_auth_required(
-        &dux.send(
-            THIS_MACHINE,
-            via("100.64.0.9", Some(("forwarded", "for=192.168.1.50"))),
-        )
-        .await,
-        "a non-Tailscale Forwarded",
-    );
+    // X-Real-IP and Forwarded are not part of the proof: tailscale serve
+    // passes a client's own copies through, so they decide nothing here. The
+    // nearest hop's X-Forwarded-For above is what refuses the LAN client.
+    for extra in [
+        ("x-real-ip", "192.168.1.50"),
+        ("forwarded", "for=192.168.1.50"),
+    ] {
+        assert_eq!(
+            dux.send(THIS_MACHINE, via("100.64.0.9", Some(extra)))
+                .await
+                .status,
+            StatusCode::OK,
+            "{extra:?}"
+        );
+    }
     assert_eq!(
         dux.send(THIS_MACHINE, via("100.64.0.9", None)).await.status,
         StatusCode::OK,
@@ -2386,4 +2385,186 @@ async fn through_a_raw_forward_outsiders_share_the_plain_loopback_bucket() {
     // The owner on plain loopback now waits with it.
     let mine = dux.login(THIS_MACHINE, PASSWORD).await;
     assert_eq!(mine.status, StatusCode::TOO_MANY_REQUESTS, "{}", mine.body);
+}
+
+// ── Concurrent guesses, serve from this machine, serve headers ───────────
+
+/// After a failure an address waits before its next attempt is checked. Two
+/// guesses sent at once from the same verified address must not both be
+/// checked: the second is the "next attempt" and must wait (429), whatever
+/// order the two arrive in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_guesses_from_one_address_are_not_all_checked() {
+    let dux = Dux::with_password(
+        "failed_login_delay_seconds = 30\nfailed_login_max_delay_seconds = 30\n\
+         max_failed_logins = 0\nmax_failed_logins_per_minute = 0",
+    );
+    let (a, b) = tokio::join!(
+        dux.login(NETWORK, "first wrong guess here"),
+        dux.login(NETWORK, "second wrong guess here"),
+    );
+    let checked = [&a, &b]
+        .iter()
+        .filter(|answer| answer.status == StatusCode::UNAUTHORIZED)
+        .count();
+    assert_eq!(
+        checked, 1,
+        "both concurrent guesses were checked with no wait between them: {} {} / {} {}",
+        a.status, a.body, b.status, b.body
+    );
+}
+
+/// A `tailscale serve` request whose client is THIS machine's own Tailscale
+/// address (a browser or a relay on this machine opening the serve URL). The
+/// one own-address rule says such a peer is the network, never banned and
+/// never written to config.toml. Failed sign-ins from it must not put this
+/// machine's own Tailscale address into blocked_addresses.
+#[tokio::test]
+async fn serve_from_this_machines_own_tailscale_address_is_never_written_to_the_blocklist() {
+    use dux_web::exposure::FunnelState;
+    let own = own_tailscale_ips()[0].to_string();
+    let exposure = exposure_with_route(FunnelState::Open, false);
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nmax_failed_logins = 2\nfailed_login_delay_seconds = 0\n\
+             max_failed_logins_per_minute = 0",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(exposure),
+    );
+    let via_serve = |req: Req| {
+        req.header("host", "box.tail0000.ts.net")
+            .header("origin", "https://box.tail0000.ts.net")
+            .header("tailscale-user-login", "owner@example.com")
+            .header("x-forwarded-for", &own)
+    };
+    for _ in 0..3 {
+        let _ = dux
+            .send(
+                THIS_MACHINE,
+                via_serve(
+                    Req::new(Method::POST, "/api/v1/auth/login")
+                        .json(json!({ "password": "wrong" })),
+                ),
+            )
+            .await;
+    }
+    let config = dux.config();
+    assert!(
+        !config.contains(&format!("\"{own}\"")),
+        "this machine's own Tailscale address was written to the blocklist:\n{config}"
+    );
+}
+
+/// While a Funnel reaches dux, a request from this machine over plain
+/// loopback is the network and signs in. The same machine opening the
+/// `tailscale serve` URL arrives from its own Tailscale address, which the
+/// own-address rule also makes the network, so it must sign in as well
+/// rather than pass as the tailnet with no password.
+#[tokio::test]
+async fn under_a_funnel_this_machine_through_the_serve_url_still_signs_in() {
+    use dux_web::exposure::FunnelState;
+    let own = own_tailscale_ips()[0].to_string();
+    let exposure = exposure_with_route(FunnelState::Funnel, false);
+    let dux = Dux::start_tuned(
+        &format!("password_hash = \"{}\"", hash_of(PASSWORD)),
+        move |p| p.with_live_exposure(exposure),
+    );
+    assert_auth_required(
+        &dux.get(THIS_MACHINE, "/api/v1/projects").await,
+        "plain loopback under a Funnel",
+    );
+    let answer = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::GET, "/api/v1/projects")
+                .header("host", "box.tail0000.ts.net")
+                .header("tailscale-user-login", "owner@example.com")
+                .header("x-forwarded-for", &own),
+        )
+        .await;
+    assert_auth_required(
+        &answer,
+        "this machine's own Tailscale address through tailscale serve under a Funnel",
+    );
+}
+
+/// A tailnet device signing in through `tailscale serve` is verified by the
+/// address Tailscale's proxy wrote, and is blocked after `max_failed_logins`.
+/// Tailscale's proxy passes a client's own `X-Real-IP` through untouched, so a
+/// guesser on the tailnet that adds one must not turn its verified, bannable
+/// address into a mere claim that is only ever slowed: the same dodge the
+/// Funnel marker was refused for on a direct connection.
+#[tokio::test]
+async fn a_tailnet_guesser_through_serve_cannot_dodge_the_block_with_x_real_ip() {
+    use dux_web::exposure::FunnelState;
+    let start = || {
+        let exposure = exposure_with_route(FunnelState::Open, false);
+        Dux::start_tuned(
+            &format!(
+                "password_hash = \"{}\"\nrequire = \"tailnet\"\nmax_failed_logins = 2\n\
+                 failed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
+                hash_of(PASSWORD)
+            ),
+            move |p| p.with_live_exposure(exposure),
+        )
+    };
+    let guess = |extra: Option<(&'static str, &'static str)>| {
+        let mut req = forged_serve(
+            Req::new(Method::POST, "/api/v1/auth/login").json(json!({ "password": "wrong" })),
+        );
+        if let Some((name, value)) = extra {
+            req = req.header(name, value);
+        }
+        req
+    };
+
+    // Control: the plain serve request is blocked at the limit and written.
+    let plain = start();
+    for _ in 0..2 {
+        let _ = plain.send(THIS_MACHINE, guess(None)).await;
+    }
+    let third = plain.send(THIS_MACHINE, guess(None)).await;
+    assert_eq!(third.error().as_deref(), Some("blocked"), "{}", third.body);
+    assert!(plain.config().contains("\"100.64.0.9\""));
+
+    // The same device adding X-Real-IP keeps guessing and is never blocked.
+    let dodging = start();
+    let mut answers = Vec::new();
+    for _ in 0..4 {
+        let answer = dodging
+            .send(THIS_MACHINE, guess(Some(("x-real-ip", "203.0.113.1"))))
+            .await;
+        answers.push(format!("{} {}", answer.status, answer.body));
+    }
+    assert!(
+        dodging.config().contains("\"100.64.0.9\""),
+        "the tailnet guesser was never blocked after {} failures: {answers:#?}",
+        answers.len()
+    );
+}
+
+/// A right password whose address is blocked while its check runs gets no
+/// session: admission is judged again when the session is issued. The wrong
+/// guess holds the one check slot, so the right one is checked only after the
+/// wrong one has blocked the address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_right_password_racing_a_block_gets_no_session() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 1\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0\n\
+         max_concurrent_password_checks = 1\npassword_check_queue = 1",
+    );
+    let wrong = dux.login(NETWORK, "wrong guess");
+    let right = async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        dux.login(NETWORK, PASSWORD).await
+    };
+    let (wrong, right) = tokio::join!(wrong, right);
+    assert_eq!(wrong.error().as_deref(), Some("blocked"), "{}", wrong.body);
+    assert_eq!(right.error().as_deref(), Some("blocked"), "{}", right.body);
+    assert!(
+        right.headers.get("set-cookie").is_none(),
+        "a blocked address was handed a session: {:?}",
+        right.headers
+    );
 }

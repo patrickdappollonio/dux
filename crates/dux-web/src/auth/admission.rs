@@ -26,6 +26,10 @@
 //! - `max_failed_logins`: failures within the window before the address is
 //!   blocked (the caller appends it to `blocked_addresses`). 0 never blocks.
 //!
+//! A check is reserved when it is admitted ([`Reservation`]) and counts as a
+//! failure that may yet land until it is settled, so attempts sent at the
+//! same moment from one address cannot all skip the wait between them.
+//!
 //! WHICH address a failure counts against is decided by what dux can verify
 //! (decided, after review). A verified address (the direct peer on a listener
 //! that is not loopback, or the client of a request proven to come through
@@ -160,12 +164,51 @@ struct Inner {
     /// Bans that hold for this run only: their write to `config.toml` failed,
     /// or `blocked_addresses` was already at `max_blocked_addresses`.
     runtime_bans: HashSet<IpAddr>,
+    /// Checks admitted and still running, per key and per level: each counts
+    /// as a failure that may yet land when the next attempt's wait and limits
+    /// are worked out.
+    pending: HashMap<TrackKey, u32>,
+    pending_minutes: HashMap<Level, u32>,
 }
 
 /// The admission state of one serve.
 #[derive(Default)]
 pub(crate) struct Admission {
-    inner: std::sync::Mutex<Inner>,
+    inner: std::sync::Arc<std::sync::Mutex<Inner>>,
+}
+
+/// An admitted check, reserved under its keys until it is settled (dropped,
+/// whether it failed, succeeded or never ran). While it is held the check
+/// counts as a pending failure, so a second attempt sent at the same moment
+/// is the "next attempt" and waits as if this one had failed (decided, after
+/// review: two guesses sent at once must not both skip the wait).
+pub(crate) struct Reservation {
+    inner: std::sync::Arc<std::sync::Mutex<Inner>>,
+    keys: Vec<TrackKey>,
+    level: Level,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for key in &self.keys {
+            if let Some(n) = inner.pending.get_mut(key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    inner.pending.remove(key);
+                }
+            }
+        }
+        if let Some(n) = inner.pending_minutes.get_mut(&self.level) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                inner.pending_minutes.remove(&self.level);
+            }
+        }
+    }
 }
 
 /// Whether an address may be blocked at all.
@@ -220,41 +263,67 @@ impl Admission {
         named().any(|ip| inner.runtime_bans.contains(&ip))
     }
 
-    /// Whether a password check may run for this client now. `Err` is how long
-    /// it must wait first, in whole seconds (at least one). Every check, a
-    /// sign-in or a current password, is held to the same waits and limits.
+    /// Whether a password check may run for this client now, reserving it
+    /// atomically when it may. `Err` is how long it must wait first, in whole
+    /// seconds (at least one). Every check, a sign-in or a current password,
+    /// is held to the same waits and limits, and a check still running counts
+    /// as a failure that may yet land.
     pub(crate) fn check_attempt(
         &self,
         cfg: &ServerAuthConfig,
         c: &Classification,
         now: Instant,
-    ) -> Result<(), u64> {
+    ) -> Result<Reservation, u64> {
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
+        let keys = TrackKey::of(c);
         let mut inner = self.lock();
-        let wait = TrackKey::of(c)
+        let wait = keys
             .iter()
-            .filter_map(|key| inner.tracked.get(key))
-            .filter(|failures| {
-                now.saturating_duration_since(failures.last) <= window
-                    && now < failures.next_allowed
+            .filter_map(|key| {
+                let live = inner
+                    .tracked
+                    .get(key)
+                    .filter(|failures| now.saturating_duration_since(failures.last) <= window);
+                let pending = inner.pending.get(key).copied().unwrap_or(0);
+                // The wait its last failure set, and the one its running
+                // checks would set if they all failed now.
+                let set = live
+                    .filter(|failures| now < failures.next_allowed)
+                    .map(|failures| failures.next_allowed - now);
+                let after_pending = (pending > 0).then(|| {
+                    let count = live.map_or(0, |failures| failures.count);
+                    delay_after(cfg, count.saturating_add(pending))
+                });
+                set.into_iter()
+                    .chain(after_pending)
+                    .filter(|wait| !wait.is_zero())
+                    .max()
             })
-            .map(|failures| failures.next_allowed - now)
             .max();
         if let Some(wait) = wait {
             return Err(ceil_secs(wait));
         }
         inner.prune_minutes(now);
         let level = Level::of(c);
-        if cfg.max_failed_logins_per_minute > 0
-            && level.has_global_limit()
-            && let Some((start, count)) = inner.minutes.get(&level).copied()
-        {
-            let elapsed = now.saturating_duration_since(start);
-            if elapsed < MINUTE && count >= cfg.max_failed_logins_per_minute {
-                return Err(ceil_secs(MINUTE - elapsed));
+        if cfg.max_failed_logins_per_minute > 0 && level.has_global_limit() {
+            let pending = inner.pending_minutes.get(&level).copied().unwrap_or(0);
+            let (count, left) = match inner.minutes.get(&level).copied() {
+                Some((start, count)) => (count, MINUTE - now.saturating_duration_since(start)),
+                None => (0, MINUTE),
+            };
+            if count.saturating_add(pending) >= cfg.max_failed_logins_per_minute {
+                return Err(ceil_secs(left));
             }
         }
-        Ok(())
+        for key in &keys {
+            *inner.pending.entry(*key).or_insert(0) += 1;
+        }
+        *inner.pending_minutes.entry(level).or_insert(0) += 1;
+        Ok(Reservation {
+            inner: std::sync::Arc::clone(&self.inner),
+            keys,
+            level,
+        })
     }
 
     /// Count a failed check against every key the client's failures count
@@ -421,6 +490,53 @@ mod tests {
         }
     }
 
+    impl Admission {
+        /// [`Admission::check_attempt`] with the reservation given straight
+        /// back, for tests about waits and limits only.
+        fn check(
+            &self,
+            cfg: &ServerAuthConfig,
+            c: &Classification,
+            now: Instant,
+        ) -> Result<(), u64> {
+            self.check_attempt(cfg, c, now).map(drop)
+        }
+    }
+
+    #[test]
+    fn a_running_check_makes_the_next_attempt_wait_until_it_is_settled() {
+        let a = Admission::default();
+        let c = cfg();
+        let t0 = Instant::now();
+        let first = a
+            .check_attempt(&c, &net("198.51.100.1"), t0)
+            .expect("first");
+        assert_eq!(
+            a.check(&c, &net("198.51.100.1"), t0),
+            Err(1),
+            "waits as if the running one had failed"
+        );
+        assert_eq!(
+            a.check(&c, &net("198.51.100.2"), t0),
+            Ok(()),
+            "only that address"
+        );
+        drop(first);
+        assert_eq!(a.check(&c, &net("198.51.100.1"), t0), Ok(()), "settled");
+        // A running check also counts toward a level's per-minute cap.
+        let capped = ServerAuthConfig {
+            failed_login_delay_seconds: 0,
+            max_failed_logins_per_minute: 1,
+            ..cfg()
+        };
+        let held = a
+            .check_attempt(&capped, &net("198.51.100.3"), t0)
+            .expect("held");
+        assert!(a.check(&capped, &net("198.51.100.4"), t0).is_err());
+        drop(held);
+        assert_eq!(a.check(&capped, &net("198.51.100.4"), t0), Ok(()));
+    }
+
     /// An unverified request that came by `via`.
     fn unverified(via: Via) -> Classification {
         Classification {
@@ -442,20 +558,17 @@ mod tests {
             ..unverified(Via::Forwarded)
         };
         a.record_failure(&c, &funnel, t0);
-        assert!(
-            a.check_attempt(&c, &unverified(Via::Forwarded), t0)
-                .is_err()
-        );
+        assert!(a.check(&c, &unverified(Via::Forwarded), t0).is_err());
         let owner = Classification {
             claimed_ip: None,
             ..unverified(Via::PlainLoopback)
         };
-        assert_eq!(a.check_attempt(&c, &owner, t0), Ok(()), "plain loopback");
+        assert_eq!(a.check(&c, &owner, t0), Ok(()), "plain loopback");
         let own = Classification {
             claimed_ip: None,
             ..unverified(Via::OwnAddress)
         };
-        assert_eq!(a.check_attempt(&c, &own, t0), Ok(()), "own address");
+        assert_eq!(a.check(&c, &own, t0), Ok(()), "own address");
     }
 
     #[test]
@@ -468,7 +581,7 @@ mod tests {
         let t0 = Instant::now();
         let tailnet = from(ClientClass::Tailnet, "100.101.102.104");
         a.record_failure(&c, &tailnet, t0);
-        assert!(a.check_attempt(&c, &tailnet, t0).is_err(), "slowed");
+        assert!(a.check(&c, &tailnet, t0).is_err(), "slowed");
     }
 
     /// A forwarded request dux cannot verify, claiming `ip`.
@@ -524,7 +637,7 @@ mod tests {
             a.record_failure(&c, &claiming("198.51.100.7"), t0);
         }
         assert_eq!(
-            a.check_attempt(&c, &net("198.51.100.7"), t0),
+            a.check(&c, &net("198.51.100.7"), t0),
             Ok(()),
             "the claims did not make the verified device wait"
         );
@@ -546,12 +659,12 @@ mod tests {
         a.record_failure(&cfg(), &claiming("203.0.113.1"), t0);
         a.record_failure(&cfg(), &claiming("203.0.113.2"), t0);
         assert_eq!(
-            a.check_attempt(&cfg(), &claiming("203.0.113.3"), t0),
+            a.check(&cfg(), &claiming("203.0.113.3"), t0),
             Err(2),
             "a fresh claim still waits out the shared, doubled wait"
         );
         assert_eq!(
-            a.check_attempt(&cfg(), &net("198.51.100.1"), t0),
+            a.check(&cfg(), &net("198.51.100.1"), t0),
             Ok(()),
             "a verified client is not held by unverified traffic"
         );
@@ -596,18 +709,18 @@ mod tests {
     fn a_failure_makes_that_address_wait_and_only_that_address() {
         let a = Admission::default();
         let t0 = Instant::now();
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Ok(()));
+        assert_eq!(a.check(&cfg(), &net("198.51.100.1"), t0), Ok(()));
         assert_eq!(
             a.record_failure(&cfg(), &net("198.51.100.1"), t0),
             Strike::Counted
         );
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Err(1));
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.2"), t0), Ok(()));
+        assert_eq!(a.check(&cfg(), &net("198.51.100.1"), t0), Err(1));
+        assert_eq!(a.check(&cfg(), &net("198.51.100.2"), t0), Ok(()));
         let later = t0 + Duration::from_millis(1001);
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), later), Ok(()));
+        assert_eq!(a.check(&cfg(), &net("198.51.100.1"), later), Ok(()));
         a.record_failure(&cfg(), &net("198.51.100.1"), later);
         assert_eq!(
-            a.check_attempt(&cfg(), &net("198.51.100.1"), later),
+            a.check(&cfg(), &net("198.51.100.1"), later),
             Err(2),
             "doubled"
         );
@@ -655,7 +768,7 @@ mod tests {
         let mut now = Instant::now();
         for _ in 0..50 {
             assert_eq!(a.record_failure(&c, &ip, now), Strike::Counted);
-            assert!(a.check_attempt(&c, &ip, now).is_err(), "slowed");
+            assert!(a.check(&c, &ip, now).is_err(), "slowed");
             now += Duration::from_secs(31);
         }
     }
@@ -682,7 +795,7 @@ mod tests {
         let slowed = cfg();
         a.record_failure(&slowed, &machine, t0);
         assert!(
-            a.check_attempt(&slowed, &machine, t0).is_err(),
+            a.check(&slowed, &machine, t0).is_err(),
             "this machine waits too"
         );
         // Nothing to block for a forwarded request with no readable address.
@@ -704,23 +817,17 @@ mod tests {
             a.record_failure(&c, &net(&format!("198.51.100.{n}")), t0);
         }
         let fresh = net("203.0.113.50");
+        assert_eq!(a.check(&c, &fresh, t0 + Duration::from_secs(10)), Err(50));
         assert_eq!(
-            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(10)),
-            Err(50)
-        );
-        assert_eq!(
-            a.check_attempt(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
+            a.check(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
             Ok(())
         );
-        assert_eq!(
-            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(60)),
-            Ok(())
-        );
+        assert_eq!(a.check(&c, &fresh, t0 + Duration::from_secs(60)), Ok(()));
         let off = ServerAuthConfig {
             max_failed_logins_per_minute: 0,
             ..c
         };
-        assert_eq!(a.check_attempt(&off, &fresh, t0), Ok(()));
+        assert_eq!(a.check(&off, &fresh, t0), Ok(()));
     }
 
     #[test]
@@ -737,11 +844,11 @@ mod tests {
         a.record_failure(&c, &net("198.51.100.3"), t0 + Duration::from_millis(2));
         assert_eq!(a.tracked(), 2);
         assert_eq!(
-            a.check_attempt(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
+            a.check(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
             Ok(()),
             "the oldest was forgotten"
         );
-        assert!(a.check_attempt(&c, &net("198.51.100.3"), t0).is_err());
+        assert!(a.check(&c, &net("198.51.100.3"), t0).is_err());
     }
 
     #[test]
