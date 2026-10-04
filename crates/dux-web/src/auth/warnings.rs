@@ -27,6 +27,7 @@ pub(crate) const EXPOSED_KEY: &str = "server-auth-no-password";
 const PROXY_KEY: &str = "server-auth-proxy";
 const WEAK_KEY: &str = "server-auth-weak-password";
 const BLOCKED_KEY: &str = "server-auth-blocked";
+const LOOPBACK_ENTRY_KEY: &str = "server-auth-loopback-entry";
 
 /// Says a sentence everywhere it belongs.
 pub(crate) struct Speaker {
@@ -111,6 +112,17 @@ impl Speaker {
         );
     }
 
+    /// A `blocked_addresses` entry covers loopback, which the blocklist never
+    /// applies to.
+    pub(crate) fn loopback_entry(&self, entry: &str) {
+        self.say(
+            Loudness::Warning,
+            LOOPBACK_ENTRY_KEY,
+            &loopback_entry_sentence(entry),
+            false,
+        );
+    }
+
     fn exposed(&self, reach: &[String], funnel: bool) {
         self.say(
             Loudness::Alarm,
@@ -191,6 +203,32 @@ fn unverified_limit_sentence(ip: IpAddr, failures: u32, path: &str) -> String {
     )
 }
 
+/// The entries of `blocked_addresses` that cover a loopback address. Config
+/// validation still accepts them (decided, after review): they are not wrong
+/// so much as inert here, and refusing to start over one would be worse.
+pub(crate) fn loopback_entries(entries: &[String]) -> Vec<String> {
+    let loopback: [IpAddr; 2] = [
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    entries
+        .iter()
+        .filter(|entry| {
+            dux_core::config_auth::AddressBlock::parse(entry)
+                .is_ok_and(|block| loopback.iter().any(|ip| block.contains(*ip)))
+        })
+        .cloned()
+        .collect()
+}
+
+fn loopback_entry_sentence(entry: &str) -> String {
+    format!(
+        "blocked_addresses in [server.auth] has \"{entry}\", which covers loopback. dux never \
+         applies the blocklist to loopback: that is this machine, and tailscale serve relays \
+         every tailnet device through it, so the entry never refuses anyone on this machine."
+    )
+}
+
 /// Follows whether the no-password alarm is due, saying it when it becomes
 /// true and withdrawing its status when it stops being true.
 #[derive(Default)]
@@ -215,6 +253,23 @@ impl ExposedWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entries_covering_loopback_are_found_and_named() {
+        let entries: Vec<String> = ["127.0.0.0/8", "203.0.113.0/24", "::1", "0.0.0.0/0", "bad"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            loopback_entries(&entries),
+            ["127.0.0.0/8", "::1", "0.0.0.0/0"]
+        );
+        let text = loopback_entry_sentence("127.0.0.0/8");
+        assert!(
+            text.contains("127.0.0.0/8") && text.contains("never"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn an_unverified_address_at_the_limit_says_it_was_not_written_and_how_to_add_it() {

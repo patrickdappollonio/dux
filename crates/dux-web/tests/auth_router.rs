@@ -510,12 +510,16 @@ async fn forwarding_headers_never_make_a_request_more_trusted() {
     let posing = Req::new(Method::GET, "/api/v1/projects")
         .header("tailscale-user-login", "owner@example.com");
     assert_auth_required(&dux.send(NETWORK, posing).await, "posing as tailnet");
-    // The Funnel marker is the internet, even on the Tailscale listener.
+    // The Funnel marker is the internet on loopback, the only way tailscaled
+    // delivers Funnel traffic; from a direct peer it is ignored, so the peer
+    // stays what its connection says.
     let funnel =
-        Req::new(Method::GET, "/api/v1/auth/status").header("tailscale-funnel-request", "?1");
-    let answer = dux.send(TAILNET, funnel).await;
+        || Req::new(Method::GET, "/api/v1/auth/status").header("tailscale-funnel-request", "?1");
+    let answer = dux.send(THIS_MACHINE, funnel()).await;
     assert_eq!(answer.json()["client_class"], json!("internet"));
     assert_eq!(answer.json()["required_here"], json!(true));
+    let direct = dux.send(TAILNET, funnel()).await;
+    assert_eq!(direct.json()["client_class"], json!("tailnet"));
 }
 
 #[tokio::test]
@@ -1582,5 +1586,337 @@ async fn an_abandoned_login_holds_its_slot_until_the_check_ends_and_still_counts
     assert!(
         after.contains("429"),
         "the abandoned guess was not counted: {after}"
+    );
+}
+
+// ── Forwards, the Funnel marker and loopback entries ─────────────────────
+
+/// A raw TCP forward onto dux's port (here a Funnel TCP forward, which carries
+/// no Funnel marker) beside a non-Funnel `tailscale serve` HTTPS route: a
+/// stranger who comes in through the forward lands on loopback and can write
+/// every header the serve route would have written. dux distrusts loopback
+/// and the Tailscale listener while it knows of the forward, so it must not
+/// take such a forged "tailscale serve" request for the tailnet either.
+#[tokio::test]
+async fn a_known_forward_never_lets_forged_serve_headers_pass_as_the_tailnet() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Funnel);
+    exposure.set_identity(Some(IdentityFacts {
+        funnel_any: true,
+        forward_to_dux: true,
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        let cell = exposure.clone();
+        move |p| p.with_live_exposure(cell)
+    });
+    // The bare stream the forward hands dux, with headers the stranger chose.
+    let forged = Req::new(Method::GET, "/api/v1/projects")
+        .header("host", "box.tail0000.ts.net")
+        .header("tailscale-user-login", "owner@example.com")
+        .header("x-forwarded-for", "100.64.0.9");
+    // Unforwarded loopback is already the network here.
+    assert_auth_required(
+        &dux.get(THIS_MACHINE, "/api/v1/projects").await,
+        "plain loopback under a forward",
+    );
+    assert_auth_required(
+        &dux.send(THIS_MACHINE, forged).await,
+        "forged serve headers through the forward",
+    );
+}
+
+/// A client on the network whose direct address dux can see is blocked after
+/// `max_failed_logins`. Adding a Tailscale Funnel marker header (which nothing
+/// stops a LAN client from sending) must not turn that verified address into
+/// an unverified one that is only slowed and never blocked.
+#[tokio::test]
+async fn a_lan_client_cannot_dodge_the_block_with_a_funnel_header() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 2\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
+    );
+    for _ in 0..4 {
+        let _ = dux
+            .send(
+                NETWORK,
+                Req::new(Method::POST, "/api/v1/auth/login")
+                    .json(json!({ "password": "wrong guess" }))
+                    .header("tailscale-funnel-request", "?1"),
+            )
+            .await;
+    }
+    let config = dux.config();
+    assert!(
+        config.contains("198.51.100.7"),
+        "the direct LAN peer was never blocked: {config}"
+    );
+    let after = dux.get(NETWORK, "/api/v1/auth/status").await;
+    assert_eq!(after.error().as_deref(), Some("blocked"), "{}", after.body);
+}
+
+/// Control: the same client without the header is blocked.
+#[tokio::test]
+async fn a_lan_client_without_the_funnel_header_is_blocked() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 2\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
+    );
+    for _ in 0..4 {
+        let _ = dux
+            .send(
+                NETWORK,
+                Req::new(Method::POST, "/api/v1/auth/login")
+                    .json(json!({ "password": "wrong guess" })),
+            )
+            .await;
+    }
+    assert!(dux.config().contains("198.51.100.7"));
+}
+
+/// "This machine is never blocked", and, by the admission layer's own word, a
+/// loopback address is never blocked even when dux cannot vouch for it. A
+/// blocklist entry covering loopback must not lock the owner's own browser on
+/// this machine out while dux merely cannot check Tailscale, nor refuse every
+/// request that `tailscale serve` relays from loopback.
+#[tokio::test]
+async fn a_loopback_peer_is_never_refused_by_the_blocklist() {
+    use dux_web::exposure::{ExposureCell, FunnelState};
+    let unchecked = ExposureCell::new(FunnelState::Unchecked);
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nblocked_addresses = [\"127.0.0.0/8\", \"::1\"]",
+            hash_of(PASSWORD)
+        ),
+        {
+            let cell = unchecked.clone();
+            move |p| p.with_live_exposure(cell)
+        },
+    );
+    let mine = dux.get(THIS_MACHINE, "/api/v1/auth/status").await;
+    assert_ne!(
+        mine.error().as_deref(),
+        Some("blocked"),
+        "the owner on this machine was refused as blocked: {}",
+        mine.body
+    );
+}
+
+/// The second half of the same rule: `tailscale serve` always connects from
+/// loopback, so an entry covering loopback refuses every tailnet device it
+/// relays, though dux never blocks a loopback address.
+#[tokio::test]
+async fn a_loopback_entry_never_refuses_a_tailscale_serve_request() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let served = ExposureCell::new(FunnelState::Open);
+    served.set_identity(Some(IdentityFacts {
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nblocked_addresses = [\"127.0.0.0/8\"]",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(served),
+    );
+    let via_serve = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::GET, "/api/v1/projects")
+                .header("host", "box.tail0000.ts.net")
+                .header("tailscale-user-login", "owner@example.com")
+                .header("x-forwarded-for", "100.64.0.9"),
+        )
+        .await;
+    assert_ne!(
+        via_serve.error().as_deref(),
+        Some("blocked"),
+        "a tailnet device through tailscale serve was refused for the loopback hop: {}",
+        via_serve.body
+    );
+}
+
+/// The forged serve request of the test above, wherever it is used.
+fn forged_serve(request: Req) -> Req {
+    request
+        .header("host", "box.tail0000.ts.net")
+        .header("origin", "https://box.tail0000.ts.net")
+        .header("tailscale-user-login", "owner@example.com")
+        .header("x-forwarded-for", "100.64.0.9")
+}
+
+/// A serve route to dux beside a known raw forward, or beside an exposure dux
+/// could not confirm.
+fn exposure_with_route(
+    funnel: dux_web::exposure::FunnelState,
+    forward_to_dux: bool,
+) -> dux_web::exposure::ExposureCell {
+    use dux_web::exposure::{ExposureCell, IdentityFacts};
+    let exposure = ExposureCell::new(funnel);
+    exposure.set_identity(Some(IdentityFacts {
+        forward_to_dux,
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        ..IdentityFacts::default()
+    }));
+    exposure
+}
+
+/// While dux cannot confirm what reaches its port, a request bearing every
+/// serve header is the network too: the gate runs before any branch can trust.
+#[tokio::test]
+async fn an_unconfirmed_exposure_never_lets_serve_headers_pass_as_the_tailnet() {
+    use dux_web::exposure::FunnelState;
+    for funnel in [
+        FunnelState::Checking,
+        FunnelState::Unconfirmed,
+        FunnelState::CliNotFound,
+        FunnelState::Unchecked,
+    ] {
+        let exposure = exposure_with_route(funnel, false);
+        let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+            move |p| p.with_live_exposure(exposure)
+        });
+        assert_auth_required(
+            &dux.send(
+                THIS_MACHINE,
+                forged_serve(Req::new(Method::GET, "/api/v1/projects")),
+            )
+            .await,
+            &format!("serve headers under {funnel:?}"),
+        );
+    }
+}
+
+/// Through a known forward, forged serve headers cannot set the first
+/// password: the request is the network.
+#[tokio::test]
+async fn a_known_forward_never_lets_forged_serve_headers_set_the_first_password() {
+    use dux_web::exposure::FunnelState;
+    let exposure = exposure_with_route(FunnelState::Open, true);
+    let dux = Dux::start_tuned("", move |p| p.with_live_exposure(exposure));
+    let refused = dux
+        .send(
+            THIS_MACHINE,
+            forged_serve(
+                Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+            ),
+        )
+        .await;
+    assert_eq!(
+        refused.error().as_deref(),
+        Some("first_password_not_here"),
+        "{}",
+        refused.body
+    );
+    assert!(!dux.config().contains("$argon2id$"));
+}
+
+/// Through a known forward, the tailnet address forged serve headers name is
+/// only a claim, so failed sign-ins never write it to the blocklist.
+#[tokio::test]
+async fn a_known_forward_never_bans_the_tailnet_address_forged_headers_name() {
+    use dux_web::exposure::FunnelState;
+    let exposure = exposure_with_route(FunnelState::Open, true);
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nmax_failed_logins = 2\nfailed_login_delay_seconds = 0\n\
+             max_failed_logins_per_minute = 0",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(exposure),
+    );
+    for _ in 0..3 {
+        let answer = dux
+            .send(
+                THIS_MACHINE,
+                forged_serve(
+                    Req::new(Method::POST, "/api/v1/auth/login")
+                        .json(json!({ "password": "wrong" })),
+                ),
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", answer.body);
+    }
+    let config = dux.config();
+    assert!(!config.contains("100.64.0.9"), "{config}");
+}
+
+fn network_peer(last: u8) -> Arrival {
+    Arrival {
+        peer: SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, last)),
+            50000,
+        ),
+        local: NETWORK.local,
+    }
+}
+
+/// Throttling is per trust level: a flood from the internet and from
+/// unverified forwards never slows or refuses a verified network or tailnet
+/// device, and a flood from verified network devices never touches the
+/// tailnet.
+#[tokio::test]
+async fn a_flood_from_less_trusted_clients_never_slows_a_verified_device() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 0\nfailed_login_delay_seconds = 30\nmax_failed_logins_per_minute = 2",
+    );
+    let wrong = || Req::new(Method::POST, "/api/v1/auth/login").json(json!({ "password": "x" }));
+    for n in 0..4u8 {
+        let _ = dux
+            .send(
+                THIS_MACHINE,
+                wrong().header("x-forwarded-for", &format!("192.0.2.{n}")),
+            )
+            .await;
+        let _ = dux
+            .send(
+                THIS_MACHINE,
+                wrong()
+                    .header("tailscale-funnel-request", "?1")
+                    .header("x-forwarded-for", &format!("203.0.113.{n}")),
+            )
+            .await;
+    }
+    // The unverified traffic is held to its own limit.
+    let held = dux
+        .send(
+            THIS_MACHINE,
+            wrong().header("x-forwarded-for", "192.0.2.99"),
+        )
+        .await;
+    assert_eq!(held.status, StatusCode::TOO_MANY_REQUESTS, "{}", held.body);
+    assert_eq!(
+        dux.login(NETWORK, PASSWORD).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        dux.login(TAILNET, PASSWORD).await.status,
+        StatusCode::NO_CONTENT
+    );
+
+    // Verified network devices fill their own global limit...
+    for n in 20..24u8 {
+        let _ = dux.send(network_peer(n), wrong()).await;
+    }
+    let network_held = dux.login(network_peer(30), PASSWORD).await;
+    assert_eq!(
+        network_held.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        network_held.body
+    );
+    // ...and the tailnet is still let in.
+    assert_eq!(
+        dux.login(TAILNET, PASSWORD).await.status,
+        StatusCode::NO_CONTENT
     );
 }

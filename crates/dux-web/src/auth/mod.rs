@@ -727,6 +727,17 @@ async fn maintain(state: Arc<AuthState>) {
     let mut generation = state.snapshot().generation.clone();
     let mut warning = warnings::ExposedWarning::default();
     warning.check(&state);
+    // Each loopback-covering entry is said once per run, at load and at the
+    // reload that adds it.
+    let mut loopback_said: std::collections::HashSet<String> = Default::default();
+    let mut say_loopback_entries = |state: &AuthState| {
+        for entry in warnings::loopback_entries(&state.snapshot().config.blocked_addresses) {
+            if loopback_said.insert(entry.clone()) {
+                state.speaker.loopback_entry(&entry);
+            }
+        }
+    };
+    say_loopback_entries(&state);
     // The Tailscale leg comes and goes with no event of its own to wait on, so
     // the reach behind the no-password alarm is looked at on a short clock.
     let mut reach = tokio::time::interval(REACH_LOOK);
@@ -756,6 +767,7 @@ async fn maintain(state: Arc<AuthState>) {
                 }
                 state.bump();
                 warning.check(&state);
+                say_loopback_entries(&state);
             }
             changed = async {
                 match exposure.as_mut() {

@@ -12,9 +12,11 @@
 //!   failure, that address waits before its next attempt is checked; the wait
 //!   doubles with each further failure in the window, up to the maximum. This
 //!   machine waits too. 0 turns the wait off.
-//! - `max_failed_logins_per_minute`: failures from all addresses together in
-//!   the current minute; past it, every address but this machine is told
-//!   "too many requests" until the minute is over. 0 turns it off.
+//! - `max_failed_logins_per_minute`: failures from many addresses together in
+//!   the current minute, counted apart for each trust level (see [`Level`]);
+//!   past it, that level is told "too many requests" until the minute is
+//!   over. Tailnet devices and this machine have no such limit, only their
+//!   own per-address wait. 0 turns it off.
 //! - `max_tracked_addresses`: how many addresses are remembered at once; past
 //!   it, the one whose last failure is oldest is forgotten.
 //! - `max_failed_logins`: failures within the window before the address is
@@ -49,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use dux_core::config::{AddressBlock, ServerAuthConfig};
 
-use super::provenance::Classification;
+use super::provenance::{Classification, ClientClass};
 
 /// What failures are counted against: a client's address, or the one bucket
 /// shared by every request whose address dux cannot verify.
@@ -72,6 +74,34 @@ impl TrackKey {
             .into_iter()
             .chain(std::iter::once(Self::Unverified))
             .collect()
+    }
+}
+
+/// How far dux trusts a client, which decides the global limit it shares
+/// (decided, after review): unverified forwards and the internet share one,
+/// verified network clients another, and verified tailnet clients and this
+/// machine none, so a flood from a less trusted level never slows a more
+/// trusted one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Level {
+    /// No address dux can verify: an unproven forward, or the internet.
+    Unverified,
+    /// A verified address on the network.
+    Network,
+    /// A verified tailnet device: per address only.
+    Tailnet,
+    /// This machine: per address only, and never blocked.
+    ThisMachine,
+}
+
+impl Level {
+    fn of(c: &Classification) -> Self {
+        match (c.class, c.verified_ip) {
+            (ClientClass::ThisMachine, _) => Self::ThisMachine,
+            (_, None) => Self::Unverified,
+            (ClientClass::Tailnet, Some(_)) => Self::Tailnet,
+            (ClientClass::Network | ClientClass::Internet, Some(_)) => Self::Network,
+        }
     }
 }
 
@@ -99,9 +129,10 @@ struct Failures {
 #[derive(Default)]
 struct Inner {
     tracked: HashMap<TrackKey, Failures>,
-    /// The current minute of the global limit: when it began and how many
-    /// failures it has seen.
-    minute: Option<(Instant, u32)>,
+    /// The current minute of each level's global limit: when it began and
+    /// how many failures it has seen.
+    unverified_minute: Option<(Instant, u32)>,
+    network_minute: Option<(Instant, u32)>,
     /// Bans that hold for this run only: their write to `config.toml` failed,
     /// or `blocked_addresses` was already at `max_blocked_addresses`.
     runtime_bans: HashSet<IpAddr>,
@@ -147,11 +178,17 @@ impl Admission {
         if c.verified_this_machine() {
             return false;
         }
+        // Loopback never matches (decided, after review): it is this machine,
+        // and `tailscale serve` relays every tailnet device from it, so an
+        // entry covering it would refuse the owner and the whole tailnet. Only
+        // the other addresses a request names are matched, so a serve request
+        // is judged by its tailnet client's address.
         let named = || {
             c.named
                 .iter()
                 .copied()
                 .map(dux_core::config_auth::canonical)
+                .filter(|ip| !ip.is_loopback())
         };
         if named().any(|ip| blocks.iter().any(|block| block.contains(ip))) {
             return true;
@@ -191,16 +228,15 @@ impl Admission {
                 return Err(ceil_secs(wait));
             }
         }
+        inner.prune_minutes(now);
         if cfg.max_failed_logins_per_minute > 0
-            && !c.verified_this_machine()
-            && let Some((start, count)) = inner.minute
+            && let Some(Some((start, count))) = inner.minute(Level::of(c)).copied()
         {
             let elapsed = now.saturating_duration_since(start);
             if elapsed < MINUTE && count >= cfg.max_failed_logins_per_minute {
                 return Err(ceil_secs(MINUTE - elapsed));
             }
         }
-        inner.prune_minute(now);
         Ok(())
     }
 
@@ -215,9 +251,11 @@ impl Admission {
         let keys = TrackKey::of(c);
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
         let mut inner = self.lock();
-        inner.prune_minute(now);
-        let minute = inner.minute.get_or_insert((now, 0));
-        minute.1 = minute.1.saturating_add(1);
+        inner.prune_minutes(now);
+        if let Some(minute) = inner.minute(Level::of(c)) {
+            let minute = minute.get_or_insert((now, 0));
+            minute.1 = minute.1.saturating_add(1);
+        }
 
         let mut strike = Strike::Counted;
         for key in keys {
@@ -319,13 +357,22 @@ impl Inner {
         failures.count
     }
 
-    /// Start a new minute when the current one is over.
-    fn prune_minute(&mut self, now: Instant) {
-        if self
-            .minute
-            .is_some_and(|(start, _)| now.saturating_duration_since(start) >= MINUTE)
-        {
-            self.minute = None;
+    /// The global limit's minute a level counts against, or `None` for a
+    /// level with no global limit.
+    fn minute(&mut self, level: Level) -> Option<&mut Option<(Instant, u32)>> {
+        match level {
+            Level::Unverified => Some(&mut self.unverified_minute),
+            Level::Network => Some(&mut self.network_minute),
+            Level::Tailnet | Level::ThisMachine => None,
+        }
+    }
+
+    /// Start a new minute for each level whose current one is over.
+    fn prune_minutes(&mut self, now: Instant) {
+        for minute in [&mut self.unverified_minute, &mut self.network_minute] {
+            if minute.is_some_and(|(start, _)| now.saturating_duration_since(start) >= MINUTE) {
+                *minute = None;
+            }
         }
     }
 }

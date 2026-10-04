@@ -1514,10 +1514,12 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # ranges (\"203.0.113.0/24\"). A request is refused when ANY address it\n\
                  # names matches: where it connected from, and every address in its\n\
                  # X-Forwarded-For, X-Real-IP and Forwarded headers, so an entry works\n\
-                 # behind a proxy too. Yours to edit: add a scanner you keep seeing, or\n\
-                 # remove an address dux blocked after failed logins (yours, if you\n\
-                 # mistyped). An entry that does not parse makes this section invalid.\n\
-                 # Default empty.",
+                 # behind a proxy too. Loopback (127.0.0.1, ::1) never matches: it is\n\
+                 # this machine, and tailscale serve relays your tailnet through it, so\n\
+                 # an entry covering it is accepted, warned about, and ignored. Yours\n\
+                 # to edit: add a scanner you keep seeing, or remove an address dux\n\
+                 # blocked after failed logins (yours, if you mistyped). An entry that\n\
+                 # does not parse makes this section invalid. Default empty.",
             )),
             value_fn: |c| FieldValue::StrList(c.server.auth.blocked_addresses.clone()),
         },
@@ -1613,10 +1615,13 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "max_failed_logins_per_minute",
             comment: Some(CommentSource::Static(
-                "# Failed logins per minute from all addresses together. Past it, every\n\
-                 # address but this machine is told \"too many requests\" until the minute\n\
-                 # is over, which stops a guesser that keeps changing address. 0 turns\n\
-                 # this limit off. Default 30.",
+                "# Failed logins per minute from many addresses together. Past it, they\n\
+                 # are told \"too many requests\" until the minute is over, which stops a\n\
+                 # guesser that keeps changing address. Counted apart for each kind of\n\
+                 # visitor, so a flood from one never locks out another: the internet and\n\
+                 # anything behind a proxy dux cannot verify share one count, devices on\n\
+                 # your network another. Your tailnet devices and this machine are only\n\
+                 # slowed one address at a time. 0 turns this limit off. Default 30.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins_per_minute),
         },

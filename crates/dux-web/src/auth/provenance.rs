@@ -313,8 +313,88 @@ fn is_tailscale(ip: IpAddr) -> bool {
 const SELF_RELAY: &str = "the connection came from this machine's own Tailscale address, as \
      a relay on this machine (socat, `ssh -L`, a proxy, a Funnel TCP forward) does too";
 
+/// What a request would be if the exposure gate were open: the only way a
+/// request becomes this machine or the tailnet.
+enum Candidate {
+    /// A loopback connection with no forwarding header.
+    ThisMachine { peer: IpAddr },
+    /// A direct peer on the Tailscale listener.
+    TailnetPeer { peer: IpAddr },
+    /// A request proven, by everything it carries, to come through a confirmed
+    /// `tailscale serve` route.
+    ServeClient { client: IpAddr, https: bool },
+}
+
 /// Classify one request. See the module doc for the rules.
+///
+/// Every request that could be trusted is first reduced to a [`Candidate`],
+/// and the exposure gate ([`Exposure::trust_gate`]) is then applied in ONE
+/// place, so no branch can hand out this machine or the tailnet without
+/// passing it (decided, after review: the forwarded branch once skipped it).
 pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
+    let base = untrusted_base(facts);
+    let Some(arrival) = facts.arrival else {
+        return base;
+    };
+    let candidate = match candidate(facts, exposure, arrival, &base) {
+        Ok(candidate) => candidate,
+        Err(untrusted) => return untrusted,
+    };
+    let gate = match candidate {
+        // Plain loopback is also distrusted while any Funnel reaches dux.
+        Candidate::ThisMachine { .. } => exposure.loopback_distrust_reason(),
+        Candidate::TailnetPeer { .. } | Candidate::ServeClient { .. } => exposure.trust_gate(),
+    };
+    match (candidate, gate) {
+        (Candidate::ThisMachine { peer }, None) => Classification {
+            class: ClientClass::ThisMachine,
+            verified_ip: Some(peer),
+            claimed_ip: None,
+            transport_encrypted: true,
+            ..base
+        },
+        (Candidate::TailnetPeer { peer }, None) => Classification {
+            class: ClientClass::Tailnet,
+            verified_ip: Some(peer),
+            claimed_ip: None,
+            transport_encrypted: true,
+            ..base
+        },
+        (Candidate::ServeClient { client, https }, None) => Classification {
+            class: ClientClass::Tailnet,
+            verified_ip: Some(client),
+            claimed_ip: None,
+            transport_encrypted: true,
+            https_serve_route: https,
+            ..base
+        },
+        // Closed: the network, saying why. A loopback peer is never written
+        // anywhere (it is this machine's own address); a direct Tailscale peer
+        // is still the address it connected from, so it stays verified; a
+        // serve client is only what the headers claimed, since whatever is
+        // closing the gate may have written them.
+        (Candidate::ThisMachine { .. }, Some(reason)) => Classification {
+            loopback_distrusted: Some(reason),
+            claimed_ip: None,
+            ..base
+        },
+        (Candidate::TailnetPeer { peer }, Some(reason)) => Classification {
+            loopback_distrusted: Some(reason),
+            verified_ip: Some(peer),
+            claimed_ip: None,
+            ..base
+        },
+        (Candidate::ServeClient { .. }, Some(reason)) => Classification {
+            loopback_distrusted: Some(reason),
+            unvouched_proxy: true,
+            ..base
+        },
+    }
+}
+
+/// The network, with every address the request names and the one it claims;
+/// what every untrusted answer starts from.
+fn untrusted_base(facts: &RequestFacts) -> Classification {
     let canonical = dux_core::config_auth::canonical;
     let mut named: Vec<IpAddr> = Vec::new();
     if let Some(arrival) = facts.arrival {
@@ -327,7 +407,7 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
         .forwarded_client
         .or_else(|| facts.other_named.last().copied())
         .map(canonical);
-    let base = Classification {
+    Classification {
         class: ClientClass::Network,
         named,
         verified_ip: None,
@@ -336,113 +416,93 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
         https_serve_route: false,
         unvouched_proxy: false,
         loopback_distrusted: None,
-    };
-    let Some(arrival) = facts.arrival else {
-        return base;
-    };
+    }
+}
+
+/// The candidate a request is, or its final, untrusted classification.
+fn candidate(
+    facts: &RequestFacts,
+    exposure: &Exposure,
+    arrival: Arrival,
+    base: &Classification,
+) -> Result<Candidate, Classification> {
+    let canonical = dux_core::config_auth::canonical;
     let local = canonical(arrival.local.ip());
     let peer = canonical(arrival.peer.ip());
-    // Tailscale terminates TLS for every Funnel, so a Funnel request reached
-    // the browser over HTTPS: encrypted, and its cookie may be Secure. Only
-    // Tailscale's serve proxy sets the marker (it strips client copies); a
-    // client that forges it on a direct request only makes itself the
-    // internet and loses its own cookie over plain HTTP. The address it names
-    // is still only claimed: the marker proves nothing about it.
-    if facts.funnel_marker {
-        return Classification {
-            class: ClientClass::Internet,
-            transport_encrypted: true,
-            https_serve_route: true,
-            ..base
+    if !local.is_loopback() || !peer.is_loopback() {
+        // A direct peer on a listener that is not loopback is the client
+        // itself, verified whatever headers it sends. The Funnel marker is
+        // ignored here (decided, after review): tailscaled delivers Funnel
+        // traffic only from loopback, and honouring the marker from a LAN
+        // client turned its verified, bannable address into an unverified
+        // claim that is only slowed.
+        let verified = Classification {
+            verified_ip: Some(peer),
+            claimed_ip: None,
+            ..base.clone()
         };
-    }
-    if local.is_loopback() {
-        if !facts.forwarded {
-            if let Some(reason) = exposure.loopback_distrust_reason() {
-                return Classification {
-                    loopback_distrusted: Some(reason),
-                    claimed_ip: None,
-                    ..base
-                };
-            }
-            return Classification {
-                class: ClientClass::ThisMachine,
-                verified_ip: Some(peer),
-                claimed_ip: None,
-                transport_encrypted: true,
-                ..base
-            };
+        if !(is_tailscale(local) && is_tailscale(peer)) {
+            return Err(verified);
         }
-        // Proven to come through `tailscale serve` only when everything
-        // Tailscale's serve proxy sets is there and nothing it never sets is:
-        // the route's own name and port in the Host, the identity headers, the
-        // nearest hop's X-Forwarded-For naming a Tailscale address (a LAN
-        // client named by another proxy on this machine never is), and no
-        // X-Real-IP or Forwarded naming anything else (decided: a proxy that
-        // keeps the client's Host and passes its headers on is how a LAN
-        // client would otherwise pose as the tailnet).
-        let route = facts
-            .host
-            .as_deref()
-            .and_then(|host| exposure.confirmed_route(host));
-        let tailnet_hop = facts
-            .forwarded_client
-            .map(canonical)
-            .filter(|ip| is_tailscale(*ip));
-        return match (route, tailnet_hop) {
-            (Some(route), Some(client))
-                if facts.identity_headers && !facts.other_names_beyond_tailscale =>
-            {
-                Classification {
-                    class: ClientClass::Tailnet,
-                    verified_ip: Some(client),
-                    claimed_ip: None,
-                    transport_encrypted: true,
-                    https_serve_route: route.is_https(),
-                    ..base
-                }
-            }
-            _ => Classification {
-                unvouched_proxy: true,
-                ..base
-            },
-        };
-    }
-    // A direct peer on a listener that is not loopback is the client itself.
-    if is_tailscale(local) && is_tailscale(peer) {
         // A connection this machine opens to its own Tailscale address leaves
         // FROM that address, so any relay on this machine aimed there looks
         // like a peer. dux cannot tell a local user from a relay, so it fails
-        // closed (decided).
+        // closed (decided). Never written anywhere: it is this machine.
         if peer == local || exposure.own_tailscale_ip(peer) {
-            return Classification {
+            return Err(Classification {
                 loopback_distrusted: Some(SELF_RELAY),
                 claimed_ip: None,
-                ..base
-            };
+                ..base.clone()
+            });
         }
-        // A forward dux knows of may be aimed at this listener as well as at
-        // loopback (decided), so it is distrusted the same way.
-        if exposure.forward_known() {
-            return Classification {
-                loopback_distrusted: exposure.loopback_distrust_reason(),
-                verified_ip: Some(peer),
-                claimed_ip: None,
-                ..base
-            };
-        }
-        return Classification {
-            class: ClientClass::Tailnet,
-            verified_ip: Some(peer),
-            claimed_ip: None,
-            transport_encrypted: true,
-            ..base
-        };
+        return Ok(Candidate::TailnetPeer { peer });
     }
-    Classification {
-        verified_ip: Some(peer),
-        claimed_ip: None,
-        ..base
+    // Tailscale terminates TLS for every Funnel, so a Funnel request reached
+    // the browser over HTTPS: encrypted, and its cookie may be Secure. Only
+    // Tailscale's serve proxy sets the marker (it strips client copies); a
+    // client that forges it on a loopback stream only makes itself the
+    // internet and loses its own cookie over plain HTTP. The marker only ever
+    // makes a request stricter, and the address it names stays a claim.
+    if facts.funnel_marker {
+        return Err(Classification {
+            class: ClientClass::Internet,
+            transport_encrypted: true,
+            https_serve_route: true,
+            ..base.clone()
+        });
+    }
+    if !facts.forwarded {
+        return Ok(Candidate::ThisMachine { peer });
+    }
+    // Proven to come through `tailscale serve` only when everything
+    // Tailscale's serve proxy sets is there and nothing it never sets is: the
+    // route's own name and port in the Host, the identity headers, the
+    // nearest hop's X-Forwarded-For naming a Tailscale address (a LAN client
+    // named by another proxy on this machine never is), and no X-Real-IP or
+    // Forwarded naming anything else (decided: a proxy that keeps the
+    // client's Host and passes its headers on is how a LAN client would
+    // otherwise pose as the tailnet).
+    let route = facts
+        .host
+        .as_deref()
+        .and_then(|host| exposure.confirmed_route(host));
+    let tailnet_hop = facts
+        .forwarded_client
+        .map(canonical)
+        .filter(|ip| is_tailscale(*ip));
+    match (route, tailnet_hop) {
+        (Some(route), Some(client))
+            if facts.identity_headers && !facts.other_names_beyond_tailscale =>
+        {
+            Ok(Candidate::ServeClient {
+                client,
+                https: route.is_https(),
+            })
+        }
+        _ => Err(Classification {
+            unvouched_proxy: true,
+            ..base.clone()
+        }),
     }
 }
 
@@ -599,23 +659,90 @@ mod tests {
     }
 
     #[test]
-    fn the_funnel_marker_is_the_internet_wherever_it_arrives() {
-        for (peer, local) in [
-            ("127.0.0.1:1", LOOPBACK),
-            ("100.64.0.9:1", "100.101.102.103:3890"),
+    fn the_funnel_marker_is_the_internet_on_loopback_and_ignored_from_a_direct_peer() {
+        let marked = [
+            ("tailscale-funnel-request", "?1"),
+            ("tailscale-user-login", "x@example.com"),
+        ];
+        let exposure = served("https://box.tail.ts.net", false);
+        let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &marked, &exposure);
+        assert_eq!(c.class, ClientClass::Internet);
+        assert!(c.transport_encrypted, "Funnel is always HTTPS");
+        assert!(c.https_serve_route);
+        assert_eq!(c.verified_ip, None);
+
+        let tailnet = class_of(
+            arrival("100.64.0.9:1", "100.101.102.103:3890"),
+            &marked,
+            &exposure,
+        );
+        assert_eq!(tailnet.class, ClientClass::Tailnet);
+        let lan = class_of(
+            arrival("198.51.100.9:1", "192.168.1.2:3890"),
+            &marked,
+            &exposure,
+        );
+        assert_eq!(lan.class, ClientClass::Network);
+        assert_eq!(
+            lan.verified_ip,
+            Some("198.51.100.9".parse().unwrap()),
+            "a direct peer stays verified, and so bannable, whatever it sends"
+        );
+    }
+
+    #[test]
+    fn no_trusted_class_passes_a_closed_exposure_gate() {
+        let serve_headers = [
+            ("host", "box.tail.ts.net"),
+            ("x-forwarded-for", "100.64.0.9"),
+            ("tailscale-user-login", "owner@example.com"),
+        ];
+        for (funnel, forward) in [
+            (FunnelState::Open, true),
+            (FunnelState::Checking, false),
+            (FunnelState::Unconfirmed, false),
+            (FunnelState::CliNotFound, false),
+            (FunnelState::Unchecked, false),
         ] {
-            let c = class_of(
-                arrival(peer, local),
-                &[
-                    ("tailscale-funnel-request", "?1"),
-                    ("tailscale-user-login", "x@example.com"),
-                ],
-                &served("https://box.tail.ts.net", false),
+            let exposure = Exposure {
+                funnel,
+                identity: Some(IdentityFacts {
+                    forward_to_dux: forward,
+                    routes: vec![ServeRoute {
+                        url: "https://box.tail.ts.net".to_string(),
+                        funnel: false,
+                    }],
+                    ..IdentityFacts::default()
+                }),
+            };
+            let what = format!("{funnel:?} forward={forward}");
+            let serve = class_of(arrival("127.0.0.1:1", LOOPBACK), &serve_headers, &exposure);
+            assert_eq!(serve.class, ClientClass::Network, "{what}");
+            assert_eq!(serve.verified_ip, None, "a claim, never banned: {what}");
+            assert_eq!(serve.claimed_ip, Some("100.64.0.9".parse().unwrap()));
+            assert!(serve.loopback_distrusted.is_some(), "{what}");
+            let plain = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &exposure);
+            assert_eq!(plain.class, ClientClass::Network, "{what}");
+            let peer = class_of(
+                arrival("100.64.0.9:1", "100.101.102.103:3890"),
+                &[],
+                &exposure,
             );
-            assert_eq!(c.class, ClientClass::Internet);
-            assert!(c.transport_encrypted, "Funnel is always HTTPS");
-            assert!(c.https_serve_route);
+            assert_eq!(peer.class, ClientClass::Network, "{what}");
         }
+        // A Funnel over HTTP marks its requests, so a serve route still works.
+        let funnel = Exposure {
+            funnel: FunnelState::Funnel,
+            ..served("https://box.tail.ts.net", false)
+        };
+        let serve = class_of(arrival("127.0.0.1:1", LOOPBACK), &serve_headers, &funnel);
+        assert_eq!(serve.class, ClientClass::Tailnet);
+        let plain = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &funnel);
+        assert_eq!(
+            plain.class,
+            ClientClass::Network,
+            "plain loopback still is not"
+        );
     }
 
     #[test]

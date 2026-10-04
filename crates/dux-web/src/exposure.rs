@@ -115,18 +115,20 @@ impl Exposure {
                 .is_some_and(|facts| facts.forward_to_dux)
     }
 
-    /// Why a loopback request with no trustworthy origin is not taken for
-    /// this machine, in words for the person on it, or `None` when it is.
-    pub fn loopback_distrust_reason(&self) -> Option<&'static str> {
-        if self
-            .identity
-            .as_ref()
-            .is_some_and(|facts| facts.forward_to_dux)
-        {
+    /// The exposure gate every trusted classification passes: why NO request
+    /// may be taken for this machine or the tailnet right now, or `None` when
+    /// the gate is open. It is closed while dux knows of a raw TCP forward onto
+    /// its port (a forward hands over whatever bytes, headers included, its
+    /// sender chose, and may be aimed at loopback or the Tailscale listener),
+    /// and while dux cannot confirm what reaches its port at all (decided,
+    /// after review). A Funnel that serves dux over HTTP does not close it:
+    /// Tailscale marks every such request, so it is told apart by the marker.
+    pub fn trust_gate(&self) -> Option<&'static str> {
+        if self.forward_known() {
             return Some("a `tailscale serve` TCP forward reaches dux's port");
         }
         match self.funnel {
-            FunnelState::Open => None,
+            FunnelState::Open | FunnelState::Funnel | FunnelState::FunnelSaved => None,
             FunnelState::Unchecked => Some(
                 "`[server] tailscale` is `no` (or dux runs with `--no-tailscale`), so dux cannot \
                  check for a Tailscale Funnel or forward",
@@ -135,10 +137,21 @@ impl Exposure {
             FunnelState::Unconfirmed | FunnelState::CliNotFound => {
                 Some("dux cannot confirm with Tailscale that no Funnel reaches its port")
             }
+        }
+    }
+
+    /// Why a loopback request with no forwarding header is not taken for this
+    /// machine, in words for the person on it, or `None` when it is: the
+    /// exposure gate, and also any Funnel to dux, because a Funnel request
+    /// stripped of its marker by something on the way would look exactly
+    /// like this machine.
+    pub fn loopback_distrust_reason(&self) -> Option<&'static str> {
+        self.trust_gate().or(match self.funnel {
             FunnelState::Funnel | FunnelState::FunnelSaved => {
                 Some("a Tailscale Funnel reaches dux's port from the public internet")
             }
-        }
+            _ => None,
+        })
     }
 
     /// Whether dux KNOWS it is published beyond this machine and its own
