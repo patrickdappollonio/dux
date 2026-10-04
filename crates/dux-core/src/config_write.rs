@@ -146,19 +146,99 @@ const CONFIG_WRITE_LOCK_NAME: &str = ".config-write.lock";
 /// leaves no orphan and never a partial real file. Holds the
 /// [`ConfigFileLock`] for the write.
 pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
-    check_auth_before_write(path, contents)?;
     let _lock = ConfigFileLock::acquire(path)?;
+    // Judged against the file as it is on disk, under the lock.
+    let on_disk = std::fs::read_to_string(path).ok();
+    check_auth_added_by(path, on_disk.as_deref(), contents, "write")?;
     write_config_atomic_unlocked(path, contents, durability)
 }
 
-/// Refuse to write `contents` when its `[server.auth]` would not load: dux
-/// refuses to start with such a file, so no writer may produce one. Every
-/// write path checks this before anything lands.
-fn check_auth_before_write(path: &Path, contents: &str) -> Result<()> {
-    if let Err(problem) = crate::config::auth_section_of(contents) {
-        return Err(auth_refusal(path, contents, problem.reason(), "write"));
+/// Each `[server.auth]` problem `raw` has (the section's own, and a password
+/// setting where dux does not read it), each known by what it is about
+/// rather than by a sentence: positions move when a write patches the file,
+/// and the same problem must read as the same problem before and after.
+fn auth_problem_identities(raw: &str) -> std::collections::BTreeSet<String> {
+    crate::config::auth_problems_of(raw)
+        .into_iter()
+        .map(|problem| {
+            // A line the sentence names is no part of what the problem is.
+            let without_positions: String = problem
+                .message
+                .chars()
+                .filter(|c| !c.is_ascii_digit())
+                .collect();
+            format!("{:?}:{without_positions}", problem.keys)
+        })
+        .collect()
+}
+
+/// Refuse a write (`act`) that would ADD a `[server.auth]` problem to the
+/// file, `before` being the file's text as the user left it (`None` for a
+/// file that does not exist yet): dux refuses to start with such a file, so
+/// no writer may make one. A problem the user's file already has is the
+/// user's to fix, not the write's: it never blocks the write (dux's own
+/// change, a preference toggled in a browser, would be lost), and it is
+/// logged once, worded from the user's own file so any line it names is a
+/// line of that file, never of dux's patched copy.
+fn check_auth_added_by(path: &Path, before: Option<&str>, contents: &str, act: &str) -> Result<()> {
+    let after = auth_problem_identities(contents);
+    if after.is_empty() {
+        return Ok(());
+    }
+    let had = before.map(auth_problem_identities).unwrap_or_default();
+    if after.iter().any(|problem| !had.contains(problem)) {
+        // Each problem the write would add, named by the setting it is about
+        // and never by a line: the result is dux's text, which was never
+        // written, so a line of it is no line of the user's file.
+        let reason = crate::config::auth_problems_of(contents)
+            .into_iter()
+            .filter(|problem| {
+                let without_positions: String = problem
+                    .message
+                    .chars()
+                    .filter(|c| !c.is_ascii_digit())
+                    .collect();
+                !had.contains(&format!("{:?}:{without_positions}", problem.keys))
+            })
+            .map(|problem| match problem.keys.first() {
+                Some(keys) => format!("a problem with {}", crate::config::shown_path("", keys)),
+                None => "a problem with the section".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(auth_refusal(path, contents, &reason, act));
+    }
+    if let Some(before) = before {
+        log_existing_auth_problems_once(before);
     }
     Ok(())
+}
+
+/// Log, once per process for each, the `[server.auth]` problems the user's
+/// file `raw` already has, a write having gone ahead beside them.
+fn log_existing_auth_problems_once(raw: &str) {
+    static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let Err(problem) = crate::config::auth_section_of(raw) else {
+        return;
+    };
+    let line = format!(
+        "config.toml has a [server.auth] problem dux did not make, so dux will not start with \
+         it until it is fixed; the change dux saved left it as it was: {}",
+        problem.reason()
+    );
+    // Once per problem, known as the attribution knows it: the same mistake
+    // reads as itself even when the lines around it move.
+    let identity = auth_problem_identities(raw)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if logged.insert(identity) {
+        crate::logger::warn(&line);
+    }
 }
 
 /// The refusal of a write (`act`) that would leave `contents`, whose
@@ -339,7 +419,7 @@ pub fn patch_config_file_three_way(
     })?;
     apply_patches_three_way(&mut doc, base, ours);
     let text = doc.to_string();
-    check_auth_before_write(config_path, &text)?;
+    check_auth_added_by(config_path, Some(&raw), &text, "write")?;
     write_config_atomic_unlocked(config_path, &text, durability)?;
     Ok(text)
 }
@@ -1284,7 +1364,7 @@ pub fn replace_config_file<T>(
         }
     };
     let (text, outcome) = render(current.as_deref())?;
-    check_auth_before_write(config_path, &text)?;
+    check_auth_added_by(config_path, current.as_deref(), &text, "write")?;
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
     Ok(outcome)
 }
@@ -1301,9 +1381,11 @@ pub fn migrate_config_file<T>(
     decide: impl FnOnce(std::io::Result<String>) -> Result<(Option<String>, T)>,
 ) -> Result<T> {
     let _lock = ConfigFileLock::acquire(config_path)?;
-    let (text, outcome) = decide(fs::read_to_string(config_path))?;
+    let read = fs::read_to_string(config_path);
+    let before = read.as_ref().ok().cloned();
+    let (text, outcome) = decide(read)?;
     if let Some(text) = text {
-        check_auth_before_write(config_path, &text)?;
+        check_auth_added_by(config_path, before.as_deref(), &text, "write")?;
         write_config_atomic_unlocked(config_path, &text, Durability::Fsync)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
     }
@@ -1421,9 +1503,7 @@ fn mutate_config_file_ruled<T>(
     let text = doc.to_string();
     let remaining = match rule {
         AuthRule::Valid => {
-            if let Err(problem) = crate::config::auth_section_of(&text) {
-                return Err(auth_refusal(config_path, &text, problem.reason(), "change"));
-            }
+            check_auth_added_by(config_path, Some(&raw), &text, "change")?;
             Vec::new()
         }
         AuthRule::NothingAddedBy(key) => {
@@ -5134,10 +5214,54 @@ second_note = \"nowhere to go\"
         let broken = "[server.auth]\npassword_hash = \"hunter2\"\n";
         assert!(write_config_atomic(&path, broken, Durability::NoFsync).is_err());
         assert!(!path.exists(), "nothing was written");
-        // A file broken on disk is not saved over from memory either.
+        // A file the user left broken is the user's to fix: a save from
+        // memory, which writes no auth key, goes ahead beside it and leaves
+        // the user's line as it was.
         std::fs::write(&path, broken).expect("seed");
-        assert!(patch_config_file_with(&path, &Config::default(), Durability::NoFsync).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        let mut ours = Config::default();
+        ours.ui.copy_on_select = false;
+        patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("password_hash = \"hunter2\""), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
+    }
+
+    /// A save beside a `[server.auth]` mistake the user made logs it once,
+    /// naming the line in the user's own file even though dux's change moves
+    /// it down in the text written, and logs it no more on the next save.
+    #[test]
+    fn a_save_beside_a_users_auth_mistake_logs_it_once_by_the_users_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // A distinct value, so this test's line is its own in the log.
+        let user =
+            "[ui]\ncopy_on_select = true\n\n[server.auth]\nminimum_password_length = \"27\"\n";
+        std::fs::write(&path, user).expect("seed");
+        let mut ours = Config::default();
+        ours.ui.copy_on_select = false;
+        ours.ui.left_width_pct = 31;
+        let ((), lines) = crate::logger::capture_for_test(|| {
+            patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        });
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("left_width_pct = 31"), "{after}");
+        let logged: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("a [server.auth] problem dux did not make"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{lines:?}\n{after}");
+        // Line 5 of the user's file; dux's copy has it on line 6.
+        assert!(logged[0].contains("line 5"), "{logged:?}\n{after}");
+        ours.ui.left_width_pct = 32;
+        let ((), lines) = crate::logger::capture_for_test(|| {
+            patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        });
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("a [server.auth] problem dux did not make")),
+            "{lines:?}"
+        );
     }
 
     /// The three-way save: a key changed on disk by someone else, and not in
@@ -5696,10 +5820,13 @@ second_note = \"nowhere to go\"
             Ok(())
         })
         .expect("a [server] that is not a table holds no password");
+        // The write itself makes `server.auth` something other than a table.
+        let clean = "[ui]\nleft_width_pct = 20\n";
+        fs::write(&path, clean).unwrap();
         let text = "[server]\nauth = [1]\n";
-        fs::write(&path, text).unwrap();
         let err = mutate_config_file(&path, |doc| {
-            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            doc["server"] = toml_edit::Item::Table(toml_edit::Table::new());
+            doc["server"]["auth"] = toml_edit::value(toml_edit::Array::from_iter([1i64]));
             Ok(())
         })
         .expect_err("refused");
@@ -5713,7 +5840,7 @@ second_note = \"nowhere to go\"
         assert!(!message.contains("leave [server.auth]"), "{message}");
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            text,
+            clean,
             "nothing was written"
         );
     }

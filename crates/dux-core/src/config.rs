@@ -3179,6 +3179,39 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// A table merely named like "auth" (`[path]`, `[oauth]`) and holding no
 /// auth setting is the user's own, as it always was.
 pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
+    misplaced_auth_problems_tagged(raw)
+        .into_iter()
+        .map(|(problem, _)| problem)
+        .collect()
+}
+
+/// The problems [`misplaced_auth_problem_list`] gives that are a plaintext
+/// password written in the file, each saying where it is, never its value.
+pub fn plaintext_password_problems(raw: &str) -> Vec<crate::config_auth::Problem> {
+    misplaced_auth_problems_tagged(raw)
+        .into_iter()
+        .filter_map(|(problem, plaintext)| plaintext.then_some(problem))
+        .collect()
+}
+
+/// What a printer shows in place of a plaintext password written in the
+/// file, `--show` included: it is never echoed.
+pub const PLAINTEXT_PASSWORD_NOT_SHOWN: &str = "(a plaintext password; not shown, and not read)";
+
+/// Whether the key at `path` (keys only) holds a plaintext password: its
+/// name is, in [`auth_key_form`], a setting the command line takes and the
+/// file never holds (`password`), and it is not a name the user chose (an
+/// `[env]` variable called that). No printer ever shows its value.
+pub fn is_plaintext_password_path(path: &[String]) -> bool {
+    let Some((last, parent)) = path.split_last() else {
+        return false;
+    };
+    virtual_auth_setting(last).is_some() && !names_a_user_entry(parent)
+}
+
+/// [`misplaced_auth_problem_list`], each problem with whether it is a
+/// plaintext password.
+fn misplaced_auth_problems_tagged(raw: &str) -> Vec<(crate::config_auth::Problem, bool)> {
     use crate::config_auth::Problem;
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
@@ -3221,7 +3254,8 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
                      so dux will not start until it is moved there or removed"
                 )
             };
-            Problem::about(misplaced.keys, message)
+            let plaintext = misplaced.virtual_path.is_some();
+            (Problem::about(misplaced.keys, message), plaintext)
         })
         .collect()
 }

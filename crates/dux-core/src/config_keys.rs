@@ -649,7 +649,8 @@ fn write_value_checked(
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path, had)?;
-            let held_back = refuse_a_set_dux_would_undo(&before, &doc.to_string(), path)?;
+            let held_back =
+                refuse_a_set_dux_would_undo(&before, &doc.to_string(), path, config_path.parent())?;
             Ok((previous, held_back))
         })?;
     Ok(SetReport {
@@ -681,6 +682,7 @@ fn refuse_a_set_dux_would_undo(
     before: &str,
     after: &str,
     path: &[String],
+    root: Option<&Path>,
 ) -> Result<Option<String>> {
     if let Some(held) = held_back_by(before, path) {
         let still = held_back_by(after, path).unwrap_or(held);
@@ -705,7 +707,7 @@ fn refuse_a_set_dux_would_undo(
         policy: WritePolicy::Plain,
         shape: Shape::Unknown,
     };
-    let Ok(report) = get_report_inner(after, &key) else {
+    let Ok(report) = get_report_inner(after, &key, root) else {
         return Ok(None);
     };
     let Some(correction) = report
@@ -1218,7 +1220,14 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
 /// part. For a [`WritePolicy::Secret`] key it reads where the secret is
 /// stored (the password's hash).
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
-    get_report_inner(raw, key)
+    get_report_inner(raw, key, None)
+}
+
+/// [`get_report`] for the config file in dux's config directory `root`, so
+/// a value that depends on files beside the config (the theme) is reported
+/// as dux uses it too.
+pub fn get_report_at(raw: &str, key: &Key, root: &Path) -> Result<GetReport> {
+    get_report_inner(raw, key, Some(root))
 }
 
 /// Where `key`'s value is stored in the file: the key itself, or for the
@@ -1275,6 +1284,9 @@ pub fn printed_value(
     if crate::config::path_is_hidden(path) {
         return None;
     }
+    if crate::config::is_plaintext_password_path(path) {
+        return Some(crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string());
+    }
     Some(match form {
         ValueForm::Get => render(&names_hidden(raw, path, value)),
         ValueForm::Line | ValueForm::Summary if holds_a_table(value) => {
@@ -1294,6 +1306,34 @@ fn summarized(value: &toml::Value) -> String {
             items.iter().map(summarized).collect::<Vec<_>>().join(", ")
         ),
         other => other.to_string(),
+    }
+}
+
+/// `value`, at `path`, with every plaintext password below it (see
+/// [`crate::config::is_plaintext_password_path`]) replaced by the words that
+/// say what it is: the one rendering `--show` uses, which shows every name.
+fn plaintext_masked(path: &[String], value: &toml::Value) -> toml::Value {
+    if crate::config::is_plaintext_password_path(path) {
+        return toml::Value::String(crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string());
+    }
+    match value {
+        toml::Value::Table(table) => toml::Value::Table(
+            table
+                .iter()
+                .map(|(key, child)| {
+                    let mut at = path.to_vec();
+                    at.push(key.clone());
+                    (key.clone(), plaintext_masked(&at, child))
+                })
+                .collect(),
+        ),
+        toml::Value::Array(items) => toml::Value::Array(
+            items
+                .iter()
+                .map(|item| plaintext_masked(path, item))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -1333,10 +1373,25 @@ fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value 
                     // Once a key is hidden, nothing below it is printed: its
                     // whole value (a table or an array can hold more names
                     // pasted in the wrong place) is the placeholder.
+                    let keys: Vec<String> = path
+                        .iter()
+                        .filter_map(|step| match step {
+                            Step::Key(key) => Some(key.clone()),
+                            Step::Index(_) => None,
+                        })
+                        .collect();
                     if crate::config::part_is_hidden(&at) {
                         out.insert(
                             format!("<{}>", crate::config::shown_parts(raw, &at)),
                             toml::Value::String(NOT_SHOWN.to_string()),
+                        );
+                    } else if crate::config::is_plaintext_password_path(&keys) {
+                        // A plaintext password is never echoed.
+                        out.insert(
+                            key.clone(),
+                            toml::Value::String(
+                                crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string(),
+                            ),
                         );
                     } else {
                         out.insert(key.clone(), shown(raw, path, child));
@@ -1400,7 +1455,9 @@ fn render_in_use(
     let text = if hide_names {
         printed_value(raw, path, in_use, ValueForm::Get).unwrap_or_else(|| NOT_SHOWN.to_string())
     } else {
-        render(in_use)
+        // `--show` prints names as the file writes them, but never a
+        // plaintext password.
+        render(&plaintext_masked(path, in_use))
     };
     let Ok(mut doc) = text.parse::<DocumentMut>() else {
         return text;
@@ -1428,7 +1485,7 @@ fn render_in_use(
     doc.to_string().trim_end().to_string()
 }
 
-fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
+fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetReport> {
     use crate::config::Surface;
     let path = stored_path(key);
     let doc: toml::Table = toml::from_str(raw).map_err(|e| {
@@ -1498,7 +1555,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     // What dux makes of a value where it is used (a level it does not know
     // read as info, a ceiling, `0` meaning the default), by the same
     // `effective_*` function every runtime reader goes through.
-    let use_time = crate::config_effective::use_time_corrections(&effective);
+    let use_time = crate::config_effective::use_time_corrections_at(&effective, root);
     let mut effective = serde_json::to_value(&effective).ok();
     for correction in &use_time {
         if let Some(slot) = correction

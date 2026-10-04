@@ -298,6 +298,34 @@ pub fn effective_terminal_font_family(configured: &str) -> String {
     kept.trim().to_string()
 }
 
+/// Whether the terminal UI can load the theme `name`, given dux's config
+/// directory `root` (whose `themes/` holds the user's own): its own theme
+/// loader, installed by the terminal UI, the one crate that has it, so
+/// [`effective_theme`] answers by the very code the terminal UI runs.
+pub type ThemeResolver = fn(name: &str, root: &std::path::Path) -> bool;
+
+static THEME_RESOLVER: std::sync::OnceLock<ThemeResolver> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's theme loader (see [`ThemeResolver`]); a second
+/// install is ignored.
+pub fn install_theme_resolver(resolver: ThemeResolver) {
+    let _ = THEME_RESOLVER.set(resolver);
+}
+
+/// `[ui] theme`: the theme the terminal UI draws with, given dux's config
+/// directory `root`: the one named when the terminal UI can load it (built
+/// in, or a file in `root/themes/`), and its default theme otherwise.
+/// `None` when no theme loader is installed in this process (no terminal UI
+/// here, `dux server`, which draws no theme), so nothing can be said.
+pub fn effective_theme(configured: &str, root: &std::path::Path) -> Option<String> {
+    let resolves = THEME_RESOLVER.get()?;
+    Some(if resolves(configured, root) {
+        configured.to_string()
+    } else {
+        Config::default().ui.theme
+    })
+}
+
 // ---------------------------------------------------------------------------
 // [capabilities]
 // ---------------------------------------------------------------------------
@@ -559,6 +587,16 @@ pub struct UseTimeCorrection {
 /// each with what it uses and why. `get` reports these beside what the file
 /// says, and the load logs each reason once.
 pub fn use_time_corrections(config: &Config) -> Vec<UseTimeCorrection> {
+    use_time_corrections_at(config, None)
+}
+
+/// [`use_time_corrections`], with dux's config directory `root` when it is
+/// known, so a setting that depends on files beside the config (the theme)
+/// is judged too.
+pub fn use_time_corrections_at(
+    config: &Config,
+    root: Option<&std::path::Path>,
+) -> Vec<UseTimeCorrection> {
     let mut found = Vec::new();
     let mut note = |path: &[&str],
                     written: serde_json::Value,
@@ -744,6 +782,14 @@ pub fn use_time_corrections(config: &Config) -> Vec<UseTimeCorrection> {
             }
         },
     );
+    if let Some(used) = root.and_then(|root| effective_theme(&ui.theme, root)) {
+        note(&["ui", "theme"], json(&ui.theme), json(&used), &|| {
+            format!(
+                "the terminal UI has no theme by this name (built in, or a file in the themes \
+                 directory beside config.toml), so it draws with {used}"
+            )
+        });
+    }
     let family = &ui.terminal_font_family;
     note(
         &["ui", "terminal_font_family"],

@@ -373,6 +373,23 @@ pub const PROJECT_VALUE_POSITIONS: &[&str] = &[
     "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\nname = \"{V}\"\n[projects.env]\n\"1BAD\" = \"x\"\n",
 ];
 
+/// Where a plaintext `password` sits in the file, in every shape, `{V}`
+/// standing for it. No printer ever shows it, `--show` included.
+pub const PLAINTEXT_PASSWORD_POSITIONS: &[&str] = &[
+    "[server.auth]\npassword = \"{V}\"\n",
+    "[server]\nauth = { password = \"{V}\" }\n",
+    "server = { auth = { password = \"{V}\" } }\n",
+    "server.auth.password = \"{V}\"\n",
+    "[server]\nauth.password = \"{V}\"\n",
+    "[server.auth]\nPassword = \"{V}\"\n",
+    "[server.auth]\npass-word = \"{V}\"\n",
+    "[server]\npassword = \"{V}\"\n",
+    "password = \"{V}\"\n",
+    "[auth]\nusername = \"u\"\npassword = \"{V}\"\n",
+    "[ui]\nx = [{ password = \"{V}\" }]\n",
+    "[server.auth]\npassword = [\"{V}\"]\n",
+];
+
 /// Token-like names, from a fixed seed: each holds a dot and a space, so it
 /// breaks every naming rule, and starts with a marker no setting has.
 pub fn name_tokens() -> Vec<String> {

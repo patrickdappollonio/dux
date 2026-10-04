@@ -1728,6 +1728,17 @@ pub fn install_canonical_renderer() {
         fold_legacy_key_actions(doc);
     });
     dux_core::config::install_terminal_ui_key_resolution(terminal_ui_keys);
+    // `get` and `set` judge `[ui] theme` by the terminal UI's own loader.
+    dux_core::config_effective::install_theme_resolver(|name, root| {
+        let paths = DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        crate::theme::load(name, &paths).is_ok()
+    });
 }
 
 /// The `[keys]` the terminal UI runs with for a whole config file, by its

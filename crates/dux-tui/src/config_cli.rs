@@ -75,9 +75,29 @@ pub(crate) fn run_get(
             dux_core::config::shown_path("", &key.path)
         ),
     };
+    // The password itself is never stored, only its hash, so what is
+    // reported is the hash, under its own name.
+    let is_password = matches!(
+        key.policy,
+        WritePolicy::Secret(SecretKind::PasswordHash { .. })
+    );
+    let stored_at = match key.policy {
+        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => stores_at
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
+        _ => key.path.clone(),
+    };
     // Every path printed below goes through the one formatter.
-    let path = &dux_core::config::shown_path(&raw, &key.path);
-    let report = config_keys::get_report(&raw, &key)?;
+    let path = &dux_core::config::shown_path(&raw, &stored_at);
+    let report = config_keys::get_report_at(&raw, &key, &paths.root)?;
+    // A plaintext password written in the file is never read, and never
+    // printed: it is said to be there, with where, and what to do.
+    if is_password {
+        for problem in dux_core::config::plaintext_password_problems(&raw) {
+            writeln!(err, "({})", problem.message)?;
+        }
+    }
     let hide = key.is_sensitive() && !show;
     // Every surface that starts with the file uses the same value, so it is
     // said once, for the surfaces that use it; each one that will not start
@@ -2152,3 +2172,6 @@ mod conflicting_binding_tests;
 
 #[cfg(test)]
 mod set_get_policy_projects_paths_tests;
+
+#[cfg(test)]
+mod plaintext_password_and_theme_tests;

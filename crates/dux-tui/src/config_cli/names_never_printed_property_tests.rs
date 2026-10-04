@@ -7,8 +7,8 @@
 //! hashes.
 use super::*;
 use dux_core::start_check_fixtures::{
-    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, PROJECT_VALUE_POSITIONS, VALUE_POSITIONS,
-    name_tokens as tokens,
+    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, PLAINTEXT_PASSWORD_POSITIONS,
+    PROJECT_VALUE_POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
 };
 
 /// Every table `get` is asked for.
@@ -210,6 +210,49 @@ fn a_project_value_reaches_no_printer() {
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             for (printer, text) in printed(&body) {
                 if text.contains(&plain[..12]) || text.contains(fragment) {
+                    leaks.push(format!("{printer} on {body:?}:\n{text}"));
+                }
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// A plaintext password written in the file reaches no printer in any
+/// shape, and `--show` makes no exception for it.
+#[test]
+fn a_plaintext_password_reaches_no_printer_even_with_show() {
+    crate::config::install_canonical_renderer();
+    let mut leaks = Vec::new();
+    for token in tokens() {
+        let fragment = &token[..12];
+        let quoted = toml::Value::String(token.clone()).to_string();
+        let bare = &quoted[1..quoted.len() - 1];
+        for position in PLAINTEXT_PASSWORD_POSITIONS {
+            let body = position.replace("{V}", bare);
+            assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
+            let mut said = printed(&body);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let paths = paths_in(tmp.path());
+            for args in [
+                vec!["server", "--show"],
+                vec!["server.auth", "--show"],
+                vec!["server.auth.password"],
+                vec!["server.auth.password", "--show"],
+            ] {
+                std::fs::write(&paths.config_path, &body).expect("seed");
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+                let result = run_get(&args, &paths, &mut out, &mut err);
+                let mut text = String::from_utf8_lossy(&out).into_owned();
+                text.push_str(&String::from_utf8_lossy(&err));
+                if let Err(error) = result {
+                    text.push_str(&format!("{error:#}"));
+                }
+                said.push((format!("get {}", args.join(" ")), text));
+            }
+            for (printer, text) in said {
+                if text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
             }
