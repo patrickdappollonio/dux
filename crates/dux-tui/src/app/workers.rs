@@ -844,13 +844,18 @@ impl App {
         );
     }
 
-    fn apply_reloaded_config_reaction(&mut self, config: Config) {
+    pub(crate) fn apply_reloaded_config_reaction(&mut self, config: Config) {
         let bind_settings_changed = dux_core::config::server_bind_settings_changed(
             &self.engine.config.server,
             &config.server,
         );
         let outcome = match self.apply_reloaded_config(config) {
-            Err(error) => TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}")),
+            Err(error) => {
+                // Memory keeps the old config; the writer's base follows it so
+                // the next save cannot write it over the new file.
+                self.engine.reload_apply_failed();
+                TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
+            }
             Ok(()) => TuiConfigReloadOutcome::Applied,
         };
         let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);

@@ -44,3 +44,6 @@ tempfile.workspace = true
 # Used only by the signal-disposition regression tests to raise a signal and to
 # reproduce the `SIG_DFL` reset the web server deliberately no longer performs.
 libc.workspace = true
+# Used only to break the session database under a test, through a second
+# connection, the way a disk error would. The same version dux-core uses.
+rusqlite = { version = "0.39.0", features = ["bundled"] }

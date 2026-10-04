@@ -13161,6 +13161,38 @@ not_a_real_action = ["x"]
         assert!(!app.engine.paths.config_path.exists(), "not recreated");
     }
 
+    /// The terminal UI's apply failing after a coalesced reload moved the
+    /// writer's base to the new config: memory keeps the old config, so the
+    /// base goes back to it, and the next save does not write the old values
+    /// over the new file.
+    #[test]
+    fn a_failed_reload_apply_never_reverts_the_file() {
+        let mut app = test_app(default_bindings());
+        std::fs::write(&app.engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        app.engine.config = dux_core::config::load_config(&app.engine.paths).unwrap();
+        app.engine.retune_after_config_swap();
+        std::fs::write(&app.engine.paths.config_path, "[ui]\nleft_width_pct = 33\n").unwrap();
+        let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
+        // What a coalesced reload's pre-swap does to the writer.
+        app.engine.config_writer.set_base(reloaded.clone());
+        rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
+            .unwrap()
+            .execute("DROP TABLE projects", [])
+            .unwrap();
+
+        app.apply_reloaded_config_reaction(reloaded);
+        assert_eq!(app.engine.config.ui.left_width_pct, 20, "the apply failed");
+
+        let mut memory = app.engine.config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        app.engine.config_writer.save_eager(memory).expect("save");
+        let after = std::fs::read_to_string(&app.engine.paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "not reverted:\n{after}"
+        );
+    }
+
     #[test]
     fn reload_config_applies_a_valid_new_password() {
         let mut app = test_app(default_bindings());

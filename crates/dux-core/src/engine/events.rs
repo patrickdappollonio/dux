@@ -9113,6 +9113,66 @@ mod tests {
         );
     }
 
+    /// Make every later read of the session database fail, as a disk error
+    /// would, through a second connection that drops a table.
+    fn break_the_session_database(engine: &Engine) {
+        let connection = rusqlite::Connection::open(&engine.paths.sessions_db_path).unwrap();
+        connection.execute("DROP TABLE projects", []).unwrap();
+    }
+
+    /// The surface's apply failing after a coalesced reload pre-swapped the
+    /// config must not let the next save write the old config over the new
+    /// file: memory stays as it was, so the writer's base goes back to match
+    /// it, and the deferred change that was saved stays on disk.
+    #[test]
+    fn a_failed_apply_after_a_coalesced_reload_never_reverts_the_file() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 33\n").unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("reloaded config");
+        break_the_session_database(&engine);
+        assert!(
+            engine.apply_reloaded_config(*applied).is_err(),
+            "the apply fails"
+        );
+
+        let mut memory = engine.config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        engine.config_writer.save_eager(memory).expect("save");
+        let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "not reverted:\n{after}"
+        );
+        assert!(
+            after.contains("API = \"k\""),
+            "the deferred save stays:\n{after}"
+        );
+    }
+
     fn flatten(reaction: EventReaction) -> Vec<EventReaction> {
         match reaction {
             EventReaction::Multi(list) => list.into_iter().flat_map(flatten).collect(),

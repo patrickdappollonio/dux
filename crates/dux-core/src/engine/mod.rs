@@ -2597,6 +2597,26 @@ impl Engine {
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
+        let result = self.apply_reloaded_config_inner(config);
+        if result.is_err() {
+            self.reload_apply_failed();
+        }
+        result
+    }
+
+    /// A surface could not apply a reloaded config, so memory still holds the
+    /// config from before it. A coalesced reload may already have moved the
+    /// writer's base to the new config (its pre-swap), and a save would then
+    /// read memory's older values as changes and write them over the new file.
+    /// Put the base back to match memory: the next save writes only what
+    /// changes in memory from here, so the new file (and any deferred change
+    /// already saved to it) stays as it is on disk. Every surface's failed
+    /// apply calls this.
+    pub fn reload_apply_failed(&mut self) {
+        self.config_writer.set_base(self.config.clone());
+    }
+
+    fn apply_reloaded_config_inner(&mut self, config: Config) -> anyhow::Result<()> {
         let github_was_enabled = self.github_integration_enabled;
         self.github_integration_enabled = config.ui.github_integration;
         if self.github_integration_enabled
