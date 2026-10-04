@@ -9063,9 +9063,10 @@ leading_branch = "main"
         );
     }
 
-    /// After the startup sync writes, a value dux corrected at load still
-    /// counts as a change (so a later save writes the correction), and a key
-    /// deleted by hand before the sync stays deleted.
+    /// After the startup sync writes, a value dux corrected at load is still
+    /// not a change dux made (so no later save writes the correction over
+    /// what the file says), and a key deleted by hand before the sync stays
+    /// deleted.
     #[test]
     fn the_sync_write_keeps_corrections_and_hand_deletions_apart() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -9121,8 +9122,8 @@ leading_branch = "main"
         }
         let saved = std::fs::read_to_string(&paths.config_path).expect("read");
         assert!(
-            !saved.contains("github_probe_interval_secs = 1\n"),
-            "the correction is written:\n{saved}"
+            saved.contains("github_probe_interval_secs = 1\n"),
+            "the file keeps what the user wrote:\n{saved}"
         );
         assert!(
             !saved.contains("left_width_pct"),

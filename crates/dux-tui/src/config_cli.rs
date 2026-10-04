@@ -90,13 +90,16 @@ pub(crate) fn run_get(
         (true, true) => "dux",
     };
     let corrected = !report.corrections.is_empty();
+    // A table prints a name that breaks its map's rule as a marker naming
+    // its line; only `--show` prints it as the file names it.
+    let with_names = report.with_names.clone().filter(|_| show);
     match report.value {
         GetValue::Set(_) if hide => writeln!(
             err,
             "{path} is set; it can hold secrets, so its value is not printed. Add --show to \
              print it."
         )?,
-        GetValue::Set(value) => writeln!(out, "{value}")?,
+        GetValue::Set(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
         GetValue::Default(value) if value.is_empty() => {
             writeln!(out)?;
             match key.path.as_slice() {
@@ -127,7 +130,7 @@ pub(crate) fn run_get(
                     "{path} is set in config.toml; it can hold secrets, so its value is not \
                      printed. Add --show to print it."
                 )?,
-                Some(value) => writeln!(out, "{value}")?,
+                Some(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
                 None => writeln!(err, "{path} is not in config.toml")?,
             }
             writeln!(
@@ -1967,3 +1970,6 @@ mod overridable_problems_name_their_flag_tests {
 
 #[cfg(test)]
 mod printing_signals_and_carried_values_tests;
+
+#[cfg(test)]
+mod rule_breaking_names_in_tables_tests;

@@ -110,3 +110,42 @@ pub const FIXTURES: &[Fixture] = &[
         stops_dux_server: false,
     },
 ];
+
+/// One case of the start corpus (`tests/fixtures/start_corpus.txt`): a
+/// whole config file and whether each surface starts with it, as pinned to
+/// the release before the config checks were rebuilt.
+pub struct CorpusCase {
+    /// The whole config file.
+    pub text: String,
+    /// Whether the terminal UI starts with it.
+    pub terminal_ui_starts: bool,
+    /// Whether `dux server` starts with it, with no `--bind` or `--port`.
+    pub dux_server_starts: bool,
+}
+
+/// Every case of the start corpus, read from its fixture (see the comment
+/// at its head for the format and for each outcome changed on purpose).
+pub fn start_corpus() -> Vec<CorpusCase> {
+    const TEXT: &str = include_str!("../tests/fixtures/start_corpus.txt");
+    let starts = |outcome: &str| match outcome.split('(').next() {
+        Some("start") => true,
+        Some("refuse") => false,
+        _ => panic!("start corpus: unknown outcome {outcome:?}"),
+    };
+    TEXT.lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let (Some(tui), Some(server), Some(body)) = (parts.next(), parts.next(), parts.next())
+            else {
+                panic!("start corpus: malformed line {line:?}");
+            };
+            CorpusCase {
+                text: serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("start corpus: {line:?}: {e}")),
+                terminal_ui_starts: starts(tui),
+                dux_server_starts: starts(server),
+            }
+        })
+        .collect()
+}

@@ -3165,10 +3165,14 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
 /// the top level, directly under `[server]`, or inside an auth-like table (a
 /// table at the top level or under `[server]` whose name is within two edits
 /// of "auth": `[server.auht]`, `[server.Auth]`, a top-level `[auht]`), and
-/// each such auth-like table itself. dux would start without the password
-/// the user meant to set, so each is a problem that stops the start, named
-/// by where it is (never its value), saying where it belongs, and attributed
-/// to that place.
+/// each such auth-like table itself when it holds a setting `[server.auth]`
+/// has. dux would start without the password the user meant to set, so each
+/// is a problem that stops the start, named by where it is (never its
+/// value), saying where it belongs, and attributed to that place.
+///
+/// A table whose name is merely close to "auth" (`[path]`, `[math]`,
+/// `[auto]`, `[oauth]`) and holds nothing `[server.auth]` has is the user's
+/// own, and is ignored, as dux always did.
 ///
 /// Never inside a table whose keys are names the user chose (`[env]`, a
 /// provider, a project, `[macros]`, `[keys]`): a variable or provider that
@@ -3194,9 +3198,12 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             ),
         )
     };
-    let near_auth = |name: &str| {
+    let auth_settings = crate::config_auth::auth_setting_names();
+    // A table under a name close to "auth" that holds one of its settings.
+    let near_auth = |name: &str, table: &toml::Table| {
         let name = name.to_lowercase();
-        name == "auth" || edit_distance(&name, "auth") <= 2
+        (name == "auth" || edit_distance(&name, "auth") <= 2)
+            && table.keys().any(|key| auth_settings.contains(key))
     };
     let mut problems = Vec::new();
     if file.contains_key("password_hash") {
@@ -3206,7 +3213,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         let Some(table) = value.as_table() else {
             continue;
         };
-        if !near_auth(name) {
+        if !near_auth(name, table) {
             continue;
         }
         if table.contains_key("password_hash") {
@@ -3230,7 +3237,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             let Some(table) = value.as_table() else {
                 continue;
             };
-            if name == "auth" || !near_auth(name) {
+            if name == "auth" || !near_auth(name, table) {
                 continue;
             }
             if table.contains_key("password_hash") {
@@ -3434,6 +3441,35 @@ pub fn install_terminal_ui_check(check: TerminalUiCheck) {
     let _ = TERMINAL_UI_CHECK.set(check);
 }
 
+/// The migrations only the terminal UI's start applies (its `[keys]`
+/// ones: retired actions pruned, legacy ones folded), installed by it, so
+/// the one list judges the file's types as that start reads them.
+pub type TerminalUiMigration = fn(&mut toml_edit::DocumentMut);
+
+static TERMINAL_UI_MIGRATION: std::sync::OnceLock<TerminalUiMigration> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's own migrations (see [`TerminalUiMigration`]);
+/// a second install is ignored.
+pub fn install_terminal_ui_migration(migration: TerminalUiMigration) {
+    let _ = TERMINAL_UI_MIGRATION.set(migration);
+}
+
+/// `table` as the terminal UI's start reads it: with its own migrations
+/// applied, when installed.
+fn as_terminal_ui_reads(table: &toml::Table) -> toml::Table {
+    let Some(migrate) = TERMINAL_UI_MIGRATION.get() else {
+        return table.clone();
+    };
+    let Ok(mut doc) = toml::to_string(table)
+        .unwrap_or_default()
+        .parse::<toml_edit::DocumentMut>()
+    else {
+        return table.clone();
+    };
+    migrate(&mut doc);
+    toml::from_str(&doc.to_string()).unwrap_or_else(|_| table.clone())
+}
+
 /// Every problem that stops dux starting with the whole config file `raw`,
 /// each listed once, field by field, and each check run on its own so no
 /// problem hides another:
@@ -3492,7 +3528,10 @@ pub fn check_start(raw: &str) -> StartCheck {
     // it is: the value read as its default, or the entry or section around
     // it dropped with it.
     let plan = recovery_plan(&rest);
-    for (place, key, kind) in wrong_typed_settings(&rest, raw) {
+    // Wrong types stop the terminal UI, so they are judged as its start reads
+    // the file: after its own `[keys]` migrations, which drop a retired
+    // action whatever its value.
+    for (place, key, kind) in wrong_typed_settings(&as_terminal_ui_reads(&rest), raw) {
         let what = Recovery::covering(&plan, &key).map_or_else(
             || "dux server reads it as its default".to_string(),
             |r| r.said_of(&key, raw),
@@ -3679,6 +3718,12 @@ pub fn shown_path(raw: &str, segments: &[String]) -> String {
         Some((section, entry, rest)) => format!("{} of {entry} of [{section}]", rest.join(".")),
         None => segments.join("."),
     }
+}
+
+/// Whether the last segment of `segments` is an entry name that breaks its
+/// map's naming rule, which the formatter never prints.
+pub fn name_is_hidden(raw: &str, segments: &[String]) -> bool {
+    hidden_entry(raw, segments).is_some_and(|(_, _, rest)| rest.is_empty())
 }
 
 /// [`shown_path`] for a dotted key.
@@ -4215,8 +4260,7 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
 
 /// The file's values as written: migrated and recovered, with provider
 /// defaults, but without the in-memory corrections [`load_config`] makes to
-/// out-of-range values. The config writer's first base, so a correction
-/// counts as a change and the next save writes it back.
+/// out-of-range values.
 pub fn load_config_file_as_written(
     config_path: &Path,
 ) -> std::result::Result<Config, ConfigLoadError> {
@@ -4262,6 +4306,21 @@ pub fn read_config_text(
         }
         Err(error) => Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
     }
+}
+
+/// A config's text read as every surface loads it: [`config_from_text_as_written`]
+/// with the load's in-memory corrections, without warning about them. What
+/// memory starts as, and therefore the config writer's base: a correction is
+/// never a change dux made, so a save never writes it over what the file says.
+pub fn config_from_text_as_loaded(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text_as_written(raw).map(|config| load_corrections(config).0)
+}
+
+/// The load's in-memory corrections applied to a config a surface read
+/// itself (the terminal UI's own start), each warned about once, so every
+/// surface starts from the same config [`config_from_text_as_loaded`] reads.
+pub fn correct_loaded(config: Config) -> Config {
+    apply_load_corrections(config)
 }
 
 /// A config's text read as written: migrated in memory, recovered, with
@@ -7369,6 +7428,36 @@ mod printed_paths_and_carried_values_tests {
                 .iter()
                 .all(|(key, _)| key != "server.host")
         );
+    }
+}
+
+#[cfg(test)]
+mod near_auth_tables_tests {
+    use super::*;
+
+    /// A table named close to "auth" stops a start only when it holds a
+    /// setting `[server.auth]` has; otherwise it is the user's own.
+    #[test]
+    fn a_near_auth_table_counts_only_with_an_auth_setting_in_it() {
+        for (body, stops) in [
+            ("[path]\nx = 1\n", false),
+            ("[math]\nx = 1\n", false),
+            ("[auto]\nenabled = true\n", false),
+            ("[oauth]\nclient_id = \"x\"\n", false),
+            ("[server.oauth]\nclient_id = \"x\"\n", false),
+            ("[auth]\nusername = \"ada\"\n", false),
+            ("[server.auht]\npassword_hash = \"x\"\n", true),
+            ("[server.auht]\nrequire = \"network\"\n", true),
+            ("[oauth]\npassword_hash = \"x\"\n", true),
+            ("[auht]\nsession_idle_seconds = 60\n", true),
+        ] {
+            assert_eq!(
+                !misplaced_auth_problems(body).is_empty(),
+                stops,
+                "{body:?}: {:?}",
+                misplaced_auth_problems(body)
+            );
+        }
     }
 }
 

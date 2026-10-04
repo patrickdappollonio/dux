@@ -365,8 +365,8 @@ pub fn save_config_three_way(
 /// The source of a config right after a sync wrote its projects as
 /// `written`, starting from `read` (the config's source before the sync).
 /// The base is what the file is known to hold: the config as it was read
-/// (as written there, without load corrections, so a correction still counts
-/// as a change), with the projects the sync wrote. What has been seen is the
+/// (as loaded, its corrections included, so a correction is never a change
+/// dux made), with the projects the sync wrote. What has been seen is the
 /// read text and the written one together.
 pub fn source_after_sync(
     read: &crate::config::SourceText,
@@ -377,7 +377,7 @@ pub fn source_after_sync(
         Some(base) => base.clone(),
         None => read
             .as_str()
-            .and_then(|text| crate::config::config_from_text_as_written(text).ok())
+            .and_then(|text| crate::config::config_from_text_as_loaded(text).ok())
             .unwrap_or_else(|| synced.clone()),
     };
     base.projects = synced.projects.clone();

@@ -385,6 +385,18 @@ pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
     rule_problems_located(auth, &|_| None)
 }
 
+/// Every setting `[server.auth]` has, by name.
+pub fn auth_setting_names() -> Vec<String> {
+    toml::Value::try_from(crate::config::ServerAuthConfig::default())
+        .ok()
+        .and_then(|value| {
+            value
+                .as_table()
+                .map(|table| table.keys().cloned().collect())
+        })
+        .unwrap_or_default()
+}
+
 /// [`rule_problems_of`], placing a key dux does not know by its line in the
 /// file (`line_of`, `None` when it cannot tell) rather than by its name: an
 /// unknown name may be a value pasted in the wrong place, the password above
@@ -393,14 +405,7 @@ pub fn rule_problems_located(
     auth: toml::Value,
     line_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Vec<Problem> {
-    let known: Vec<String> = toml::Value::try_from(crate::config::ServerAuthConfig::default())
-        .ok()
-        .and_then(|value| {
-            value
-                .as_table()
-                .map(|table| table.keys().cloned().collect())
-        })
-        .unwrap_or_default();
+    let known = auth_setting_names();
     let toml::Value::Table(auth) = auth else {
         return vec![Problem::plain("server.auth is not a table")];
     };

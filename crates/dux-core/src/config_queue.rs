@@ -456,9 +456,11 @@ impl Base {
     }
 }
 
-/// The base for a file just read: its config as written, and its text.
+/// The base for a file just read: its config as loaded (the load's
+/// corrections included, which is what memory starts as, so a correction is
+/// never a change dux made), and its text.
 fn base_read_from(text: &str) -> Option<Base> {
-    let config = crate::config::config_from_text_as_written(text).ok()?;
+    let config = crate::config::config_from_text_as_loaded(text).ok()?;
     Some(Base {
         config,
         seen: text.to_string(),
@@ -776,20 +778,85 @@ mod tests {
         assert!(!after.ui.copy_on_select);
     }
 
-    /// A value dux corrected at load (an out-of-range font size) is written
-    /// back by the next save: the writer's first base is the file as written,
-    /// so the correction counts as a change.
+    /// A value dux corrected at load (an out-of-range font size) is never
+    /// written: the writer's base is the config as loaded, which is what
+    /// memory started as, so the correction is not a change dux made. The
+    /// file keeps what the user wrote, and the load keeps warning about it.
     #[test]
-    fn a_load_time_correction_reaches_the_file_on_the_next_save() {
+    fn a_load_time_correction_is_never_written() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[ui]\nterminal_font_size = 500\n").unwrap();
-        let memory = crate::config::load_config_file(&path).expect("load");
+        std::fs::write(
+            &path,
+            "[ui]\nterminal_font_size = 500\ncopy_on_select = true\n",
+        )
+        .unwrap();
+        let mut memory = crate::config::load_config_file(&path).expect("load");
         let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         assert_ne!(memory.ui.terminal_font_size, 500, "corrected in memory");
-        q.save_eager(memory.clone()).unwrap();
+        memory.ui.copy_on_select = false;
+        q.save_eager(memory).unwrap();
+        let after = read(&path);
+        assert!(after.contains("terminal_font_size = 500"), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
+    }
+
+    /// A reload's new base is the corrected config of the text it read: a
+    /// correction the reloaded file needs is not written by the next save
+    /// either, and a hand fix after the reload survives it.
+    #[test]
+    fn a_reloads_base_is_the_corrected_config_of_what_it_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\ncopy_on_select = true\n").unwrap();
+        let memory = crate::config::load_config_file(&path).expect("load");
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
+        std::fs::write(
+            &path,
+            "[server]\ntailscale = \"maybe\"\n\n[ui]\ncopy_on_select = true\n",
+        )
+        .unwrap();
+        let mut reloaded = crate::config::load_config_file(&path).expect("reload");
+        assert_eq!(reloaded.server.tailscale, "auto");
+        q.set_base(reloaded.clone());
+        std::fs::write(
+            &path,
+            "[server]\ntailscale = \"no\"\n\n[ui]\ncopy_on_select = true\n",
+        )
+        .unwrap();
+        reloaded.ui.copy_on_select = false;
+        q.save_eager(reloaded).unwrap();
         let after: Config = toml::from_str(&read(&path)).unwrap();
-        assert_eq!(after.ui.terminal_font_size, memory.ui.terminal_font_size);
+        assert_eq!(after.server.tailscale, "no", "{}", read(&path));
+        assert!(!after.ui.copy_on_select);
+    }
+
+    /// The lazy save a reload signal flushes carries memory's corrected
+    /// value, which is never written over a value `dux config set` has just
+    /// stored in the file.
+    #[test]
+    fn a_flushed_lazy_save_never_writes_a_correction_over_a_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[ui]\nterminal_font_size = 500\ncopy_on_select = true\n",
+        )
+        .unwrap();
+        let mut memory = crate::config::load_config_file(&path).expect("load");
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
+        crate::config_keys::set_plain(
+            &path,
+            &crate::config_keys::lookup("ui.terminal_font_size").unwrap(),
+            "20",
+        )
+        .expect("set");
+        memory.ui.copy_on_select = false;
+        q.save_lazy(memory);
+        q.flush();
+        let after: Config = toml::from_str(&read(&path)).unwrap();
+        assert_eq!(after.ui.terminal_font_size, 20, "{}", read(&path));
+        assert!(!after.ui.copy_on_select);
     }
 
     fn loaded(path: &std::path::Path) -> Config {

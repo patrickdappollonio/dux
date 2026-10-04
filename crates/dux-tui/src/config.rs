@@ -112,11 +112,14 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // an unrecognized clipboard_passthrough so the per-tick host forward can parse
     // silently. The warning is from_config_str's side effect.
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
-    // Same idea for an out-of-range `gh` re-check interval: warn once here and
-    // correct it in memory. Its read path is the engine tick, which this surface
-    // runs tens of times a second on the thread that draws, so a warning left to
-    // the read would be a log flood for the whole run.
-    dux_core::config::correct_github_probe_interval(&mut config.ui);
+    // The load's in-memory corrections, the same every surface makes (an
+    // out-of-range `gh` re-check interval among them, whose read path is the
+    // engine tick, run tens of times a second on the thread that draws), each
+    // warned about once. Memory then starts as the config writer's base does,
+    // so a correction is never written over what the file says.
+    let source_text = config.source_text.clone();
+    let mut config = dux_core::config::correct_loaded(config);
+    config.source_text = source_text;
     Ok(config)
 }
 
@@ -1720,6 +1723,10 @@ pub fn install_canonical_renderer() {
     // (`dux_core::config::check_start`), so every surface and `dux config
     // get`/`set` judge `[keys]` the same way.
     dux_core::config::install_terminal_ui_check(keys_start_problems);
+    dux_core::config::install_terminal_ui_migration(|doc| {
+        prune_retired_key_actions(doc);
+        fold_legacy_key_actions(doc);
+    });
 }
 
 /// What the terminal UI's start refuses in a whole config file's `[keys]`:
@@ -4865,3 +4872,6 @@ mod entries_named_password_hash_start_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod start_corpus_tests;

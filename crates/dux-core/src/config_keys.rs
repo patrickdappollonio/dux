@@ -892,6 +892,10 @@ pub struct GetReport {
     /// value cannot be worked out. Empty when [`Self::value`] is unknown,
     /// which says why itself.
     pub refused_by: Vec<(crate::config::Surface, String)>,
+    /// For a table whose printed form replaced a name that breaks its map's
+    /// rule with a marker: the table as the file names its entries, which
+    /// only `--show` prints.
+    pub with_names: Option<String>,
 }
 
 /// The value dux uses for `key` with the file `raw` (see [`get_report`]).
@@ -912,6 +916,59 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
 /// part. For a [`WritePolicy::Secret`] key it reads where the secret is
 /// stored (the password's hash).
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
+    let mut report = get_report_inner(raw, key)?;
+    // The table as the file names its entries, for `--show`, when the
+    // formatter replaced any name.
+    let path = stored_path(key);
+    if let Ok(file) = toml::from_str::<toml::Table>(raw)
+        && let Some(node) = value_at(&toml::Value::Table(file), &path)
+        && node.is_table()
+    {
+        let named = render(node);
+        if named != render_shown(raw, &path, node) {
+            report.with_names = Some(named);
+        }
+    }
+    Ok(report)
+}
+
+/// Where `key`'s value is stored in the file: the key itself, or for the
+/// password, where its hash goes.
+fn stored_path(key: &Key) -> Vec<String> {
+    match key.policy {
+        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
+            stores_at.split('.').map(str::to_string).collect()
+        }
+        WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
+    }
+}
+
+/// `value`, at `path` in the file `raw`, as `get` prints it: a table whose
+/// entries are names in a map with a naming rule prints each name that
+/// breaks the rule as a marker naming its line (the formatter's own words),
+/// never the name, which may be a token pasted in the wrong place.
+fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
+    fn shown(raw: &str, path: &mut Vec<String>, value: &toml::Value) -> toml::Value {
+        let toml::Value::Table(table) = value else {
+            return value.clone();
+        };
+        let mut out = toml::Table::new();
+        for (key, child) in table {
+            path.push(key.clone());
+            let name = if crate::config::name_is_hidden(raw, path) {
+                format!("<{}>", crate::config::shown_path(raw, path))
+            } else {
+                key.clone()
+            };
+            out.insert(name, shown(raw, path, child));
+            path.pop();
+        }
+        toml::Value::Table(out)
+    }
+    render(&shown(raw, &mut path.to_vec(), value))
+}
+
+fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     use crate::config::Surface;
     let path: Vec<String> = match key.policy {
         WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
@@ -927,7 +984,9 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
     })?;
     let file = toml::Value::Table(doc);
     let node = value_at(&file, &path);
-    let in_file = node.map(render);
+    // A table is printed through the one formatter: a name that breaks its
+    // map's rule is a marker naming its line (see [`render_shown`]).
+    let in_file = node.map(|node| render_shown(raw, &path, node));
     let problems = crate::config::start_problems_of(raw);
     let refusal = |surface: Surface| {
         let reasons: Vec<&str> = problems
@@ -945,6 +1004,7 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
         value: GetValue::Unknown { in_file, reason },
         corrections: Vec::new(),
         refused_by: Vec::new(),
+        with_names: None,
     };
     // What a starting surface runs with: the file through the load a start
     // uses. A file that does not load stops every surface.
@@ -996,6 +1056,7 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             value: used.map_or(GetValue::Unset, GetValue::Default),
             corrections: carried.into_iter().collect(),
             refused_by,
+            with_names: None,
         });
     };
     // What the load uses in place of what the file says is found by
@@ -1072,9 +1133,10 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             }
         }
         return Ok(GetReport {
-            value: GetValue::Set(render(table)),
+            value: GetValue::Set(render_shown(raw, &path, table)),
             corrections,
             refused_by,
+            with_names: None,
         });
     }
     // A single setting: what the file says, unless the load uses something
@@ -1084,6 +1146,7 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             value: GetValue::Set(in_file),
             corrections: Vec::new(),
             refused_by,
+            with_names: None,
         });
     }
     Ok(GetReport {
@@ -1095,6 +1158,7 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             used,
         }],
         refused_by,
+        with_names: None,
     })
 }
 
