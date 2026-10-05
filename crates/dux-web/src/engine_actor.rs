@@ -3694,7 +3694,32 @@ fn handle_apply_wire_request(
 ) {
     let mutates_config = cmd.mutates_config_static();
     if mutates_config && *config_disk_ahead {
-        match dux_core::config::load_config_for_reload(&engine.paths) {
+        // The same start check this engine's own reload judges a file by
+        // (decided, after review): taking the file on here is a reload in all
+        // but name, and must never adopt what the serving surface refuses.
+        let surface = engine.surface.start_surface();
+        let loaded = dux_core::config::load_config_for_reload(&engine.paths).map_err(|error| {
+            format!(
+                "config.toml was changed outside dux and cannot be loaded, so this change \
+                 was not made and the running settings are unchanged. Fix the file, then try \
+                 again: {error}"
+            )
+        });
+        let checked = loaded.and_then(|reloaded| {
+            match reloaded
+                .source_text
+                .as_str()
+                .and_then(|raw| dux_core::config::start_refusal(raw, surface))
+            {
+                Some(refusal) => Err(format!(
+                    "config.toml was changed outside dux, and this change was not made because \
+                     the running settings cannot take that file on: {refusal} The running \
+                     settings are unchanged. Fix the file, then try again."
+                )),
+                None => Ok(reloaded),
+            }
+        });
+        match checked {
             Ok(reloaded) => {
                 let _ = engine.apply_reloaded_config(reloaded);
                 *config_disk_ahead = false;
@@ -3702,12 +3727,7 @@ fn handle_apply_wire_request(
             // Kept ahead, and the command refused: applying it would save a
             // memory that never saw the disk edits over them. The next
             // config-mutating command tries again once the file is fixed.
-            Err(error) => {
-                let message = format!(
-                    "config.toml was changed outside dux and cannot be loaded, so this change \
-                     was not made and the running settings are unchanged. Fix the file, then \
-                     try again: {error}"
-                );
+            Err(message) => {
                 dux_core::logger::warn(&format!("[server] {message}"));
                 let _ = reply.send(Err(message));
                 return;
@@ -8187,6 +8207,63 @@ mod tests {
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
         assert!(after.contains("left_width_pct = 31"), "{after}");
         assert!(after.contains("API = \"k\""), "{after}");
+    }
+
+    /// A config-changing command over a file edited on disk first takes the
+    /// file on, and that adoption is judged by the same start check the
+    /// serving surface's reload uses: a file `dux server` refuses is not
+    /// adopted, the command is refused saying why, and the running settings
+    /// stay as they were. A problem only the terminal UI refuses does not stop
+    /// `dux server` taking the file on.
+    #[tokio::test]
+    async fn a_file_the_serving_surface_refuses_is_never_adopted_by_a_command() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let randomized = || async {
+            handle
+                .bootstrap()
+                .await
+                .expect("bootstrap")
+                .randomize_agent_names_by_default
+        };
+        let before = randomized().await;
+        let opened = handle.read_raw_config().await.expect("read");
+        let key = "enable_randomized_pet_name_by_default";
+        assert!(opened.content.contains(&format!("{key} = {before}")));
+        let flipped = opened.content.replace(
+            &format!("{key} = {before}"),
+            &format!("{key} = {}", !before),
+        );
+        let duplicate_projects = "\n[[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-a\"\n\n\
+                                  [[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-b\"\n";
+        save_raw(&handle, format!("{flipped}{duplicate_projects}"))
+            .await
+            .expect("the raw save persists the file");
+        let env = || {
+            let mut env = std::collections::BTreeMap::new();
+            env.insert("API".to_string(), "k".to_string());
+            WireCommand::PersistGlobalEnv { env }
+        };
+        let refused = handle.apply_wire(env()).await;
+        let message = refused.expect_err("a file dux server refuses is not adopted");
+        assert!(message.contains("unchanged"), "{message}");
+        assert!(message.contains("will not start"), "{message}");
+        assert_eq!(randomized().await, before, "the running settings stay");
+
+        // A problem only the terminal UI refuses: dux server takes it on.
+        assert!(flipped.contains("\n[env]\n"), "{flipped}");
+        save_raw(
+            &handle,
+            flipped.replacen("\n[env]\n", "\n[env]\nA = \"${\"\n", 1),
+        )
+        .await
+        .expect("the raw save persists the file");
+        handle
+            .apply_wire(env())
+            .await
+            .expect("dux server adopts what only the terminal UI refuses");
+        assert_eq!(randomized().await, !before);
     }
 
     /// `dux server`'s start (its bootstrap, then the listener plan with no
