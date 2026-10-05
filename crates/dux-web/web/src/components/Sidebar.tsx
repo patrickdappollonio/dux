@@ -61,6 +61,11 @@ import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
+import {
+  agentRowKey,
+  selectedRowKey,
+  useRevealSelectedRow,
+} from "@/hooks/use-reveal-selected-row"
 
 // The icon rail replaces the flat agent list at `collapsible="icon"` width: every
 // agent, flattened in project-then-agent order, with the same cues and selection.
@@ -83,7 +88,7 @@ function CollapsedAgentIcon({
     session.typing,
   )
   return (
-    <SidebarMenuItem>
+    <SidebarMenuItem data-sidebar-row={agentRowKey(session.id)}>
       <SimpleTooltip
         content={
           <AgentVitalsTooltip
@@ -148,6 +153,8 @@ function CollapsedAgentRail({
   changes: ChangesSlice
   selectedTarget: SelectedTarget | null
 }) {
+  // The rail scrolls on its own, so it reveals a newly selected agent too.
+  const railRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
   const entries = [
     ...projectIds.flatMap((projectId) =>
       (grouped.get(projectId) ?? []).map((session) => ({
@@ -165,6 +172,7 @@ function CollapsedAgentRail({
   return (
     <SidebarGroup
       data-testid="collapsed-agent-rail"
+      ref={railRef}
       // The rail gets its own bounded scrollable region, or SidebarContent's
       // icon-mode `overflow-hidden` clips a long agent list below the fold.
       className="hidden min-h-0 flex-1 overflow-y-auto no-scrollbar group-data-[collapsible=icon]:flex"

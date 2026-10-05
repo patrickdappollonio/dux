@@ -1612,6 +1612,16 @@ impl App {
     /// appearing behind the takeover card.
     fn activate_new_terminal(&mut self, terminal_id: String) {
         self.claim_launched_pty(&terminal_id);
+        // Closing the fullscreen returns to the terminal list, and the list
+        // scrolls to its cursor, so the cursor goes on the new row now. A live
+        // filter that hides it leaves the cursor where it was.
+        if let Some(pos) = self
+            .terminal_items()
+            .iter()
+            .position(|(id, _)| **id == terminal_id)
+        {
+            self.selected_terminal_index = pos;
+        }
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();

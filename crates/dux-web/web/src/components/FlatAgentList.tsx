@@ -33,6 +33,12 @@ import { useRef, useState } from "react"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { useWorkingPulseAnchor } from "@/hooks/use-working-cue"
+import {
+  agentRowKey,
+  selectedRowKey,
+  terminalRowKey,
+  useRevealSelectedRow,
+} from "@/hooks/use-reveal-selected-row"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -324,6 +330,7 @@ function AgentFlatRow({
     <div
       ref={setNodeRef}
       style={style}
+      data-sidebar-row={agentRowKey(session.id)}
       className={cn("flex flex-col", isDragging && "z-10 rounded-md shadow-lg")}
     >
       <div
@@ -571,6 +578,7 @@ function TerminalFlatRow({
     <div
       ref={setNodeRef}
       style={style}
+      data-sidebar-row={terminalRowKey(terminal.id)}
       className={cn(
         "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -1095,6 +1103,9 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     nothing,
     nothingMatches,
   } = flatAgentListModel(dux)
+  // A newly selected row is scrolled into view, a just-created one as soon as
+  // its row arrives, so a launch never happens out of sight below the fold.
+  const listRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
   // Mouse drags on a 6px pull; touch drags on a HOLD, or it fights the list's
   // scroll gesture. The values live in lib/dragActivation.ts.
   const sensors = useSensors(
@@ -1188,7 +1199,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 no-scrollbar">
+      <div
+        ref={listRef}
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 no-scrollbar"
+      >
         {nothing ? (
           <Empty className="border-0 p-4">
             <EmptyHeader>

@@ -26913,6 +26913,53 @@ cyan = "#00ffff"
         );
     }
 
+    /// Leaving a just-launched terminal's fullscreen lands the sidebar cursor ON
+    /// that terminal, scrolled into view, rather than on whichever terminal the
+    /// cursor held before, which can sit a screenful away from the new row.
+    #[test]
+    fn a_new_terminal_is_the_selected_and_visible_row_when_its_fullscreen_closes() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        for _ in 0..8 {
+            app.engine
+                .create_standalone_terminal(24, 80)
+                .expect("standalone terminal");
+        }
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+
+        app.execute_command("new-standalone-terminal".to_string())
+            .expect("should spawn a standalone terminal");
+        let new_id = app.active_terminal_id.clone().expect("a new terminal");
+        app.exit_interactive_mode();
+
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(
+            app.terminal_items()
+                .get(app.selected_terminal_index)
+                .map(|(id, _)| id.as_str()),
+            Some(new_id.as_str()),
+            "the cursor must be on the terminal that was just launched"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert!(
+            app.mouse_layout
+                .terminal_row_to_item
+                .contains(&app.selected_terminal_index),
+            "the new terminal's row must be on screen; visible items {:?}, selected {}",
+            app.mouse_layout.terminal_row_to_item,
+            app.selected_terminal_index
+        );
+    }
+
     /// A standalone terminal is an ordinary sidebar element: it sorts with the
     /// others under every sort mode, including the manual drag order, rather
     /// than being pinned somewhere or dropped.
