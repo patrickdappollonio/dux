@@ -1517,6 +1517,26 @@ fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// The error [`fetch_origin_bounded`] answers when the fetch ran into its
+/// bound and was stopped, typed so a caller can tell "out of time" apart from
+/// a reason git gave (`anyhow::Error::downcast_ref`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchTimedOut {
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Display for FetchTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "git fetch origin timed out after {}s and was stopped",
+            crate::duration_text::whole_seconds(self.timeout)
+        )
+    }
+}
+
+impl std::error::Error for FetchTimedOut {}
+
 /// Run one `git fetch origin` in `repo_path`, stopped at `timeout`.
 ///
 /// The fetch runs in a process group of its own and the whole group is killed
@@ -1575,10 +1595,7 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
             let _ = child.kill();
             let _ = child.wait();
             let _ = drain();
-            return Err(anyhow!(
-                "git fetch origin timed out after {}s and was stopped",
-                timeout.as_secs_f32()
-            ));
+            return Err(FetchTimedOut { timeout }.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
@@ -5513,7 +5530,7 @@ fn wait_child_or_kill(
             let _ = child.wait();
             return Err(anyhow!(
                 "{what} timed out after {}s and was terminated",
-                timeout.as_secs()
+                crate::duration_text::whole_seconds(timeout)
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8591,7 +8608,12 @@ mod tests {
         let started = std::time::Instant::now();
         let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_millis(300))
             .expect_err("the fetch outlives its bound");
-        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "git fetch origin timed out after 1s and was stopped",
+            "typed, and in whole seconds"
+        );
+        assert!(error.downcast_ref::<FetchTimedOut>().is_some(), "{error}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
             "the bound must stop the fetch, took {:?}",

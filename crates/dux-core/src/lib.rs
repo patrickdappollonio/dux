@@ -32,6 +32,7 @@ pub mod container;
 pub mod destructive;
 pub mod device_label;
 pub mod diff;
+pub mod duration_text;
 pub mod editor;
 pub mod engine;
 pub mod file_drop;

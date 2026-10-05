@@ -68,7 +68,7 @@ impl Engine {
         let guard = self.checkout_move_guard();
         // Matched against the holder in the worker, which canonicalizes: that
         // must not run on the engine's thread.
-        let agents = self.agent_worktrees_for_base_switch();
+        let holders = self.holder_context_for_base_switch(&project);
         let spawned = thread::Builder::new()
             .name("dux-change-base-branch".to_string())
             .spawn(move || {
@@ -79,7 +79,7 @@ impl Engine {
                         Path::new(&project.path),
                         &branch,
                         &guard,
-                        &agents,
+                        &holders,
                     )
                 });
                 let _ = worker_tx.send(WorkerEvent::ProjectBaseBranchChanged {
@@ -108,21 +108,32 @@ impl Engine {
         Ok(pending)
     }
 
-    /// Every managed agent's worktree with its row label, for a held branch to
-    /// name its agent. Standalone agents are left out: deleting one never
-    /// removes its folder, so it is not a way to free a branch.
-    fn agent_worktrees_for_base_switch(&self) -> Vec<crate::base_branch::AgentWorktree> {
-        self.sessions
+    /// What the change worker needs to say who holds a branch: every agent's
+    /// directory with its row label and kind, and the project's managed
+    /// worktree area. Only gathered here; the canonical comparison runs in the
+    /// worker.
+    fn holder_context_for_base_switch(
+        &self,
+        project: &Project,
+    ) -> crate::base_branch::HolderContext {
+        let agents = self
+            .sessions
             .iter()
-            .filter_map(|session| {
-                session
-                    .managed_worktree()
-                    .map(|directory| crate::base_branch::AgentWorktree {
-                        directory: directory.to_string(),
-                        label: session.display_label(),
-                    })
+            .map(|session| crate::base_branch::AgentDirectory {
+                directory: session.directory().to_string(),
+                label: session.display_label(),
+                // Deleting a standalone agent never removes its folder, so the
+                // refusal must not offer that as a way to free the branch.
+                standalone: match &session.workspace {
+                    crate::model::AgentWorkspace::Managed(_) => false,
+                    crate::model::AgentWorkspace::Folder(_) => true,
+                },
             })
-            .collect()
+            .collect();
+        crate::base_branch::HolderContext {
+            agents,
+            managed_root: self.paths.worktrees_root.join(&project.name),
+        }
     }
 
     /// The change worker's answer: release the folder, save the base when the
@@ -223,11 +234,11 @@ mod tests {
         );
     }
 
-    /// The worker is handed every managed agent's worktree under its row label,
-    /// and no standalone agent: deleting one never frees a branch its folder
-    /// holds, so naming it beside "delete agent" would point at a dead end.
+    /// The worker is handed every agent's directory under its row label, a
+    /// standalone one marked as such (deleting it never frees a branch its
+    /// folder holds), and the project's own managed worktree area.
     #[test]
-    fn only_managed_agents_are_offered_as_holders() {
+    fn the_holder_context_marks_standalone_agents_and_scopes_the_managed_area() {
         let (mut engine, _tmp) = test_engine();
         engine
             .sessions
@@ -235,15 +246,28 @@ mod tests {
         engine
             .sessions
             .push(sample_standalone_session("s-folder", "/home/me/notes"));
+        let project = crate::engine::test_support::sample_project("p1", "/work/app");
 
-        let agents = engine.agent_worktrees_for_base_switch();
+        let holders = engine.holder_context_for_base_switch(&project);
 
         assert_eq!(
-            agents,
-            vec![crate::base_branch::AgentWorktree {
-                directory: "/tmp/s-managed-worktree".to_string(),
-                label: "s-managed-title".to_string(),
-            }]
+            holders.agents,
+            vec![
+                crate::base_branch::AgentDirectory {
+                    directory: "/tmp/s-managed-worktree".to_string(),
+                    label: "s-managed-title".to_string(),
+                    standalone: false,
+                },
+                crate::base_branch::AgentDirectory {
+                    directory: "/home/me/notes".to_string(),
+                    label: "s-folder-title".to_string(),
+                    standalone: true,
+                },
+            ]
+        );
+        assert_eq!(
+            holders.managed_root,
+            engine.paths.worktrees_root.join(&project.name)
         );
     }
 }

@@ -71,9 +71,12 @@ pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Resu
     let fetch = match git::has_origin_remote(repo) {
         Ok(false) => OriginFetch::NoOrigin,
         Ok(true) => {
-            match fetch_with_one_retry(fetch_timeout, BASE_BRANCH_FETCH_RETRY_PAUSE, |bound| {
-                git::fetch_origin_bounded(repo, bound)
-            }) {
+            match fetch_with_one_retry(
+                fetch_timeout,
+                BASE_BRANCH_FETCH_RETRY_PAUSE,
+                BASE_BRANCH_FETCH_RETRY_MIN,
+                |bound| git::fetch_origin_bounded(repo, bound),
+            ) {
                 Ok(()) => OriginFetch::Fetched,
                 Err(error) => OriginFetch::Failed(error.to_string()),
             }
@@ -84,15 +87,26 @@ pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Resu
     Ok(BranchListing { branches, fetch })
 }
 
+/// The least a retry is given: with less of the budget left after the pause,
+/// the first failure is reported as it is. A retry squeezed into a sliver
+/// cannot finish a real fetch, and its timeout would only replace the reason
+/// the first attempt gave.
+const BASE_BRANCH_FETCH_RETRY_MIN: Duration = Duration::from_secs(5);
+
 /// Run `fetch` bounded by `budget`, and once more after `pause` if it failed
-/// and enough of the budget is left, the second attempt bounded by what
-/// remains. Two fetches in one repository race for the refs they update (the
-/// listing against a "Pull project", or two listings), and the loser fails
-/// with git's "incorrect old value provided"; a moment later the same fetch
-/// succeeds. A second failure is the one reported.
+/// and at least `min_retry` of the budget is left after the pause, the second
+/// attempt bounded by what remains. Two fetches in one repository race for the
+/// refs they update (the listing against a "Pull project", or two listings),
+/// and the loser fails with git's "incorrect old value provided"; a moment
+/// later the same fetch succeeds.
+///
+/// A second failure that is a reason git gave is the one reported. A second
+/// failure that is only the retry running out of its own time is not: the
+/// first attempt's reason is the more useful one, so that is reported.
 fn fetch_with_one_retry(
     budget: Duration,
     pause: Duration,
+    min_retry: Duration,
     mut fetch: impl FnMut(Duration) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
@@ -101,11 +115,18 @@ fn fetch_with_one_retry(
         Err(error) => error,
     };
     let remaining = budget.saturating_sub(started.elapsed());
-    if remaining <= pause {
+    let Some(retry_budget) = remaining
+        .checked_sub(pause)
+        .filter(|left| *left >= min_retry)
+    else {
         return Err(first);
-    }
+    };
     std::thread::sleep(pause);
-    fetch(remaining - pause)
+    match fetch(retry_budget) {
+        Ok(()) => Ok(()),
+        Err(second) if second.downcast_ref::<git::FetchTimedOut>().is_some() => Err(first),
+        Err(second) => Err(second),
+    }
 }
 
 /// The folder was switched to the new base (or already was on it).
@@ -126,27 +147,74 @@ pub enum BaseBranchChangeFailure {
     /// refuses as a branch name.
     NotListed,
     /// Another worktree has the branch checked out, so git will not check it
-    /// out in the project folder too. `agent` is the label of the agent whose
-    /// managed worktree that is, when one is.
-    Held {
-        holder: PathBuf,
-        agent: Option<String>,
-    },
+    /// out in the project folder too. `by` says whose that worktree is, which
+    /// decides the way out the refusal can honestly offer.
+    Held { holder: PathBuf, by: BranchHolder },
     /// Creating the local tracking branch or the `git switch` failed; the text
     /// is git's reason (for the log: the message the user reads is the sticky
     /// "Couldn't check out" one).
     SwitchFailed(String),
 }
 
-/// A managed agent's worktree and the label its row shows, handed to the
-/// switch so a branch held by that worktree can name the agent rather than a
-/// path. Only managed agents: the refusal's way out is deleting the agent,
-/// which frees the branch only where deleting removes the worktree, and a
-/// standalone agent's folder is never removed.
+/// Whose worktree holds a branch the project folder cannot check out. Each
+/// variant has a different way to free the branch WITHOUT deleting it, and the
+/// refusal names exactly that one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentWorktree {
+pub enum BranchHolder {
+    /// A managed agent's worktree; the text is the label its row shows.
+    /// Deleting the agent together with its worktree, with the branch box
+    /// unticked, frees the branch and keeps it.
+    Agent(String),
+    /// A standalone agent's folder; the text is the label its row shows.
+    /// Deleting the agent never removes its folder, so it frees nothing.
+    StandaloneAgent(String),
+    /// A worktree in dux's managed area that no agent holds: the project's
+    /// worktree manager lists it and can remove it while keeping the branch.
+    UnheldManagedWorktree,
+    /// A worktree outside dux's managed area, which dux does not remove.
+    OtherWorktree,
+}
+
+/// An agent's directory and the label its row shows, handed to the switch so a
+/// branch held there can name the agent rather than a path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentDirectory {
     pub directory: String,
     pub label: String,
+    /// A standalone agent's folder rather than a managed worktree.
+    pub standalone: bool,
+}
+
+/// What the switch needs to say who holds a branch: every agent's directory
+/// and the project's managed worktree area (`<worktrees root>/<project>`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HolderContext {
+    pub agents: Vec<AgentDirectory>,
+    pub managed_root: PathBuf,
+}
+
+impl HolderContext {
+    /// Classify the worktree at `holder`. Canonicalizes, so it runs in the
+    /// worker, and another spelling of a directory still matches.
+    pub fn classify(&self, holder: &Path) -> BranchHolder {
+        let held = holder.to_string_lossy();
+        if let Some(agent) = self
+            .agents
+            .iter()
+            .find(|agent| crate::project_browser::same_directory(&agent.directory, &held))
+        {
+            return if agent.standalone {
+                BranchHolder::StandaloneAgent(agent.label.clone())
+            } else {
+                BranchHolder::Agent(agent.label.clone())
+            };
+        }
+        if git::is_under(&self.managed_root, holder) {
+            BranchHolder::UnheldManagedWorktree
+        } else {
+            BranchHolder::OtherWorktree
+        }
+    }
 }
 
 /// Switch the project folder at `repo` to `branch`, creating the local
@@ -160,7 +228,7 @@ pub fn switch_to_base_branch(
     repo: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
-    agents: &[AgentWorktree],
+    holders: &HolderContext,
 ) -> Result<BaseBranchSwitched, BaseBranchChangeFailure> {
     if !repo.is_dir() {
         return Err(BaseBranchChangeFailure::FolderMissing);
@@ -171,14 +239,8 @@ pub fn switch_to_base_branch(
         return Err(BaseBranchChangeFailure::NotListed);
     };
     if let Some(holder) = choice.held_by {
-        // Canonical paths, so another spelling of the worktree still matches.
-        let agent = agents
-            .iter()
-            .find(|agent| {
-                crate::project_browser::same_directory(&agent.directory, &holder.to_string_lossy())
-            })
-            .map(|agent| agent.label.clone());
-        return Err(BaseBranchChangeFailure::Held { holder, agent });
+        let by = holders.classify(&holder);
+        return Err(BaseBranchChangeFailure::Held { holder, by });
     }
     // The full ref, not `--short`: with a tag of the same name the short form
     // is `heads/<branch>` and would never match.
@@ -287,25 +349,24 @@ mod tests {
     /// there is never a third.
     #[test]
     fn the_fetch_retry_stays_inside_the_budget() {
+        let pause = Duration::from_millis(10);
+        let min = Duration::from_secs(5);
         let mut bounds = Vec::new();
-        let result = fetch_with_one_retry(
-            Duration::from_secs(10),
-            Duration::from_millis(10),
-            |bound| {
-                bounds.push(bound);
-                if bounds.len() == 1 {
-                    anyhow::bail!("cannot lock ref")
-                }
-                Ok(())
-            },
-        );
+        let result = fetch_with_one_retry(Duration::from_secs(10), pause, min, |bound| {
+            bounds.push(bound);
+            if bounds.len() == 1 {
+                anyhow::bail!("cannot lock ref")
+            }
+            Ok(())
+        });
         assert!(result.is_ok());
         assert_eq!(bounds.len(), 2);
         assert_eq!(bounds[0], Duration::from_secs(10));
-        assert!(bounds[1] <= Duration::from_secs(10) - Duration::from_millis(10));
+        assert!(bounds[1] <= Duration::from_secs(10) - pause);
+        assert!(bounds[1] >= min, "a retry always gets at least the minimum");
 
         let mut calls = 0;
-        let result = fetch_with_one_retry(Duration::ZERO, Duration::from_millis(10), |_| {
+        let result = fetch_with_one_retry(Duration::ZERO, pause, min, |_| {
             calls += 1;
             anyhow::bail!("timed out")
         });
@@ -313,13 +374,55 @@ mod tests {
         assert_eq!(calls, 1, "a spent budget is not retried");
 
         let mut calls = 0;
-        let result =
-            fetch_with_one_retry(Duration::from_secs(10), Duration::from_millis(1), |_| {
-                calls += 1;
-                anyhow::bail!("failure {calls}")
-            });
+        let result = fetch_with_one_retry(Duration::from_secs(10), pause, min, |_| {
+            calls += 1;
+            anyhow::bail!("failure {calls}")
+        });
         assert_eq!(calls, 2, "one retry, never more");
-        assert_eq!(result.unwrap_err().to_string(), "failure 2");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "failure 2",
+            "a reason git gave on the retry is reported"
+        );
+    }
+
+    /// Less than the minimum left after the pause means no retry at all: the
+    /// first reason is reported.
+    #[test]
+    fn a_fetch_with_too_little_budget_left_is_not_retried() {
+        let mut calls = 0;
+        let result = fetch_with_one_retry(
+            Duration::from_secs(4),
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            |_| {
+                calls += 1;
+                anyhow::bail!("Authentication failed")
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(result.unwrap_err().to_string(), "Authentication failed");
+    }
+
+    /// A retry that fails only because it ran out of its own time does not
+    /// replace the first attempt's reason.
+    #[test]
+    fn a_retry_that_only_timed_out_reports_the_first_reason() {
+        let mut calls = 0;
+        let result = fetch_with_one_retry(
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            |bound| {
+                calls += 1;
+                if calls == 1 {
+                    anyhow::bail!("Authentication failed")
+                }
+                Err(git::FetchTimedOut { timeout: bound }.into())
+            },
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(result.unwrap_err().to_string(), "Authentication failed");
     }
 
     /// A tag with the branch's name makes `symbolic-ref --short` answer
@@ -337,9 +440,13 @@ mod tests {
             "the short form really is ambiguous here"
         );
 
-        let switched =
-            switch_to_base_branch(repo.path(), "develop", &CheckoutMoveGuard::default(), &[])
-                .unwrap();
+        let switched = switch_to_base_branch(
+            repo.path(),
+            "develop",
+            &CheckoutMoveGuard::default(),
+            &HolderContext::default(),
+        )
+        .unwrap();
 
         assert!(switched.folder_was_on_it, "{switched:?}");
     }
@@ -348,7 +455,7 @@ mod tests {
     /// canonical paths so another spelling of the directory still matches; a
     /// worktree no agent has names nobody.
     #[test]
-    fn a_held_branch_names_the_agent_whose_worktree_holds_it() {
+    fn a_held_branch_names_whose_worktree_holds_it() {
         let repo = tempfile::tempdir().unwrap();
         init_repo(repo.path());
         let worktrees = tempfile::tempdir().unwrap();
@@ -364,31 +471,96 @@ mod tests {
                 held.to_string_lossy().as_ref(),
             ],
         );
-        let spelled_differently = worktrees.path().join(".").join("agent");
-        let agents = [
-            AgentWorktree {
-                directory: "/nowhere/else".to_string(),
-                label: "other".to_string(),
-            },
-            AgentWorktree {
-                directory: spelled_differently.to_string_lossy().into_owned(),
-                label: "Fix the login".to_string(),
-            },
-        ];
-        let guard = CheckoutMoveGuard::default();
-
-        let named = switch_to_base_branch(repo.path(), "fix-login", &guard, &agents).unwrap_err();
-        let BaseBranchChangeFailure::Held { agent, .. } = &named else {
-            panic!("expected a held refusal: {named:?}");
+        let spelled_differently = worktrees
+            .path()
+            .join(".")
+            .join("agent")
+            .to_string_lossy()
+            .into_owned();
+        let other = AgentDirectory {
+            directory: "/nowhere/else".to_string(),
+            label: "other".to_string(),
+            standalone: false,
         };
-        assert_eq!(agent.as_deref(), Some("Fix the login"));
-
-        let unnamed =
-            switch_to_base_branch(repo.path(), "fix-login", &guard, &agents[..1]).unwrap_err();
-        let BaseBranchChangeFailure::Held { holder, agent } = &unnamed else {
-            panic!("expected a held refusal: {unnamed:?}");
+        let holder_by = |agents: Vec<AgentDirectory>, managed_root: &Path| {
+            let holders = HolderContext {
+                agents,
+                managed_root: managed_root.to_path_buf(),
+            };
+            let refusal = switch_to_base_branch(
+                repo.path(),
+                "fix-login",
+                &CheckoutMoveGuard::default(),
+                &holders,
+            )
+            .unwrap_err();
+            let BaseBranchChangeFailure::Held { holder, by } = refusal else {
+                panic!("expected a held refusal: {refusal:?}");
+            };
+            assert_eq!(holder.canonicalize().unwrap(), held.canonicalize().unwrap());
+            by
         };
-        assert_eq!(*agent, None);
-        assert_eq!(holder.canonicalize().unwrap(), held.canonicalize().unwrap());
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            holder_by(
+                vec![
+                    other.clone(),
+                    AgentDirectory {
+                        directory: spelled_differently.clone(),
+                        label: "Fix the login".to_string(),
+                        standalone: false,
+                    },
+                ],
+                elsewhere.path(),
+            ),
+            BranchHolder::Agent("Fix the login".to_string())
+        );
+        assert_eq!(
+            holder_by(
+                vec![AgentDirectory {
+                    directory: spelled_differently,
+                    label: "Notes".to_string(),
+                    standalone: true,
+                }],
+                worktrees.path(),
+            ),
+            BranchHolder::StandaloneAgent("Notes".to_string()),
+            "an agent wins over the managed area it may sit in"
+        );
+        assert_eq!(
+            holder_by(vec![other.clone()], worktrees.path()),
+            BranchHolder::UnheldManagedWorktree
+        );
+        assert_eq!(
+            holder_by(vec![other], elsewhere.path()),
+            BranchHolder::OtherWorktree
+        );
+    }
+
+    /// A fetch that fails late for a real reason (here a refusing upload-pack
+    /// that answers after a delay) leaves only a sliver of the budget. No
+    /// retry is squeezed into it, so its timeout cannot replace the real
+    /// reason in what the user reads.
+    #[test]
+    fn a_late_real_failure_is_reported_as_itself_not_as_a_short_timeout() {
+        let (_origin, repo) = clone_of_local_origin();
+        let refuse_slowly =
+            "sleep 2.5; echo 'fatal: Authentication failed for origin' >&2; exit 1".to_string();
+        run_git(
+            repo.path(),
+            &["config", "remote.origin.uploadpack", &refuse_slowly],
+        );
+
+        let listing = load_branch_listing(repo.path(), Duration::from_secs(4)).unwrap();
+
+        let OriginFetch::Failed(reason) = &listing.fetch else {
+            panic!("expected a failed fetch: {listing:?}");
+        };
+        assert!(
+            !reason.contains("timed out"),
+            "the real reason was replaced by the squeezed retry's timeout: {reason}"
+        );
+        assert!(reason.contains("Authentication failed"), "{reason}");
     }
 }

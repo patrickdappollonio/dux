@@ -110,10 +110,10 @@ impl ConfigFileLock {
                 Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
                     if Instant::now() >= deadline {
                         anyhow::bail!(
-                            "another dux process has been writing {} for over {} seconds, so \
-                             this change was not saved; try again in a moment (lock file {})",
+                            "another dux process has been writing {} for over {}, so this \
+                             change was not saved; try again in a moment (lock file {})",
                             config_path.display(),
-                            wait.as_secs_f32(),
+                            crate::duration_text::seconds_phrase(wait),
                             lock_path.display()
                         );
                     }
@@ -5770,6 +5770,10 @@ second_note = \"nowhere to go\"
         .expect("join")
         .expect_err("times out");
         assert!(err.to_string().contains("another"), "{err:#}");
+        assert!(
+            err.to_string().contains("for over 1 second, so"),
+            "the wait is printed in whole seconds: {err:#}"
+        );
     }
 
     #[test]
