@@ -897,3 +897,43 @@ async fn a_worktree_no_agent_holds_points_at_the_worktree_manager_and_that_way_o
 
     change_base_succeeds(&f, &project_id, "agent-one").await;
 }
+
+/// An agent's worktree folder can vanish (the agent deleted it from inside).
+/// git still counts the branch as checked out there, and the refusal still
+/// names the agent, because its advice works without the folder: deleting the
+/// agent with its worktree, branch box unticked, makes git forget the
+/// registration, and the retry then switches with the branch kept.
+#[tokio::test]
+async fn an_agent_whose_worktree_folder_is_gone_is_named_and_its_advice_frees_the_branch() {
+    let f = boot().await;
+    let project_id = add_project(&f, false).await;
+    let worktree = create_agent(&f, &project_id).await;
+    std::fs::remove_dir_all(&worktree).unwrap();
+
+    let mut ws = events_socket(&f).await;
+    let resp = change_base(&f, &project_id, "agent-one").await;
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let frame = status_frame(&mut ws, "Can't change the base branch").await;
+    assert!(
+        frame["message"]
+            .as_str()
+            .unwrap()
+            .contains("the worktree of agent \"agent-one\" has it checked out"),
+        "{frame}"
+    );
+
+    // Follow the advice exactly.
+    delete_agent_and_wait(&f, "?delete_worktree=true&delete_branch=false").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let gone = worktree.to_string_lossy().into_owned();
+    while git(&f.repo, &["worktree", "list", "--porcelain"]).contains(&gone) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git never forgot the vanished worktree"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(local_branch_exists(&f.repo, "agent-one"));
+
+    change_base_succeeds(&f, &project_id, "agent-one").await;
+}

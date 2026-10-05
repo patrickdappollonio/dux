@@ -1224,6 +1224,16 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
                     n("git worktree remove"),
                     " with that path in the project folder."
                 ]),
+                BranchHolder::UnreadableWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": it is checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", and dux could not look at that folder to say whose it is. Pick another \
+                     branch, or fix access to that folder and try again."
+                ]),
                 BranchHolder::UnheldManagedWorktree => Final::error(status_text![
                     "Can't change the base branch of project ",
                     q(project_name),
@@ -10301,6 +10311,19 @@ mod tests {
                  forget that one worktree, keeping the branch, by running git worktree remove \
                  with that path in the project folder.",
                 vec!["app", "develop", "/work/gone", "git worktree remove"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/locked"),
+                    by: BranchHolder::UnreadableWorktree,
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": it is checked \
+                 out in the worktree at /work/locked, and dux could not look at that folder to \
+                 say whose it is. Pick another branch, or fix access to that folder and try \
+                 again.",
+                vec!["app", "develop", "/work/locked"],
             ),
             (
                 refused(BaseBranchChangeFailure::Held {

@@ -182,6 +182,10 @@ pub enum BranchHolder {
     /// worktree manager does not list it, since there is no folder to classify:
     /// `git worktree remove` with that one path is what forgets it.
     MissingWorktree,
+    /// A worktree folder dux could not look at (permission denied, say): it
+    /// may well exist, so the only ways out offered are picking another
+    /// branch or fixing access, never anything that removes it.
+    UnreadableWorktree,
     /// A worktree outside dux's managed area, which dux does not remove.
     OtherWorktree,
 }
@@ -236,8 +240,21 @@ impl HolderContext {
             }
         }
         // Every other way out needs the folder, so a gone one says so first.
-        if std::fs::symlink_metadata(holder).is_err() {
-            return BranchHolder::MissingWorktree;
+        // Gone means git's own answer for a missing path and nothing else: a
+        // folder dux merely could not look at may be full of work, and the
+        // gone verdict's advice would remove it.
+        match std::fs::symlink_metadata(holder) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return BranchHolder::MissingWorktree;
+            }
+            Err(error) => {
+                crate::logger::warn(&format!(
+                    "could not look at the worktree folder {} that holds a branch: {error}",
+                    holder.display()
+                ));
+                return BranchHolder::UnreadableWorktree;
+            }
         }
         if let Some(agent) = standalone {
             return BranchHolder::StandaloneAgent(agent.label.clone());
@@ -775,6 +792,54 @@ mod tests {
         assert_eq!(
             classify(vec![agent("one", false), agent("notes", true)]),
             BranchHolder::StandaloneAgent("notes".to_string())
+        );
+    }
+
+    /// A worktree whose folder EXISTS but cannot be looked at (its parent is
+    /// unreadable) is never called gone, whose advice would remove a real
+    /// folder: it gets the unreadable verdict, which offers no removal.
+    #[test]
+    fn an_unreadable_existing_worktree_is_not_called_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let outside = tempfile::tempdir().unwrap();
+        let parent = outside.path().join("locked");
+        std::fs::create_dir_all(&parent).unwrap();
+        let held = parent.join("wt");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix-login",
+                held.to_str().unwrap(),
+            ],
+        );
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refusal = switch_to_base_branch(
+            repo.path(),
+            "fix-login",
+            &CheckoutMoveGuard::default(),
+            &HolderContext {
+                agents: Vec::new(),
+                managed_root: PathBuf::from("/nowhere"),
+            },
+        );
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            held.join("f").exists(),
+            "the worktree folder is really there"
+        );
+        let Err(BaseBranchChangeFailure::Held { by, .. }) = refusal else {
+            panic!("expected a held refusal: {refusal:?}");
+        };
+        assert_eq!(
+            by,
+            BranchHolder::UnreadableWorktree,
+            "an existing folder dux merely could not stat must not be reported as gone"
         );
     }
 }
