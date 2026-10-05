@@ -258,10 +258,19 @@ export function BlockedPage({ where }: { where: string | null }) {
   return (
     <Shell title="This address is blocked">
       <p className="text-sm text-muted-foreground">
-        dux refuses every request from the address you are connecting from. The
-        block is an entry in <InlineCode>blocked_addresses</InlineCode>, in the{" "}
-        <InlineCode>[server.auth]</InlineCode> section of{" "}
-        {where ? <InlineCode>{where}</InlineCode> : <InlineCode>config.toml</InlineCode>}.
+        dux refuses every request from the address you are connecting from.{" "}
+        {/* The server's `where` is a whole location phrase that already names
+          * the setting and its section, so it is the sentence's object as it
+          * came, never slotted into a phrase of the page's own. */}
+        {where ? (
+          <>The block is an entry in {where}.</>
+        ) : (
+          <>
+            The block is an entry in <InlineCode>blocked_addresses</InlineCode>, in
+            the <InlineCode>[server.auth]</InlineCode> section of{" "}
+            <InlineCode>config.toml</InlineCode>.
+          </>
+        )}{" "}
         Whoever runs dux can remove the address there and reload the config; dux
         also adds an address on its own after too many failed sign-ins.
       </p>

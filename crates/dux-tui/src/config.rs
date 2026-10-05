@@ -1536,9 +1536,10 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # ranges (\"203.0.113.0/24\"). A request is refused when ANY address it\n\
                  # names matches: where it connected from, and every address in its\n\
                  # X-Forwarded-For, X-Real-IP and Forwarded headers, so an entry works\n\
-                 # behind a proxy too. Loopback (127.0.0.1, ::1) never matches: it is\n\
-                 # this machine, and tailscale serve relays your tailnet through it, so\n\
-                 # an entry covering it is accepted, warned about, and ignored. dux adds\n\
+                 # behind a proxy too. Loopback and this machine's own addresses never\n\
+                 # match: they are this machine, and tailscale serve relays your tailnet\n\
+                 # through loopback, so the part of an entry covering them is accepted,\n\
+                 # warned about, and ignored; the rest of a range still applies. dux adds\n\
                  # single addresses after failed logins, or an IPv6 /64 as one range\n\
                  # (\"2001:db8:1:2::/64\"), which then replaces the addresses of that /64\n\
                  # already listed; it adds nothing an entry already covers. Yours to\n\
@@ -1670,7 +1671,8 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "max_blocked_addresses",
             comment: Some(CommentSource::Static(
-                "# How long blocked_addresses may grow through dux's own additions. Past\n\
+                "# How many entries blocked_addresses may hold before dux stops adding to\n\
+                 # it. The whole list counts, entries you added yourself included. Past\n\
                  # it, a newly blocked address stays blocked until dux restarts but is not\n\
                  # written here, and dux says so in its log. Entries you add yourself are\n\
                  # never refused. Default 1000.",

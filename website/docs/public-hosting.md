@@ -102,9 +102,15 @@ docker compose exec dux dux config set server.auth.password
 ## The GitHub version: oauth2-proxy in front
 
 The rest of this page builds the second gate: a TLS terminator, `oauth2-proxy` doing GitHub
-sign-in restricted to your org or to accounts you name, and dux behind it. Setting a dux
-password as well costs nothing, and it is still the gate if someone ever reaches dux
-around the proxy.
+sign-in restricted to your org or to accounts you name, and dux behind it.
+
+A dux password behind the proxy is not free. Everyone signs in twice, once to GitHub and
+once to dux. dux sees every visitor as the proxy's one address, so five wrong guesses by
+anyone block the proxy and with it everybody. And dux cannot see the HTTPS in front, so
+under the default `cookie_secure = "auto"` its cookie is not marked Secure. You can still
+set one as the gate for anyone who reaches dux around the proxy; if you do, use the simple
+version's settings (`require = "everywhere"`, `cookie_secure = "always"`,
+`max_failed_logins = 0`).
 
 ## The shape of it
 
@@ -436,6 +442,14 @@ proxy_set_header Upgrade    $http_upgrade;
 proxy_set_header Connection "upgrade";
 proxy_read_timeout 1h;      # or an idle agent's socket is closed under you
 ```
+
+> [!WARNING]
+> nginx's `proxy_pass` adds no `X-Forwarded-For` by default. When nginx runs on the same
+> machine as dux and forwards to loopback, that makes every visitor look like this
+> machine, which the default `require` lets in with no password. Add
+> `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, and set
+> `require = "everywhere"` either way. See
+> [Behind a reverse proxy](/docs/web-login#behind-a-reverse-proxy).
 
 ### `403 this dux server does not serve the requested host`
 

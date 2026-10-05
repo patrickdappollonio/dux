@@ -261,9 +261,9 @@ The safe shapes:
 
 > [!WARNING]
 > **No password on anything wider than loopback is on you.** dux still serves it, and
-> warns in red as it starts (in `dux server`'s output, the flip's log viewer, or the
-> terminal UI's status line for the background server) and with a red banner in every
-> browser. Anyone who can reach that address controls your agents and worktrees.
+> warns as it starts (in red in `dux server`'s output and the flip's log viewer, in the
+> warning color on the terminal UI's status line for the background server) and with a
+> red banner in every browser. Anyone who can reach that address controls your agents and worktrees.
 
 > [!WARNING]
 > **In a container, dux cannot see a Tailscale outside it.** A Tailscale on the host or in

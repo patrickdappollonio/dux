@@ -181,13 +181,23 @@ describe("LoginPage", () => {
 
 describe("BlockedPage", () => {
   it("names where the block lives and how to lift it", () => {
-    render(<BlockedPage where="/home/u/.config/dux/config.toml" />)
+    render(<BlockedPage where={null} />)
     expect(screen.getByRole("heading", { name: "This address is blocked" })).toBeTruthy()
     const chips = [...document.querySelectorAll("[data-slot=inline-code]")].map(
       (c) => c.textContent,
     )
-    expect(chips).toContain("blocked_addresses")
-    expect(chips).toContain("/home/u/.config/dux/config.toml")
+    expect(chips).toEqual(["blocked_addresses", "[server.auth]", "config.toml"])
+    expect(document.body.textContent).toContain("remove the address there and reload the config")
+  })
+
+  it("uses the server's location as the whole phrase, never nested in a second one", () => {
+    // The server sends a full location phrase (`BLOCKED_WHERE`), which already
+    // names the setting and its section.
+    const where = "blocked_addresses in the [server.auth] section of dux's config.toml"
+    render(<BlockedPage where={where} />)
+    const text = (document.body.textContent ?? "").replace(/\s+/g, " ")
+    expect(text).toContain(`The block is an entry in ${where}.`)
+    expect(text.match(/section of/g)?.length).toBe(1)
   })
 
   it("still names the setting when the server gave no location", () => {

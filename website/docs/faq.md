@@ -118,7 +118,7 @@ runs on and your own tailnet. See [The web password](/docs/web-login).
 > [!WARNING]
 > Until you set it there is no password at all, and anyone who can reach the port gets
 > the whole workspace, including typing into your agents. That is why dux binds
-> `127.0.0.1` by default, and why it warns in red when it is reachable beyond this machine
+> `127.0.0.1` by default, and why it warns loudly when it is reachable beyond this machine
 > without one. See [Who can get in](/docs/server-mode#who-can-get-in).
 
 ### Is server mode a hosted service? Does my code leave my machine?

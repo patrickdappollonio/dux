@@ -309,7 +309,10 @@ over the plain address.
 
 With a [password](/docs/web-login) set, a request through the route counts as your tailnet
 when Tailscale says which tailnet user sent it, and the sign-in cookie is marked Secure
-on its own, so it never travels over plain HTTP.
+on its own, so it never travels over plain HTTP. Both hold only while dux can tell what
+reaches its port: while it [cannot](#when-tailscale-isnt-there), route visitors are asked
+for the password, see the plain-HTTP warning, and get a cookie that is not Secure unless
+`cookie_secure = "always"`.
 
 The plain Tailscale address keeps serving alongside the HTTPS one. To make HTTPS the only
 way in from the tailnet, run with `tailscale = "no"` (or `dux server --no-tailscale`) and
@@ -473,8 +476,8 @@ does not pretend that is the same as your tailnet:
 - **With a password set**, Funnel visitors get the sign-in page and nothing more, and
   this machine's MagicDNS name keeps working. See
   [Tailscale serve and Funnel](/docs/web-login#tailscale-serve-and-funnel).
-- **With no password**, dux serves anyway and says so as loudly as it can: a red warning
-  in every serving mode, a red banner in every browser, and this machine's MagicDNS name
+- **With no password**, dux serves anyway and says so as loudly as it can: a warning in
+  every serving mode (red in `dux server`'s output and the flip's log viewer), a red banner in every browser, and this machine's MagicDNS name
   withdrawn while any Funnel is on, so a browser opening the Funnel's address gets a `403`.
   That last one is not a lock; a crafted request gets past it. Set a password before you
   Funnel dux.
