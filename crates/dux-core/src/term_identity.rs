@@ -26,7 +26,8 @@
 use serde::{Deserialize, Serialize};
 
 /// How dux resolves the terminal identity presented to an agent. Stored in config
-/// as a lowercase string (see [`TerminalIdentityMode::from_config_str`]).
+/// as a lowercase string, read through
+/// [`crate::config_effective::effective_terminal_identity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TerminalIdentityMode {
@@ -61,18 +62,15 @@ impl TerminalIdentityMode {
         }
     }
 
-    /// Parse a config string, falling back to [`TerminalIdentityMode::Auto`] with a
-    /// logged warning on an unrecognized value (the theme/color-config convention:
-    /// a typo degrades gracefully rather than failing the whole config load).
-    pub fn from_config_str(s: &str) -> Self {
-        match Self::parse(s) {
-            Some(mode) => mode,
-            None => {
-                crate::logger::warn(&format!(
-                    "unknown capabilities.terminal_identity value {s:?}; falling back to \"auto\""
-                ));
-                Self::Auto
-            }
+    /// The config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Mirror => "mirror",
+            Self::Ghostty => "ghostty",
+            Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+            Self::None => "none",
         }
     }
 }
@@ -454,7 +452,7 @@ mod tests {
         );
         assert_eq!(TerminalIdentityMode::parse("nope"), None);
         assert_eq!(
-            TerminalIdentityMode::from_config_str("nonsense"),
+            crate::config_effective::effective_terminal_identity("nonsense"),
             TerminalIdentityMode::Auto
         );
     }

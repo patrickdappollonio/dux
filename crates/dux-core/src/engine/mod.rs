@@ -225,6 +225,9 @@ fn lock_changed_files_queue(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// See [`Engine::serve_memory`].
+pub type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
+
 pub struct Engine {
     pub config: Config,
     pub paths: DuxPaths,
@@ -517,6 +520,13 @@ pub struct Engine {
     /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
     pub has_active_processes: Arc<AtomicBool>,
+    /// What a web serve keeps for the life of this engine, which is the life
+    /// of this dux process, rather than for one serve: the web layer's address
+    /// admission (bans held in memory, failure counts, waits). Every serve this
+    /// process starts (`dux server`, the flip, the background server turned off
+    /// and on) shares it, so a ban said to hold "until dux restarts" does.
+    /// Opaque here; the web layer owns its type.
+    pub serve_memory: ServeMemory,
     /// The audience for statuses minted while processing the CURRENT command.
     /// Transient, never persisted: the single-threaded engine actor sets it to
     /// the originating connection's [`StatusScope`] before processing a web
@@ -2132,7 +2142,7 @@ impl Engine {
     /// from the configured mode, the owning surface, and the inherited-env probe.
     /// Companion terminals reuse it too so a plain shell sees the same identity.
     pub fn resolved_identity(&self) -> crate::term_identity::TerminalIdentity {
-        let mode = crate::term_identity::TerminalIdentityMode::from_config_str(
+        let mode = crate::config_effective::effective_terminal_identity(
             &self.config.capabilities.terminal_identity,
         );
         crate::term_identity::resolve_identity(mode, self.surface_kind, &self.host_env)
@@ -2200,13 +2210,10 @@ impl Engine {
         wrap_for_tmux: bool,
     ) -> Vec<u8> {
         let master = self.config.capabilities.passthrough;
-        // Parse without warning on the per-tick path: an unrecognized value is
-        // surfaced once at config load/reload (see `ClipboardPassthroughMode`), and
-        // falls back to the default here.
-        let clipboard_mode = crate::config::ClipboardPassthroughMode::parse(
-            &self.config.capabilities.clipboard_passthrough,
-        )
-        .unwrap_or(crate::config::ClipboardPassthroughMode::Focused);
+        // Pure on the per-tick path: an unrecognized value is said once, at
+        // config load/reload.
+        let clipboard_mode =
+            crate::config_effective::effective_clipboard_passthrough(&self.config.capabilities);
         let mut out = Vec::new();
         for (tab_id, provider) in &self.providers {
             // Always drain (keeps the ring bounded even for a headless server).
@@ -2597,21 +2604,116 @@ impl Engine {
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
-        let github_was_enabled = self.github_integration_enabled;
-        self.github_integration_enabled = config.ui.github_integration;
+        self.apply_reloaded_config_probing(config, true)
+    }
+
+    /// [`Self::apply_reloaded_config`] that leaves the `gh` probe a reload
+    /// owes to whoever applies the config next: a coalesced reload applies it
+    /// only to drain the deferred commands, then hands it back to the surface,
+    /// whose own apply asks once.
+    pub(crate) fn apply_reloaded_config_for_drain(&mut self, config: Config) -> anyhow::Result<()> {
+        self.apply_reloaded_config_probing(config, false)
+    }
+
+    fn apply_reloaded_config_probing(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
+        let fallback = config.clone();
+        let result = self.apply_reloaded_config_inner(config, probe);
+        if result.is_err() {
+            self.keep_reloaded_config(fallback);
+        }
+        result
+    }
+
+    /// Ask `gh` for a fresh answer when a reload owes one:
+    /// `github_was_enabled` is whether the integration was on before it.
+    ///
+    /// Off-to-on through a config reload is the same transition as the
+    /// toggle, and needs the same fresh answer from `gh`. A reload while the
+    /// integration was already on re-probes too, but only when `gh` is not
+    /// currently usable: reloading the config is a deliberate act and one of
+    /// the reasons to perform it is having just fixed `gh`, so waiting out the
+    /// timer would be needless. A reload with everything working stays a
+    /// no-op, because there is nothing to recover and a probe costs a process.
+    pub fn probe_gh_after_reload(&mut self, github_was_enabled: bool) {
         if self.github_integration_enabled
             && (!github_was_enabled || !matches!(self.gh_status, crate::model::GhStatus::Available))
         {
-            // Off-to-on through a config reload is the same transition as the
-            // toggle, and needs the same fresh answer from `gh`.
-            //
-            // A reload while the integration was already on re-probes too, but
-            // only when `gh` is not currently usable: reloading the config is a
-            // deliberate act and one of the reasons to perform it is having just
-            // fixed `gh`, so waiting out the timer would be needless. A reload
-            // with everything working stays a no-op, because there is nothing to
-            // recover and a probe costs a process.
             self.spawn_gh_status_check();
+        }
+    }
+
+    /// A surface could not finish applying a reloaded config (the error is
+    /// its own to report). The engine still adopts the new config, so memory,
+    /// the writer's base and the file agree: nothing old can be saved over the
+    /// new file, and a deferred change already saved to it stays in memory
+    /// too. Every surface's failed apply calls this.
+    ///
+    /// What the engine derives from the config is re-derived from the kept
+    /// one. When the session database cannot be read (often the very reason
+    /// the apply failed), the engine's projects are derived from the kept
+    /// config's own projects alone, so memory, the writer's base and the
+    /// file still agree.
+    pub fn keep_reloaded_config(&mut self, config: Config) {
+        self.github_integration_enabled = config.ui.github_integration;
+        let derived = self
+            .session_store
+            .load_projects()
+            .and_then(|stored| Ok((stored, self.session_store.load_project_created_ats()?)));
+        match derived {
+            Ok((stored, created)) => {
+                self.projects = crate::project_browser::load_projects(&stored, &created, &config);
+                self.config = config;
+                self.retune_after_config_swap();
+            }
+            Err(error) => {
+                // The kept config's own projects stay (a project deleted from
+                // the reloaded file by hand stays deleted), and the engine's
+                // projects are derived from them alone, so memory, base and
+                // file agree and a later save of the projects writes what the
+                // file already has. The session database is reconciled on the
+                // next sync that can read it.
+                crate::logger::warn(&format!(
+                    "the reloaded config's projects could not be matched with the session \
+                     database ({error:#}); using the config file's projects until it can be read"
+                ));
+                self.projects = crate::project_browser::load_projects(
+                    &config.projects,
+                    &std::collections::HashMap::new(),
+                    &config,
+                );
+                self.config = config;
+                self.retune_after_config_swap();
+            }
+        }
+        self.refresh_project_defaults();
+        self.update_branch_sync_sessions();
+    }
+
+    /// Pull-request sync after a reload swapped in a config:
+    /// `github_was_enabled` is whether the integration was on before it.
+    /// Turned off, the sync stops and its statuses go. Already on with a
+    /// settled answer from `gh`, the sync set is re-derived and refreshed,
+    /// re-seeded first so a manually attached PR's badge survives the reload
+    /// without waiting for a cycle. Turned on, the `gh` probe the reload asked
+    /// for decides, so nothing is armed here. Every surface's reload runs it.
+    pub fn retune_pr_sync_after_reload(&mut self, github_was_enabled: bool) {
+        if !self.github_integration_enabled {
+            self.pr_statuses.clear();
+            self.disarm_pr_sync();
+        } else if github_was_enabled && matches!(self.gh_status, crate::model::GhStatus::Available)
+        {
+            self.seed_pr_statuses_from_store();
+            self.update_pr_sync_sessions();
+            self.spawn_initial_pr_refresh();
+            self.spawn_pr_sync_worker();
+        }
+    }
+
+    fn apply_reloaded_config_inner(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
+        let github_was_enabled = self.github_integration_enabled;
+        self.github_integration_enabled = config.ui.github_integration;
+        if probe {
+            self.probe_gh_after_reload(github_was_enabled);
         }
         self.projects = crate::project_browser::load_projects(
             &self.session_store.load_projects()?,
@@ -2632,16 +2734,20 @@ impl Engine {
     /// applies a reload its own way, so both call this rather than relying on
     /// the other's path.
     pub fn retune_after_config_swap(&mut self) {
+        // The config just adopted is what the file holds now, so it is the
+        // base the writer's three-way saves patch against: a key someone else
+        // sets on disk afterwards is never undone by a save from memory.
+        self.config_writer.set_base(self.config.clone());
         crate::logger::set_level(&self.config.logging.level);
         crate::logger::set_rotation(&self.config.logging);
         self.pr_poll_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_interval(
+            u64::from(crate::config::effective_pr_poll_interval_seconds(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
         self.pr_poll_inactive_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+            u64::from(crate::config::effective_pr_poll_inactive_interval_seconds(
                 self.config.ui.pr_poll_inactive_interval_seconds,
             )),
             Ordering::Relaxed,
@@ -3642,13 +3748,13 @@ impl Engine {
         // them, and arm BEFORE spawning so the kill switch observes the live
         // state on the first iteration.
         interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_interval(
+            u64::from(crate::config::effective_pr_poll_interval_seconds(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
         inactive_interval_secs.store(
-            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+            u64::from(crate::config::effective_pr_poll_inactive_interval_seconds(
                 self.config.ui.pr_poll_inactive_interval_seconds,
             )),
             Ordering::Relaxed,
@@ -5633,7 +5739,7 @@ impl Engine {
 
     /// The effective per-agent tab cap (clamped, default-substituted).
     pub fn agent_tabs_max(&self) -> u16 {
-        crate::config::normalized_agent_tabs_max(self.config.ui.agent_tabs_max)
+        crate::config::effective_agent_tabs_max(self.config.ui.agent_tabs_max)
     }
 
     /// Create a new extra tab for `session_id` running `provider`, persist its
@@ -8902,6 +9008,10 @@ mod tests {
     }
 
     impl crate::engine::ConfigSurface for MarkerReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,
@@ -8985,10 +9095,13 @@ mod tests {
         assert!(engine.reload_guard.is_none(), "barrier must be released");
         assert!(engine.deferred_commands.is_empty());
 
-        // The reloaded config landed (provider swapped from claude → codex).
+        // As with a reload that defers nothing, the engine hands the reloaded
+        // config to the surface and keeps its own until the surface applies it,
+        // so the surface can compare the config before the reload with the one
+        // after it.
         assert_eq!(
-            engine.config.defaults.provider, "codex",
-            "the reloaded config must be applied"
+            engine.config.defaults.provider, "claude",
+            "the surface still sees the config from before the reload"
         );
 
         // The deferred env change survives IN MEMORY after the reload; this is
@@ -9031,6 +9144,10 @@ mod tests {
     struct FailingReloadSurface;
 
     impl crate::engine::ConfigSurface for FailingReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,
@@ -9110,6 +9227,10 @@ mod tests {
     struct StuckReloadSurface;
 
     impl crate::engine::ConfigSurface for StuckReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,
@@ -9122,6 +9243,30 @@ mod tests {
         }
     }
 
+    /// Reordering macros by drag saves the new order: a pure reorder is a
+    /// change even though no macro's own text changed.
+    #[test]
+    fn reordering_macros_reaches_the_file() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[macros]\na = { text = \"a\", surface = \"agent\" }\nb = { text = \"b\", surface = \"agent\" }\nc = { text = \"c\", surface = \"agent\" }\n",
+        )
+        .expect("seed");
+        engine.config = crate::config::load_config(&engine.paths).expect("load");
+        engine.retune_after_config_swap();
+        let mut macros = engine.config.macros.clone();
+        macros.entries.move_index(2, 0);
+        engine
+            .apply(Command::UpdateMacros { macros })
+            .expect("update macros");
+        engine.config_writer.flush();
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&engine.paths.config_path).unwrap()).unwrap();
+        let order: Vec<&str> = parsed.macros.entries.keys().map(String::as_str).collect();
+        assert_eq!(order, ["c", "a", "b"]);
+    }
+
     #[test]
     fn reentrant_reload_is_rejected_and_keeps_the_first_barrier() {
         let (mut engine, _tmp) = test_engine();
@@ -9131,18 +9276,18 @@ mod tests {
         assert!(engine.reloading);
         assert!(engine.reload_guard.is_some());
 
-        // A second reload while one is in flight must be refused: it must NOT
+        // A second reload while one is in flight is queued, never run at once: it must NOT
         // drop the live guard or spawn a second worker.
         let reaction = engine.apply(Command::ReloadConfig).expect("second reload");
         match reaction {
             EventReaction::Status(update) => {
                 assert!(
-                    update.message.contains("already in progress"),
+                    update.message.contains("already running"),
                     "got: {}",
                     update.message
                 );
             }
-            _ => panic!("expected an 'already in progress' status"),
+            _ => panic!("expected an 'already running' status"),
         }
         // The first barrier is intact.
         assert!(engine.reloading);

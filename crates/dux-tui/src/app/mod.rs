@@ -29,7 +29,7 @@ use crate::clipboard::Clipboard;
 #[allow(deprecated)]
 // importing the deprecated TUI save_config for use in the blessed sync-direct project-sync helpers
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ensure_config, provider_config, save_config, validate_keys,
+    Config, DuxPaths, MacroSurface, ensure_config, provider_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
@@ -789,9 +789,10 @@ pub struct App {
     /// `reload_config_from_disk` mints a [`dux_core::engine::HandlerStatusOp`]
     /// only when a reload worker actually spawned, shows its keyed busy, and
     /// stashes it here (a reload is terminal, so an `Option` suffices). The
-    /// matching `ApplyReloadedConfig` (success) or `OpenConfigReloadFailedModal`
-    /// (failure) handler pops the op and resolves it against the handler-computed
-    /// [`TuiConfigReloadOutcome`].
+    /// matching `ApplyReloadedConfig` (applied, or adopted with a failed step),
+    /// `ConfigAdopted` (adopted with a failed step) or
+    /// `OpenConfigReloadFailedModal` (refused) handler pops the op and resolves
+    /// it against the handler-computed [`TuiConfigReloadOutcome`].
     /// The shared engine `ConfigReloadReady`/`ApplyReloadedConfig` logic (which
     /// also drives the web and replays deferred commands) is untouched: only the
     /// TUI's view-handler final is routed through the op.
@@ -878,7 +879,7 @@ pub enum TuiConfigReloadOutcome {
     /// comes from [`dux_core::config_reload_status::applied`].
     Applied,
     /// Validation passed but applying the config failed. Dismisses the spinner;
-    /// the sentence comes from [`dux_core::config_reload_status::apply_failed`].
+    /// the sentence comes from [`dux_core::config_reload_status::adopted_but_apply_failed`].
     ApplyFailed(String),
     /// Validation failed; the reload-failed modal is opened. Resolves to the
     /// review-the-modal error line.
@@ -3929,17 +3930,19 @@ impl AgentSortMode {
         AgentSortMode::NameDesc,
     ];
 
-    /// Parse the shared `config.ui.agent_sort` string. Unknown values fall back to
-    /// `Active` (the default), matching the web's tolerance for a value it does
-    /// not offer.
+    /// The shared `config.ui.agent_sort` string, read by
+    /// [`dux_core::config_effective::effective_agent_sort`], the one rule both
+    /// surfaces and `dux config get` share: an unknown value is `Active`, the
+    /// default.
     pub(crate) fn from_config_str(s: &str) -> AgentSortMode {
-        match s {
-            "updated" => AgentSortMode::Updated,
-            "created" => AgentSortMode::Created,
-            "name" => AgentSortMode::NameAsc,
-            "name_desc" => AgentSortMode::NameDesc,
-            "manual" => AgentSortMode::Manual,
-            _ => AgentSortMode::Active,
+        use dux_core::flat_list::FlatSortMode;
+        match dux_core::config_effective::effective_agent_sort(s) {
+            FlatSortMode::Active => AgentSortMode::Active,
+            FlatSortMode::Updated => AgentSortMode::Updated,
+            FlatSortMode::Created => AgentSortMode::Created,
+            FlatSortMode::NameAsc => AgentSortMode::NameAsc,
+            FlatSortMode::NameDesc => AgentSortMode::NameDesc,
+            FlatSortMode::Manual => AgentSortMode::Manual,
         }
     }
 
@@ -4190,6 +4193,7 @@ impl App {
         let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
             paths.config_path.clone(),
             worker_tx.clone(),
+            &config,
         );
         let engine = Engine {
             config,
@@ -4254,6 +4258,7 @@ impl App {
             changed_files_refresh: Default::default(),
             watched_session_id: None,
             has_active_processes,
+            serve_memory: Default::default(),
             current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
@@ -4310,7 +4315,9 @@ impl App {
         theme: Theme,
         restore: SessionRestore,
     ) -> Result<Self> {
-        let pr_banner_at_bottom = engine.config.ui.pr_banner_position == "bottom";
+        let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
+            &engine.config.ui.pr_banner_position,
+        ) == dux_core::config_effective::PrBannerPosition::Bottom;
         let show_diff_line_numbers = engine.config.ui.show_diff_line_numbers;
         // Seed the changes (right) pane's hidden state from config; the runtime
         // RemoveGitPane toggle (Ctrl-]) overrides it for the rest of the session.
@@ -4599,6 +4606,10 @@ impl App {
 
     fn prepare_run_tick(&mut self) {
         self.drain_events();
+        // A `dux config set` (or a hand-run `kill -USR1`) asks for a reload.
+        if self.reload_config_on_signal() {
+            self.mark_frame_dirty();
+        }
         // Browser requests observe this tick's worker results and render in the same frame.
         self.service_companion();
         self.note_visible_pty_output();
@@ -5722,6 +5733,23 @@ impl App {
         }
     }
 
+    /// Run the ordinary config reload when a SIGUSR1 has arrived since the
+    /// last tick (`dux config set` sends one; see
+    /// [`dux_core::reload_signal`]). Returns whether one had. The reload
+    /// itself runs on a worker, never on this thread. While the background
+    /// server is up this one reload is its reload too, because the terminal
+    /// UI drives the engine both serve from.
+    pub(crate) fn reload_config_on_signal(&mut self) -> bool {
+        if !dux_core::reload_signal::take_pending() {
+            return false;
+        }
+        dux_core::logger::info("SIGUSR1 received: reloading config.toml");
+        if let Err(err) = self.reload_config_from_disk() {
+            self.report_runtime_error("config reload on SIGUSR1 failed", err.as_ref());
+        }
+        true
+    }
+
     pub(crate) fn reload_config_from_disk(&mut self) -> Result<()> {
         let reaction = self.engine.apply(Command::ReloadConfig)?;
         // Only show the "Reloading…" busy when a reload worker was actually
@@ -5733,10 +5761,11 @@ impl App {
         self.apply_reaction(reaction);
         if spawned {
             // Mint the reload's keyed busy op. The TUI view handler for the shared
-            // `ApplyReloadedConfig` (success) / `OpenConfigReloadFailedModal`
-            // (failure) reactions resolves it: a validation failure into this
-            // surface's own error, an apply outcome into a clear, because that
-            // sentence is owed to both surfaces and travels the worker lane.
+            // `ApplyReloadedConfig` / `ConfigAdopted` (applied or adopted) and
+            // `OpenConfigReloadFailedModal` (refused) reactions resolves it: a
+            // refused file into this surface's own error, an apply outcome into
+            // a clear, because that sentence is owed to both surfaces and
+            // travels the worker lane.
             let op = dux_core::engine::status_op("Reloading config.toml.").resolve_in_handler(
                 |o: &TuiConfigReloadOutcome| match o {
                     // Both apply outcomes are authored in `config_reload_status`
@@ -5777,7 +5806,9 @@ impl App {
     /// only a reload has to re-seed them.
     pub(crate) fn sync_view_state_from_config(&mut self) {
         let ui = &self.engine.config.ui;
-        self.pr_banner_at_bottom = ui.pr_banner_position == "bottom";
+        self.pr_banner_at_bottom =
+            dux_core::config_effective::effective_pr_banner_position(&ui.pr_banner_position)
+                == dux_core::config_effective::PrBannerPosition::Bottom;
         let clear_after = Duration::from_secs(ui.status_clear_seconds.into());
         let hide_right = !ui.show_changes_pane;
         self.status.set_clear_after(clear_after);
@@ -5789,7 +5820,10 @@ impl App {
         }
     }
 
-    fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
+    /// Take the view state only a reload changes (bindings, theme, pane
+    /// sizes, diff line numbers) from `config`, returning the theme's own
+    /// warning when it could not be loaded.
+    pub(crate) fn take_reload_view_state(&mut self, config: &Config) -> Option<String> {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
@@ -5803,13 +5837,13 @@ impl App {
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        theme_warning
+    }
+
+    fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
+        let theme_warning = self.take_reload_view_state(&config);
         let github_was_enabled = self.engine.github_integration_enabled;
         self.engine.github_integration_enabled = config.ui.github_integration;
-        if !github_was_enabled && self.engine.github_integration_enabled {
-            // Off-to-on through a config reload is the same transition as the
-            // palette toggle, and needs the same fresh answer from `gh`.
-            self.engine.spawn_gh_status_check();
-        }
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
             &self.engine.session_store.load_project_created_ats()?,
@@ -5822,11 +5856,26 @@ impl App {
             &self.bindings,
             &self.engine.session_store,
         )?;
-        // Captured BEFORE the swap, because the comparison is against what the
-        // running serve was told, not against what the file now says.
-        let tailscale_before = self.engine.config.server.tailscale_mode();
-        self.engine.config = config;
+        let before = std::mem::replace(&mut self.engine.config, config);
         self.engine.retune_after_config_swap();
+        self.run_config_swap_effects(&before, github_was_enabled);
+        if let Some(message) = theme_warning {
+            self.set_pinned_warning(message);
+        }
+        Ok(())
+    }
+
+    /// Everything a reload owes once `engine.config` holds the new config,
+    /// compared with `before`, the config it replaced: the view, the project
+    /// list, the GitHub integration, the serve and Tailscale switches.
+    /// `github_was_enabled` is whether the integration was on before; the
+    /// `gh` probe a reload owes is asked for here, by the engine's one rule
+    /// ([`dux_core::engine::Engine::probe_gh_after_reload`]), and nowhere
+    /// else on this surface. Runs after a successful apply and after one
+    /// that failed but adopted the config anyway, so neither claims a
+    /// setting that is not in force.
+    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
+        self.engine.probe_gh_after_reload(github_was_enabled);
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -5839,22 +5888,7 @@ impl App {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
         self.engine.update_branch_sync_sessions();
-        if !self.engine.github_integration_enabled {
-            self.engine.pr_statuses.clear();
-            self.engine.disarm_pr_sync();
-        } else if github_was_enabled
-            && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
-        {
-            // The integration was already on, so the status is a settled answer
-            // rather than one a probe is about to replace: re-derive the sync set
-            // and refresh. Re-seed first so a manually attached PR's badge
-            // survives the reload-time `pr_statuses` churn without waiting for a
-            // cycle.
-            self.engine.seed_pr_statuses_from_store();
-            self.engine.update_pr_sync_sessions();
-            self.engine.spawn_initial_pr_refresh();
-            self.engine.spawn_pr_sync_worker();
-        }
+        self.engine.retune_pr_sync_after_reload(github_was_enabled);
         self.reload_changed_files();
         self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live
@@ -5869,10 +5903,12 @@ impl App {
         // the reload: the serve is the companion's, and the actor arm that owns it
         // for `dux server` and the flip has no control handle here. Skipped when
         // the same reload just STARTED the serve, because that serve read the new
-        // mode from config on its way up, and when it just stopped one.
+        // mode from config on its way up, and when it just stopped one. Compared
+        // with the config before the reload, because the comparison is against
+        // what the running serve was told, not against what the file now says.
         if serving_before
             && self.background_server_is_serving()
-            && tailscale_before != self.engine.config.server.tailscale_mode()
+            && before.server.tailscale_mode() != self.engine.config.server.tailscale_mode()
         {
             let mode = self.engine.config.server.tailscale_mode();
             self.ask_companion_for_tailscale_mode(mode);
@@ -5885,10 +5921,6 @@ impl App {
         if let Some(message) = tab_reaches_agent_trap_warning(&self.bindings, &self.engine.config) {
             self.set_warning(message);
         }
-        if let Some(message) = theme_warning {
-            self.set_pinned_warning(message);
-        }
-        Ok(())
     }
 
     pub(crate) fn open_edit_macros(&mut self) {
@@ -7445,12 +7477,12 @@ pub(crate) use dux_core::agent_tabs::tab_labels;
 
 pub(crate) use dux_core::project_browser::load_projects;
 
-#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
+// Sync-direct by design: bootstrap/reload-worker project-sync runs before/outside the queue.
 pub(crate) fn persist_runtime_projects_to_config_and_store(
     projects: &[Project],
     config: &mut Config,
     paths: &DuxPaths,
-    bindings: &RuntimeBindings,
+    _bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
     let existing_projects = config.projects.clone();
@@ -7478,18 +7510,30 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
     }
 
     if config.projects != config_project_configs {
+        // Only the projects change here, so only they are written: the base is
+        // the config before the change, and a key set on disk since it was read
+        // is left alone.
+        let base = config.clone();
         config.projects = config_project_configs;
-        save_config(&paths.config_path, config, bindings)?;
+        let written = dux_core::config_write::save_config_three_way(
+            &paths.config_path,
+            Some(dux_core::config_write::SaveBase::read(&base)),
+            config,
+            dux_core::config_write::Durability::Fsync,
+        )?;
+        // The file is now this text: what a later save compares with.
+        config.source_text =
+            dux_core::config_write::source_after_sync(&base.source_text, &written, config);
     }
 
     Ok(())
 }
 
-#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
+// Sync-direct by design: bootstrap/reload-worker project-sync runs before/outside the queue.
 pub(crate) fn sync_config_projects_with_store(
     config: &mut Config,
     paths: &DuxPaths,
-    bindings: &RuntimeBindings,
+    _bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
     // The reconciliation DECISION (validate identity, merge per field, adopt
@@ -7497,9 +7541,25 @@ pub(crate) fn sync_config_projects_with_store(
     // `dux_core::config_sync::reconcile_config_projects`, shared with the web
     // server's bootstrap. Only PERSISTING is a surface concern: the TUI renders
     // the full commented template via `save_config`.
+    // Three-way against the config as read, so the sync writes only the
+    // projects it changed and never undoes a key set on disk meanwhile.
+    let base = config.clone();
+    let mut written: Option<String> = None;
     dux_core::config_sync::reconcile_config_projects(config, session_store, |config| {
-        save_config(&paths.config_path, config, bindings)
-    })
+        written = Some(dux_core::config_write::save_config_three_way(
+            &paths.config_path,
+            Some(dux_core::config_write::SaveBase::read(&base)),
+            config,
+            dux_core::config_write::Durability::Fsync,
+        )?);
+        Ok(())
+    })?;
+    // The file is now this text: what a later save compares with.
+    if let Some(text) = written {
+        config.source_text =
+            dux_core::config_write::source_after_sync(&base.source_text, &text, config);
+    }
+    Ok(())
 }
 
 /// Pre-flight for the in-process flip from the TUI to the web server: resolve
@@ -8914,6 +8974,170 @@ leading_branch = "main"
         assert_eq!(stored[0].leading_branch.as_deref(), Some("main"));
     }
 
+    /// The project sync that writes config.toml on startup and reload only
+    /// writes the projects: a `dux config set` that landed after the file was
+    /// read is not overwritten.
+    #[test]
+    fn the_project_sync_never_undoes_a_concurrent_set() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(&paths.config_path, "[server]\nport = 3890\n").expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        // `dux config set server.port 4444` from another process.
+        let key = dux_core::config_keys::lookup("server.port").unwrap();
+        dux_core::config_keys::set_plain(&paths.config_path, &key, "4444").unwrap();
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(
+            saved.contains("store-only"),
+            "the sync wrote its project:\n{saved}"
+        );
+        assert!(saved.contains("port = 4444"), "the set survives:\n{saved}");
+    }
+
+    /// After the startup sync wrote the file (folding in a `set` that landed
+    /// after dux read it), the writer's base is what dux wrote, not a re-read
+    /// of that file: a later save from memory does not revert the set.
+    #[test]
+    fn a_set_folded_into_the_sync_write_is_not_reverted_by_a_later_save() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        let key = dux_core::config_keys::lookup("ui.left_width_pct").unwrap();
+        dux_core::config_keys::set_plain(&paths.config_path, &key, "40").unwrap();
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store).expect("sync");
+        // The writer dux builds from that config, and a save from memory.
+        let writer =
+            dux_core::config_queue::ConfigWriteQueue::with_base(paths.config_path.clone(), &config);
+        let mut memory = config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        writer.save_eager(memory).expect("save");
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            saved.contains("left_width_pct = 40"),
+            "the set survives:\n{saved}"
+        );
+    }
+
+    /// After the startup sync writes, a value dux corrected at load is still
+    /// not a change dux made (so no later save writes the correction over
+    /// what the file says), and a key deleted by hand before the sync stays
+    /// deleted.
+    #[test]
+    fn the_sync_write_keeps_corrections_and_hand_deletions_apart() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(
+            &paths.config_path,
+            "[ui]\ngithub_probe_interval_secs = 1\nleft_width_pct = 25\n",
+        )
+        .expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        assert_ne!(
+            config.ui.github_probe_interval_secs, 1,
+            "corrected in memory"
+        );
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        // Deleted by hand after dux read the file, before the sync wrote.
+        let text = std::fs::read_to_string(&paths.config_path).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            text.replace("left_width_pct = 25\n", ""),
+        )
+        .unwrap();
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store).expect("sync");
+        let writer =
+            dux_core::config_queue::ConfigWriteQueue::with_base(paths.config_path.clone(), &config);
+        for round in 0..2 {
+            let mut memory = config.clone();
+            memory.ui.copy_on_select = round == 0;
+            writer.save_eager(memory).expect("save");
+        }
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            saved.contains("github_probe_interval_secs = 1\n"),
+            "the file keeps what the user wrote:\n{saved}"
+        );
+        assert!(
+            !saved.contains("left_width_pct"),
+            "the deletion stays:\n{saved}"
+        );
+    }
+
     #[test]
     fn config_project_values_update_sqlite_on_sync() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -9435,10 +9659,43 @@ leading_branch = "main"
             "a reload that turns the integration on re-runs the probe",
         );
 
-        // A reload that leaves it on is not a transition and must not re-run it.
-        app.apply_reloaded_config(config)
+        // A reload that leaves it on with a settled, working answer is not a
+        // transition and must not re-run it.
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        app.apply_reloaded_config(config.clone())
             .expect("apply reloaded config again");
         assert_eq!(app.engine.gh_probe.generation, 1);
+
+        // One that leaves it on while `gh` is not usable re-checks, the same
+        // rule the engine follows for every surface: reloading is one of the
+        // ways a user retries after fixing `gh`.
+        app.engine.gh_status = dux_core::model::GhStatus::NotInstalled;
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config a third time");
+        assert_eq!(app.engine.gh_probe.generation, 2);
+    }
+
+    /// A config the engine adopted after its own apply failed follows the
+    /// same rule: the integration was already on and `gh` is not usable, so
+    /// the reload re-checks it.
+    #[test]
+    fn an_adopted_config_re_checks_an_unusable_gh() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = true;
+        app.engine.config.ui.github_integration = true;
+        app.engine.gh_status = dux_core::model::GhStatus::NotInstalled;
+        let before = app.engine.config.clone();
+        let generation = app.engine.gh_probe.generation;
+
+        app.apply_reaction(dux_core::engine::EventReaction::ConfigAdopted {
+            before: Box::new(before),
+            github_was_enabled: true,
+            error: "the session database could not be read".to_string(),
+        });
+
+        assert_eq!(app.engine.gh_probe.generation, generation.wrapping_add(1));
     }
 
     /// A config file that turns the option on and leaves both pane actions on
@@ -9534,7 +9791,7 @@ leading_branch = "main"
         );
     }
 
-    /// A reentrant config reload (one already in flight) returns an Info status
+    /// A reentrant config reload (one already in flight) is queued behind it with an Info status
     /// and spawns no worker, so `reload_config_from_disk` must NOT set the
     /// "Reloading…" busy. Doing so would clobber the Info and strand a spinner
     /// that nothing would ever clear.
@@ -9552,7 +9809,7 @@ leading_branch = "main"
             app.status.text(),
         );
         assert!(
-            app.status.message().contains("already in progress"),
+            app.status.message().contains("already running"),
             "the engine's Info must survive, got: {}",
             app.status.message(),
         );

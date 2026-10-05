@@ -25,6 +25,11 @@ use dux_core::worker::WorkerEvent;
 pub struct WebConfigSurface;
 
 impl ConfigSurface for WebConfigSurface {
+    /// Its reload refuses what stops `dux server`.
+    fn start_surface(&self) -> dux_core::config::Surface {
+        dux_core::config::Surface::DuxServer
+    }
+
     fn reload(&self, paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
         std::thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
@@ -33,26 +38,62 @@ impl ConfigSurface for WebConfigSurface {
             let guard = ReloadCompletionGuard::new(worker_tx);
             // Re-read config from disk (a read-only load, same as bootstrap). Returns the
             // REAL config, not Config::default().
-            let mut config = dux_core::config::load_config(&paths);
+            // A file whose [server.auth] cannot be read rejects the whole
+            // reload: the running config, password included, stays as it was.
+            let mut config = match dux_core::config::load_config_for_reload(&paths) {
+                Ok(config) => config,
+                Err(error) => {
+                    guard.complete(Err(format!(
+                        "The config was not reloaded, and the running settings are unchanged: \
+                         {error}"
+                    )));
+                    return;
+                }
+            };
+            // The one list of start checks: what stops `dux server` starting
+            // stops its reload too.
+            if let Some(raw) = config.source_text.as_str()
+                && let Some(refusal) =
+                    dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+            {
+                guard.complete(Err(format!(
+                    "The config was not reloaded, and the running settings are unchanged: \
+                     {refusal}"
+                )));
+                return;
+            }
             // Config wins: an edited `[[projects]]` applies its preferences to
             // SQLite on a live serve. Errors ride the reload result rather than
             // crashing the reload thread.
             let reconciled = SessionStore::open(&paths.sessions_db_path)
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|store| {
-                    #[allow(deprecated)]
+                    // Three-way against the config as read: the sync writes
+                    // only what it changed, never a key set on disk meanwhile.
+                    let base = config.clone();
+                    let mut written: Option<String> = None;
                     dux_core::config_sync::reconcile_config_projects(
                         &mut config,
                         &store,
                         |config| {
-                            dux_core::config_write::save_config_with(
+                            written = Some(dux_core::config_write::save_config_three_way(
                                 &paths.config_path,
+                                Some(dux_core::config_write::SaveBase::read(&base)),
                                 config,
                                 dux_core::config_write::Durability::Fsync,
-                            )
+                            )?);
+                            Ok(())
                         },
                     )
-                    .map_err(|e| format!("{e:#}"))
+                    .map_err(|e| format!("{e:#}"))?;
+                    if let Some(text) = written {
+                        config.source_text = dux_core::config_write::source_after_sync(
+                            &base.source_text,
+                            &text,
+                            &config,
+                        );
+                    }
+                    Ok(())
                 });
             match reconciled {
                 Ok(()) => guard.complete(Ok(config)),
@@ -79,20 +120,39 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
     // config write, matching the TUI's invariant.
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
-    let mut config = dux_core::config::load_config(paths);
+    // Fails closed: a config whose [server.auth] cannot be read stops the
+    // start rather than serving with no password.
+    let mut config = dux_core::config::load_config(paths)
+        .map_err(|e| anyhow::anyhow!("dux cannot start: {e}"))?;
+    // The one list of start checks, the same the terminal UI and `dux config
+    // get`/`set` ask. A host or port the command line can override is left to
+    // `resolve_server_plan`, which knows the command line.
+    if let Some(raw) = config.source_text.as_str()
+        && let Some(refusal) =
+            dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+    {
+        anyhow::bail!("dux cannot start: {refusal}");
+    }
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     // Config wins: adopt config-only projects, apply config-edited preferences to
     // SQLite, and validate identity conflicts, persisting any normalization back
     // through the core save path. The write is sync-direct because bootstrap runs
     // before the engine's config-write queue exists.
-    #[allow(deprecated)]
+    let base = config.clone();
+    let mut written: Option<String> = None;
     dux_core::config_sync::reconcile_config_projects(&mut config, &session_store, |config| {
-        dux_core::config_write::save_config_with(
+        written = Some(dux_core::config_write::save_config_three_way(
             &paths.config_path,
+            Some(dux_core::config_write::SaveBase::read(&base)),
             config,
             dux_core::config_write::Durability::Fsync,
-        )
+        )?);
+        Ok(())
     })?;
+    if let Some(text) = written {
+        config.source_text =
+            dux_core::config_write::source_after_sync(&base.source_text, &text, &config);
+    }
     let sessions = session_store.load_sessions()?;
     let agent_tabs = session_store.load_extra_agent_tabs()?;
     let projects = dux_core::project_browser::load_projects(
@@ -105,7 +165,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
 
     let github_integration_enabled = config.ui.github_integration;
     let config_writer =
-        ConfigWriteQueue::with_status_lane(paths.config_path.clone(), worker_tx.clone());
+        ConfigWriteQueue::with_status_lane(paths.config_path.clone(), worker_tx.clone(), &config);
 
     let mut engine = Engine {
         config,
@@ -183,6 +243,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         changed_files_refresh: Default::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        serve_memory: Default::default(),
         current_origin: dux_core::statusline::StatusScope::All,
         in_flight: InFlightSet::new(),
         rename_expected: std::collections::HashMap::new(),
@@ -239,6 +300,27 @@ mod tests {
         // A valid TOML table header proves the render is structured config text,
         // not a placeholder.
         assert!(body.contains("[env]"), "env table missing: {body}");
+    }
+
+    /// `dux server` and every engine bootstrap refuse to start when
+    /// `[server.auth]` cannot be read, instead of serving with no password.
+    #[test]
+    fn bootstrap_engine_refuses_to_start_when_server_auth_cannot_be_read() {
+        for body in [
+            "[server.auth]]\n",
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$m=1,t=1,p=1$x$y\"\n",
+            "[server.auth]\nrequire = [\"network\"]\n",
+        ] {
+            let (_tmp, paths) = temp_paths();
+            std::fs::write(&paths.config_path, body).expect("write config");
+            let err = match bootstrap_engine(&paths) {
+                Ok(_) => panic!("{body:?}: the start must be refused"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("dux cannot start"), "{body:?}: {err}");
+            assert!(err.contains("server.auth"), "{body:?}: {err}");
+            assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), body);
+        }
     }
 
     #[test]

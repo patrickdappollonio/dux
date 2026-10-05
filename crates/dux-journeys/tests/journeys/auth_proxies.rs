@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use dux_journeys::sidecars::{
-    PROXY_PORT, SERVE_PORT, Sidecar, serve_and_proxy_caddyfile, serve_client, serve_route_json,
+    PROXY_PORT, SERVE_PORT, Sidecar, serve_and_proxy_caddyfile, serve_and_proxy_sites,
+    serve_client, serve_route_json,
 };
 use dux_journeys::{
     Client, DUX_PORT, Dux, DuxOptions, STRONG_PASSWORD, TAILNET_NAME, eventually, journey,
@@ -87,6 +88,7 @@ async fn journey_07_behind_nginx_the_password_still_applies() {
     journey("07-nginx", Duration::from_secs(240), async {
         let dux = Dux::start(
             DuxOptions::local()
+                .with_tailscale_checks()
                 .with_published(8080)
                 .with_published(8081)
                 .with_password(STRONG_PASSWORD),
@@ -198,7 +200,7 @@ async fn journey_08_the_cookie_is_secure_exactly_when_dux_knows_it_is_https() {
         .await;
         dux.client_on(4100).await.wait_answering().await;
         let caddy =
-            Sidecar::caddy(&dux, &serve_and_proxy_caddyfile(), &[SERVE_PORT, PROXY_PORT]).await;
+            Sidecar::caddy(&dux, &serve_and_proxy_caddyfile(), &serve_and_proxy_sites()).await;
         let root = caddy.caddy_root().await;
         let proxy_port = dux.host_port(PROXY_PORT).await;
 

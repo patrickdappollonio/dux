@@ -604,103 +604,6 @@ pub enum WireCommand {
     },
 }
 
-/// The curated favicon TINT color names accepted by `config.server.favicon` and
-/// the customize-webapp dialog. The default (an empty value) is the original
-/// full-color yellow duck; these names recolor a flat duck silhouette instead, so
-/// `yellow` is intentionally NOT a tint. This is the CANONICAL list; the web
-/// frontend mirrors it. Keep the two in sync.
-pub const CURATED_FAVICON_COLORS: &[&str] = &[
-    "violet", "blue", "sky", "cyan", "teal", "green", "amber", "orange", "red", "pink", "rose",
-];
-
-/// Normalize a favicon value for `config.server.favicon`.
-///
-/// Trims and lowercases the input. An empty (or whitespace-only) value resets the
-/// favicon to the default (the empty string, which the web renders as the brand
-/// yellow duck). A curated color name is accepted as-is. Any other value is
-/// invalid and yields `None` so the caller can reject it.
-pub fn normalize_instance_favicon(raw: &str) -> Option<String> {
-    let normalized = raw.trim().to_lowercase();
-    if normalized.is_empty() {
-        return Some(String::new());
-    }
-    if CURATED_FAVICON_COLORS.contains(&normalized.as_str()) {
-        Some(normalized)
-    } else {
-        None
-    }
-}
-
-/// True for a character that must not survive into a title: a Unicode control
-/// code (category Cc, via `char::is_control`) OR one of the bidi/format
-/// characters (a subset of Cf) that can visually reorder or hide text.
-/// `char::is_control` alone misses Cf, so a right-to-left override (U+202E) or
-/// zero-width joiner would pass through and spoof the rendered tab title and the
-/// on-disk `config.toml`, a Trojan-Source-style display attack.
-fn is_unsafe_title_char(ch: char) -> bool {
-    ch.is_control()
-        || matches!(ch,
-            // Zero-width + directional marks, bidi embeddings/overrides, bidi
-            // isolates, and the byte-order mark / zero-width no-break space.
-            '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}')
-}
-
-/// Normalize a title for `config.server.title`.
-///
-/// Replaces every unsafe character (Unicode control codes and bidi/format
-/// characters; see [`is_unsafe_title_char`]) with a space, collapses runs of
-/// whitespace to a single space, and trims. Caps the result to at most 200
-/// characters (counted by `char`, never bytes, so multi-byte glyphs can't be
-/// sliced mid-codepoint). An empty result resets to the default `"dux"` (which is
-/// also the reset value the dialog sends as an empty title).
-pub fn normalize_instance_title(raw: &str) -> String {
-    let mut collapsed = String::new();
-    let mut pending_space = false;
-    for ch in raw.chars() {
-        let ch = if is_unsafe_title_char(ch) { ' ' } else { ch };
-        if ch == ' ' {
-            // Defer emitting whitespace so runs collapse and leading space drops.
-            if !collapsed.is_empty() {
-                pending_space = true;
-            }
-        } else {
-            if pending_space {
-                collapsed.push(' ');
-                pending_space = false;
-            }
-            collapsed.push(ch);
-        }
-    }
-    let capped: String = collapsed.chars().take(200).collect();
-    let trimmed = capped.trim();
-    if trimmed.is_empty() {
-        "dux".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Sanitize a `ui.terminal_font_family` settings-PATCH value: drop every ASCII
-/// control character and cap the result to 200 characters (counted by `char`,
-/// never bytes, so a multi-byte glyph can't be sliced mid-codepoint).
-///
-/// Defense in depth alongside the web's own sanitizing, which strips a wider set
-/// because the value there is concatenated into a CSS `font-family` declaration.
-/// The goal here is narrower: no control character, a literal newline above all,
-/// may survive into `config.toml`, and the field must not grow unbounded.
-/// Degrades quietly rather than rejecting the patch, matching this settings
-/// API's tolerant style elsewhere (for example [`normalize_instance_title`]).
-pub fn sanitize_terminal_font_family(raw: &str) -> String {
-    raw.chars()
-        .filter(|ch| !ch.is_ascii_control())
-        .take(200)
-        .collect()
-}
-
 /// Clamp a numeric settings-PATCH field to `[0, max]`, preserving `0`
 /// unclamped: several of these fields document `0` as a distinct "disable"/
 /// "never" meaning (`status_clear_seconds`, `attention_grace_seconds`), not
@@ -708,20 +611,6 @@ pub fn sanitize_terminal_font_family(raw: &str) -> String {
 /// input.
 fn clamp_nonzero<T: PartialOrd + Copy>(value: T, max: T) -> T {
     if value > max { max } else { value }
-}
-
-/// Normalize a `ui.pr_banner_position` value for [`Engine::set_settings`].
-/// Accepts exactly "top" or "bottom", case-insensitive and trimmed; anything
-/// else is rejected so the endpoint returns a plain-text 400 rather than
-/// coercing. Deliberately stricter than `toggle_pr_banner_position`, which only
-/// ever flips between two known values it already holds, while this validates a
-/// client-supplied string.
-pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
-    match raw.trim().to_lowercase().as_str() {
-        "top" => Some("top".to_string()),
-        "bottom" => Some("bottom".to_string()),
-        _ => None,
-    }
 }
 
 /// The present/absent fields for [`WireCommand::SetSettings`], the SINGLE
@@ -809,7 +698,7 @@ pub struct SettingsPatch {
     pub disable_release_notes: Option<bool>,
     /// `ui.terminal_font_family`: a font name installed on the viewing device,
     /// placed ahead of the bundled web terminal font stack. Sanitized by
-    /// [`crate::wire::sanitize_terminal_font_family`] before being stored, and
+    /// [`crate::config_effective::effective_terminal_font_family`] before being stored, and
     /// degrades quietly rather than rejecting the patch. An empty string is a
     /// valid value and means "use the bundled stack only".
     pub terminal_font_family: Option<String>,
@@ -1555,7 +1444,8 @@ impl SettingsUiDisplayPatch {
             config.ui.disable_release_notes = value;
         }
         if let Some(value) = self.terminal_font_family {
-            config.ui.terminal_font_family = sanitize_terminal_font_family(&value);
+            config.ui.terminal_font_family =
+                crate::config_effective::effective_terminal_font_family(&value);
         }
         if let Some(value) = self.terminal_font_size {
             config.ui.terminal_font_size = crate::config::normalized_terminal_font_size(value);
@@ -1602,7 +1492,8 @@ fn validate_settings_patch(
     patch.pr_banner_position = patch
         .pr_banner_position
         .map(|raw| {
-            normalize_pr_banner_position(&raw)
+            crate::config_effective::PrBannerPosition::parse(&raw)
+                .map(|position| position.as_str().to_string())
                 .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
         })
         .transpose()?;
@@ -1971,8 +1862,9 @@ impl Engine {
     ///
     /// Each field is optional and an empty body is a no-op, with no write and no
     /// `config.changed`. A `Some` title is normalized (see
-    /// [`normalize_instance_title`]); a `Some` favicon must be a curated color
-    /// name or empty (see [`normalize_instance_favicon`]) or the command is
+    /// [`crate::config_effective::effective_server_title`]); a `Some` favicon must
+    /// be a curated color name or empty (see
+    /// [`crate::config_effective::parse_server_favicon`]) or the command is
     /// rejected, which the dispatch layer turns into a plain-text `400`. The
     /// write is eager and idempotent, and mutates config-static state, so the web
     /// fires `config.changed`.
@@ -1989,10 +1881,10 @@ impl Engine {
         }
         let mut candidate = self.config.clone();
         if let Some(raw) = title {
-            candidate.server.title = normalize_instance_title(&raw);
+            candidate.server.title = crate::config_effective::effective_server_title(&raw);
         }
         if let Some(raw) = favicon {
-            candidate.server.favicon = normalize_instance_favicon(&raw)
+            candidate.server.favicon = crate::config_effective::parse_server_favicon(&raw)
                 .ok_or_else(|| anyhow::anyhow!("unknown favicon color \"{}\"", raw))?;
         }
         // Idempotent: skip the write (and the fan-out) when nothing changed.
@@ -2163,15 +2055,15 @@ impl Engine {
     }
 
     /// Flip `ui.pr_banner_position` between "top" and "bottom" and persist it,
-    /// mirroring the TUI's `toggle-pr-banner-position` handler. Any value other
-    /// than "bottom" is treated as "top" (so an unexpected/legacy string moves to
-    /// "bottom" on first toggle). Low-stakes preference, lazy write.
+    /// mirroring the TUI's `toggle-pr-banner-position` handler. It flips the
+    /// position dux shows (an unknown value shows at the default, the bottom),
+    /// so the banner always visibly moves. Low-stakes preference, lazy write.
     fn toggle_pr_banner_position(&mut self) -> WireStatus {
-        let next = if self.config.ui.pr_banner_position == "bottom" {
-            "top"
-        } else {
-            "bottom"
-        };
+        let next = crate::config_effective::effective_pr_banner_position(
+            &self.config.ui.pr_banner_position,
+        )
+        .flipped()
+        .as_str();
         self.config.ui.pr_banner_position = next.to_string();
         self.config_writer.save_lazy(self.config.clone());
         // Loud: one band of chrome is a small indicator, and on an agent with
@@ -2193,21 +2085,17 @@ impl Engine {
     /// DISPLAYS any value the other one sets. `pub` so the TUI's `sort-agents`
     /// palette command can drive it too.
     pub fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
-        const VALID: [&str; 6] = [
-            "active",
-            "updated",
-            "created",
-            "name",
-            "name_desc",
-            "manual",
-        ];
-        if !VALID.contains(&sort) {
+        if crate::config_effective::parse_agent_sort(sort).is_none() {
+            let known: Vec<&str> = crate::config_effective::AGENT_SORTS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect();
             return WireStatus::new(
                 "error",
                 crate::status_text![
                     "Unknown agent sort ",
                     q(sort),
-                    format!(". Expected one of: {}.", VALID.join(", "))
+                    format!(". Expected one of: {}.", known.join(", "))
                 ],
             );
         }
@@ -12665,7 +12553,7 @@ mod tests {
             "[ui]\nupload_directory = \"tmp/drops\"\nupload_write_gitignore = false\n",
         )
         .expect("seed config");
-        engine.config = crate::config::load_config(&engine.paths);
+        engine.config = crate::config::load_config(&engine.paths).expect("config loads");
         assert_eq!(engine.config.ui.upload_directory, "tmp/drops");
         assert!(!engine.config.ui.upload_write_gitignore);
 
@@ -12698,7 +12586,7 @@ mod tests {
             disk.contains("upload_write_gitignore = false"),
             "a settings PATCH must not reset a [ui] field it never named:\n{disk}"
         );
-        let reloaded = crate::config::load_config(&engine.paths);
+        let reloaded = crate::config::load_config(&engine.paths).expect("config loads");
         assert_eq!(reloaded.ui.upload_directory, "tmp/drops");
         assert!(!reloaded.ui.upload_write_gitignore);
     }
@@ -12727,21 +12615,6 @@ mod tests {
         assert!(err.to_string().contains("not-a-real-provider"), "{err}");
         assert!(err.to_string().contains("not configured"), "{err}");
         assert_eq!(engine.config.defaults.provider, before);
-    }
-
-    #[test]
-    fn normalize_pr_banner_position_accepts_known_values() {
-        assert_eq!(normalize_pr_banner_position("top"), Some("top".to_string()));
-        assert_eq!(
-            normalize_pr_banner_position("  Bottom "),
-            Some("bottom".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_pr_banner_position_rejects_unknown() {
-        assert_eq!(normalize_pr_banner_position("left"), None);
-        assert_eq!(normalize_pr_banner_position(""), None);
     }
 
     #[test]
@@ -12822,10 +12695,9 @@ mod tests {
                 ..Default::default()
             }))
             .expect("dispatch ok");
-        assert_eq!(
-            engine.config.ui.terminal_font_family,
-            "Fira Code; color: red"
-        );
+        // Stored as the web terminal uses it (`effective_terminal_font_family`):
+        // only the safe class survives, the declaration's punctuation included.
+        assert_eq!(engine.config.ui.terminal_font_family, "Fira Code color red");
     }
 
     #[test]
@@ -13430,142 +13302,6 @@ mod tests {
         );
         assert_eq!(disk.ui.terminal_font_family, after.ui.terminal_font_family);
         assert_eq!(disk.ui.terminal_font_size, after.ui.terminal_font_size);
-    }
-
-    /// CROSS-LANGUAGE PIN: the curated favicon color names live twice, here in
-    /// `CURATED_FAVICON_COLORS` and in the TS `FAVICON_COLORS` map that drives the
-    /// customize-webapp dialog and the tinted-duck SVG. A recolor/rename dialog that
-    /// offered a color the server rejects (or vice versa) would degrade silently, so
-    /// this parses the TS map's keys out of `favicon.ts` and asserts the two sets
-    /// are identical. Skips (rather than fails) when the web tree isn't present, e.g.
-    /// a published crate build outside the workspace. Copies the file-reading and
-    /// relative-path approach from `palette::tests::web_pin_matches_the_typescript_pin`.
-    #[test]
-    fn curated_favicon_colors_match_the_typescript_list() {
-        let ts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../dux-web/web/src/lib/favicon.ts");
-        let Ok(source) = std::fs::read_to_string(&ts_path) else {
-            eprintln!("skipping: {} not present", ts_path.display());
-            return;
-        };
-        // Isolate the `FAVICON_COLORS` object body, then read the `name: "#hex",`
-        // key off each line (the identifier before the first colon).
-        let body = source
-            .split("export const FAVICON_COLORS: Record<string, string> = {")
-            .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("FAVICON_COLORS object not found in favicon.ts");
-        let mut ts_names: Vec<String> = body
-            .lines()
-            .filter_map(|line| line.trim().split(':').next())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .collect();
-        ts_names.sort();
-        let mut rust_names: Vec<String> = CURATED_FAVICON_COLORS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        rust_names.sort();
-        assert_eq!(
-            rust_names, ts_names,
-            "the curated favicon colors drifted between Rust CURATED_FAVICON_COLORS \
-             (wire.rs) and the TS FAVICON_COLORS map (favicon.ts). Update BOTH lists \
-             together so the dialog and the server agree on the accepted colors."
-        );
-    }
-
-    #[test]
-    fn normalize_instance_favicon_accepts_curated_names() {
-        assert_eq!(normalize_instance_favicon("amber"), Some("amber".into()));
-        // Trimmed and lowercased.
-        assert_eq!(
-            normalize_instance_favicon("  VIOLET  "),
-            Some("violet".into())
-        );
-        // Every curated name round-trips.
-        for name in CURATED_FAVICON_COLORS {
-            assert_eq!(normalize_instance_favicon(name), Some((*name).to_string()));
-        }
-    }
-
-    #[test]
-    fn normalize_instance_favicon_empty_resets_to_default() {
-        assert_eq!(normalize_instance_favicon(""), Some(String::new()));
-        assert_eq!(normalize_instance_favicon("   "), Some(String::new()));
-    }
-
-    #[test]
-    fn normalize_instance_favicon_rejects_unknown() {
-        // Dropped legacy names, hex, and URLs are all invalid now. `yellow` is the
-        // default (empty), not a tint, so it is rejected as an explicit value.
-        assert_eq!(normalize_instance_favicon("mauve"), None);
-        assert_eq!(normalize_instance_favicon("yellow"), None);
-        assert_eq!(normalize_instance_favicon("purple"), None);
-        assert_eq!(normalize_instance_favicon("#863bff"), None);
-        assert_eq!(normalize_instance_favicon("https://x/y.png"), None);
-    }
-
-    #[test]
-    fn normalize_instance_title_strips_controls_and_collapses_whitespace() {
-        assert_eq!(
-            normalize_instance_title("  dux\t\n  prod \r\n "),
-            "dux prod"
-        );
-        // A bare control character becomes nothing meaningful → default.
-        assert_eq!(normalize_instance_title("\u{0007}\u{0000}"), "dux");
-        // Bidi/format characters (Cf) are neutralized too, not just controls (Cc),
-        // so a right-to-left override can't spoof the rendered title.
-        assert_eq!(
-            normalize_instance_title("invoice\u{202E}cod.exe"),
-            "invoice cod.exe"
-        );
-        assert_eq!(normalize_instance_title("a\u{200D}\u{FEFF}b"), "a b");
-    }
-
-    #[test]
-    fn normalize_instance_title_empty_resets_to_dux() {
-        assert_eq!(normalize_instance_title(""), "dux");
-        assert_eq!(normalize_instance_title("     "), "dux");
-    }
-
-    #[test]
-    fn normalize_instance_title_caps_length_by_chars_not_bytes() {
-        // Multi-byte glyphs: 300 of them must cap to 200 chars, never panic on a
-        // byte boundary inside a codepoint.
-        let input: String = "é".repeat(300);
-        let out = normalize_instance_title(&input);
-        assert_eq!(out.chars().count(), 200);
-        assert!(out.chars().all(|c| c == 'é'));
-    }
-
-    #[test]
-    fn sanitize_terminal_font_family_drops_ascii_control_characters() {
-        assert_eq!(
-            sanitize_terminal_font_family("Fira Code\n; color: red"),
-            "Fira Code; color: red"
-        );
-        assert_eq!(sanitize_terminal_font_family("\u{0007}\u{0000}"), "");
-        assert_eq!(sanitize_terminal_font_family("a\tb\rc"), "abc");
-    }
-
-    #[test]
-    fn sanitize_terminal_font_family_leaves_ordinary_values_untouched() {
-        assert_eq!(sanitize_terminal_font_family("Fira Code"), "Fira Code");
-        assert_eq!(
-            sanitize_terminal_font_family("\"Cascadia Code\", Consolas"),
-            "\"Cascadia Code\", Consolas"
-        );
-        assert_eq!(sanitize_terminal_font_family(""), "");
-    }
-
-    #[test]
-    fn sanitize_terminal_font_family_caps_length_by_chars_not_bytes() {
-        let input: String = "é".repeat(300);
-        let out = sanitize_terminal_font_family(&input);
-        assert_eq!(out.chars().count(), 200);
-        assert!(out.chars().all(|c| c == 'é'));
     }
 
     #[test]

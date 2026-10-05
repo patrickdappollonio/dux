@@ -46,6 +46,22 @@ ureq = "3.3.0"
 # as QR codes (dux_core::qr). Default features off: they pull in the `image`
 # crate for raster output, and dux draws the codes as text itself.
 qrcode = { version = "0.14", default-features = false }
+# The web login's password hashing (dux_core::auth): Argon2id, PHC strings.
+argon2 = { version = "0.6", features = ["zeroize"] }
+# Password strength estimation for the login's minimum checks (dux_core::auth).
+# Default features off: the builder is only for custom dictionaries.
+zxcvbn = { version = "3.1", default-features = false }
+# Wipes a typed password from memory when the buffer holding it is dropped.
+zeroize = "1.9"
+# The SIGUSR1 "reload the config" flag (dux_core::reload_signal), the same
+# registry dux-tui and tokio already register their handlers through.
+signal-hook = "0.4"
+# The web login's sessions (dux_core::web_sessions): a random token from the
+# operating system's generator, kept server-side only as its SHA-256 digest, and
+# carried in the cookie as unpadded URL-safe base64.
+getrandom = "0.3"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 # Decodes the QR codes dux_core::qr draws, so the tests prove a phone could read

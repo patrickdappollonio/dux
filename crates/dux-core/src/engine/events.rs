@@ -333,6 +333,23 @@ pub enum EventReaction {
     // -- Config reload (App helpers). --
     ApplyReloadedConfig(Box<Config>),
     OpenConfigReloadFailedModal(String),
+    /// The engine adopted a reloaded config it could not fully apply (its
+    /// own apply of a coalesced reload failed): `engine.config` is the new
+    /// config, and `before` is the one it replaced. The surface does what it
+    /// does after a successful reload's swap, comparing `before` with
+    /// `engine.config` (its view state, the serve and Tailscale switches,
+    /// the restart warning), so nothing claims a setting that is not in
+    /// force, and reports `error` with
+    /// [`crate::config_reload_status::adopted_but_apply_failed`].
+    /// `github_was_enabled` is whether the GitHub integration was on before
+    /// the reload started; the apply asked `gh` for nothing, so the surface
+    /// asks for the fresh answer a reload owes (see
+    /// [`crate::engine::Engine::probe_gh_after_reload`]).
+    ConfigAdopted {
+        before: Box<Config>,
+        github_was_enabled: bool,
+        error: String,
+    },
 
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
@@ -2338,18 +2355,27 @@ impl Engine {
     /// reloaded plus drained, whenever deferred commands ran, so the surface's
     /// richer apply cannot revert a deferred change to the pre-deferral state.
     ///
-    /// With no deferral the engine leaves `self.config` alone and returns the
-    /// bare reloaded config, because the surface does the swap and must see the
-    /// pre-swap config to diff old against new. The tradeoff: a deferral
-    /// coinciding with a `[server]` change suppresses that advisory restart
-    /// warning, since the engine pre-swapped before the diff.
+    /// Either way the surface does the final swap and must see the pre-swap
+    /// config to diff old against new. With no deferral the engine leaves
+    /// `self.config` alone; with one it swaps the reloaded config in for the
+    /// drain and then puts the old one back before returning, so a deferral
+    /// (a queued follow-up reload included) never hides a `[server]` change
+    /// from the Tailscale switch, the restart warning or the bind check.
     ///
-    /// On failure, whether the reload could not be parsed or could not be
-    /// applied to engine state, the in-memory config is unchanged, so the
-    /// deferred commands are re-applied against it rather than dropped. The
-    /// reload-failed reaction goes last in the returned `Multi` so its error
-    /// wins the status line over a deferred save's success message.
+    /// The deferred commands are re-applied rather than dropped whatever the
+    /// outcome. A reload that could not be read or parsed changes nothing: the
+    /// commands re-apply against the config in force and the reload-failed
+    /// modal reports it. A reload that parsed but could not be fully applied
+    /// is adopted anyway (see [`Engine::keep_reloaded_config`]): the commands
+    /// re-apply against the new config, and the surface is told so with
+    /// [`EventReaction::ConfigAdopted`]. Either failure goes last in the
+    /// returned `Multi` so it wins the status line over a deferred save's
+    /// success message.
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
+        // The GitHub integration's state before the reload. The drain below
+        // applies the reloaded config, which moves it; it goes back with the
+        // old config, so every surface's apply compares with the true state.
+        let github_before = self.github_integration_enabled;
         let deferred = std::mem::take(&mut self.deferred_commands);
         let has_deferred = !deferred.is_empty();
         // Pre-swap `self.config` to the reloaded config (rather than leaving the
@@ -2362,23 +2388,38 @@ impl Engine {
         // reloaded config to engine state before clearing the barrier, but only
         // when deferred commands must drain, since they re-mutate and re-save
         // the config and need the reloaded one as their base. `failure` carries
-        // a reload-failed reaction whenever the reload could not be applied, a
-        // successful parse that engine state rejected included: that is a real
-        // failure, not a silent success on a stale config.
+        // the reload's failure: the reload-failed modal for a file that could
+        // not be read, or `ConfigAdopted` for one adopted although engine state
+        // could not take all of it, never a silent success.
         let mut failure: Option<EventReaction> = None;
+        // The config before this reload. When the engine pre-swaps, it is put
+        // back before the surfaces see the result, so each surface still
+        // compares the config before the reload with the one after it and
+        // runs what a change asks of it (the Tailscale switch, the restart
+        // warning, the bind-change check), even when a follow-up reload or a
+        // deferred command rode along.
+        let mut before_reload: Option<Config> = None;
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
                 if must_preswap {
+                    before_reload = Some(self.config.clone());
                     // Apply the reloaded config so the deferred drain re-mutates it
                     // (and the surfaced config carries those edits).
-                    // If applying it FAILS, do not pretend the reload worked: open
-                    // the reload-failed modal and leave `self.config` as-is (the
-                    // deferred commands below still re-apply against the current
-                    // config, so they are never dropped).
-                    if let Err(err) = self.apply_reloaded_config(config) {
-                        failure = Some(EventReaction::OpenConfigReloadFailedModal(format!(
-                            "Config validated but could not be applied: {err:#}"
-                        )));
+                    // If applying it FAILS, the engine still keeps the new config
+                    // (`apply_reloaded_config` falls back to
+                    // `keep_reloaded_config`), so memory, the writer's base and
+                    // the file agree, and the deferred commands below re-apply
+                    // against it, so they are never dropped. The surface is told
+                    // the config was adopted and what failed, never that it was
+                    // refused.
+                    if let Err(err) = self.apply_reloaded_config_for_drain(config) {
+                        failure = Some(EventReaction::ConfigAdopted {
+                            before: Box::new(
+                                before_reload.clone().unwrap_or_else(|| self.config.clone()),
+                            ),
+                            github_was_enabled: github_before,
+                            error: format!("{err:#}"),
+                        });
                     }
                     // On success the FINAL config (reloaded + deferred) is surfaced
                     // after the drain below, so there is no bare reaction here.
@@ -2408,11 +2449,15 @@ impl Engine {
         }
 
         // Step 3: re-apply each deferred command now that the barrier is closed.
+        // Their saves change the file after the reload read it, so the count
+        // of writes is noted to learn below whether they wrote.
+        let writes_before = self.config_writer.last_written().0;
         // Each re-mutates the current config and eager-writes. The deferred write
-        // is therefore the LAST write to disk. On a failed reload the config is
-        // unchanged/current, so re-applying against it is still correct: deferred
-        // commands are never dropped. Collect status reactions so the
-        // surface still reports each save's success/failure.
+        // is therefore the LAST write to disk. The current config is the one in
+        // force whatever happened (the old one for a refused file, the new one
+        // for an adopted reload), so re-applying against it is correct: deferred
+        // commands are never dropped. Collect status reactions so the surface
+        // still reports each save's success/failure.
         let mut deferred_reactions = Vec::new();
         for command in deferred {
             match self.apply(command) {
@@ -2431,17 +2476,32 @@ impl Engine {
             // that JUST landed) FIRST so the surface's config swap matches the
             // engine + disk state and never reverts a deferred change. Snapshot
             // `self.config` AFTER the drain above so it carries the deferred edits.
-            reactions.push(EventReaction::ApplyReloadedConfig(Box::new(
-                self.config.clone(),
-            )));
+            let mut reloaded = match before_reload {
+                Some(before) => {
+                    self.github_integration_enabled = github_before;
+                    std::mem::replace(&mut self.config, before)
+                }
+                None => self.config.clone(),
+            };
+            // When the deferred commands wrote, the file now holds the text of
+            // their last write, not the text the reload read: that is the
+            // text the surfaced config agrees with, so it is the base a later
+            // save compares memory with (a `dux config set` of one of those
+            // same settings is then not undone).
+            let (writes_after, written) = self.config_writer.last_written();
+            if writes_after != writes_before
+                && let Some(source) = written
+            {
+                reloaded.source_text = source;
+            }
+            reactions.push(EventReaction::ApplyReloadedConfig(Box::new(reloaded)));
         }
         reactions.extend(deferred_reactions);
         if let Some(failure) = failure {
-            // Failure: append the reload-failed modal/error LAST so its error
-            // status wins the surface's status line instead of being overwritten by
-            // a deferred save's success message (the deferred saves did land against
-            // the still-current config, but the headline state the user needs is
-            // "reload failed, review the modal").
+            // Failure: append it LAST so it wins the surface's status line
+            // instead of being overwritten by a deferred save's success message
+            // (the deferred saves did land, against the config in force, but the
+            // headline the user needs is the reload's own outcome).
             reactions.push(failure);
         }
 
@@ -4850,6 +4910,7 @@ mod tests {
             }
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
+            EventReaction::ConfigAdopted { .. } => "ConfigAdopted",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
             EventReaction::StartupLogsArrived { .. } => "StartupLogsArrived",
             EventReaction::StartupLogContentArrived { .. } => "StartupLogContentArrived",
@@ -8898,6 +8959,10 @@ mod tests {
     struct RecordingConfigSurface(Arc<Mutex<Vec<String>>>);
 
     impl crate::engine::ConfigSurface for RecordingConfigSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: crate::config::DuxPaths,
@@ -8947,6 +9012,544 @@ mod tests {
         // The barrier is open until ConfigReloadReady lands.
         assert!(engine.reloading);
         assert!(engine.reload_guard.is_some());
+    }
+
+    /// A surface that reloads the real file on a worker thread, as the web
+    /// surface does.
+    struct FileReloadSurface;
+
+    impl crate::engine::ConfigSurface for FileReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
+        fn reload(
+            &self,
+            paths: crate::config::DuxPaths,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            std::thread::spawn(move || {
+                let guard = crate::engine::ReloadCompletionGuard::new(worker_tx);
+                guard.complete(crate::config::load_config(&paths).map_err(|e| e.to_string()));
+            });
+        }
+
+        fn recover_render(&self, config: &crate::config::Config) -> String {
+            crate::config_write::render_config_plain(config)
+        }
+    }
+
+    /// Two `dux config set` runs in quick succession each signal a reload; the
+    /// second arrives while the first is still reading. It must not be
+    /// dropped: it runs right after, so the file's final state is what runs.
+    #[test]
+    fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 21\n").unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("first reload");
+        assert!(engine.reloading);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 22\n").unwrap();
+        let second = engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("second reload");
+        let status = unwrap_status(second);
+        assert!(status.message.contains("right after"), "{}", status.message);
+        // A third collapses into the same follow-up.
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("third reload");
+        assert_eq!(
+            engine
+                .deferred_commands
+                .iter()
+                .filter(|c| matches!(c, crate::engine::Command::ReloadConfig))
+                .count(),
+            1
+        );
+
+        let mut reloads_finished = 0;
+        while let Some(event) = try_recv_worker_event(&engine) {
+            if !matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                continue;
+            }
+            reloads_finished += 1;
+            let reaction = engine.process_worker_event(event);
+            for reaction in flatten(reaction) {
+                if let EventReaction::ApplyReloadedConfig(config) = reaction {
+                    engine.apply_reloaded_config(*config).expect("apply");
+                }
+            }
+            if !engine.reloading {
+                break;
+            }
+        }
+        assert_eq!(reloads_finished, 2, "the follow-up reload ran");
+        assert_eq!(engine.config.ui.left_width_pct, 22);
+    }
+
+    /// When a follow-up reload (or any deferred command) rides on a reload,
+    /// the surfaces still see the transition from the config before it: the
+    /// engine hands back the new config while its own is still the old one,
+    /// so the Tailscale switch, the restart warning and the bind-change check
+    /// all run.
+    #[test]
+    fn a_coalesced_reload_still_shows_the_surfaces_the_old_config() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        assert_eq!(engine.config.server.tailscale, "auto");
+        std::fs::write(
+            &engine.paths.config_path,
+            "[server]\ntailscale = \"no\"\nport = 4999\n",
+        )
+        .unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("first reload");
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("queued reload");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("the first reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("the surfaces get the reloaded config");
+        assert_eq!(applied.server.tailscale, "no");
+        assert_eq!(applied.server.port, 4999);
+        assert_eq!(
+            engine.config.server.tailscale, "auto",
+            "the engine's own config is still the old one for the surfaces to compare"
+        );
+        assert_eq!(engine.config.server.port, Config::default().server.port);
+    }
+
+    /// Recovering over a file whose [server.auth] has no password while the
+    /// running dux has one keeps the running password and says so, rather
+    /// than writing "no password" as if the file had decided it.
+    #[test]
+    fn recovering_keeps_the_running_password_over_an_empty_one_and_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        let hash = crate::auth::hash_password(&crate::auth::Password::new(
+            "the running password".to_string(),
+        ))
+        .expect("hash");
+        engine.config.server.auth.password_hash = hash.clone();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[server.auth]\nrequire = \"tailnet\"\n",
+        )
+        .unwrap();
+        let status = unwrap_status(
+            engine
+                .apply(crate::engine::Command::RecoverConfig)
+                .expect("recover"),
+        );
+        let written = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        let auth = crate::config::auth_section_of(&written).expect("valid");
+        assert_eq!(auth.password_hash, hash, "{written}");
+        assert_eq!(
+            auth.require,
+            crate::config::AuthRequire::Tailnet,
+            "the file's own setting"
+        );
+        assert_eq!(status.tone, StatusTone::Warning);
+        assert!(
+            status.message.contains("running password was kept"),
+            "{}",
+            status.message
+        );
+    }
+
+    /// Make every later read of the session database fail, as a disk error
+    /// would, through a second connection that drops a table.
+    fn break_the_session_database(engine: &Engine) {
+        let connection = rusqlite::Connection::open(&engine.paths.sessions_db_path).unwrap();
+        connection.execute("DROP TABLE projects", []).unwrap();
+    }
+
+    /// A coalesced reload applies the new config to drain the deferred
+    /// commands and then puts the old one back for the surface to apply:
+    /// the GitHub integration's state goes back with it, so the surface's
+    /// apply compares with the state from before the reload, and the `gh`
+    /// probe a reload owes is asked for once, by that apply.
+    #[test]
+    fn a_coalesced_reload_hands_the_surface_the_github_state_from_before_it() {
+        for was_enabled in [false, true] {
+            let (mut engine, _tmp) = test_engine();
+            engine.surface = Box::new(FileReloadSurface);
+            engine.config.ui.github_integration = was_enabled;
+            engine.github_integration_enabled = was_enabled;
+            engine.gh_status = crate::model::GhStatus::Available;
+            std::fs::write(
+                &engine.paths.config_path,
+                "[ui]\ngithub_integration = true\n",
+            )
+            .unwrap();
+            engine
+                .apply(crate::engine::Command::ReloadConfig)
+                .expect("reload");
+            let mut env = BTreeMap::new();
+            env.insert("API".to_string(), "k".to_string());
+            engine
+                .apply(crate::engine::Command::PersistGlobalEnv { env })
+                .expect("deferred");
+            let event = loop {
+                let event = try_recv_worker_event(&engine).expect("reload finishes");
+                if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                    break event;
+                }
+            };
+            let generation = engine.gh_probe.generation;
+            let applied = flatten(engine.process_worker_event(event))
+                .into_iter()
+                .find_map(|reaction| match reaction {
+                    EventReaction::ApplyReloadedConfig(config) => Some(config),
+                    _ => None,
+                })
+                .expect("reloaded config");
+            assert_eq!(
+                engine.github_integration_enabled, was_enabled,
+                "the surface reads the state from before the reload"
+            );
+            assert_eq!(
+                engine.gh_probe.generation, generation,
+                "the coalesced apply leaves the probe to the surface's apply"
+            );
+            engine.apply_reloaded_config(*applied).expect("apply");
+            assert!(engine.github_integration_enabled);
+            let probes = engine.gh_probe.generation.wrapping_sub(generation);
+            assert_eq!(
+                probes,
+                u64::from(!was_enabled),
+                "off to on asks gh once; on to on with a settled answer does not"
+            );
+        }
+    }
+
+    /// The engine's own apply of a coalesced reload failing still adopts the
+    /// new config, so the surface is told it was adopted, with the config
+    /// from before the reload to compare against, whether the GitHub
+    /// integration was on before the apply, and what failed.
+    #[test]
+    fn an_engine_apply_failure_tells_the_surface_to_take_the_adopted_view() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 33\n").unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        break_the_session_database(&engine);
+        let was_enabled = engine.github_integration_enabled;
+        let reactions = flatten(engine.process_worker_event(event));
+        assert_eq!(engine.config.ui.left_width_pct, 33, "adopted");
+        assert!(
+            reactions.iter().any(|reaction| {
+                matches!(reaction, EventReaction::ConfigAdopted { before, github_was_enabled, error }
+                    if before.ui.left_width_pct != 33
+                        && *github_was_enabled == was_enabled
+                        && !error.is_empty())
+            }),
+            "{:?}",
+            reactions.iter().map(reaction_kind).collect::<Vec<_>>()
+        );
+        // The config is in force, so this is not a refused reload: no
+        // review-the-modal failure that would say the old settings still run.
+        assert!(
+            !reactions
+                .iter()
+                .any(|reaction| matches!(reaction, EventReaction::OpenConfigReloadFailedModal(_))),
+            "{:?}",
+            reactions.iter().map(reaction_kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// The surface's apply failing after a coalesced reload pre-swapped the
+    /// config must not let the next save write the old config over the new
+    /// file: memory stays as it was, so the writer's base goes back to match
+    /// it, and the deferred change that was saved stays on disk.
+    #[test]
+    fn a_failed_apply_after_a_coalesced_reload_never_reverts_the_file() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(
+            &engine.paths.config_path,
+            "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        // The reloaded file changes one setting and deletes another by hand.
+        std::fs::write(
+            &engine.paths.config_path,
+            "[ui]\nleft_width_pct = 33\n\n[env]\n",
+        )
+        .unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("reloaded config");
+        break_the_session_database(&engine);
+        assert!(
+            engine.apply_reloaded_config(*applied).is_err(),
+            "the apply fails"
+        );
+        assert_eq!(
+            engine.config.ui.left_width_pct, 33,
+            "the engine keeps the new config anyway"
+        );
+
+        for round in 0..2 {
+            let mut memory = engine.config.clone();
+            memory.ui.copy_on_select = round == 0;
+            engine.config_writer.save_eager(memory).expect("save");
+        }
+        let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            !after.contains("FOO"),
+            "the deletion survives two saves:\n{after}"
+        );
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "not reverted:\n{after}"
+        );
+        assert!(
+            after.contains("API = \"k\""),
+            "the deferred save stays:\n{after}"
+        );
+    }
+
+    /// When a failed apply leaves the engine unable to derive its projects
+    /// from the kept config, memory and the writer's base still agree, so
+    /// the stale derived projects never count as a change memory made: a
+    /// project the reloaded file added stays in the file across saves.
+    #[test]
+    fn a_failed_apply_never_lets_stale_projects_count_as_a_change() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n",
+        )
+        .unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"b\"\npath = \"/tmp/b\"\n",
+        )
+        .unwrap();
+        let reloaded = crate::config::load_config(&engine.paths).unwrap();
+        break_the_session_database(&engine);
+        assert!(engine.apply_reloaded_config(reloaded).is_err());
+        // The engine's projects could not be derived from the kept config, so
+        // they are the old ones; persisting them is a save from memory.
+        engine.persist_projects_to_config().expect("persist");
+        for round in 0..2 {
+            let mut memory = engine.config.clone();
+            memory.ui.copy_on_select = round == 0;
+            engine.config_writer.save_eager(memory).expect("save");
+            let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+            assert!(
+                after.contains("/tmp/a") && after.contains("/tmp/b"),
+                "save {round}:\n{after}"
+            );
+        }
+    }
+
+    /// A deferred change saved during a reload is part of the file the
+    /// surfaced config agrees with: a later `dux config set` of that same
+    /// setting is not undone when a pending save is flushed.
+    #[test]
+    fn a_set_after_a_deferred_change_survives_the_next_flush() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "deferred".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("reloaded config");
+        engine.apply_reloaded_config(*applied).expect("apply");
+
+        let key = crate::config_keys::lookup("env.API").unwrap();
+        crate::config_keys::set_secret_text(
+            &engine.paths.config_path,
+            &key,
+            &crate::auth::Password::new("from-set".to_string()),
+        )
+        .unwrap();
+        let mut memory = engine.config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        engine.config_writer.save_lazy(memory);
+        drop(engine.config_writer.quiesce());
+        let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            after.contains("API = \"from-set\""),
+            "the set survives:\n{after}"
+        );
+    }
+
+    // Sixth review cases.
+
+    #[test]
+    fn rv_failed_apply_resurrects_project_deleted_by_hand() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"c\"\npath = \"/tmp/c\"\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config(&engine.paths).unwrap();
+        for (i, p) in loaded.projects.iter().enumerate() {
+            engine.session_store.upsert_project_at(p, i as i64).unwrap();
+        }
+        engine.apply_reloaded_config(loaded).expect("first apply");
+        eprintln!(
+            "engine projects: {:?}",
+            engine
+                .projects
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        );
+        std::fs::write(
+            &engine.paths.config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n",
+        )
+        .unwrap();
+        let reloaded = crate::config::load_config(&engine.paths).unwrap();
+        break_the_session_database(&engine);
+        assert!(engine.apply_reloaded_config(reloaded).is_err());
+        for round in 0..3 {
+            let mut memory = engine.config.clone();
+            memory.ui.copy_on_select = round % 2 == 0;
+            engine.config_writer.save_eager(memory).expect("save");
+            let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+            eprintln!(
+                "ROUND {round}:\n{}",
+                after.lines().take(12).collect::<Vec<_>>().join("\n")
+            );
+            assert!(
+                !after.contains("/tmp/c"),
+                "save {round}: hand-deleted project came back\n{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn rv_set_between_reload_read_and_deferred_write_is_reverted() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        engine.config = crate::config::load_config(&engine.paths).unwrap();
+        engine.retune_after_config_swap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("reload");
+        let mut env = BTreeMap::new();
+        env.insert("API".to_string(), "deferred".to_string());
+        engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("deferred");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        // `dux config set ui.left_width_pct 40` lands after the reload read the file.
+        let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
+        crate::config_keys::set_plain(&engine.paths.config_path, &key, "40").unwrap();
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("reloaded config");
+        engine.apply_reloaded_config(*applied).expect("apply");
+        let mid = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            mid.contains("left_width_pct = 40"),
+            "after deferred:\n{mid}"
+        );
+        let mut memory = engine.config.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        engine.config_writer.save_lazy(memory);
+        drop(engine.config_writer.quiesce());
+        let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 40"),
+            "the set was reverted:\n{}",
+            after
+                .lines()
+                .filter(|l| l.contains("left_width") || l.contains("API"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    fn flatten(reaction: EventReaction) -> Vec<EventReaction> {
+        match reaction {
+            EventReaction::Multi(list) => list.into_iter().flat_map(flatten).collect(),
+            other => vec![other],
+        }
     }
 
     #[test]

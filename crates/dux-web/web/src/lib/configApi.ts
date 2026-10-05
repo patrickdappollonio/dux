@@ -10,6 +10,21 @@ import { getConnectionId } from "./connection"
 import type { SettingValue } from "./settingsDescriptors"
 import type { MacroView } from "./types"
 
+/// A refusal whose body is the 409 `config_changed` answer becomes a
+/// `ConfigChangedError`; anything else is passed through as it was.
+function asConfigChanged(e: unknown): unknown {
+  if (!(e instanceof Error)) return e
+  try {
+    const parsed = JSON.parse(e.message) as { error?: unknown; message?: unknown }
+    if (parsed.error === "config_changed" && typeof parsed.message === "string") {
+      return new ConfigChangedError(parsed.message)
+    }
+  } catch {
+    // Not JSON: an ordinary refusal.
+  }
+  return e
+}
+
 async function send(method: string, path: string, body: unknown): Promise<void> {
   const headers: Record<string, string> = { "content-type": "application/json" }
   const id = getConnectionId()
@@ -33,6 +48,24 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
     const detail = (await resp.text().catch(() => "")).trim()
     throw new Error(detail || `request failed (${resp.status})`)
   }
+}
+
+/// The raw config editor's save met a file that changed on disk since the
+/// editor read it (a `dux config set`, a blocked address, another editor). The
+/// server wrote nothing; the message is its sentence, and the editor offers to
+/// reload the file or keep editing.
+export class ConfigChangedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ConfigChangedError"
+  }
+}
+
+/// The raw config as the editor opens it, with the proof of what it read that
+/// the save must carry back.
+export interface RawConfig {
+  content: string
+  token: string
 }
 
 export const configApi = {
@@ -132,7 +165,7 @@ export const configApi = {
   }): Promise<void> => send("PATCH", "/api/v1/config/settings", patch),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).
-  readRawConfig: async (): Promise<string> => {
+  readRawConfig: async (): Promise<RawConfig> => {
     let resp: Response
     try {
       resp = await apiFetch("/api/v1/config/raw", { credentials: "same-origin" })
@@ -144,11 +177,18 @@ export const configApi = {
       const detail = (await resp.text().catch(() => "")).trim()
       throw new Error(detail || `request failed (${resp.status})`)
     }
-    const body = (await resp.json()) as { content: string }
-    return body.content
+    const body = (await resp.json()) as { content: string; token: string }
+    return { content: body.content, token: body.token }
   },
-  // Validate + write the raw config.toml text. A 400 (invalid TOML) throws with
-  // the server's parse message so the editor can surface it inline.
-  writeRawConfig: (content: string) =>
-    send("PUT", "/api/v1/config/raw", { content }),
+  // Validate + write the raw config.toml text over the file the editor read
+  // (`token` is the read's). A 409 means the file changed since and nothing was
+  // written: it throws `ConfigChangedError`. A 400 (invalid TOML, a refused
+  // change) throws with the server's message so the editor can show it inline.
+  writeRawConfig: async (content: string, token: string): Promise<void> => {
+    try {
+      await send("PUT", "/api/v1/config/raw", { content, token })
+    } catch (e) {
+      throw asConfigChanged(e)
+    }
+  },
 }

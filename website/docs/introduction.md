@@ -173,10 +173,13 @@ you write, and `worktrees/`, which holds the checkouts your agents work in.
 > owner-writable. If you need a config dux cannot touch, keep it somewhere dux does not
 > write to.
 
-dux never follows a symlink when setting a mode, so a `config.toml` that links into a
-dotfiles repository leaves that repository's file exactly as it is. A mode dux cannot
-set is a warning, not an error, so a directory on a volume without `chmod` still works
-and dux still starts.
+A `config.toml` that is a symlink (into a dotfiles repository, say) stays one: saves
+write through it to the file it points at, owner-only like any save. If that file is
+missing, dux will not start and a reload keeps the running settings, password included;
+it never creates the file or replaces the link. The startup pass that tightens modes
+never follows a symlink, so it leaves the linked file's mode alone. A mode dux cannot set
+is a warning, not an error, so a directory on a volume without `chmod` still works and dux
+still starts.
 
 ## Where to go next
 

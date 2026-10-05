@@ -104,7 +104,7 @@ fn load_old(raw: &str) -> (tempfile::TempDir, DuxPaths, Config) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = paths_in(tmp.path());
     std::fs::write(&paths.config_path, raw).expect("write config");
-    let config = load_config(&paths);
+    let config = load_config(&paths).expect("config loads");
     (tmp, paths, config)
 }
 
@@ -306,7 +306,7 @@ fn writing_after_an_upgrade_keeps_the_users_unmanaged_keys_and_comments() {
     // The user's own comment.
     assert!(saved.contains("Do not lose these comments."), "{saved}");
 
-    let reloaded = load_config(&paths);
+    let reloaded = load_config(&paths).expect("config loads");
     assert_eq!(reloaded.ui.left_width_pct, 41, "the edit must stick");
     assert_eq!(
         reloaded.shutdown_timeout_seconds, 17,
@@ -333,7 +333,7 @@ fn the_migrated_values_are_what_gets_persisted_not_the_deprecated_keys() {
     assert!(saved.contains("host = \"0.0.0.0\""), "{saved}");
     assert!(saved.contains("port = 9100"), "{saved}");
 
-    let reloaded = load_config(&paths);
+    let reloaded = load_config(&paths).expect("config loads");
     assert_eq!(reloaded.server.host, "0.0.0.0");
     assert_eq!(reloaded.server.port, 9100);
     assert!(reloaded.defaults.enable_randomized_pet_name_by_default);
@@ -345,7 +345,7 @@ fn a_second_load_of_a_migrated_config_is_stable() {
     // entrypoint AND on every config reload, so a migration that flip-flopped
     // would flip-flop many times per session.
     let (_tmp, paths, first) = load_old(OLD_CONFIG);
-    let second = load_config(&paths);
+    let second = load_config(&paths).expect("config loads");
     assert_eq!(first, second);
 }
 
@@ -392,7 +392,7 @@ PROJECT_ONE = "2"
     );
 
     patch_config_file_with(&paths.config_path, &config, Durability::NoFsync).expect("patch");
-    let reloaded = load_config(&paths);
+    let reloaded = load_config(&paths).expect("config loads");
     assert_eq!(reloaded.env, config.env);
     assert_eq!(reloaded.projects[0].env, config.projects[0].env);
 }

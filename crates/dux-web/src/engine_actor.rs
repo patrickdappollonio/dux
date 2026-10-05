@@ -332,12 +332,16 @@ pub enum EngineRequest {
     /// a plain render of the running config when the file does not exist yet. Any
     /// other read error is an `Err`, so the editor refuses to open rather than let
     /// the user save a blank default over their real config.
-    ReadRawConfig(oneshot::Sender<Result<String, String>>),
+    ReadRawConfig(oneshot::Sender<Result<RawConfig, String>>),
     /// Validate and write raw `config.toml` text: parse as a `Config`, flush any
     /// pending managed writes so they cannot clobber it, then write the file
     /// atomically and verbatim. The caller adopts the change through a config
     /// reload. `Err(message)` for a parse or IO failure.
-    WriteRawConfig(String, oneshot::Sender<Result<(), String>>),
+    WriteRawConfig(
+        String,
+        Option<String>,
+        oneshot::Sender<Result<(), RawWriteError>>,
+    ),
     /// Read everything `dux_core::first_load::plan` needs in one round trip: the
     /// last-seen version, the running display version, the `[ui]` suppression flags,
     /// and the state root the release-notes cache lives under. One trip so the
@@ -447,6 +451,23 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
     }
 }
 
+/// What a `ConfigAdopted` reaction (bare or inside a `Multi`) carries: the
+/// config it replaced, whether the GitHub integration was on before, and what
+/// failed.
+fn find_config_adopted(
+    reaction: &EventReaction,
+) -> Option<(dux_core::config::Config, bool, String)> {
+    match reaction {
+        EventReaction::ConfigAdopted {
+            before,
+            github_was_enabled,
+            error,
+        } => Some(((**before).clone(), *github_was_enabled, error.clone())),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(find_config_adopted),
+        _ => None,
+    }
+}
+
 /// Which way of serving a reload arrived at, because each owes a different set of
 /// restart sentences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,9 +560,18 @@ pub struct LiveServerLimits {
     /// `[server] allowed_hosts`, which the Host guard reads per request, so a
     /// reload that edits the list applies to the running listener.
     allowed_hosts: crate::host_guard::LiveHostNames,
+    /// `[server.auth]`, which the auth layer reads per request. Every reload
+    /// path adopts it here (see [`Self::store_from`]), so the password, the
+    /// blocklist and every limit apply to the running server with no restart.
+    auth: Arc<crate::auth::LiveAuth>,
 }
 
 impl LiveServerLimits {
+    /// The live `[server.auth]` section. Shared, not copied.
+    pub fn auth(&self) -> Arc<crate::auth::LiveAuth> {
+        Arc::clone(&self.auth)
+    }
+
     /// The Host guard's configured-hosts set. Shared, not copied: the guard
     /// holds this same set and sees every later [`Self::set_allowed_hosts`].
     pub fn allowed_hosts(&self) -> crate::host_guard::LiveHostNames {
@@ -574,9 +604,10 @@ impl LiveServerLimits {
 
     /// Deadline on one of a PTY socket's opening sends, in seconds, read when a
     /// socket opens so a reload applies to the next connection rather than to the
-    /// ones already attached. `0` means not seeded yet and the caller falls back to
-    /// the compiled default, because no bound at all is the one answer this must
-    /// never give.
+    /// ones already attached. Stored as dux uses it (see
+    /// `config_effective::effective_pty_send_timeout_seconds`), so `0` only ever
+    /// means not seeded yet, and the caller falls back to the compiled default,
+    /// because no bound at all is the one answer this must never give.
     pub fn pty_send_timeout_seconds(&self) -> usize {
         self.pty_send_timeout_seconds.load(Ordering::Relaxed)
     }
@@ -589,8 +620,9 @@ impl LiveServerLimits {
     /// How long a browser waits for the server's answer to one beat before treating
     /// the socket as half-open and reconnecting. Nothing on the server times itself
     /// by this; it is read so a send that answers a beat cannot outlive the window
-    /// the client waits in. `0` means not seeded yet, and the caller falls back to
-    /// the compiled default.
+    /// the client waits in. Stored as the browser uses it (see
+    /// `config_effective::effective_heartbeat_deadline_seconds`), so `0` only ever
+    /// means not seeded yet, and the caller falls back to the compiled default.
     pub fn heartbeat_deadline_seconds(&self) -> usize {
         self.heartbeat_deadline_seconds.load(Ordering::Relaxed)
     }
@@ -600,13 +632,25 @@ impl LiveServerLimits {
             .store(value, Ordering::Relaxed);
     }
 
-    /// Adopt every value from a reloaded `[server]` section.
-    pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
+    /// Adopt every value from a reloaded `[server]` section. `source` is the
+    /// text it was read from, when there is one (see [`crate::auth::LiveAuth::store`]).
+    pub fn store_from(&self, server: &dux_core::config::ServerConfig, source: Option<&str>) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(server.access_log);
-        self.set_pty_send_timeout_seconds(server.pty_send_timeout_seconds as usize);
-        self.set_heartbeat_deadline_seconds(server.heartbeat_deadline_seconds as usize);
+        // As dux uses them, through the functions `dux config get` reports.
+        self.set_pty_send_timeout_seconds(
+            dux_core::config_effective::effective_pty_send_timeout_seconds(
+                server.pty_send_timeout_seconds,
+            ) as usize,
+        );
+        self.set_heartbeat_deadline_seconds(
+            dux_core::config_effective::effective_heartbeat_deadline_seconds(
+                server.heartbeat_deadline_seconds,
+                server.heartbeat_seconds,
+            ) as usize,
+        );
         self.set_allowed_hosts(&server.allowed_hosts);
+        self.auth.store(&server.auth, source);
     }
 }
 
@@ -656,6 +700,12 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // Built here for the same reason as `pty_input_owners`: the loop starts
     // before the router exists, so both sides have to be handed the same Arc.
     let live_limits = Arc::new(LiveServerLimits::default());
+    // The password and the rest of `[server.auth]` hold from the first request,
+    // before any router seeds the other limits.
+    live_limits.auth().store(
+        &engine.config.server.auth,
+        engine.config.source_text.as_str(),
+    );
     // Filled by the serve path once its loop exists, which is after the actor is
     // already running on `dux server`. A `OnceLock` rather than a constructor
     // argument for exactly that reason; empty means nothing is serving, which is
@@ -677,6 +727,9 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             pty_input_owners: Arc::clone(&pty_input_owners),
             live_limits: Arc::clone(&live_limits),
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
+            paths: Arc::new(engine.paths.clone()),
+            reload_surface: engine.surface.start_surface(),
+            admission: process_admission(engine),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -695,6 +748,19 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
         },
     )
+}
+
+/// The address admission `engine` keeps for its whole life, made the first
+/// time a serve asks for it.
+fn process_admission(engine: &Engine) -> Arc<crate::auth::admission::Admission> {
+    let held = engine.serve_memory.get_or_init(|| {
+        let admission: Arc<dyn std::any::Any + Send + Sync> =
+            Arc::new(crate::auth::admission::Admission::default());
+        admission
+    });
+    Arc::clone(held)
+        .downcast::<crate::auth::admission::Admission>()
+        .unwrap_or_default()
 }
 
 /// Spawn the four global background workers on `engine`. Both `App::run` (the
@@ -777,6 +843,19 @@ pub struct EngineHandle {
     /// The `[server]` limits a reload can move on a bound listener, shared with
     /// the router the same way and for the same reason as `pty_input_owners`.
     live_limits: Arc<LiveServerLimits>,
+    /// Where this engine's config and session database live, for the auth
+    /// layer's own writes (a password, a ban, the warning's dismissal) and its
+    /// stored sessions.
+    paths: Arc<dux_core::config::DuxPaths>,
+    /// Which surface's start checks this engine's reload refuses a file by:
+    /// `dux server`'s, or the terminal UI's for the flip and the background
+    /// server, which run on the terminal UI's engine.
+    reload_surface: dux_core::config::Surface,
+    /// The web layer's address admission for this engine's whole life, so
+    /// every serve over it shares bans held in memory, failure counts and
+    /// waits (decided, after review: they belong to the dux process, not to
+    /// one serve).
+    admission: Arc<crate::auth::admission::Admission>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1546,6 +1625,21 @@ impl EngineHandle {
         Arc::clone(&self.live_limits)
     }
 
+    /// Where this engine's config and session database live.
+    pub fn paths(&self) -> Arc<dux_core::config::DuxPaths> {
+        Arc::clone(&self.paths)
+    }
+
+    /// Which surface's start checks this engine's reload refuses a file by.
+    pub fn reload_surface(&self) -> dux_core::config::Surface {
+        self.reload_surface
+    }
+
+    /// This engine's (this dux process's) address admission.
+    pub(crate) fn admission(&self) -> Arc<crate::auth::admission::Admission> {
+        Arc::clone(&self.admission)
+    }
+
     /// The configured preferred editor name for the "open in editor" action
     /// (`config.editor.default`). Empty if the engine is gone, in which case the handler
     /// falls back to the first detected editor.
@@ -1694,7 +1788,7 @@ impl EngineHandle {
     /// render of the running config if the file is missing). `Err` on a read
     /// failure or a dead engine thread, so the editor never opens on blank
     /// content the user could save over their real config.
-    pub async fn read_raw_config(&self) -> Result<String, String> {
+    pub async fn read_raw_config(&self) -> Result<RawConfig, String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -1708,20 +1802,32 @@ impl EngineHandle {
             .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
     }
 
-    /// Validate and write raw `config.toml` text from the Monaco editor. Returns
-    /// `Err(message)` for invalid TOML, an IO failure, or a dead engine thread.
-    pub async fn write_raw_config(&self, content: String) -> Result<(), String> {
+    /// Validate and write raw `config.toml` text from the Monaco editor, over
+    /// the file the editor read: `token` is the one [`Self::read_raw_config`]
+    /// handed out. [`RawWriteError::Changed`] when the file moved since that
+    /// read; [`RawWriteError::Refused`] for no token, invalid TOML, a refused
+    /// change, an IO failure, or a dead engine thread.
+    pub async fn write_raw_config(
+        &self,
+        content: String,
+        token: Option<String>,
+    ) -> Result<(), RawWriteError> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
-            .send(EngineRequest::WriteRawConfig(content, tx))
+            .send(EngineRequest::WriteRawConfig(content, token, tx))
             .await
             .is_err()
         {
-            return Err("the engine is not available".to_string());
+            return Err(RawWriteError::Refused(
+                "the engine is not available".to_string(),
+            ));
         }
-        rx.await
-            .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
+        rx.await.unwrap_or_else(|_| {
+            Err(RawWriteError::Refused(
+                "the engine did not reply".to_string(),
+            ))
+        })
     }
 
     /// Read the inputs `dux_core::first_load::plan` needs. `None` when the engine
@@ -2405,6 +2511,21 @@ impl EngineService {
     /// ends up correct either way; what it loses is the news that the reload
     /// failed, which the surface that failed it is the one showing.
     pub(crate) fn announce_config_reload(&mut self, engine: &Engine, reaction: &EventReaction) {
+        // A config the engine adopted after its own apply failed is already
+        // in force: browsers refetch it and hear what only a restart applies,
+        // as for one that applied. Its outcome follows on the reload's key,
+        // from the terminal UI's drain.
+        if let Some((before, _, _)) = find_config_adopted(reaction) {
+            let _ = self.config_reload_tx.send(());
+            if let Some(warning) = server_restart_warning_copy(
+                &before.server,
+                &engine.config.server,
+                ServeSurface::Background,
+            ) {
+                let _ = self.status.send(WireStatus::new("warning", warning));
+            }
+            return;
+        }
         let Some(config) = peek_apply_reloaded_config(reaction) else {
             return;
         };
@@ -2433,11 +2554,157 @@ impl EngineService {
         }
     }
 
+    /// The reload's follow-up on this loop, which owns the reload for `dux
+    /// server` and the flip. `ApplyReloadedConfig` and
+    /// `ProjectPersistenceOutcome` are distinct variants, so consuming the
+    /// reaction here never skips the project sync.
+    ///
+    /// The reaction may arrive WRAPPED in a `Multi` when config-mutating
+    /// commands were deferred during the reload (the engine folds the
+    /// `ApplyReloadedConfig` in with the deferred saves' status reactions), so
+    /// both forms are searched. The deferred saves' own status reactions were
+    /// already surfaced by the fan-out (it flattens `Multi`). A config in force
+    /// after a failed apply (this loop's own, or the engine's, which arrives as
+    /// `ConfigAdopted`) gets everything a reload owes the running server, as a
+    /// successful one does, so nothing stays on the config it replaced.
+    pub(crate) fn apply_reload_followup(&mut self, engine: &mut Engine, reaction: EventReaction) {
+        let adopted = find_config_adopted(&reaction);
+        if let Some(config) = take_apply_reloaded_config(reaction) {
+            let before = engine.config.clone();
+            let github_was_enabled = engine.github_integration_enabled;
+            match engine.apply_reloaded_config(*config) {
+                Ok(()) => {
+                    let _ = self.status.send(WireStatus::from_update(
+                        &dux_core::config_reload_status::applied(),
+                    ));
+                    self.config_in_force(engine, &before, github_was_enabled);
+                }
+                Err(e) => {
+                    // The engine kept the new config anyway, so it is in
+                    // force; the failure is said last, so it holds the line.
+                    self.config_in_force(engine, &before, github_was_enabled);
+                    let _ = self.status.send(WireStatus::from_update(
+                        &dux_core::config_reload_status::adopted_but_apply_failed(&format!(
+                            "{e:#}"
+                        )),
+                    ));
+                }
+            }
+        }
+        if let Some((before, github_was_enabled, error)) = adopted {
+            // The engine applied this config only to drain the commands it had
+            // deferred, and left the `gh` probe a reload owes to this apply.
+            engine.probe_gh_after_reload(github_was_enabled);
+            self.config_in_force(engine, &before, github_was_enabled);
+            let _ = self.status.send(WireStatus::from_update(
+                &dux_core::config_reload_status::adopted_but_apply_failed(&error),
+            ));
+        }
+    }
+
+    /// Take on the file a raw save left on disk ahead of memory, exactly as a
+    /// reload does (decided, after review): judged by the serving surface's
+    /// own start check, and once applied, put in force through
+    /// [`Self::config_in_force`], so its `[server.auth]`, the pull-request
+    /// sync and the restart warning follow it as they follow every reload.
+    /// Kept ahead, with the reason, when the file cannot be taken on: applying
+    /// the command would save a memory that never saw the disk edits.
+    fn adopt_disk_config(&mut self, engine: &mut Engine) -> Result<(), String> {
+        let surface = engine.surface.start_surface();
+        let reloaded =
+            dux_core::config::load_config_for_reload(&engine.paths).map_err(|error| {
+                format!(
+                    "config.toml was changed outside dux and cannot be loaded, so this change \
+                 was not made and the running settings are unchanged. Fix the file, then try \
+                 again: {error}"
+                )
+            })?;
+        if let Some(refusal) = reloaded
+            .source_text
+            .as_str()
+            .and_then(|raw| dux_core::config::start_refusal(raw, surface))
+        {
+            return Err(format!(
+                "config.toml was changed outside dux, and this change was not made because \
+                 the running settings cannot take that file on: {refusal} The running \
+                 settings are unchanged. Fix the file, then try again."
+            ));
+        }
+        let before = engine.config.clone();
+        let github_was_enabled = engine.github_integration_enabled;
+        let applied = engine.apply_reloaded_config(reloaded);
+        // In force either way: the engine keeps the config even when its
+        // apply fails, as on a reload.
+        self.config_in_force(engine, &before, github_was_enabled);
+        if let Err(error) = applied {
+            let _ = self.status.send(WireStatus::from_update(
+                &dux_core::config_reload_status::adopted_but_apply_failed(&format!("{error:#}")),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Everything a reload owes the running server once `engine.config` is
+    /// in force, compared with `before`, the config it replaced, the same
+    /// pull-request sync the terminal UI's reload runs included.
+    /// `github_was_enabled` is whether the integration was on before.
+    fn config_in_force(
+        &mut self,
+        engine: &mut Engine,
+        before: &dux_core::config::Config,
+        github_was_enabled: bool,
+    ) {
+        engine.retune_pr_sync_after_reload(github_was_enabled);
+        // Memory now matches disk: any pending raw "Save" has been adopted, so
+        // disk is no longer ahead.
+        self.config_disk_ahead = false;
+        self.live_limits
+            .store_from(&engine.config.server, engine.config.source_text.as_str());
+        // Signal the web layer that config-static state changed so it emits a
+        // `config.changed` event and clients refetch `/api/v1/bootstrap`.
+        // Fire-and-forget: an `Err` only means no forwarder is listening (e.g.
+        // the TUI flip), which is fine.
+        let _ = self.config_reload_tx.send(());
+        // The `[server]` bind section only takes effect at startup; a reload
+        // cannot rebind listeners. Warn so the user knows a restart is needed
+        // for those specific changes to take effect.
+        if let Some(warning) =
+            server_restart_warning_copy(&before.server, &engine.config.server, self.surface)
+        {
+            let _ = self.status.send(WireStatus::new("warning", warning));
+        }
+        // `[server] tailscale` IS live, so a reload that changed it acts rather
+        // than warning. This is the reload owner for `dux server` and for the
+        // flip. Background mode fills the same slot but never runs this loop,
+        // so its reload is the terminal UI's and there is no double apply. The
+        // parsed MODE, never the raw string: the value is trimmed and
+        // case-insensitive, so a user who retyped "Auto" must not have their
+        // listener stopped and started for nothing.
+        let next_tailscale = engine.config.server.tailscale_mode();
+        if before.server.tailscale_mode() != next_tailscale
+            && let Some(control) = self.tailscale_mode_control.get()
+        {
+            let status = self.status.tx.clone();
+            control.set_mode_detached(next_tailscale, move |outcome| {
+                let report = outcome.report(next_tailscale);
+                let tone = if report.warning { "warning" } else { "info" };
+                // The same key the terminal UI's mode change uses, so one
+                // answer per change whichever surface asked for it.
+                let _ = status.send(WireStatus::keyed(
+                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
+                    tone,
+                    report.message,
+                ));
+            });
+        }
+    }
+
     /// Adopt the two live `[server]` limits from a config the drainer has already
     /// applied. The companion seam's post-apply half; see
     /// [`dux_core::background_serve::BackgroundServeCompanion::note_config_applied`].
-    pub(crate) fn note_config_applied(&self, server: &dux_core::config::ServerConfig) {
-        self.live_limits.store_from(server);
+    pub(crate) fn note_config_applied(&self, config: &dux_core::config::Config) {
+        self.live_limits
+            .store_from(&config.server, config.source_text.as_str());
     }
 
     /// The shared maintenance sweeps, run by whoever drains `worker_rx`.
@@ -2736,6 +3003,27 @@ impl EngineService {
                     stopped = true;
                     break;
                 }
+                // A config-changing command over a file a raw save left ahead
+                // of memory takes the file on first, as a reload does, or is
+                // refused saying why.
+                EngineRequest::ApplyWire(cmd, reply, origin)
+                    if cmd.mutates_config_static() && self.config_disk_ahead =>
+                {
+                    match self.adopt_disk_config(engine) {
+                        Ok(()) => handle_request(
+                            engine,
+                            EngineRequest::ApplyWire(cmd, reply, origin),
+                            &mut self.status,
+                            &self.config_reload_tx,
+                            &mut self.config_disk_ahead,
+                            &self.pty_input_owners,
+                        ),
+                        Err(message) => {
+                            dux_core::logger::warn(&format!("[server] {message}"));
+                            let _ = reply.send(Err(message));
+                        }
+                    }
+                }
                 other => {
                     handle_request(
                         engine,
@@ -2806,87 +3094,8 @@ pub(crate) fn run_engine_loop(
             // A reload worker re-read config.toml; apply the new config to the
             // running engine. This consumes `reaction`, so it MUST be the last
             // use of it in the loop body (all `&reaction` borrows above end
-            // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
-            // distinct variants, so consuming here never skips the project sync.
-            //
-            // The reload follow-up reaction may arrive WRAPPED in a `Multi` when
-            // config-mutating commands were deferred during the reload (the
-            // engine folds the `ApplyReloadedConfig` in with the deferred saves'
-            // status reactions). Pull the `ApplyReloadedConfig` out of either the
-            // bare or the wrapped form so the server-restart warning always
-            // runs. The deferred saves' own status reactions were already
-            // surfaced by the `wire_statuses_from_reaction` drain above (it
-            // flattens `Multi`).
-            if let Some(config) = take_apply_reloaded_config(reaction) {
-                // Capture the rebind-relevant [server] settings
-                // BEFORE the swap so we can tell whether the reload touched
-                // anything that only takes effect at startup (listeners are
-                // bound once; reload-config never rebinds). Comparing here, where the
-                // arm already holds both the running config (pre-swap) and the
-                // incoming one, keeps the detection next to the config-reload handler.
-                let restart_warning =
-                    server_restart_warning_copy(&engine.config.server, &config.server, svc.surface);
-                // The parsed MODE, never the raw string: the value is trimmed
-                // and case-insensitive, so a user who retyped "Auto" must not
-                // have their listener stopped and started for nothing.
-                let previous_tailscale = engine.config.server.tailscale_mode();
-                let next_tailscale = config.server.tailscale_mode();
-                match engine.apply_reloaded_config(*config) {
-                    Ok(()) => {
-                        // Memory now matches disk: any pending raw "Save" has been
-                        // adopted, so disk is no longer ahead.
-                        svc.config_disk_ahead = false;
-                        svc.live_limits.store_from(&engine.config.server);
-                        // Signal the web layer that config-static state changed so
-                        // it emits a `config.changed` event and clients refetch
-                        // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
-                        // no forwarder is listening (e.g. the TUI flip), which is
-                        // fine.
-                        let _ = svc.config_reload_tx.send(());
-                        let _ = svc.status.send(WireStatus::from_update(
-                            &dux_core::config_reload_status::applied(),
-                        ));
-
-                        // The new config WAS applied to the engine, but the
-                        // `[server]` bind section only takes effect at startup; a
-                        // reload cannot rebind listeners. Warn so the user knows a
-                        // restart is needed for those specific changes to take
-                        // effect.
-                        if let Some(warning) = restart_warning {
-                            let _ = svc.status.send(WireStatus::new("warning", warning));
-                        }
-
-                        // `[server] tailscale` IS live, so a reload that changed
-                        // it acts rather than warning. This is the reload owner
-                        // for `dux server` and for the flip. Background mode
-                        // fills the same slot but never runs this loop, so its
-                        // reload is the terminal UI's and there is no double
-                        // apply.
-                        if previous_tailscale != next_tailscale
-                            && let Some(control) = svc.tailscale_mode_control.get()
-                        {
-                            let status = svc.status.tx.clone();
-                            control.set_mode_detached(next_tailscale, move |outcome| {
-                                let report = outcome.report(next_tailscale);
-                                let tone = if report.warning { "warning" } else { "info" };
-                                // The same key the terminal UI's mode change
-                                // uses, so one answer per change whichever
-                                // surface asked for it.
-                                let _ = status.send(WireStatus::keyed(
-                                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
-                                    tone,
-                                    report.message,
-                                ));
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        let _ = svc.status.send(WireStatus::from_update(
-                            &dux_core::config_reload_status::apply_failed(&format!("{e:#}")),
-                        ));
-                    }
-                }
-            }
+            // first).
+            svc.apply_reload_followup(&mut engine, reaction);
         }
 
         svc.run_maintenance(&mut engine);
@@ -3547,12 +3756,9 @@ fn handle_apply_wire_request(
     config_disk_ahead: &mut bool,
 ) {
     let mutates_config = cmd.mutates_config_static();
-    if mutates_config && *config_disk_ahead {
-        let reloaded = dux_core::config::load_config(&engine.paths);
-        let _ = engine.apply_reloaded_config(reloaded);
-        *config_disk_ahead = false;
-    }
-
+    // A file a raw save left ahead of memory is taken on before this runs,
+    // by the loop that owns the reload (`EngineService::adopt_disk_config`).
+    debug_assert!(!(mutates_config && *config_disk_ahead));
     engine.current_origin = origin;
     let result = engine.apply_wire(cmd).map_err(|e| e.to_string());
     engine.current_origin = StatusScope::All;
@@ -3637,12 +3843,52 @@ fn first_load_inputs(engine: &Engine) -> FirstLoadInputs {
     }
 }
 
-fn read_raw_config(engine: &Engine) -> Result<String, String> {
-    match std::fs::read_to_string(&engine.paths.config_path) {
-        Ok(raw) => Ok(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(dux_core::config_write::render_config_plain(&engine.config))
+/// The raw `config.toml` as the editor opens it, with the proof of what was
+/// read that its save must carry back.
+#[derive(Debug, Clone)]
+pub struct RawConfig {
+    pub content: String,
+    /// [`dux_core::config_write::read_token`] of the file as read (or of "no
+    /// file"). The save is refused unless the file still matches it.
+    pub token: String,
+}
+
+/// Why a raw config save did not land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawWriteError {
+    /// The file changed since the editor read it (a `dux config set`, a ban,
+    /// another editor), so saving would undo that change. Nothing was written;
+    /// the browser offers to reload the file or keep editing.
+    Changed(String),
+    /// Anything else: no token, invalid TOML, a change the editor may not
+    /// make, an IO failure.
+    Refused(String),
+}
+
+impl std::fmt::Display for RawWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(message) | Self::Refused(message) => f.write_str(message),
         }
+    }
+}
+
+/// What the raw editor is told when the file moved under it.
+const RAW_CONFIG_CHANGED: &str = "config.toml changed on disk since you opened it (a `dux \
+     config set`, a blocked address, or another editor), and saving would undo that change, \
+     so nothing was saved. Reload the file to see it as it is now (your edits here are \
+     discarded), or keep editing and copy what you need first.";
+
+fn read_raw_config(engine: &Engine) -> Result<RawConfig, String> {
+    match std::fs::read_to_string(&engine.paths.config_path) {
+        Ok(raw) => Ok(RawConfig {
+            token: dux_core::config_write::read_token(Some(&raw)),
+            content: raw,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RawConfig {
+            content: dux_core::config_write::render_config_plain(&engine.config),
+            token: dux_core::config_write::read_token(None),
+        }),
         Err(error) => Err(format!("Could not read config.toml: {error}")),
     }
 }
@@ -3946,10 +4192,11 @@ fn handle_request(
         EngineRequest::ReadRawConfig(reply) => {
             let _ = reply.send(read_raw_config(engine));
         }
-        EngineRequest::WriteRawConfig(content, reply) => {
+        EngineRequest::WriteRawConfig(content, token, reply) => {
             let _ = reply.send(write_raw_config_on_engine(
                 engine,
                 &content,
+                token.as_deref(),
                 config_disk_ahead,
             ));
         }
@@ -3965,6 +4212,13 @@ fn handle_request(
         }
     }
 }
+
+/// Why the raw config editor refused an edit that sets, changes or clears the
+/// web password.
+const PASSWORD_EDIT_REFUSAL: &str = "The web password cannot be set, changed or removed \
+     from the config editor, so nothing was written. Change it from Preferences, which asks \
+     for the current password, or with `dux config set server.auth.password` on the machine \
+     dux runs on, and keep password_hash as it is in this edit.";
 
 /// Validate and persist a raw `config.toml` edit from the web Monaco editor, on
 /// the engine thread. Runs as a free function (not an inline closure) so the `?`
@@ -3985,40 +4239,91 @@ fn handle_request(
 fn write_raw_config_on_engine(
     engine: &mut Engine,
     content: &str,
+    token: Option<&str>,
     config_disk_ahead: &mut bool,
-) -> Result<(), String> {
-    let parsed = dux_core::config::validate_config_str(content)
-        .map_err(|e| format!("config.toml is not valid: {e}"))?;
+) -> Result<(), RawWriteError> {
+    let Some(token) = token else {
+        return Err(RawWriteError::Refused(
+            "This save carries no proof of what it read, so it could undo a change made since. \
+             Reopen the config editor and save again."
+                .to_string(),
+        ));
+    };
+    write_raw_config_checked(engine, content, token, config_disk_ahead)
+}
+
+/// [`write_raw_config_on_engine`] once the save's token is in hand.
+fn write_raw_config_checked(
+    engine: &mut Engine,
+    content: &str,
+    token: &str,
+    config_disk_ahead: &mut bool,
+) -> Result<(), RawWriteError> {
+    let refused = RawWriteError::Refused;
+    dux_core::config::validate_config_str(content)
+        .map_err(|e| refused(format!("config.toml is not valid: {e}")))?;
+    // Every guard below judges the file as a start would load it, with the
+    // load migrations applied (decided, after review): a deprecated
+    // `[server] bind` becomes `host` on the next start, so judging the text
+    // as written would let it change the host past this guard.
+    let parsed = dux_core::config::effective_config_from_text(content)
+        .map_err(|e| refused(format!("config.toml is not valid: {}", e.reason())))?;
     // The web editor must not silently weaken the server perimeter, so both
     // halves of it stay a terminal-side edit. `host` binds once and needs a
     // restart; `allowed_hosts` is read live by the Host guard and a reload
     // applies it, so its refusal names the reload rather than a restart nobody
     // needs.
     if parsed.server.host != engine.config.server.host {
-        return Err(
+        return Err(refused(
             "Server host cannot be changed from the web editor; edit config.toml directly \
              and restart."
                 .to_string(),
-        );
+        ));
     }
     if parsed.server.allowed_hosts != engine.config.server.allowed_hosts {
-        return Err(
+        return Err(refused(
             "Server allowed_hosts cannot be changed from the web editor; edit config.toml \
              directly and run Reload config, which applies it to the running server."
                 .to_string(),
-        );
+        ));
     }
     // Flush pending managed writes so a coalesced lazy save cannot clobber the
-    // raw write, then persist the user's text verbatim.
+    // raw write, then persist the user's text verbatim, but only after checking,
+    // under the config write lock and against the file as it is NOW, that it
+    // leaves the web password exactly as it is. The editor is a page anyone the
+    // login lets in can use; setting, changing or clearing the password needs
+    // the current one (Preferences) or the machine itself (`dux config set`).
+    // Checked against the file rather than memory, so a `dux config set` that
+    // landed before its reload is the password the edit must keep.
     engine.config_writer.flush();
-    dux_core::config_write::write_config_atomic(
-        &engine.paths.config_path,
-        content,
-        dux_core::config_write::Durability::Fsync,
-    )
+    let running_hash = engine.config.server.auth.password_hash.clone();
+    let new_hash = parsed.server.auth.password_hash.clone();
+    dux_core::config_write::replace_config_file(&engine.paths.config_path, |current| {
+        // The save carries proof of what it read; a file that moved since
+        // (a `dux config set`, a ban, another editor) is not overwritten.
+        if dux_core::config_write::read_token(current) != token {
+            anyhow::bail!(RAW_CONFIG_CHANGED);
+        }
+        let current_hash = current
+            .and_then(|raw| dux_core::config::auth_section_of(raw).ok())
+            .map_or(running_hash, |auth| auth.password_hash);
+        if new_hash != current_hash {
+            anyhow::bail!(PASSWORD_EDIT_REFUSAL);
+        }
+        Ok((content.to_string(), ()))
+    })
     // Don't leak the absolute config-dir path to the client: return the
-    // underlying OS error without the path-annotated context.
-    .map_err(|e| format!("Could not write config.toml: {}", e.root_cause()))?;
+    // underlying error without the path-annotated context.
+    .map_err(|e| {
+        let cause = e.root_cause().to_string();
+        if cause == RAW_CONFIG_CHANGED {
+            RawWriteError::Changed(cause)
+        } else if cause == PASSWORD_EDIT_REFUSAL {
+            refused(cause)
+        } else {
+            refused(format!("Could not write config.toml: {cause}"))
+        }
+    })?;
     // Persist-only: the file is on disk, but the running config is left as-is so
     // nothing applies until an explicit reload. Mark disk as ahead of memory so a
     // later config-static mutation reconciles before its wholesale patch (which
@@ -4256,6 +4561,16 @@ fn auto_reopen_log_line(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A raw editor save as the editor makes it: read the file for its token,
+    /// then save over what was read.
+    async fn save_raw(
+        handle: &super::EngineHandle,
+        content: impl Into<String>,
+    ) -> Result<(), super::RawWriteError> {
+        let token = handle.read_raw_config().await.expect("read").token;
+        handle.write_raw_config(content.into(), Some(token)).await
+    }
+
     use super::*;
     // The test flavour: stock provider names, harmless commands.
     use crate::test_support::bootstrap_test_engine as bootstrap_engine;
@@ -4299,6 +4614,94 @@ mod tests {
 
         assert_eq!(limits.search_index_max_files(), 9);
         assert!(!limits.access_log());
+    }
+
+    /// A config the engine adopted after its own apply failed is in force, so
+    /// what a reload owes the running server follows it: the live limits and
+    /// the Host guard's allowed hosts take it, and browsers are told to
+    /// refetch, rather than everything staying on the config it replaced.
+    #[test]
+    fn a_config_adopted_after_a_failed_apply_reaches_the_running_server() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let limits = handle.live_limits();
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let mut before = engine.config.clone();
+        engine.config.server.allowed_hosts = vec!["after.example.com".to_string()];
+        engine.config.server.search_index_max_files = 4321;
+        // The adopted config turns the GitHub integration off: pull-request
+        // sync stops, as the terminal UI's reload does.
+        before.ui.github_integration = true;
+        engine.config.ui.github_integration = false;
+        engine.github_integration_enabled = false;
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            dux_core::model::PrInfo {
+                number: 1,
+                state: dux_core::model::PrState::Open,
+                title: "x".into(),
+                host: "github.com".into(),
+                owner_repo: "o/r".into(),
+                url: "https://example".into(),
+            },
+        );
+
+        let mut statuses = handle.subscribe_status();
+        svc.apply_reload_followup(
+            &mut engine,
+            EventReaction::ConfigAdopted {
+                github_was_enabled: before.ui.github_integration,
+                before: Box::new(before),
+                error: "the session database could not be read".to_string(),
+            },
+        );
+        let said = std::iter::from_fn(|| statuses.try_recv().ok())
+            .find(|status| {
+                status.key.as_deref() == Some(dux_core::wire::status_keys::CONFIG_RELOAD)
+            })
+            .expect("the reload's outcome is said");
+        assert!(said.message.contains("in force"), "{}", said.message);
+        assert!(engine.pr_statuses.is_empty(), "pull-request sync stopped");
+
+        assert_eq!(
+            limits.allowed_hosts().snapshot(),
+            vec!["after.example.com".to_string()]
+        );
+        assert_eq!(limits.search_index_max_files(), 4321);
+        assert!(reloads.try_recv().is_ok(), "browsers are told to refetch");
+    }
+
+    /// In background mode the terminal UI drains, and this seam announces a
+    /// reload to browsers: a config the engine adopted after its own apply
+    /// failed is announced like one that applied, so browsers refetch and
+    /// hear a change only a restart applies.
+    #[test]
+    fn an_adopted_config_is_announced_to_browsers() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut statuses = handle.subscribe_status();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let before = engine.config.clone();
+        engine.config.server.port += 1;
+
+        svc.announce_config_reload(
+            &engine,
+            &EventReaction::ConfigAdopted {
+                github_was_enabled: before.ui.github_integration,
+                before: Box::new(before),
+                error: "the session database could not be read".to_string(),
+            },
+        );
+
+        assert!(reloads.try_recv().is_ok(), "browsers are told to refetch");
+        assert!(
+            std::iter::from_fn(|| statuses.try_recv().ok()).any(|status| status.tone == "warning"),
+            "the restart warning reaches browsers"
+        );
     }
 
     /// A background worker that died and came back is a fact about the process,
@@ -4376,7 +4779,7 @@ mod tests {
 
         // The apply fails, exactly as the engine loop reports it.
         let _ = svc.status.send(WireStatus::from_update(
-            &dux_core::config_reload_status::apply_failed("boom"),
+            &dux_core::config_reload_status::adopted_but_apply_failed("boom"),
         ));
 
         let replayed: Vec<_> = handle
@@ -4389,7 +4792,7 @@ mod tests {
         assert_eq!(replayed.len(), 1, "one key holds one status: {replayed:?}");
         assert_eq!(
             replayed[0].message,
-            dux_core::config_reload_status::apply_failed("boom").message,
+            dux_core::config_reload_status::adopted_but_apply_failed("boom").message,
             "and it is the outcome, not the announcement it answered"
         );
         assert_eq!(replayed[0].tone, "error");
@@ -4407,10 +4810,10 @@ mod tests {
         limits.set_access_log(false);
         let svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
 
-        let mut server = engine.config.server.clone();
-        server.search_index_max_files = 4321;
-        server.access_log = true;
-        svc.note_config_applied(&server);
+        let mut config = engine.config.clone();
+        config.server.search_index_max_files = 4321;
+        config.server.access_log = true;
+        svc.note_config_applied(&config);
 
         assert_eq!(limits.search_index_max_files(), 4321);
         assert!(limits.access_log());
@@ -5943,6 +6346,48 @@ mod tests {
         }
     }
 
+    /// Every `[server.auth]` setting applies to the running server on a
+    /// reload: the live limits adopt it and no restart is asked for. The
+    /// password-check bounds included: the gate reads them per attempt.
+    #[test]
+    fn every_server_auth_setting_applies_on_reload_with_no_restart() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.auth = dux_core::config::ServerAuthConfig {
+            password_hash: dux_core::auth::hash_password(&dux_core::auth::Password::new(
+                "orbit velvet quarry lantern cobalt".to_string(),
+            ))
+            .unwrap(),
+            require: dux_core::config::AuthRequire::Everywhere,
+            minimum_password_length: 20,
+            minimum_password_score: 3,
+            max_failed_logins: 9,
+            blocked_addresses: vec!["198.51.100.0/24".to_string()],
+            session_idle_seconds: 120,
+            disable_no_auth_warning: true,
+            cookie_secure: dux_core::config::CookieSecure::Always,
+            max_concurrent_password_checks: 4,
+            password_check_queue: 16,
+            max_password_bytes: 2048,
+            failed_login_window_seconds: 60,
+            failed_login_delay_seconds: 2,
+            failed_login_max_delay_seconds: 60,
+            max_failed_logins_per_minute: 10,
+            max_tracked_addresses: 50,
+            max_blocked_addresses: 20,
+        };
+        for surface in [
+            ServeSurface::DuxServer,
+            ServeSurface::Flip,
+            ServeSurface::Background,
+        ] {
+            assert_eq!(server_restart_warning_copy(&prev, &next, surface), None);
+        }
+        let limits = LiveServerLimits::default();
+        limits.store_from(&next, None);
+        assert_eq!(limits.auth().snapshot().config, next.auth);
+    }
+
     #[test]
     fn restart_drift_detects_host_change() {
         let prev = dux_core::config::ServerConfig::default();
@@ -6921,15 +7366,14 @@ mod tests {
             "[defaults]\nstart_directory = \"{}\"\n",
             dir_b.path().to_string_lossy()
         );
-        handle
-            .write_raw_config(new_body.clone())
-            .await
-            .expect("write");
+        save_raw(&handle, new_body.clone()).await.expect("write");
 
         // PERSISTED: the file on disk now carries dir B.
         let on_disk = handle.read_raw_config().await.expect("read");
         assert!(
-            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            on_disk
+                .content
+                .contains(dir_b.path().to_string_lossy().as_ref()),
             "disk must hold the saved edit"
         );
 
@@ -6985,6 +7429,181 @@ mod tests {
         }
     }
 
+    /// A file saved from the web editor and then broken by hand cannot be
+    /// adopted; a settings change then must be refused out loud rather than
+    /// written over the disk edits from a memory that never saw them.
+    #[tokio::test]
+    async fn a_settings_change_is_refused_while_an_unadoptable_disk_edit_waits() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        save_raw(&handle, "[ui]\nleft_width_pct = 25\n".to_string())
+            .await
+            .expect("raw save");
+        let broken = "[ui]\nleft_width_pct = 26\n\n[server.auth]\nrequire = \"lan\"\n";
+        std::fs::write(&paths.config_path, broken).expect("hand edit");
+        let refusal = handle
+            .apply_wire(WireCommand::SetSettings(dux_core::wire::SettingsPatch {
+                copy_on_select: Some(false),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("refused");
+        assert!(refusal.contains("server.auth"), "{refusal}");
+        assert!(refusal.contains("was not made"), "{refusal}");
+        assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), broken);
+    }
+
+    /// The web's "recover config" keeps the file's own `[server.auth]`: a
+    /// password set on disk after this dux started is not replaced by the
+    /// running config's (here, none).
+    #[tokio::test]
+    async fn recovering_the_config_keeps_the_files_server_auth() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "set on disk after dux started".to_string(),
+        ))
+        .expect("hash");
+        std::fs::write(
+            &paths.config_path,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .expect("write");
+        handle
+            .apply_wire(WireCommand::RecoverConfig {})
+            .await
+            .expect("recover");
+        let after = std::fs::read_to_string(&paths.config_path).expect("read");
+        let auth = dux_core::config::auth_section_of(&after).expect("valid");
+        assert_eq!(auth.password_hash, hash, "{after}");
+    }
+
+    /// A reload that meets an unreadable `[server.auth]` changes nothing at
+    /// all, not even the settings beside it that are fine, and says why; the
+    /// next good file applies as usual.
+    /// config.toml deleted while the server runs: the reload is refused and
+    /// the running config (its password included) stays.
+    #[tokio::test]
+    async fn a_reload_of_a_deleted_config_keeps_the_running_config() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"before.example.com\"]\n",
+        )
+        .expect("seed config");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let guard_set = handle.live_limits().allowed_hosts();
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("first reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["before.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first reload never applied"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let mut statuses = handle.subscribe_status();
+        std::fs::remove_file(&paths.config_path).expect("delete");
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload request");
+        let said = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = statuses.recv().await.expect("status");
+                if status.message.contains("no longer exists") {
+                    return status.message;
+                }
+            }
+        })
+        .await
+        .expect("a status says the file is gone");
+        assert!(said.contains("not reloaded"), "{said}");
+        assert_eq!(guard_set.snapshot(), vec!["before.example.com".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_reload_with_an_unreadable_server_auth_keeps_the_running_config() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"before.example.com\"]\n",
+        )
+        .expect("seed config");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let guard_set = handle.live_limits().allowed_hosts();
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("first reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["before.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first reload never applied"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        for broken_auth in [
+            "[server.auth\n",
+            "[server.auth]\npassword_hash = \"not-a-hash\"\n",
+            "[server.auth]\nsession_idle_seconds = true\n",
+        ] {
+            let mut statuses = handle.subscribe_status();
+            std::fs::write(
+                &paths.config_path,
+                format!("[server]\nallowed_hosts = [\"after.example.com\"]\n\n{broken_auth}"),
+            )
+            .expect("edit config.toml by hand");
+            handle
+                .apply_wire(WireCommand::ReloadConfig {})
+                .await
+                .expect("reload request");
+            let said = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let status = statuses.recv().await.expect("status");
+                    if status.message.contains("server.auth") {
+                        return status.message;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{broken_auth:?}: no status named [server.auth]"));
+            assert!(said.contains("not reloaded"), "{said}");
+            assert_eq!(
+                guard_set.snapshot(),
+                vec!["before.example.com".to_string()],
+                "{broken_auth:?}: the whole reload is refused"
+            );
+        }
+
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"after.example.com\"]\n",
+        )
+        .expect("fix config.toml");
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["after.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the good reload never applied"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// The web editor still leaves the perimeter to the terminal, but the
     /// refusal must not send anyone to restart for a list a reload applies.
     #[tokio::test]
@@ -6992,18 +7611,21 @@ mod tests {
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (handle, _join) = spawn_engine_thread(engine);
-        let refusal = handle
-            .write_raw_config("[server]\nallowed_hosts = [\"box.example.com\"]\n".to_string())
-            .await
-            .expect_err("an allowed_hosts edit from the browser is refused");
+        let refusal = save_raw(
+            &handle,
+            "[server]\nallowed_hosts = [\"box.example.com\"]\n".to_string(),
+        )
+        .await
+        .expect_err("an allowed_hosts edit from the browser is refused")
+        .to_string();
         assert!(refusal.contains("allowed_hosts"), "{refusal}");
         assert!(refusal.to_lowercase().contains("reload"), "{refusal}");
         assert!(!refusal.contains("restart"), "{refusal}");
 
-        let refusal = handle
-            .write_raw_config("[server]\nhost = \"0.0.0.0\"\n".to_string())
+        let refusal = save_raw(&handle, "[server]\nhost = \"0.0.0.0\"\n".to_string())
             .await
-            .expect_err("a host edit from the browser is refused");
+            .expect_err("a host edit from the browser is refused")
+            .to_string();
         assert!(
             refusal.contains("restart"),
             "host still needs a restart: {refusal}"
@@ -7025,7 +7647,7 @@ mod tests {
             "[defaults]\nstart_directory = \"{}\"\n",
             dir_b.path().to_string_lossy()
         );
-        handle.write_raw_config(new_body).await.expect("write");
+        save_raw(&handle, new_body).await.expect("write");
 
         // Now toggle a config-static setting. Its wholesale toml_edit patch would
         // serialize the (stale) in-memory config over the file, reverting the
@@ -7038,11 +7660,15 @@ mod tests {
         // The saved edit survived on disk: the toggle reconciled instead of clobbering.
         let on_disk = handle.read_raw_config().await.expect("read");
         assert!(
-            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            on_disk
+                .content
+                .contains(dir_b.path().to_string_lossy().as_ref()),
             "the config-static mutation must not clobber the saved start_directory"
         );
         assert!(
-            !on_disk.contains(dir_a.path().to_string_lossy().as_ref()),
+            !on_disk
+                .content
+                .contains(dir_a.path().to_string_lossy().as_ref()),
             "the stale dir A must not have been written back"
         );
 
@@ -7381,7 +8007,7 @@ mod tests {
             ),
             (
                 "WriteRawConfig",
-                EngineRequest::WriteRawConfig("x = 1".into(), dead_reply()),
+                EngineRequest::WriteRawConfig("x = 1".into(), None, dead_reply()),
                 false,
             ),
             (
@@ -7589,6 +8215,300 @@ mod tests {
         assert_eq!(
             auto_reopen_log_line(3),
             "Auto-reopening 3 agents that were running when dux last exited..."
+        );
+    }
+
+    /// `dux server` started with no config.toml, and the user then writes
+    /// one by hand: a save from memory keeps what they wrote, changing only
+    /// what memory changed.
+    #[tokio::test]
+    async fn a_config_written_by_hand_after_a_start_without_one_survives_a_save() {
+        let (_tmp, paths) = temp_paths();
+        let _ = std::fs::remove_file(&paths.config_path);
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 31\n").unwrap();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        handle
+            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .await
+            .expect("save");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(after.contains("left_width_pct = 31"), "{after}");
+        assert!(after.contains("API = \"k\""), "{after}");
+    }
+
+    /// a config-changing command that takes on a file saved in the
+    /// raw editor adopts it into the engine, so it must adopt its
+    /// `[server.auth]` into the auth layer too, as every reload path does.
+    #[tokio::test]
+    async fn a_command_adopting_the_disk_file_also_adopts_its_server_auth() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        let live = handle.live_limits().auth();
+        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        let edited = if opened.content.contains("blocked_addresses = []") {
+            opened.content.replace(
+                "blocked_addresses = []",
+                "blocked_addresses = [\"203.0.113.7\"]",
+            )
+        } else {
+            format!(
+                "{}\n[server.auth]\nblocked_addresses = [\"203.0.113.7\"]\n",
+                opened.content
+            )
+        };
+        save_raw(&handle, edited)
+            .await
+            .expect("the raw save persists the file");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        handle
+            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .await
+            .expect("the command adopts the file and applies");
+        let after = handle.read_raw_config().await.expect("read").content;
+        assert!(
+            after.contains("203.0.113.7"),
+            "the engine kept the edit: {after}"
+        );
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            ["203.0.113.7"],
+            "the engine took the file on, but the auth layer still runs the old [server.auth]"
+        );
+    }
+
+    /// A config-changing command over a file edited on disk first takes the
+    /// file on, and that adoption is judged by the same start check the
+    /// serving surface's reload uses: a file `dux server` refuses is not
+    /// adopted, the command is refused saying why, and the running settings
+    /// stay as they were. A problem only the terminal UI refuses does not stop
+    /// `dux server` taking the file on.
+    #[tokio::test]
+    async fn a_file_the_serving_surface_refuses_is_never_adopted_by_a_command() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let randomized = || async {
+            handle
+                .bootstrap()
+                .await
+                .expect("bootstrap")
+                .randomize_agent_names_by_default
+        };
+        let before = randomized().await;
+        let opened = handle.read_raw_config().await.expect("read");
+        let key = "enable_randomized_pet_name_by_default";
+        assert!(opened.content.contains(&format!("{key} = {before}")));
+        let flipped = opened.content.replace(
+            &format!("{key} = {before}"),
+            &format!("{key} = {}", !before),
+        );
+        let duplicate_projects = "\n[[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-a\"\n\n\
+                                  [[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-b\"\n";
+        save_raw(&handle, format!("{flipped}{duplicate_projects}"))
+            .await
+            .expect("the raw save persists the file");
+        let env = || {
+            let mut env = std::collections::BTreeMap::new();
+            env.insert("API".to_string(), "k".to_string());
+            WireCommand::PersistGlobalEnv { env }
+        };
+        let refused = handle.apply_wire(env()).await;
+        let message = refused.expect_err("a file dux server refuses is not adopted");
+        assert!(message.contains("unchanged"), "{message}");
+        assert!(message.contains("will not start"), "{message}");
+        assert_eq!(randomized().await, before, "the running settings stay");
+
+        // A problem only the terminal UI refuses: dux server takes it on.
+        assert!(flipped.contains("\n[env]\n"), "{flipped}");
+        save_raw(
+            &handle,
+            flipped.replacen("\n[env]\n", "\n[env]\nA = \"${\"\n", 1),
+        )
+        .await
+        .expect("the raw save persists the file");
+        handle
+            .apply_wire(env())
+            .await
+            .expect("dux server adopts what only the terminal UI refuses");
+        assert_eq!(randomized().await, !before);
+    }
+
+    /// `dux server`'s start (its bootstrap, then the listener plan with no
+    /// `--bind` or `--port`) refuses exactly the files the one list of start
+    /// checks says stop it, for every kind of problem the list knows.
+    #[test]
+    fn dux_server_refuses_exactly_what_the_start_checks_say() {
+        for fixture in dux_core::start_check_fixtures::FIXTURES {
+            let (_tmp, paths) = temp_paths();
+            std::fs::write(&paths.config_path, fixture.text).unwrap();
+            let refused = match crate::bootstrap::bootstrap_engine(&paths) {
+                Err(_) => true,
+                Ok(engine) => dux_core::config::resolve_server_plan(
+                    &engine.config.server,
+                    &dux_core::config::ServerCliOverrides::default(),
+                    None,
+                )
+                .is_err(),
+            };
+            let listed = dux_core::config::start_problems_of(fixture.text)
+                .iter()
+                .any(|problem| problem.stops_dux_server);
+            assert_eq!(refused, fixture.stops_dux_server, "{}: start", fixture.name);
+            assert_eq!(
+                listed, fixture.stops_dux_server,
+                "{}: the list",
+                fixture.name
+            );
+        }
+    }
+
+    // ── The raw editor's save carries proof of what it read ────────────────
+
+    /// Review probe (ported): a password set with `dux config set` while a
+    /// browser has the raw editor open must not be undone when that editor
+    /// saves an unrelated change. The save carries the read's token, the file
+    /// moved, so the save is refused as a conflict and nothing is written.
+    #[tokio::test]
+    async fn review17_raw_editor_save_keeps_a_password_set_meanwhile() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        dux_core::config_keys::set_password(
+            &paths.config_path,
+            &dux_core::auth::Password::new("correct horse battery staple 77".to_string()),
+            &[],
+        )
+        .expect("set password");
+        let saved = handle
+            .write_raw_config(
+                opened
+                    .content
+                    .replace("left_width_pct = 20", "left_width_pct = 25"),
+                Some(opened.token),
+            )
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        let auth = dux_core::config::auth_section_of(&after).expect("loads");
+        assert!(
+            auth.has_password(),
+            "the password set meanwhile was erased by the raw editor save:\n{after}"
+        );
+    }
+
+    /// A ban appended while the editor was open is kept the same way.
+    #[tokio::test]
+    async fn a_raw_save_never_undoes_a_ban_appended_meanwhile() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        dux_core::config_keys::append_blocked_address(
+            &paths.config_path,
+            "203.0.113.9".parse().unwrap(),
+            10,
+        )
+        .unwrap();
+        let saved = handle
+            .write_raw_config(opened.content.clone(), Some(opened.token.clone()))
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("203.0.113.9")
+        );
+
+        // Read again: the fresh token saves.
+        let fresh = handle.read_raw_config().await.expect("read");
+        assert_ne!(fresh.token, opened.token);
+        handle
+            .write_raw_config(
+                fresh
+                    .content
+                    .replace("left_width_pct = 20", "left_width_pct = 25"),
+                Some(fresh.token),
+            )
+            .await
+            .expect("a save over what it read");
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(after.contains("left_width_pct = 25") && after.contains("203.0.113.9"));
+    }
+
+    /// The raw editor's guards judge the file as a start would load it, after
+    /// the load migrations: a deprecated `[server] bind` that a start turns
+    /// into `host = "0.0.0.0"` is the host changing, and is refused.
+    #[tokio::test]
+    async fn a_raw_save_cannot_change_the_host_through_a_deprecated_bind() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nhost = \"127.0.0.1\"\nport = 3890\n",
+        )
+        .unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let before = std::fs::read_to_string(&paths.config_path).unwrap();
+        let saved = save_raw(&handle, "[server]\nbind = \"0.0.0.0:3890\"\n").await;
+        match saved {
+            Err(RawWriteError::Refused(reason)) => {
+                assert!(reason.contains("host"), "{reason}");
+            }
+            other => panic!("a host change through a deprecated bind was saved: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), before);
+        // The same bind naming the host already in force is no change, and saves.
+        save_raw(&handle, "[server]\nbind = \"127.0.0.1:3890\"\n")
+            .await
+            .expect("a bind equal to the running host and port is no host change");
+    }
+
+    /// A save that carries no proof of what it read is refused: the raw editor
+    /// is its only client, and it always has one.
+    #[tokio::test]
+    async fn a_raw_save_with_no_token_is_refused() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let saved = handle
+            .write_raw_config("[ui]\nleft_width_pct = 25\n".to_string(), None)
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Refused(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("= 20")
+        );
+    }
+
+    /// With no file yet, the token names that, and a save that finds a file
+    /// written meanwhile is a conflict too.
+    #[tokio::test]
+    async fn a_raw_save_over_a_file_that_appeared_meanwhile_is_a_conflict() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let _ = std::fs::remove_file(&paths.config_path);
+        let opened = handle.read_raw_config().await.expect("read");
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 31\n").unwrap();
+        let saved = handle
+            .write_raw_config(opened.content, Some(opened.token))
+            .await;
+        assert!(matches!(saved, Err(RawWriteError::Changed(_))), "{saved:?}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("= 31")
         );
     }
 }

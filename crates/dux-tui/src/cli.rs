@@ -31,18 +31,32 @@ pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
         }
         "regenerate" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            reject_unknown_flags(&args[1..], &["--yes"])?;
-            run_regenerate(paths, yes)
+            let show = args[1..].iter().any(|a| a == "--show");
+            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            run_regenerate(paths, yes, show)
         }
         "restore-docs" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            reject_unknown_flags(&args[1..], &["--yes"])?;
-            run_restore_docs(paths, yes)
+            let show = args[1..].iter().any(|a| a == "--show");
+            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            run_restore_docs(paths, yes, show)
         }
         "path" => {
             println!("{}", paths.config_path.display());
             Ok(())
         }
+        "get" => crate::config_cli::run_get(
+            &args[1..],
+            paths,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        "set" => crate::config_cli::run_set(
+            &args[1..],
+            paths,
+            &mut crate::config_cli::TerminalSecrets,
+            &mut std::io::stdout(),
+        ),
         "" | "--help" | "-h" => {
             print_config_help();
             Ok(())
@@ -67,6 +81,18 @@ dux config: manage the dux configuration file
 
 Subcommands:
   dux config path          Print the config file path
+  dux config get <setting> Print one setting's value, for example
+                           `dux config get server.port`. Values that can
+                           hold secrets (env, projects) need --show
+  dux config set <setting> <value>
+                           Change one setting, keeping the file's comments,
+                           and tell a running dux to reload. Lists are one
+                           TOML array: '[\"a\", \"b\"]'
+  dux config set server.auth.password
+                           Set the web UI password: asked for twice without
+                           echo, with a strength meter. Never a command-line
+                           argument; add --stdin to pipe it in instead.
+                           env.<NAME> values are asked for the same way
   dux config diff          Show settings that differ from defaults (summary;
                            [env] and project details are summarized, never
                            printed, so it is safe to paste into a bug report)
@@ -75,11 +101,14 @@ Subcommands:
                            redact it before sharing.
   dux config reset         Remove config and logs (keeps agents and worktrees)
   dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
-  dux config regenerate    Preview a fresh default config (shows diff)
+  dux config regenerate    Preview a fresh default config (shows diff; [env]
+                           and other sensitive values are hidden unless you
+                           add --show)
   dux config regenerate --yes
                            Overwrite the config file with fresh defaults
   dux config restore-docs  Preview re-adding the explanatory comments to your
-                           config, keeping every value you have set
+                           config, keeping every value you have set (hides
+                           values like regenerate; --show reveals them)
   dux config restore-docs --yes
                            Apply it (writes a timestamped backup first)"
     );
@@ -129,7 +158,16 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
 
     let current_raw =
         fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
-    let current: Config = toml::from_str(&current_raw).with_context_path(&paths.config_path)?;
+    let mut current: Config = toml::from_str(&current_raw).map_err(|e| {
+        anyhow!(
+            "{}: {}",
+            paths.config_path.display(),
+            dux_core::config::describe_toml_error(&current_raw, &e)
+        )
+    })?;
+    // The text it was read from, so a name the summary may not print is
+    // placed by its line.
+    current.source_text = dux_core::config::SourceText::of(&current_raw);
 
     if raw {
         run_diff_raw(&current_raw, &current)?;
@@ -140,16 +178,20 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
 }
 
 fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
+    print!("{}", raw_diff_text(current));
+    Ok(())
+}
+
+/// What `dux config diff --raw` prints for `current`.
+pub(crate) fn raw_diff_text(current: &Config) -> String {
     let bindings = RuntimeBindings::from_keys_config(&current.keys);
     let default_rendered = config::render_default_config();
     // Re-render current config to normalize it before diffing.
     let current_rendered = render_config_for_diff(current, &bindings);
     if current_rendered == default_rendered {
-        println!("config matches defaults, so there are no differences");
-        return Ok(());
+        return "config matches defaults, so there are no differences\n".to_string();
     }
-    print_unified_diff("default", "current", &default_rendered, &current_rendered);
-    Ok(())
+    unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
 fn run_diff_summary(current: &Config) -> Result<()> {
@@ -180,7 +222,7 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 /// reports what the file says rather than what dux normalizes it into, with no
 /// value clamping and no shipped provider injected into a config that does not
 /// name it.
-fn collect_config_changes(current: &Config) -> Vec<String> {
+pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
         serde_json::to_value(Config::default()),
         serde_json::to_value(current),
@@ -188,9 +230,14 @@ fn collect_config_changes(current: &Config) -> Vec<String> {
         return Vec::new();
     };
 
+    // Every path is printed through the one formatter, against the file's
+    // own text where the config carries it (for the line a hidden name is
+    // on): this summary is meant to be pasted, so a name that is not a
+    // setting name (a token pasted where a key goes) never reaches it.
+    let raw = current.source_text.as_str().unwrap_or_default();
     let mut found: Vec<(String, String)> = Vec::new();
     let mut path: Vec<String> = Vec::new();
-    diff_node(&mut found, &mut path, &default_json, &current_json);
+    diff_node(raw, &mut found, &mut path, &default_json, &current_json);
 
     // Map iteration order differs by container (`IndexMap` for providers and
     // macros, `BTreeMap` for env and keys), so the order must be imposed here
@@ -217,8 +264,8 @@ enum Policy {
 enum Summary {
     /// `env: changed`. The bare fact, with no shape to it at all.
     Changed,
-    /// `macros: 2 macros configured`, for the given singular noun.
-    Count(&'static str),
+    /// `macros: 2 macros configured`, for the given singular and plural nouns.
+    Count(&'static str, &'static str),
 }
 
 /// How a key present on only one side is reported.
@@ -233,6 +280,7 @@ enum MissingStyle {
 
 /// The policy for the subtree at `path`.
 fn policy_for(path: &[String]) -> Policy {
+    use dux_core::config_keys::SensitiveAuthSetting;
     let segments: Vec<&str> = path.iter().map(String::as_str).collect();
     match segments.as_slice() {
         // Holds API tokens. The value must never reach the terminal, a log, or a
@@ -242,11 +290,19 @@ fn policy_for(path: &[String]) -> Policy {
         // generated at deserialize time, so there is no honest per-project path
         // to print. Projects also carry their own `env`, which must stay
         // unprinted for the reason above.
-        ["projects"] => Policy::Summarize(Summary::Count("project")),
+        ["projects"] => Policy::Summarize(Summary::Count("project", "projects")),
         // A macro body is arbitrary user prose, frequently long and multi-line.
         // Counting them is what this command has always done.
-        ["macros"] => Policy::Summarize(Summary::Count("macro")),
-        _ => Policy::Recurse,
+        ["macros"] => Policy::Summarize(Summary::Count("macro", "macros")),
+        // The auth settings no summary prints (the one list the previews
+        // read too): the hash only as changed, the addresses as a count.
+        _ => match dux_core::config_keys::sensitive_auth_setting(path) {
+            Some(SensitiveAuthSetting::PasswordHash) => Policy::Summarize(Summary::Changed),
+            Some(SensitiveAuthSetting::BlockedAddresses) => {
+                Policy::Summarize(Summary::Count("address", "addresses"))
+            }
+            None => Policy::Recurse,
+        },
     }
 }
 
@@ -260,6 +316,7 @@ fn missing_style_for(path: &[String]) -> MissingStyle {
 }
 
 fn diff_node(
+    raw: &str,
     found: &mut Vec<(String, String)>,
     path: &mut Vec<String>,
     default: &serde_json::Value,
@@ -271,13 +328,13 @@ fn diff_node(
 
     match policy_for(path) {
         Policy::Summarize(summary) => {
-            let dotted = join_path(path);
+            let dotted = dux_core::config::shown_path(raw, path);
             let line = match summary {
                 Summary::Changed => format!("{dotted}: changed"),
-                Summary::Count(noun) => {
+                Summary::Count(singular, plural) => {
                     format!(
                         "{dotted}: {} configured",
-                        count_of(collection_len(current), noun)
+                        dux_core::text::count_of_with(collection_len(current), singular, plural)
                     )
                 }
             };
@@ -291,9 +348,13 @@ fn diff_node(
                 for name in names {
                     path.push(name.clone());
                     match (default_map.get(name), current_map.get(name)) {
-                        (Some(d), Some(c)) => diff_node(found, path, d, c),
-                        (Some(d), None) => push_missing(found, path, &style, Side::DefaultOnly, d),
-                        (None, Some(c)) => push_missing(found, path, &style, Side::CurrentOnly, c),
+                        (Some(d), Some(c)) => diff_node(raw, found, path, d, c),
+                        (Some(d), None) => {
+                            push_missing(raw, found, path, &style, Side::DefaultOnly, d)
+                        }
+                        (None, Some(c)) => {
+                            push_missing(raw, found, path, &style, Side::CurrentOnly, c)
+                        }
                         (None, None) => {}
                     }
                     path.pop();
@@ -303,11 +364,11 @@ fn diff_node(
             // and `server.allowed_hosts` are settings in their own right, not
             // parents of a `terminal.args.0`.
             _ => {
-                let dotted = join_path(path);
+                let dotted = dux_core::config::shown_path(raw, path);
                 let line = format!(
                     "{dotted}: {} -> {}",
-                    format_value(default),
-                    format_value(current)
+                    format_value(raw, path, default),
+                    format_value(raw, path, current)
                 );
                 found.push((dotted, line));
             }
@@ -322,21 +383,22 @@ enum Side {
 }
 
 fn push_missing(
+    raw: &str,
     found: &mut Vec<(String, String)>,
     path: &[String],
     style: &MissingStyle,
     side: Side,
     value: &serde_json::Value,
 ) {
-    let dotted = join_path(path);
+    let dotted = dux_core::config::shown_path(raw, path);
     let line = match (style, side) {
         (MissingStyle::Marker, Side::CurrentOnly) => format!("{dotted}: (added)"),
         (MissingStyle::Marker, Side::DefaultOnly) => format!("{dotted}: (removed)"),
         (MissingStyle::Valued, Side::CurrentOnly) => {
-            format!("{dotted}: (new) -> {}", format_value(value))
+            format!("{dotted}: (new) -> {}", format_value(raw, path, value))
         }
         (MissingStyle::Valued, Side::DefaultOnly) => {
-            format!("{dotted}: {} -> (removed)", format_value(value))
+            format!("{dotted}: {} -> (removed)", format_value(raw, path, value))
         }
     };
     found.push((dotted, line));
@@ -350,57 +412,24 @@ fn collection_len(value: &serde_json::Value) -> usize {
     }
 }
 
-/// Join structural segments into a dotted path.
-///
-/// Segments are structural and are never reparsed out of a rendered string:
-/// provider and macro names are user-controlled keys and may contain a dot
-/// themselves. A segment that is not a bare TOML key (ASCII letters, digits,
-/// `_`, `-`) is quoted, so `providers."my agent.v2".command` reads
-/// unambiguously. The quoting is JSON string quoting, which escapes the quote
-/// and the backslash the same way a TOML basic string does.
-fn join_path(path: &[String]) -> String {
-    path.iter()
-        .map(|segment| quote_segment(segment))
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn quote_segment(segment: &str) -> String {
-    let bare = !segment.is_empty()
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if bare {
-        segment.to_string()
-    } else {
-        serde_json::Value::String(segment.to_string()).to_string()
+/// Render one value the way the summary shows it: through the one value
+/// printer (so a value at or below a key the formatter does not name is
+/// never printed), unquoted, one line, truncated.
+fn format_value(raw: &str, path: &[String], value: &serde_json::Value) -> String {
+    use dux_core::config_keys::{NOT_SHOWN, ValueForm, printed_value};
+    if dux_core::config::path_is_hidden(path) {
+        return NOT_SHOWN.to_string();
     }
-}
-
-/// Render one value the way the summary shows it: unquoted, one line, truncated.
-fn format_value(value: &serde_json::Value) -> String {
     let rendered = match value {
-        serde_json::Value::Array(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(format_element)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        other => format_element(other),
-    };
-    truncate_display(&rendered, 40)
-}
-
-fn format_element(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
         // An absent optional setting. Matches what this command has always
         // printed for an unset `defaults.start_directory`.
         serde_json::Value::Null => "(unset)".to_string(),
-        other => other.to_string(),
-    }
+        value => toml::Value::try_from(value)
+            .ok()
+            .and_then(|value| printed_value(raw, path, &value, ValueForm::Summary))
+            .unwrap_or_else(|| NOT_SHOWN.to_string()),
+    };
+    truncate_display(&rendered, 40)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +437,7 @@ fn format_element(value: &serde_json::Value) -> String {
 // ---------------------------------------------------------------------------
 
 #[allow(deprecated)] // blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool
-fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
+fn run_regenerate(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
     let fresh = config::render_default_config();
 
     if !yes {
@@ -419,7 +448,10 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
                 println!("config already matches defaults, so there is nothing to do");
                 return Ok(());
             }
-            print_unified_diff("current", "default", &current, &fresh);
+            print!("{}", regenerate_preview(&current, &fresh, show));
+            if let Some(note) = regenerate_password_note(&current) {
+                println!("\n{note}");
+            }
             println!("\nRun `dux config regenerate --yes` to overwrite with these defaults.");
         } else {
             println!("no config file exists; regenerate --yes will create one at:");
@@ -428,11 +460,46 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
         return Ok(());
     }
 
+    let note = fs::read_to_string(&paths.config_path)
+        .ok()
+        .and_then(|current| regenerate_password_note(&current));
     paths.ensure_dirs()?;
     dux_core::config_write::write_config_secure(&paths.config_path, &fresh)
         .with_context_path(&paths.config_path)?;
     println!("config regenerated at {}", paths.config_path.display());
+    if let Some(note) = note {
+        println!("{note}");
+    }
     Ok(())
+}
+
+/// Fresh defaults have no password, so regenerating a config that has one
+/// opens the web UI to whoever can reach it. Said in words rather than left
+/// to one line of the diff.
+///
+/// Looks at the text itself too, so a password inside a section dux cannot
+/// load (or a file that is not TOML) is still warned about.
+fn regenerate_password_note(current: &str) -> Option<&'static str> {
+    let loaded = dux_core::config::auth_section_of(current)
+        .ok()
+        .is_some_and(|auth| auth.has_password());
+    let written = current.lines().any(|line| {
+        let Some(at) = line.find("password_hash") else {
+            return false;
+        };
+        let Some(value) = line[at + "password_hash".len()..]
+            .trim_start()
+            .strip_prefix('=')
+        else {
+            return false;
+        };
+        let value = value.trim();
+        !value.is_empty() && !value.starts_with("\"\"") && !value.starts_with("''")
+    });
+    (loaded || written).then_some(()).map(|_| {
+        "Note: this removes the web UI password (server.auth.password_hash). Set it again \
+             afterwards with `dux config set server.auth.password`."
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +513,7 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
 /// unparseable config is refused outright, because the whole point of the
 /// command is to be the safe alternative to a defaults-based rewrite.
 #[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists
-fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
+fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
     if !paths.config_path.exists() {
         println!("no config file found at {}", paths.config_path.display());
         println!("dux writes a fully commented config the first time it starts.");
@@ -475,7 +542,7 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
     }
 
     if !yes {
-        print_unified_diff("current", "restored", &raw, &restored.text);
+        print!("{}", restore_docs_preview(&raw, &restored.text, show));
         print_restore_report(&restored);
         println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
         println!("of your current config is written first).");
@@ -484,9 +551,21 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
 
     // Back up BEFORE committing. The writer below is atomic, which protects
     // against a torn file, but not against "the result was not what I wanted".
-    let backup_path = backup_config(&paths.config_path, &raw)?;
-
-    dux_core::config_write::write_config_secure(&paths.config_path, &restored.text)
+    // Both happen inside the config write lock, on the file as it is NOW (a
+    // `dux config set` that landed since the preview above included), so the
+    // [server.auth] written is the one the file holds at that moment.
+    let (backup_path, restored) =
+        dux_core::config_write::replace_config_file(&paths.config_path, |current| {
+            let current = current.ok_or_else(|| {
+                anyhow!(
+                    "{} disappeared; nothing was written",
+                    paths.config_path.display()
+                )
+            })?;
+            let restored = config::restore_documentation(current)?;
+            let backup_path = backup_config(&paths.config_path, current)?;
+            Ok((restored.text.clone(), (backup_path, restored)))
+        })
         .with_context_path(&paths.config_path)?;
 
     println!("documentation restored in {}", paths.config_path.display());
@@ -547,8 +626,9 @@ fn backup_config(config_path: &Path, raw: &str) -> Result<PathBuf> {
         counter += 1;
     }
 
-    #[allow(deprecated)] // blessed sync-direct: CLI-only one-shot; also gives the backup 0600
-    dux_core::config_write::write_config_secure(&candidate, raw).with_context_path(&candidate)?;
+    // Called inside the config write lock (see `run_restore_docs`); 0600.
+    dux_core::config_write::write_beside_config_locked(&candidate, raw)
+        .with_context_path(&candidate)?;
     Ok(candidate)
 }
 
@@ -576,13 +656,42 @@ fn render_config_for_diff(config: &Config, bindings: &RuntimeBindings) -> String
     config::render_config_with(config, bindings)
 }
 
-fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
+fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
     let diff = similar::TextDiff::from_lines(a, b);
-    println!("--- {label_a}");
-    println!("+++ {label_b}");
+    let mut out = format!("--- {label_a}\n+++ {label_b}\n");
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
-        println!("{hunk}");
+        out.push_str(&format!("{hunk}\n"));
     }
+    out
+}
+
+/// The user's file `raw` as a preview may print it: every line through the
+/// one value printer's rules (see `config_keys::shown_file_text`), so a
+/// plaintext password is never shown and, without `show`, nothing below a
+/// hidden key or in `[env]` or `[projects]` either.
+fn shown_for_preview(raw: &str, show: bool) -> Result<String> {
+    dux_core::config_keys::shown_file_text(raw, show, &crate::config::binding_is_understood)
+}
+
+/// The diff of `a` against `b`, each shown as a printer may show it; when
+/// either is not TOML, only why nothing of it is shown.
+fn preview(label_a: &str, label_b: &str, a: &str, b: &str, show: bool) -> String {
+    match (shown_for_preview(a, show), shown_for_preview(b, show)) {
+        (Ok(a), Ok(b)) => unified_diff(label_a, label_b, &a, &b),
+        (Err(error), _) | (_, Err(error)) => format!("{error:#}\n"),
+    }
+}
+
+/// What `dux config regenerate` previews: the user's file against the
+/// fresh default, each side shown as a printer may show it.
+pub(crate) fn regenerate_preview(current: &str, fresh: &str, show: bool) -> String {
+    preview("current", "default", current, fresh, show)
+}
+
+/// What `dux config restore-docs` previews: the user's file against the
+/// documented one, each side shown as a printer may show it.
+pub(crate) fn restore_docs_preview(raw: &str, restored: &str, show: bool) -> String {
+    preview("current", "restored", raw, restored, show)
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,12 +1323,23 @@ mod tests {
                     .map(|v| serde_json::json!(v));
                 raised.into_iter().chain(lowered).collect()
             }
-            serde_json::Value::String(s) => vec![serde_json::json!(format!("{s}-mutated"))],
-            serde_json::Value::Array(items) => {
-                let mut grown = items.clone();
-                grown.push(serde_json::json!("dux-diff-probe"));
-                vec![serde_json::Value::Array(grown)]
-            }
+            // Settings that validate their string (an enum, a password hash)
+            // refuse the appended form, so a few values that pass each kind of
+            // check follow it.
+            serde_json::Value::String(s) => vec![
+                serde_json::json!(format!("{s}-mutated")),
+                serde_json::json!("tailnet"),
+                serde_json::json!("always"),
+                serde_json::json!(a_valid_password_hash()),
+            ],
+            serde_json::Value::Array(items) => ["dux-diff-probe", "192.0.2.1"]
+                .into_iter()
+                .map(|probe| {
+                    let mut grown = items.clone();
+                    grown.push(serde_json::json!(probe));
+                    serde_json::Value::Array(grown)
+                })
+                .collect(),
             // A null carries no type, so try each shape an `Option` field can take.
             serde_json::Value::Null => vec![
                 serde_json::json!("dux-diff-probe"),
@@ -1258,6 +1378,68 @@ mod tests {
         assert_eq!(
             collect_config_changes(&config),
             vec!["server.tailscale: auto -> no".to_string()]
+        );
+    }
+
+    fn a_valid_password_hash() -> String {
+        static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        HASH.get_or_init(|| {
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(
+                "correct horse battery staple".to_string(),
+            ))
+            .expect("hash")
+        })
+        .clone()
+    }
+
+    /// A pasted bug report must not carry the password hash: anyone holding
+    /// it can guess offline. The summary says only that it changed.
+    #[test]
+    fn config_diff_never_prints_the_password_hash() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = a_valid_password_hash();
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec!["server.auth.password_hash: changed".to_string()]
+        );
+        assert!(!changes.concat().contains("argon2id"), "{changes:?}");
+    }
+
+    /// Blocked addresses are other people's IP addresses; the summary counts
+    /// them instead of listing them.
+    #[test]
+    fn config_diff_counts_blocked_addresses_without_printing_them() {
+        let mut config = Config::default();
+        config.server.auth.blocked_addresses =
+            vec!["203.0.113.7".to_string(), "198.51.100.0/24".to_string()];
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec!["server.auth.blocked_addresses: 2 addresses configured".to_string()]
+        );
+    }
+
+    #[test]
+    fn regenerate_warns_that_it_removes_a_password() {
+        let with = format!(
+            "[server.auth]\npassword_hash = \"{}\"\n",
+            a_valid_password_hash()
+        );
+        assert!(regenerate_password_note(&with).is_some_and(|n| n.contains("password")));
+        assert_eq!(regenerate_password_note("[server]\nport = 1\n"), None);
+        // Still warned about when the section around it is invalid, or the
+        // file is not even TOML: the password is in there either way.
+        for broken in [
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$whatever\"\nrequire = \"lan\"\n",
+            "[server.auth\npassword_hash = \"x\"\n",
+        ] {
+            assert!(regenerate_password_note(broken).is_some(), "{broken}");
+        }
+        assert_eq!(
+            regenerate_password_note("[server.auth]\npassword_hash = \"\"\n"),
+            None,
+            "an empty hash is no password"
         );
     }
 
@@ -1336,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn config_diff_quotes_a_provider_name_that_is_not_a_bare_key() {
+    fn config_diff_never_names_a_provider_whose_name_breaks_the_rule() {
         let mut config = Config::default();
         config.providers.commands.insert(
             "my agent.v2".to_string(),
@@ -1345,7 +1527,7 @@ mod tests {
 
         assert_eq!(
             collect_config_changes(&config),
-            vec!["providers.\"my agent.v2\": (added)".to_string()]
+            vec!["an entry of [providers] whose name is not shown: (added)".to_string()]
         );
     }
 
@@ -2113,3 +2295,37 @@ mod tests {
         assert_eq!(removed_worktrees_line(3), "removed 3 session worktrees");
     }
 }
+
+#[cfg(test)]
+mod config_diff_names_tests {
+    use super::*;
+    const TOKEN: &str = "sk-proj-AbCdEf0123456789";
+
+    /// `dux config diff` (the summary that is safe to paste into a bug
+    /// report) must not print a provider name that breaks the provider-name
+    /// rule: such a name may be a token pasted in the wrong place.
+    #[test]
+    fn config_diff_does_not_print_a_rule_breaking_provider_name() {
+        let text = format!("[providers.\"{TOKEN} x\"]\ncommand = \"a\"\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        let changes = collect_config_changes(&config).join("\n");
+        assert!(!changes.contains(TOKEN), "{changes}");
+    }
+
+    /// The same for a `[keys]` name that is no action.
+    #[test]
+    fn config_diff_does_not_print_a_rule_breaking_keys_name() {
+        let text = format!("[keys]\n\"{TOKEN} x\" = [\"ctrl-q\"]\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        let changes = collect_config_changes(&config).join("\n");
+        assert!(!changes.contains(TOKEN), "{changes}");
+    }
+}
+
+#[cfg(test)]
+#[path = "cli/preview_leak_tests.rs"]
+mod preview_leak_tests;
+
+#[cfg(test)]
+#[path = "cli/plaintext_shape_preview_tests.rs"]
+mod plaintext_shape_preview_tests;

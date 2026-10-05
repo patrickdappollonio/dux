@@ -785,9 +785,23 @@ impl Engine {
                 // Reject a reentrant reload: a second one would drop the live
                 // `reload_guard`, resuming the writer mid-reload, and spawn a
                 // worker whose completion closes a barrier it never opened.
+                // A reload asked for DURING one (a second `dux config set`'s
+                // SIGUSR1, a second press) may be about a file that changed
+                // after the running reload read it, so it is never dropped:
+                // it joins the deferred commands and runs as soon as the
+                // current reload closes its barrier. Any number of them
+                // collapse into one follow-up, which reads the latest file.
                 if self.reloading {
+                    if !self
+                        .deferred_commands
+                        .iter()
+                        .any(|c| matches!(c, Command::ReloadConfig))
+                    {
+                        self.deferred_commands.push(Command::ReloadConfig);
+                    }
                     return Ok(EventReaction::Status(StatusUpdate::info(
-                        "A config reload is already in progress.",
+                        "A config reload is already running; another runs right after it, so \
+                         the latest config.toml is the one that applies.",
                     )));
                 }
                 // Open the reload barrier: quiesce the writer so no queued save
@@ -832,11 +846,69 @@ impl Engine {
                         "Config writer is busy; please retry.",
                     )));
                 }
-                let body = self.surface.recover_render(&self.config);
-                match crate::config_write::write_config_secure(&self.paths.config_path, &body) {
-                    Ok(()) => Ok(EventReaction::Status(StatusUpdate::info(
-                        "Restored the last working configuration to config.toml.",
-                    ))),
+                // The running config may be older than the file's [server.auth]
+                // (a `dux config set`, a ban since dux started), so the file's
+                // own section is kept whenever it reads. Only when it cannot be
+                // read is the running one written back, and the status says so.
+                // Read inside the config write lock, so a `dux config set` that
+                // lands meanwhile is part of what is kept.
+                let running = self.config.clone();
+                let surface = &self.surface;
+                let outcome =
+                    crate::config_write::replace_config_file(&self.paths.config_path, |current| {
+                        let mut recovered = running.clone();
+                        // A missing file holds no newer password than the
+                        // running one: nothing to explain.
+                        let auth_note = match current.map(crate::config::auth_section_of) {
+                            None => None,
+                            // The file has no password but the running dux has
+                            // one: recovering must not quietly turn the login
+                            // off, so the running password stays, beside the
+                            // file's other auth settings, and the status says so.
+                            Some(Ok(mut auth))
+                                if !auth.has_password() && running.server.auth.has_password() =>
+                            {
+                                auth.password_hash = running.server.auth.password_hash.clone();
+                                recovered.server.auth = auth;
+                                Some(Some(
+                                    "The file's [server.auth] had no password but the running \
+                                     dux has one, so the running password was kept. To remove \
+                                     it, run `dux config set server.auth.password_hash \"\"`."
+                                        .to_string(),
+                                ))
+                            }
+                            Some(Ok(auth)) => {
+                                recovered.server.auth = auth;
+                                Some(None)
+                            }
+                            Some(Err(problem)) => Some(Some(format!(
+                                "The file's [server.auth] could not be read, so the running \
+                                 dux's web password settings were written back ({}); check \
+                                 them with `dux config get server.auth`. What could not be \
+                                 read: {}",
+                                if recovered.server.auth.has_password() {
+                                    "a password is set"
+                                } else {
+                                    "no password is set"
+                                },
+                                problem.reason()
+                            ))),
+                        };
+                        Ok((surface.recover_render(&recovered), auth_note))
+                    });
+                match outcome {
+                    Ok(auth_note) => Ok(EventReaction::Status(match auth_note {
+                        None => StatusUpdate::info(
+                            "Restored the last working configuration to config.toml.",
+                        ),
+                        Some(None) => StatusUpdate::info(
+                            "Restored the last working configuration to config.toml. Its \
+                             [server.auth] was kept as the file had it.",
+                        ),
+                        Some(Some(note)) => StatusUpdate::warning(format!(
+                            "Restored the last working configuration to config.toml. {note}"
+                        )),
+                    })),
                     Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
                         "Couldn't restore the last working configuration: {e:#}"
                     )))),

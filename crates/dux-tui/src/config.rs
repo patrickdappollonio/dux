@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+#[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,67 +18,105 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // emit the commented template, not a bare one.
     install_canonical_renderer();
     paths.ensure_dirs()?;
+    // A config.toml symlink to a file that is gone is not a first start: it
+    // stops the start, and nothing is created at the link or its target.
+    if let Some(target) = dux_core::config::dangling_link_target(&paths.config_path) {
+        return Err(dux_core::config::ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: dux_core::config::ConfigLoadProblem::DanglingLink(target),
+        }
+        .into());
+    }
     if !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    let raw = fs::read_to_string(&paths.config_path)
-        .with_context(|| format!("failed to read {}", paths.config_path.display()))?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
-    // The deprecated-key + retired-provider migrations are the core-owned
-    // `dux_core::config_migrate::apply_load_migrations` (also applied in memory
-    // by `load_config`, so `dux serve` honors them); the TUI ADDITIONALLY
-    // persists the migrated document. Retired KEYBINDING actions are pruned only
-    // here (they matter only to the TUI's `validate_keys`).
-    let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
-    let retired_keys_changed = prune_retired_key_actions(&mut doc);
-    let folded_keys_changed = fold_legacy_key_actions(&mut doc);
-    if migrations_changed || retired_keys_changed || folded_keys_changed {
-        // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
-        dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
-            .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
-    }
+    // Fails closed BEFORE anything else, migrations included (they write the
+    // file): a config whose [server.auth] cannot be read stops the start, and
+    // stops a reload from changing the running config, rather than reading as
+    // "no password".
+    let load_error = |problem| dux_core::config::ConfigLoadError {
+        path: paths.config_path.clone(),
+        problem,
+    };
+    // Read the file and run the migrations on it: the text to write when
+    // they changed something, and what was read and what it became.
+    let migrate =
+        |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
+            let raw = read.map_err(|error| {
+                load_error(dux_core::config::ConfigLoadProblem::Unreadable(
+                    error.to_string(),
+                ))
+            })?;
+            dux_core::config::auth_section_of(&raw).map_err(load_error)?;
+            let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+                anyhow::anyhow!(
+                    "failed to parse {}: {}",
+                    paths.config_path.display(),
+                    dux_core::config::describe_toml_edit_error(&raw, &e)
+                )
+            })?;
+            // The deprecated-key + retired-provider migrations are the
+            // core-owned `dux_core::config_migrate::apply_load_migrations`
+            // (also applied in memory by `load_config`, so `dux serve` honors
+            // them); the TUI ADDITIONALLY persists the migrated document.
+            // Retired KEYBINDING actions are pruned only here (they matter
+            // only to the TUI's `validate_keys`).
+            let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
+            let retired_keys_changed = prune_retired_key_actions(&mut doc);
+            let folded_keys_changed = fold_legacy_key_actions(&mut doc);
+            let text = doc.to_string();
+            let migrated = migrations_changed || retired_keys_changed || folded_keys_changed;
+            Ok((migrated.then(|| text.clone()), (raw, text, migrated)))
+        };
+    // Most starts migrate nothing, and those never take the write lock, so a
+    // lock file this user cannot open does not stop them. One that does
+    // migrate reads, migrates and writes again under the lock, so a `dux
+    // config set` (or any other writer) landing meanwhile is part of what is
+    // migrated rather than overwritten by the copy read before it.
+    let (_, unlocked) = migrate(std::fs::read_to_string(&paths.config_path))?;
+    let (raw, text, migrated) = if unlocked.2 {
+        dux_core::config_write::migrate_config_file(&paths.config_path, migrate)?
+    } else {
+        unlocked
+    };
 
-    let mut config: Config = toml::from_str(&doc.to_string())
-        .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    // The error gives a position and the kind of problem, never the file's
+    // text, which may hold a token. The position is in the user's own text
+    // whenever the problem is there too (it almost always is: migrations
+    // only rename and remove keys).
+    let mut config: Config = toml::from_str(&text).map_err(|e| {
+        let position = match toml::from_str::<Config>(&raw) {
+            Err(original) => dux_core::config::describe_toml_error(&raw, &original),
+            Ok(_) => dux_core::config::describe_toml_error(&text, &e),
+        };
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            paths.config_path.display(),
+            position
+        )
+    })?;
+    // The text the file holds now: what the config writer compares saves with.
+    config.source_text = dux_core::config::SourceText::of(if migrated { &text } else { &raw });
     config.providers.ensure_defaults();
-    validate_server_host(&config)?;
-    validate_project_envs(&config)?;
-    // Warn once here (TUI startup and reload both funnel through ensure_config) on
-    // an unrecognized clipboard_passthrough so the per-tick host forward can parse
-    // silently. The warning is from_config_str's side effect.
-    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
-    // Same idea for an out-of-range `gh` re-check interval: warn once here and
-    // correct it in memory. Its read path is the engine tick, which this surface
-    // runs tens of times a second on the thread that draws, so a warning left to
-    // the read would be a log flood for the whole run.
-    dux_core::config::correct_github_probe_interval(&mut config.ui);
-    Ok(config)
-}
-
-/// Reject a `[server] host` that is not an IP literal before the TUI starts.
-/// The TUI flip reads `host` too, so a bad value gets a clear message here
-/// rather than failing later. Delegates to `dux_core::config::parse_server_host`
-/// so this and `resolve_server_plan` accept exactly the same values.
-fn validate_server_host(config: &Config) -> Result<()> {
-    dux_core::config::parse_server_host(&config.server.host).map_err(|e| anyhow::anyhow!(e))?;
-    Ok(())
-}
-
-fn validate_project_envs(config: &Config) -> Result<()> {
-    for project in &config.projects {
-        resolve_agent_env(&config.env, &project.env).with_context(|| {
-            format!(
-                "invalid env for project {}",
-                project.name.as_deref().unwrap_or(&project.path)
-            )
-        })?;
+    // The one list of start checks, the same `dux config get`/`set` and `dux
+    // server` ask: anything that stops the terminal UI stops it here, its
+    // own `[keys]` check included (installed above).
+    if let Some(refusal) =
+        dux_core::config::start_refusal(&raw, dux_core::config::Surface::TerminalUi)
+    {
+        anyhow::bail!("{}: {refusal}", paths.config_path.display());
     }
-    resolve_project_env(&config.env).context("invalid global env")?;
-    Ok(())
+    // The load's in-memory corrections, the same every surface makes (an
+    // out-of-range `gh` re-check interval among them, whose read path is the
+    // engine tick, run tens of times a second on the thread that draws), each
+    // warned about once. Memory then starts as the config writer's base does,
+    // so a correction is never written over what the file says.
+    let source_text = config.source_text.clone();
+    let mut config = dux_core::config::correct_loaded(config);
+    config.source_text = source_text;
+    Ok(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +355,12 @@ fn config_schema() -> Vec<ConfigEntry> {
              #\n\
              # dux leaves the worktrees/ directory, dux.lock, and a themes/ directory you\n\
              # create alone; they are covered by the 0700 on the directory above them.\n\
-             # It never follows a symlink when setting a mode, so if this file is a link\n\
-             # into a dotfiles repository the file in that repository is untouched. And a\n\
-             # mode it cannot set is a warning in dux.log, not an error: dux still starts.",
+             # If this file is a symlink (into a dotfiles repository, say), saves write\n\
+             # through it to the file it points at, and the link stays. If that file is\n\
+             # missing, dux does not start and a reload keeps the running settings; it\n\
+             # never creates the file or replaces the link. The startup pass that sets\n\
+             # modes never follows a symlink. And a mode it cannot set is a warning in\n\
+             # dux.log, not an error: dux still starts.",
         ),
         ConfigEntry::Blank,
         ConfigEntry::Field {
@@ -398,11 +441,15 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Providers,
         ConfigEntry::Terminal,
         ConfigEntry::StartupCommandTerminal,
+        ConfigEntry::Keys,
+        ConfigEntry::Macros,
+        ConfigEntry::Blank,
         ConfigEntry::Section("logging"),
         ConfigEntry::Field {
             key: "level",
             comment: Some(CommentSource::Static(
-                "# Log level can be error, warn, info, or debug.\n\
+                "# Log level: \"error\", \"warn\", \"info\" or \"debug\", in lowercase. Anything\n\
+                 # else logs at info, with a note in dux.log.\n\
                  # A config reload applies a new level right away; the path below\n\
                  # is read only at startup.",
             )),
@@ -592,7 +639,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "terminal_font_family",
             comment: Some(CommentSource::Static(
-                "# Web UI only: name a font installed on the VIEWING device (the browser's\n# machine, not the server's) to use in the web terminal, e.g. \"Fira Code\" or\n# \"Cascadia Code\". It is placed AHEAD of dux's own bundled terminal font, so\n# the bundled font still fills in any glyph (box drawing, blocks, braille,\n# arrows, powerline) your chosen font lacks. Leave empty (the default) to use\n# only the bundled font. The TUI is unaffected: it always uses your host\n# terminal's own font. Change it at runtime from the web UI's Preferences\n# dialog.",
+                "# Web UI only: name a font installed on the VIEWING device (the browser's\n# machine, not the server's) to use in the web terminal, e.g. \"Fira Code\" or\n# \"Cascadia Code\". It is placed AHEAD of dux's own bundled terminal font, so\n# the bundled font still fills in any glyph (box drawing, blocks, braille,\n# arrows, powerline) your chosen font lacks. Leave empty (the default) to use\n# only the bundled font. Only letters, digits, spaces and _ - , ' \" are kept\n# in the name, up to 200 characters; anything else is left out. The TUI is\n# unaffected: it always uses your host terminal's own font. Change it at\n# runtime from the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.terminal_font_family.clone()),
         },
@@ -763,14 +810,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
-                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
+                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\". Anything\n# else shows it at the bottom, with a note in dux.log.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
         },
         ConfigEntry::Field {
             key: "agent_sort",
             comment: Some(CommentSource::Static(
-                "# Agent-list sort mode, persisted across restarts and shared by the TUI\n# and the web. One of:\n#   \"active\"    (default) working / needs-attention agents float to the top\n#   \"updated\"   most recently updated first\n#   \"created\"   most recently created first\n#   \"name\"      by name, A to Z\n#   \"name_desc\" by name, Z to A\n#   \"manual\"    the hand-placed order (the stored global order)\n# The TUI cycles the five non-manual modes via the \"sort-agents\" palette\n# command and hand-places rows with the \"move-agent-*\" and\n# \"move-terminal-*\" commands; the web sets the mode from its sidebar sort\n# control and hand-places rows by dragging. Either surface's hand-placing\n# switches the mode to \"manual\" automatically. Each surface offers its own\n# subset but displays whatever value the other set.",
+                "# Agent-list sort mode, persisted across restarts and shared by the TUI\n# and the web. One of:\n#   \"active\"    (default) working / needs-attention agents float to the top\n#   \"updated\"   most recently updated first\n#   \"created\"   most recently created first\n#   \"name\"      by name, A to Z\n#   \"name_desc\" by name, Z to A\n#   \"manual\"    the hand-placed order (the stored global order)\n# The TUI cycles the five non-manual modes via the \"sort-agents\" palette\n# command and hand-places rows with the \"move-agent-*\" and\n# \"move-terminal-*\" commands; the web sets the mode from its sidebar sort\n# control and hand-places rows by dragging. Either surface's hand-placing\n# switches the mode to \"manual\" automatically. Each surface offers its own\n# subset but displays whatever value the other set. Anything else sorts as\n# \"active\", with a note in dux.log.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.agent_sort.clone()),
         },
@@ -868,12 +915,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
-            "# The dux web UI is a trusted-local tool: there is no login gate. It binds\n\
-             # host:port (loopback by default) and, unless you turn it off, also this\n\
-             # machine's Tailscale address so your other tailnet devices can reach it\n\
-             # (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
+            "# The dux web UI: one workspace for one owner, with one optional password\n\
+             # (see [server.auth] below, which also decides who is asked for it). It\n\
+             # binds host:port (loopback by default) and, unless you turn it off, also\n\
+             # this machine's Tailscale address so your other tailnet devices can reach\n\
+             # it (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
              # server\" flip always serves on loopback (plus Tailscale) regardless of\n\
-             # host. Only run a non-loopback host on a network you trust.\n\
+             # host. With no password set, anyone who can reach an address dux listens\n\
+             # on drives your agents and terminals, and dux warns about it loudly.\n\
              #\n\
              # Three settings below decide where dux listens and who it answers.\n\
              # They do NOT override each other; they stack, and they are checked in\n\
@@ -934,20 +983,25 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # If the CLI is missing, the daemon is down, or something else already\n\
                  # holds that port, dux WARNS and keeps listening. A Tailscale problem\n\
                  # never stops dux from starting.\n\
-                 # Unless this is \"no\", dux also checks that no Tailscale Funnel\n\
-                 # publishes it to the internet, because it has no login: while a\n\
-                 # Funnel forwards to dux, or while Tailscale is on this machine but\n\
-                 # dux cannot ask it (the CLI fails, or is missing while a tailscaled\n\
-                 # runs), every request is refused with a page saying why. Fix\n\
-                 # tailscaled or put the tailscale CLI on PATH; \"no\" also gets you in,\n\
-                 # but it turns these checks off. `dux server --no-tailscale` forces\n\
-                 # \"no\" for a single run, and refuses a live change back.\n\
+                 # Unless this is \"no\", dux also looks for a Tailscale Funnel or TCP\n\
+                 # forward that could relay the internet onto its port, because such a\n\
+                 # relay arrives over loopback and would look like this machine. While\n\
+                 # one stands, or while dux cannot tell (the CLI fails, or is missing\n\
+                 # while a tailscaled runs, or the first look has not finished), dux\n\
+                 # counts loopback as the network: with a password set, everyone,\n\
+                 # this machine included, signs in; with none, dux serves and warns\n\
+                 # loudly. Funnel visitors get the login page. On \"no\" dux cannot\n\
+                 # check at all, so it counts loopback as the network the whole time:\n\
+                 # with a password set, someone on this machine signs in too, whatever\n\
+                 # [server.auth] require says. `dux server --no-tailscale` forces \"no\"\n\
+                 # for a single run, and refuses a live change back.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # command set-tailscale-mode and the web Preferences dialog change this\n\
                  # while dux runs, apply it to the listener that is serving, and save the\n\
                  # choice back here.\n\
-                 # NOTE: a shared tailnet means OTHER people's devices can reach dux, and\n\
-                 # there is no login gate.",
+                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.\n\
+                 # Under the default [server.auth] require = \"network\" they need no\n\
+                 # password; set it to \"tailnet\" to ask them for it.",
             )),
             value_fn: |c| FieldValue::Str(c.server.tailscale.clone()),
         },
@@ -1044,10 +1098,12 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #   true:            dux starts serving as soon as the TUI does, on\n\
                  #                    loopback plus the Tailscale address (per tailscale\n\
                  #                    above), exactly like the flip binds.\n\
-                 # TRUST: there is no login. With this on, a listener exists for as long\n\
-                 # as dux runs, and anyone who can reach it drives your agents and\n\
-                 # worktrees. That is the same trust model as the rest of this section;\n\
-                 # what changes is that it now applies whenever the TUI is open.\n\
+                 # TRUST: with this on, a listener exists for as long as dux runs, and\n\
+                 # everyone it lets in drives your agents and worktrees: with no\n\
+                 # password set, that is anyone who can reach it ([server.auth] decides\n\
+                 # who is asked for one). That is the same trust model as the rest of\n\
+                 # this section; what changes is that it now applies whenever the TUI is\n\
+                 # open.\n\
                  # ONE DRIVER AT A TIME: the TUI and every browser take part in the same\n\
                  # input-ownership model, so a terminal is driven by whichever device\n\
                  # claimed it and the others watch. A watcher still sees the live output\n\
@@ -1361,9 +1417,254 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.file_drop_max_concurrency as usize),
         },
         ConfigEntry::Blank,
-        ConfigEntry::Keys,
-        ConfigEntry::Blank,
-        ConfigEntry::Macros,
+        ConfigEntry::Section("server.auth"),
+        ConfigEntry::Comment(
+            "# The web UI's optional password: one password for one owner, the same\n\
+             # single workspace as always. With no password, anyone who can reach the\n\
+             # web UI controls your agents and terminals, so set one before serving\n\
+             # beyond this machine:\n\
+             #\n\
+             #   dux config set server.auth.password\n\
+             #\n\
+             # That asks for the password twice without echoing it, shows how strong\n\
+             # it is, and stores only its hash below (`--stdin` reads it from a pipe\n\
+             # for scripts, dropping one trailing line break). A password cannot hold a\n\
+             # line break, a tab or another control character, which a browser's\n\
+             # password field cannot type. A running dux is asked to reload after each\n\
+             # `dux config set`.\n\
+             #\n\
+             # dux refuses to start, and a reload refuses to change anything, while\n\
+             # this section is invalid: a misspelled key, a value of the wrong type,\n\
+             # or a password_hash dux will not use. A mistake here is never read as\n\
+             # \"no password\".",
+        ),
+        ConfigEntry::Field {
+            key: "password_hash",
+            comment: Some(CommentSource::Static(
+                "# The password's Argon2id hash (a string starting $argon2id$v=19$), or \"\"\n\
+                 # for no password. Not the password itself, so this file can live in a\n\
+                 # dotfiles repository, but a published hash lets anyone try guesses\n\
+                 # offline as fast as their hardware allows, which no ban can slow down:\n\
+                 # use a long, unique, generated password. Set it with the command\n\
+                 # above rather than by hand. A hash you paste here is checked for its\n\
+                 # format and cost, but its password is only measured against the\n\
+                 # minimums below when you first log in with it. Changing or clearing it\n\
+                 # signs every browser out.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.password_hash.clone()),
+        },
+        ConfigEntry::Field {
+            key: "require",
+            comment: Some(CommentSource::Static(
+                "# Where the password is asked for, once one is set:\n\
+                 #   \"network\"    everyone except this machine and your own tailnet (default)\n\
+                 #   \"tailnet\"    everyone except this machine\n\
+                 #   \"everywhere\" every request, this machine included\n\
+                 # A reverse proxy on this machine makes outside visitors look local, so\n\
+                 # use \"everywhere\" behind one. No effect while password_hash is empty.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.require.as_str().to_string()),
+        },
+        ConfigEntry::Field {
+            key: "minimum_password_length",
+            comment: Some(CommentSource::Static(
+                "# The fewest characters a new password may have. Checked whenever dux sees\n\
+                 # the password itself: `dux config set` and the web UI refuse a shorter\n\
+                 # one, and logging in with one still works but shows a warning until it\n\
+                 # is changed. Default 12.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.minimum_password_length),
+        },
+        ConfigEntry::Field {
+            key: "minimum_password_score",
+            comment: Some(CommentSource::Static(
+                "# The lowest strength a new password may have, from 0 to 4: weak, fair,\n\
+                 # good, strong, excellent. The strength is an estimate of how many guesses\n\
+                 # it would take (dictionary words, names, dates, keyboard runs and l33t\n\
+                 # spellings all count against it), which is why there are no rules about\n\
+                 # symbols or capitals. Checked at the same moments as the length above.\n\
+                 # Default 2.",
+            )),
+            value_fn: |c| FieldValue::U16(u16::from(c.server.auth.minimum_password_score)),
+        },
+        ConfigEntry::Field {
+            key: "max_failed_logins",
+            comment: Some(CommentSource::Static(
+                "# Failed logins one address may make within failed_login_window_seconds\n\
+                 # before dux adds it to blocked_addresses below and says so in its log.\n\
+                 # One device can send from any address in its IPv6 /64, so an IPv6\n\
+                 # client on your network is also counted by its /64: when its addresses\n\
+                 # together reach the limit, the whole /64 is added as one range. Never\n\
+                 # grouped, so slowed and added one address at a time: this machine's\n\
+                 # own network (every device on your LAN shares its /64), link-local\n\
+                 # fe80:: addresses, your tailnet, and IPv4.\n\
+                 # dux only adds an address it can verify: a client connected to it\n\
+                 # directly, or one that came through your tailscale serve. Behind any\n\
+                 # other proxy the address is only what the request claims, so dux\n\
+                 # writes nothing, keeps slowing those logins down (all such traffic\n\
+                 # together, too, so changing the claim does not help), and its log\n\
+                 # names the address for you to add by hand if you trust the proxy.\n\
+                 # This machine is never blocked, only slowed down. Everyone behind one\n\
+                 # shared address (an office, a phone carrier) is blocked together. 0\n\
+                 # never blocks anyone automatically (use it behind a proxy many people\n\
+                 # share an address through); the slow-down below still applies.\n\
+                 # Default 5.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins),
+        },
+        ConfigEntry::Field {
+            key: "blocked_addresses",
+            comment: Some(CommentSource::Static(
+                "# Addresses and ranges dux refuses before anything else, with or without a\n\
+                 # password: single addresses (\"203.0.113.7\", \"2001:db8::1\") or CIDR\n\
+                 # ranges (\"203.0.113.0/24\"). A request is refused when ANY address it\n\
+                 # names matches: where it connected from, and every address in its\n\
+                 # X-Forwarded-For, X-Real-IP and Forwarded headers, so an entry works\n\
+                 # behind a proxy too. Loopback (127.0.0.1, ::1) never matches: it is\n\
+                 # this machine, and tailscale serve relays your tailnet through it, so\n\
+                 # an entry covering it is accepted, warned about, and ignored. dux adds\n\
+                 # single addresses after failed logins, or an IPv6 /64 as one range\n\
+                 # (\"2001:db8:1:2::/64\"), which then replaces the addresses of that /64\n\
+                 # already listed; it adds nothing an entry already covers. Yours to\n\
+                 # edit: add a scanner you keep seeing, or remove an entry dux added\n\
+                 # (yours, if you mistyped). An entry that does not parse makes this\n\
+                 # section invalid. Default empty.",
+            )),
+            value_fn: |c| FieldValue::StrList(c.server.auth.blocked_addresses.clone()),
+        },
+        ConfigEntry::Field {
+            key: "session_idle_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a signed-in browser stays signed in with nothing happening.\n\
+                 # Any request, and any open dux tab (its live connection counts),\n\
+                 # keeps the session alive, so a tab left open waiting on an agent never\n\
+                 # signs out; close every tab and the session ends this many seconds\n\
+                 # later. Sessions survive a quick restart of dux. At least 1. Default 60.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.session_idle_seconds),
+        },
+        ConfigEntry::Field {
+            key: "disable_no_auth_warning",
+            comment: Some(CommentSource::Static(
+                "# Hide the red warning the web UI shows when dux is reachable beyond this\n\
+                 # machine with no password set. The warning's \"don't show again\" sets\n\
+                 # this to true. Default false.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.auth.disable_no_auth_warning),
+        },
+        ConfigEntry::Field {
+            key: "cookie_secure",
+            comment: Some(CommentSource::Static(
+                "# Whether the sign-in cookie is marked Secure, which stops a browser from\n\
+                 # ever sending it over plain HTTP:\n\
+                 #   \"auto\"   only when dux knows the browser reached it over HTTPS: a\n\
+                 #            tailscale serve HTTPS route, or a Tailscale Funnel (default)\n\
+                 #   \"always\" always; a browser on plain HTTP then cannot stay signed in\n\
+                 #   \"never\"  never\n\
+                 # Use \"always\" when an HTTPS proxy dux cannot see is in front of it.\n\
+                 # \"always\" also tells dux that browsers reach it over HTTPS, so the login\n\
+                 # page drops its warning that a password typed over plain HTTP can be\n\
+                 # overheard.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.cookie_secure.as_str().to_string()),
+        },
+        ConfigEntry::Field {
+            key: "max_concurrent_password_checks",
+            comment: Some(CommentSource::Static(
+                "# Password checks dux runs at once, across every visitor. Each takes about\n\
+                 # 19 MiB of memory and a few dozen milliseconds of CPU on purpose, so this\n\
+                 # bounds what a flood of login attempts can cost. At least 1. Default 2.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_concurrent_password_checks),
+        },
+        ConfigEntry::Field {
+            key: "password_check_queue",
+            comment: Some(CommentSource::Static(
+                "# Logins that may wait for a free check when all of them are busy. Any\n\
+                 # more are answered \"too many requests, try again shortly\" at once,\n\
+                 # without checking anything. Default 8.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.password_check_queue),
+        },
+        ConfigEntry::Field {
+            key: "max_password_bytes",
+            comment: Some(CommentSource::Static(
+                "# The longest password the login accepts, in bytes; a longer attempt is\n\
+                 # refused before any check runs, and `dux config set` refuses to set one.\n\
+                 # 1 to 65536, and no smaller than minimum_password_length. Default 1024.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_password_bytes),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_window_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a failed login counts against its address. An address's count\n\
+                 # starts over once this long has passed since its last failure.\n\
+                 # Default 900 (15 minutes).",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_window_seconds),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_delay_seconds",
+            comment: Some(CommentSource::Static(
+                "# After a failed login (or a wrong current password when changing it),\n\
+                 # how long that address must wait before its next attempt is checked.\n\
+                 # The wait doubles with each further failure in the window, up to\n\
+                 # failed_login_max_delay_seconds. This machine waits too. 0 turns the\n\
+                 # wait off. Default 1.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_delay_seconds),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_max_delay_seconds",
+            comment: Some(CommentSource::Static(
+                "# The longest that doubling wait can grow. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_max_delay_seconds),
+        },
+        ConfigEntry::Field {
+            key: "max_failed_logins_per_minute",
+            comment: Some(CommentSource::Static(
+                "# Failed logins per minute from many addresses together. Past it, they\n\
+                 # are told \"too many requests\" until the minute is over, which stops a\n\
+                 # guesser that keeps changing address. Counted apart for each kind of\n\
+                 # visitor, so a flood from one never locks out another: the internet and\n\
+                 # anything behind a proxy dux cannot verify share one count, devices on\n\
+                 # your network another. Your tailnet devices and this machine are only\n\
+                 # slowed one address at a time. While dux cannot vouch for loopback (a\n\
+                 # Funnel, tailscale = \"no\"), sign-ins on this machine keep counts of\n\
+                 # their own that internet and proxied visitors never touch, except through\n\
+                 # a tailscale serve TCP forward: visitors through one arrive exactly like\n\
+                 # this machine and share its count. Wrong current passwords when changing\n\
+                 # the password count like failed logins everywhere here. 0 turns this\n\
+                 # limit off. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins_per_minute),
+        },
+        ConfigEntry::Field {
+            key: "max_tracked_addresses",
+            comment: Some(CommentSource::Static(
+                "# How many addresses dux remembers failed logins for at once; past it, the\n\
+                 # one forgotten is the address whose last failure is oldest. Bounds the\n\
+                 # memory a guesser with many addresses can make dux use. At least 1.\n\
+                 # Default 10000.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_tracked_addresses),
+        },
+        ConfigEntry::Field {
+            key: "max_blocked_addresses",
+            comment: Some(CommentSource::Static(
+                "# How long blocked_addresses may grow through dux's own additions. Past\n\
+                 # it, a newly blocked address stays blocked until dux restarts but is not\n\
+                 # written here, and dux says so in its log. Entries you add yourself are\n\
+                 # never refused. Default 1000.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_blocked_addresses),
+        },
+        // The file ends in `[server.auth]`, never in a map of names
+        // (`[keys]`, `[macros]`): a line added at the end lands in the last
+        // table, and in a map of names a setting would silently become an
+        // entry, while here a misplaced one stops the start and names itself.
     ]
 }
 
@@ -1466,6 +1767,138 @@ pub fn render_config_documented(config: &Config) -> String {
 /// bootstrap project-sync. Idempotent.
 pub fn install_canonical_renderer() {
     dux_core::config_write::set_canonical_renderer(render_config_documented);
+    // The terminal UI's own start check joins the one list of start checks
+    // (`dux_core::config::check_start`), so every surface and `dux config
+    // get`/`set` judge `[keys]` the same way.
+    dux_core::config::install_terminal_ui_check(keys_start_problems);
+    dux_core::config::install_terminal_ui_migration(|doc| {
+        prune_retired_key_actions(doc);
+        fold_legacy_key_actions(doc);
+    });
+    dux_core::config::install_terminal_ui_key_resolution(terminal_ui_keys);
+    dux_core::config::install_terminal_ui_key_actions(is_key_action);
+    // `get` and `set` judge `[ui] theme` by the terminal UI's own loader.
+    dux_core::config_effective::install_theme_resolver(|name, root| {
+        let paths = DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        crate::theme::load(name, &paths).is_ok()
+    });
+}
+
+/// Whether `name` is an action `[keys]` may bind: one the binding parser
+/// knows (`BINDING_DEFS`, the list `validate_keys` checks), or a retired or
+/// folded name its load still takes.
+fn is_key_action(name: &str) -> bool {
+    keybindings::BINDING_DEFS
+        .iter()
+        .any(|def| def.action.config_name() == name)
+        || RETIRED_KEY_ACTIONS.contains(&name)
+        || FOLDED_KEY_ACTIONS.iter().any(|(legacy, _)| *legacy == name)
+}
+
+/// The `[keys]` the terminal UI runs with for a whole config file, by its
+/// own resolution: its key migrations, then each action's binding from the
+/// file or, where the file has none, the action's default, written as the
+/// config writes keys. `None` for a `[keys]` it cannot read.
+fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
+    let mut doc = raw.parse::<DocumentMut>().ok()?;
+    prune_retired_key_actions(&mut doc);
+    fold_legacy_key_actions(&mut doc);
+    let mut keys_only = DocumentMut::new();
+    if let Some(keys) = doc.get("keys") {
+        keys_only["keys"] = keys.clone();
+    }
+    let keys = toml::from_str::<Config>(&keys_only.to_string()).ok()?.keys;
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&keys);
+    let mut table = toml::Table::new();
+    table.insert(
+        "show_terminal_keys".to_string(),
+        toml::Value::Boolean(keys.show_terminal_keys),
+    );
+    for binding in bindings.bindings() {
+        let combos = binding
+            .keys
+            .iter()
+            .map(|combo| toml::Value::String(crate::keybindings::format_key_for_config(*combo)))
+            .collect();
+        table.insert(
+            binding.action.config_name().to_string(),
+            toml::Value::Array(combos),
+        );
+    }
+    Some(table)
+}
+
+/// What the terminal UI's start refuses in a whole config file's `[keys]`:
+/// the key migrations its start applies first (retired actions pruned,
+/// legacy ones folded), then [`validate_keys`]. A `[keys]` that does not
+/// read at all is a wrong-typed setting, which the start checks list on
+/// their own.
+fn keys_start_problems(raw: &str) -> Vec<String> {
+    let Ok(mut doc) = raw.parse::<DocumentMut>() else {
+        return Vec::new();
+    };
+    prune_retired_key_actions(&mut doc);
+    fold_legacy_key_actions(&mut doc);
+    // A name that is no action name at all may be a token pasted in the
+    // wrong place: it is placed by its line through the one formatter and
+    // never reaches `validate_keys`, whose message would repeat it.
+    let mut problems = Vec::new();
+    if let Some(keys) = doc
+        .get_mut("keys")
+        .and_then(|item| item.as_table_like_mut())
+    {
+        let hidden: Vec<String> = keys
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| {
+                dux_core::config::name_is_hidden(raw, &["keys".to_string(), name.clone()])
+            })
+            .collect();
+        for name in hidden {
+            let shown = dux_core::config::shown_path(raw, &["keys".to_string(), name.clone()]);
+            problems.push(format!("[keys] {shown}: unknown action"));
+            keys.remove(&name);
+        }
+        // A binding that is not a key dux understands is placed by its line
+        // and named by its action, never repeated (see
+        // `not_a_key_sentence`), and taken out so nothing below repeats it.
+        let invalid: Vec<String> = keys
+            .iter()
+            .filter(|(_, item)| {
+                item.as_value()
+                    .and_then(toml_edit::Value::as_array)
+                    .is_some_and(|bindings| {
+                        bindings.iter().any(|binding| {
+                            binding
+                                .as_str()
+                                .is_some_and(|text| !binding_is_understood(text))
+                        })
+                    })
+            })
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in invalid {
+            let line = dux_core::config::line_of_setting(raw, &["keys", &name]);
+            problems.push(not_a_key_sentence(&name, line));
+            keys.remove(&name);
+        }
+    }
+    let mut keys_only = DocumentMut::new();
+    if let Some(keys) = doc.get("keys") {
+        keys_only["keys"] = keys.clone();
+    }
+    if let Ok(config) = toml::from_str::<Config>(&keys_only.to_string()) {
+        problems.extend(key_binding_problems(&config.keys, &|action| {
+            dux_core::config::line_of_setting(raw, &["keys", action])
+        }));
+    }
+    problems
 }
 
 // ---------------------------------------------------------------------------
@@ -1512,12 +1945,29 @@ impl RestoredConfig {
 ///   input. A mismatch aborts with an error rather than writing, so a renderer
 ///   bug can never silently rewrite a user's settings.
 pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
-    let original: DocumentMut = raw
-        .parse()
-        .context("config.toml is not valid TOML, so its values cannot be read back safely")?;
+    let original: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "config.toml is not valid TOML, so its values cannot be read back safely: {}",
+            dux_core::config::describe_toml_edit_error(raw, &e)
+        )
+    })?;
 
-    let config: Config = toml::from_str(raw)
-        .context("config.toml parses as TOML but not as a dux config, so its values cannot be read back safely")?;
+    let config: Config = toml::from_str(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "config.toml parses as TOML but not as a dux config, so its values cannot be read \
+             back safely: {}",
+            dux_core::config::describe_toml_error(raw, &e)
+        )
+    })?;
+    // A password in a place dux does not read is refused, never cleaned up:
+    // a top-level `[auth]` is an orphaned section, and dropping it would
+    // lose the hash the user meant to set.
+    if let Some(problem) = dux_core::config::misplaced_auth_problems(raw)
+        .into_iter()
+        .next()
+    {
+        anyhow::bail!("{problem}. Nothing was changed.");
+    }
 
     let rendered_text = render_config_documented(&config);
     let mut rendered: DocumentMut = rendered_text
@@ -1560,10 +2010,10 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 /// from the on-disk version are updated, preserving user comments, formatting
 /// and unknown keys; a missing file gets a fresh canonical config.
 ///
-/// Deprecated: this bypasses the `ConfigWriteQueue` gate every runtime write
-/// must route through. Its only legitimate callers are the TUI bootstrap
-/// helpers (`persist_runtime_projects_to_config_and_store`,
-/// `sync_config_projects_with_store`), which are sync-direct by design.
+/// Test-only now: the TUI bootstrap helpers that used it write three-way
+/// through `dux_core::config_write::save_config_three_way`, so only the
+/// tests that pin the first-creation render and the patch shape call it.
+#[cfg(test)]
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
@@ -1690,7 +2140,10 @@ fn render_macros_config(
          # surface = \"both\":     shown on both surfaces.\n\
          # Newlines in text values are translated to Alt+Enter (ESC + CR) so\n\
          # multi-line macros are entered as a single prompt; press Enter yourself\n\
-         # to submit afterwards.",
+         # to submit afterwards.\n\
+         # Macros are listed in the order they are written here. A macro written\n\
+         # as its own [macros.<name>] section always comes after every\n\
+         # name = {{ ... }} line, so keep all macros in one form to choose any order.",
     );
     if macros.entries.is_empty() {
         out.push_str(
@@ -1980,48 +2433,89 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     out.push('\n');
 }
 
+/// Whether `binding` is a key dux understands: the one parser both
+/// [`validate_keys`] and the start check read a binding with.
+pub(crate) fn binding_is_understood(binding: &str) -> bool {
+    crokey::parse(&keybindings::normalize_key_string(binding)).is_ok()
+}
+
+/// The sentence for a binding of `action` that is not a key dux understands.
+/// It never repeats the binding: a value pasted in the wrong place (a token)
+/// may be what is there. `at` places it, by its line where the file's text
+/// is at hand.
+fn not_a_key_sentence(action: &str, at: Option<usize>) -> String {
+    match at {
+        Some(line) => {
+            format!(
+                "[keys] the binding on line {line} for action {action} is not a key dux understands"
+            )
+        }
+        None => format!("[keys] a binding for action {action} is not a key dux understands"),
+    }
+}
+
 /// Validate all key bindings in the config. Returns a descriptive error on failure.
 ///
 /// Checks:
 /// 1. Every action name is known (present in `BINDING_DEFS`).
 /// 2. Every key string parses successfully after normalization
-///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`).
+///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`); a
+///    binding that does not is named by its action, never repeated.
 /// 3. No two actions bind the same normalized key in overlapping scopes.
 pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
+    let problems = key_binding_problems(keys, &|_| None);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// Every problem with the bindings in `keys`, none of them repeating a
+/// binding (a value pasted in the wrong place, a token, may be what is
+/// there): an action dux does not have, a binding that is not a key, and two
+/// actions binding the same key in a shared scope, each named by its action.
+/// `line_of` places an action's binding by its line where the file's text is
+/// at hand; an action the file leaves out binds its default key.
+fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usize>) -> Vec<String> {
+    let mut problems = Vec::new();
     for (name, key_strs) in &keys.bindings {
         let valid = keybindings::BINDING_DEFS
             .iter()
             .any(|d| d.action.config_name() == name);
         if !valid {
-            return Err(format!("[keys] unknown action: \"{name}\""));
-        }
-        for s in key_strs {
-            let normalized = keybindings::normalize_key_string(s);
-            crokey::parse(&normalized)
-                .map_err(|_| format!("[keys] invalid key \"{s}\" for action \"{name}\""))?;
+            problems.push(format!("[keys] unknown action: \"{name}\""));
+        } else if !key_strs
+            .iter()
+            .all(|binding| binding_is_understood(binding))
+        {
+            problems.push(not_a_key_sentence(name, line_of(name)));
         }
     }
-
-    // Detect conflicting bindings (same key in overlapping scopes).
-    let conflicts = keybindings::detect_conflicts(keys);
-    if !conflicts.is_empty() {
-        let mut msg = String::from("[keys] conflicting keybindings detected:");
-        for c in &conflicts {
-            msg.push_str(&format!(
-                "\n  - \"{}\" is bound to both \"{}\" and \"{}\" in {}",
-                c.key_label,
-                c.action_a,
-                c.action_b,
-                c.scope.display_name(),
-            ));
-        }
-        msg.push_str(
-            "\nCheck your [keys.bindings] configuration and ensure each key is unique within its scope.",
-        );
-        return Err(msg);
+    // Conflicts are judged once every binding is a key dux understands.
+    if !problems.is_empty() {
+        return problems;
     }
-
-    Ok(())
+    let placed = |action: &str| {
+        if keys.bindings.contains_key(action) {
+            match line_of(action) {
+                Some(line) => format!("{action} (line {line})"),
+                None => action.to_string(),
+            }
+        } else {
+            format!("{action} (its default key)")
+        }
+    };
+    for conflict in keybindings::detect_conflicts(keys) {
+        problems.push(format!(
+            "[keys] two actions bind the same key: {} and {} in the {}; give one of them a \
+             different key in [keys]",
+            placed(conflict.action_a),
+            placed(conflict.action_b),
+            conflict.scope.display_name(),
+        ));
+    }
+    problems
 }
 
 #[cfg(test)]
@@ -2285,10 +2779,20 @@ mod tests {
                 restored.text
             );
         }
+        // Reported by line: a key the schema does not know is never named.
         assert!(
             restored
                 .preserved
-                .contains(&"server.listen_addrs".to_string()),
+                .iter()
+                .any(|path| path.starts_with("the entry on line") && path.ends_with("of [server]")),
+            "preserved list: {:?}",
+            restored.preserved
+        );
+        assert!(
+            !restored
+                .preserved
+                .iter()
+                .any(|path| path.contains("listen_addrs")),
             "preserved list: {:?}",
             restored.preserved
         );
@@ -2503,6 +3007,18 @@ mod tests {
     /// There is deliberately NO experimental marker to require: the TUI takes
     /// part in the ownership model, so the comment describes one driver at a time
     /// rather than warning about a redraw fight.
+    /// No serve-related comment still says there is no login: the password
+    /// exists, and the comments are the documentation.
+    #[test]
+    fn no_comment_says_there_is_no_login() {
+        let toml = render_default_config().to_lowercase();
+        for stale in ["no login", "login gate", "is refused with a page"] {
+            assert!(!toml.contains(stale), "{stale}");
+        }
+        let tailscale = render_default_config();
+        assert!(tailscale.contains("On \"no\" dux cannot"), "{tailscale}");
+    }
+
     #[test]
     fn serve_while_tui_comment_states_what_trust_ownership_and_how_to_stop() {
         let toml = render_default_config();
@@ -2519,7 +3035,7 @@ mod tests {
             // what it does
             "keeps running",
             // the trust consequence
-            "no login",
+            "anyone who can reach it",
             // what happens when two devices want the same terminal
             "take over",
             // how to stop it
@@ -2541,7 +3057,8 @@ mod tests {
     fn ensure_config_rejects_non_ip_host() {
         let mut config = Config::default();
         config.server.host = "example.com".to_string();
-        let err = validate_server_host(&config).expect_err("a non-IP host must be rejected");
+        let err =
+            dux_core::config::start_check(&config).expect_err("a non-IP host must be rejected");
         assert!(
             err.to_string().contains("example.com"),
             "the error must name the bad host: {err}"
@@ -2552,9 +3069,9 @@ mod tests {
     fn ensure_config_accepts_ip_hosts() {
         let mut config = Config::default();
         config.server.host = "0.0.0.0".to_string();
-        validate_server_host(&config).expect("0.0.0.0 is a valid host");
+        dux_core::config::start_check(&config).expect("0.0.0.0 is a valid host");
         config.server.host = "127.0.0.1".to_string();
-        validate_server_host(&config).expect("loopback is a valid host");
+        dux_core::config::start_check(&config).expect("loopback is a valid host");
     }
 
     #[test]
@@ -2780,14 +3297,41 @@ mod tests {
         assert!(validate_keys(&keys).is_ok());
     }
 
+    /// The start check places a binding that is not a key by its line and
+    /// its action, in every way `[keys]` can be written, and never repeats it.
+    #[test]
+    fn a_binding_that_is_not_a_key_is_placed_by_its_line_and_action() {
+        for (raw, line) in [
+            ("[keys]\nquit = [\"zzTOKEN x\"]\n", 2),
+            (
+                "[keys]\nopen_palette = [\"ctrl-p\"]\nquit = [\"ctrl-q\", \"zzTOKEN x\"]\n",
+                3,
+            ),
+            ("keys = { quit = [\"zzTOKEN x\"] }\n", 1),
+            ("keys.quit = [\"zzTOKEN x\"]\n", 1),
+        ] {
+            let problems = keys_start_problems(raw);
+            assert_eq!(
+                problems,
+                vec![format!(
+                    "[keys] the binding on line {line} for action quit is not a key dux understands"
+                )],
+                "{raw}"
+            );
+        }
+    }
+
     #[test]
     fn validate_keys_rejects_bad_key() {
         let mut keys = KeysConfig::default();
         keys.bindings
             .insert("quit".to_string(), vec!["badkey!!!".to_string()]);
-        let result = validate_keys(&keys);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("badkey!!!"));
+        let error = validate_keys(&keys).unwrap_err();
+        // Named by its action, never repeated: the value may be a token.
+        assert_eq!(
+            error,
+            "[keys] a binding for action quit is not a key dux understands"
+        );
     }
 
     #[test]
@@ -3527,17 +4071,40 @@ oneshot_output = "stdout"
         let result = validate_keys(&keys);
         assert!(result.is_err(), "duplicate key in same scope should error");
         let msg = result.unwrap_err();
-        assert!(
-            msg.contains("conflicting"),
-            "error should mention conflict: {msg}"
+        // Named by its actions and scope, never by the key, and pointed at
+        // the table that exists.
+        assert_eq!(
+            msg,
+            "[keys] two actions bind the same key: toggle_project and new_agent in the \
+             Projects pane; give one of them a different key in [keys]"
         );
+    }
+
+    /// The start check places each action of a conflict by its line, or as
+    /// its default key where the file leaves the action out, and never
+    /// repeats the key.
+    #[test]
+    fn a_conflict_is_named_by_its_actions_and_lines() {
+        let raw = "[keys]\nnew_agent = [\"ctrl-alt-y\"]\ntoggle_project = [\"ctrl-alt-y\"]\n";
+        let problems = keys_start_problems(raw);
+        assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            msg.contains("toggle_project"),
-            "error should name first action: {msg}"
+            problems[0].contains("new_agent (line 2)")
+                && problems[0].contains("toggle_project (line 3)")
+                && problems[0].contains("in the Projects pane")
+                && !problems[0].contains("ctrl-alt-y")
+                && !problems[0].contains("keys.bindings"),
+            "{problems:?}"
         );
+        // `n` is new_agent's default key, which the file leaves out.
+        let raw = "[keys]\ntoggle_project = [\"n\"]\n";
+        let problems = keys_start_problems(raw);
         assert!(
-            msg.contains("new_agent"),
-            "error should name second action: {msg}"
+            problems
+                .iter()
+                .any(|p| p.contains("toggle_project (line 2)")
+                    && p.contains("new_agent (its default key)")),
+            "{problems:?}"
         );
     }
 
@@ -3829,6 +4396,275 @@ args = [\"-l\"]
     /// The terminal UI never goes through `load_config`, so the correction that
     /// keeps the engine tick from re-warning has to happen here too. Without it
     /// the surface with the fastest tick is the one that floods.
+    /// The three ways `[server.auth]` can be unreadable each stop the start,
+    /// name the file and the section, and leave the file exactly as it was
+    /// (no migration rewrites it first).
+    /// The load-time migration rewrites the file under the config write lock,
+    /// re-reading it there: it waits for another writer instead of writing
+    /// over it.
+    #[test]
+    fn the_load_time_migration_waits_for_the_config_write_lock() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[server]\ntailscale_enabled = true\n").expect("seed");
+        let held = dux_core::config_write::ConfigFileLock::acquire(&paths.config_path).unwrap();
+        let loader = {
+            let paths = paths.clone();
+            std::thread::spawn(move || ensure_config(&paths).map(|_| ()).map_err(|e| e.to_string()))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Another writer lands while the migration waits.
+        let other = "[server]\ntailscale_enabled = true\n\n[ui]\nleft_width_pct = 33\n";
+        fs::write(&paths.config_path, other).unwrap();
+        assert!(!loader.is_finished(), "the migration waits for the lock");
+        drop(held);
+        loader.join().expect("join").expect("load");
+        let after = fs::read_to_string(&paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "the other write survives:\n{after}"
+        );
+        assert!(!after.contains("tailscale_enabled"), "migrated:\n{after}");
+    }
+
+    /// A config with nothing to migrate never touches the write lock, so a
+    /// lock file this user cannot open (left by a `sudo dux`) does not stop
+    /// the start.
+    #[test]
+    fn a_config_with_nothing_to_migrate_starts_without_the_write_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[ui]\nleft_width_pct = 30\n").expect("seed");
+        let lock = dux_core::config_write::ConfigFileLock::lock_path(&paths.config_path);
+        fs::write(&lock, "").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&lock).is_ok() {
+            // Running as root: every file opens, so there is nothing to show.
+            return;
+        }
+        let config = ensure_config(&paths).expect("starts");
+        assert_eq!(config.ui.left_width_pct, 30);
+        // A migration still needs the lock, and says so.
+        fs::write(&paths.config_path, "[server]\ntailscale_enabled = true\n").expect("seed");
+        let err = ensure_config(&paths).expect_err("the migration needs the lock");
+        assert!(format!("{err:#}").contains("config lock"), "{err:#}");
+    }
+
+    /// A config.toml symlink whose target is missing stops the start, naming
+    /// the link and the target, and nothing is created at either path; a
+    /// symlink whose target is there stays a symlink when the start migrates
+    /// the file.
+    #[test]
+    fn ensure_config_keeps_a_config_symlink_and_refuses_a_dangling_one() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root: root.clone(),
+        };
+        let target = root.join("dotfiles.toml");
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let error = format!("{:#}", ensure_config(&paths).expect_err("refused"));
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        assert!(
+            error.contains(&paths.config_path.display().to_string()),
+            "{error}"
+        );
+        assert!(!target.exists(), "nothing was created at the target");
+        assert!(
+            fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        fs::write(&target, "[server]\ntailscale_enabled = true\n").unwrap();
+        ensure_config(&paths).expect("starts");
+        assert!(
+            fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the migration wrote through the link"
+        );
+        let migrated = fs::read_to_string(&target).unwrap();
+        assert!(!migrated.contains("tailscale_enabled"), "{migrated}");
+    }
+
+    /// A top-level `[auth]` is an orphaned section the documentation restore
+    /// cleans up, but one holding a password hash is a password in the wrong
+    /// place: the restore refuses it, naming it, and drops nothing.
+    #[test]
+    fn restoring_the_docs_never_cleans_up_a_misplaced_password_hash() {
+        let raw = "[auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n";
+        let error = format!("{:#}", restore_documentation(raw).expect_err("refused"));
+        assert!(error.contains("auth.password_hash"), "{error}");
+        assert!(error.contains("[server.auth]"), "{error}");
+        assert!(!error.contains("argon2id"), "{error}");
+        let mut rendered: DocumentMut = "".parse().unwrap();
+        let report = dux_core::config_write::merge_unmanaged_keys(
+            &mut rendered,
+            &raw.parse::<DocumentMut>().unwrap(),
+        );
+        assert!(report.dropped.is_empty(), "{report:?}");
+        assert!(rendered.to_string().contains("password_hash"), "{rendered}");
+        // An old `[auth]` with no password in it is still cleaned up.
+        let mut rendered: DocumentMut = "".parse().unwrap();
+        let report = dux_core::config_write::merge_unmanaged_keys(
+            &mut rendered,
+            &"[auth]\nenabled = true\n".parse::<DocumentMut>().unwrap(),
+        );
+        assert_eq!(report.dropped, vec!["auth".to_string()]);
+    }
+
+    /// A port of 0 is `dux server`'s problem alone: the terminal UI starts
+    /// with it whether or not the file has it serve in the background.
+    #[test]
+    fn a_port_of_zero_never_stops_the_terminal_ui() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[server]\nport = 0\n").unwrap();
+        ensure_config(&paths).expect("starts when it does not serve");
+        fs::write(
+            &paths.config_path,
+            "[server]\nport = 0\nserve_while_tui = true\n",
+        )
+        .unwrap();
+        ensure_config(&paths).expect("starts when it serves in the background too");
+    }
+
+    /// The terminal UI's start (and reload) refuses exactly the files the one
+    /// list of start checks says it refuses, for every kind of problem the
+    /// list knows: a check the start makes that the list lacks, or the other
+    /// way round, fails here.
+    #[test]
+    fn the_terminal_ui_start_refuses_exactly_what_the_start_checks_say() {
+        for fixture in dux_core::start_check_fixtures::FIXTURES {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let root = dir.path().to_path_buf();
+            let paths = dux_core::config::DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            fs::write(&paths.config_path, fixture.text).unwrap();
+            let refused = ensure_config(&paths).is_err();
+            install_canonical_renderer();
+            let listed = dux_core::config::start_problems_of(fixture.text)
+                .iter()
+                .any(|problem| problem.stops_terminal_ui);
+            assert_eq!(
+                refused, fixture.stops_terminal_ui,
+                "{}: start",
+                fixture.name
+            );
+            assert_eq!(
+                listed, fixture.stops_terminal_ui,
+                "{}: the list",
+                fixture.name
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        for body in [
+            "[server.auth\npassword_hash = \"\"\n",
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$broken\"\n",
+            "[server.auth]\nmax_failed_logins = \"five\"\n",
+            "[server]\nbind = \"127.0.0.1:3890\"\n\n[server.auth]\nrequire = \"nowhere\"\n",
+        ] {
+            fs::write(&paths.config_path, body).expect("seed config");
+            let err = ensure_config(&paths).expect_err(body);
+            let text = format!("{err:#}");
+            assert!(text.contains("server.auth"), "{body:?}: {text}");
+            assert!(
+                text.contains(&paths.config_path.display().to_string()),
+                "{body:?}: {text}"
+            );
+            assert_eq!(
+                fs::read_to_string(&paths.config_path).unwrap(),
+                body,
+                "a refused start writes nothing"
+            );
+        }
+    }
+
+    /// The canonical template documents every `[server.auth]` key, and what it
+    /// renders reads back as the same section.
+    #[test]
+    fn the_template_documents_and_round_trips_server_auth() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("correct horse battery staple".to_string()),
+        )
+        .expect("hash");
+        config.server.auth.blocked_addresses = vec!["203.0.113.0/24".to_string()];
+        config.server.auth.require = dux_core::config::AuthRequire::Tailnet;
+        let rendered = render_config_documented(&config);
+        assert!(rendered.contains("[server.auth]"), "{rendered}");
+        let parsed: Config = toml::from_str(&rendered).expect("valid");
+        assert_eq!(parsed.server.auth, config.server.auth);
+        // The section's own header line: comments elsewhere mention it too.
+        let section = rendered
+            .split("\n[server.auth]\n")
+            .nth(1)
+            .expect("section")
+            .split("\n[")
+            .next()
+            .expect("body");
+        let json = serde_json::to_value(&config.server.auth).expect("json");
+        for key in json.as_object().expect("object").keys() {
+            let line = section
+                .lines()
+                .position(|line| line.starts_with(&format!("{key} = ")))
+                .unwrap_or_else(|| panic!("{key} is rendered"));
+            assert!(
+                section
+                    .lines()
+                    .nth(line.wrapping_sub(1))
+                    .is_some_and(|l| l.starts_with('#')),
+                "{key} has a comment above it"
+            );
+        }
+    }
+
     #[test]
     fn ensure_config_corrects_an_out_of_range_github_probe_interval() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -4097,9 +4933,15 @@ mod legacy_exit_interactive_tests {
         // The legacy row also carries the macro bar's own chord, so the fold
         // hands `toggle_fullscreen` a key that genuinely collides.
         let body = config_with_legacy_row("exit_interactive = [\"ctrl-g\", \"ctrl-\\\\\"]", None);
-        let (_dir, _paths, config) = seeded_config(&body);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let paths = temp_paths(dir.path().to_path_buf());
+        fs::write(&paths.config_path, &body).expect("seed config");
 
-        let err = validate_keys(&config.keys).expect_err("a real conflict must still be reported");
+        // The start's own check of `[keys]` (one of the start checks) refuses it.
+        let err = format!(
+            "{:#}",
+            ensure_config(&paths).expect_err("a real conflict must still be reported")
+        );
         assert!(
             err.contains("open_macro_bar") && err.contains("toggle_fullscreen"),
             "expected the macro-bar conflict, got:\n{err}"
@@ -4205,3 +5047,123 @@ mod web_dragdrop_paste_render_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod port_zero_and_deprecated_key_start_tests {
+    use super::*;
+
+    #[test]
+    fn the_terminal_ui_still_starts_with_a_background_server_on_port_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nport = 0\nserve_while_tui = true\n",
+        )
+        .unwrap();
+        // Before the branch the terminal UI started, and only its background
+        // server reported that it could not bind.
+        let result = ensure_config(&paths)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"));
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn the_one_list_agrees_with_the_terminal_ui_start_on_a_deprecated_key_of_the_wrong_type() {
+        install_canonical_renderer();
+        for raw in [
+            "[defaults]\nprompt_for_name = \"yes\"\n",
+            "[server]\nbind = 5\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let paths = dux_core::config::DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            std::fs::write(&paths.config_path, raw).unwrap();
+            let started = ensure_config(&paths)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            let listed =
+                dux_core::config::start_refusal(raw, dux_core::config::Surface::TerminalUi);
+            assert_eq!(
+                started.is_ok(),
+                listed.is_none(),
+                "for {raw:?}: the start said {started:?}, the one list said {listed:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod entries_named_password_hash_start_tests {
+    use super::*;
+
+    /// An environment variable or a provider that happens to be named
+    /// `password_hash` is not a password hash; the terminal UI started with
+    /// such a file before the branch.
+    #[test]
+    fn the_terminal_ui_starts_with_an_env_variable_or_provider_named_password_hash() {
+        for body in [
+            "[env]\npassword_hash = \"x\"\n",
+            "[providers.password_hash]\ncommand = \"mytool\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let paths = DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            std::fs::write(&paths.config_path, body).unwrap();
+            let result = ensure_config(&paths)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            assert!(result.is_ok(), "{body:?}: {result:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod keys_names_tests {
+    use super::*;
+
+    /// A token pasted as a `[keys]` name with a binding as its value is
+    /// placed by its line, never quoted, by the terminal UI's own check.
+    #[test]
+    fn an_unknown_action_name_that_breaks_the_rule_is_placed_by_its_line() {
+        install_canonical_renderer();
+        let raw = "[keys]\n\"sk-proj-AbCdEf0123456789\" = [\"x\"]\n";
+        let problems = dux_core::config::start_problems_of(raw);
+        assert!(!problems.is_empty());
+        for problem in &problems {
+            assert!(!problem.message.contains("sk-proj"), "{problem:?}");
+        }
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("the entry on line 2 of [keys]")),
+            "{problems:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod start_corpus_tests;
+
+#[cfg(test)]
+mod inline_section_start_tests;

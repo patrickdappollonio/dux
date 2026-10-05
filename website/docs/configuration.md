@@ -32,6 +32,9 @@ value.
 A handful of subcommands handle the file without you hunting for it:
 
 - `dux config path` prints the absolute path to the active config file.
+- `dux config get <setting>` prints one setting's value.
+- `dux config set <setting> <value>` changes one setting and tells a running dux to pick
+  it up.
 - `dux config diff` shows what you have changed from the defaults.
 - `dux config regenerate` previews the latest canonical template, so you can see new
   options after an upgrade.
@@ -39,6 +42,100 @@ A handful of subcommands handle the file without you hunting for it:
   them, keeping every value exactly as it is.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
+
+### Reading and changing one setting
+
+A setting is named by its table and key, joined with dots:
+
+```bash
+dux config get server.port               # 3890
+dux config set server.port 4000
+dux config set ui.theme "catppuccin-mocha"
+dux config set server.allowed_hosts '["dux.example.com", "box.example.com"]'
+dux config set providers.claude.command claude
+```
+
+- `get` prints what `config.toml` says, or, when the file leaves the setting out, the value
+  dux actually uses with that file (a note on stderr says so, so the value alone is what a
+  script captures). Where dux uses something other than what the file says (a log level
+  it does not know runs as `info`, a value past its ceiling runs at the ceiling, a `0`
+  that means the default runs as the default), `get` prints what dux uses, and the note
+  names what the file says and why. A provider listed without a command reads as an
+  empty command, and `get` says that provider cannot start. It also works when dux
+  refuses to start with the file, which is how you look at the broken part: it prints
+  what the file says and names the problem that keeps dux from working out the value it
+  would use.
+- `set` never writes a file dux would refuse to start with: a value that would add such a
+  problem (a host name where `server.host` needs an IP address, an environment variable
+  name dux does not accept) is refused with the same message a start gives, and nothing
+  is written. So is a value dux would not use as written when it loads the file: one it
+  would drop, put back to its default or hold at a limit (a terminal font size past its
+  range, a `gh` re-check interval below its floor, a theme the terminal UI has no
+  built-in or file for, a provider changed back into a retired stock block dux removes).
+  The refusal names the value dux would use instead.
+  A setting written inside a section or entry the file already breaks some other way is
+  taken, and `set` says it stays at its default until that problem is fixed.
+- A setting with a value of the wrong type (a word where a number goes) is read two ways:
+  `dux server` uses that setting's default and starts, while the terminal UI will not start
+  until it is fixed. `get` and `set` say so in those words, and `get` says the value in use
+  cannot be worked out until then.
+- If `config.toml` is not valid TOML at all, `get` and `set` refuse it too and name the
+  line that is wrong. Fix that line by hand (or copy back a backup), then carry on.
+- `set` checks the value before writing it: a number has to be a number in range, a
+  setting with a fixed set of values has to be one of them, and a list is written whole as
+  one TOML array. Only that one line of the file changes; every comment stays.
+- `[server.auth]` settings are also checked against the rest of the section as the file
+  has it, so a `minimum_password_length` that does not fit your own `max_password_bytes`
+  is refused. When the section already has problems, `set` still fixes them one at a
+  time: a change is refused only if it adds a problem, and after each change `set` lists
+  what is still wrong, since dux will not start until all of it is fixed.
+- Providers are named by their name (`providers.<name>.<field>`), and environment
+  variables by theirs (`env.<NAME>`). Changing one field of a built-in provider your file
+  does not list writes that provider out in full with your change, so it keeps working. A
+  new name adds a provider, starting with its command: `set providers.<name>.command`
+  first, and `set` refuses anything that would leave a provider without a command.
+- Environment values are treated as secrets, since that is where API tokens live.
+  `dux config set env.GITHUB_TOKEN` asks for the value without echoing it (or reads it,
+  up to 1 MiB, from a pipe with `--stdin`) and never takes it as an argument, and it
+  reports only that the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
+  it is set but prints the value only when you add `--show`.
+- A misspelled setting is refused with the closest real one. The message repeats only the
+  part of the name that exists, never what you typed after it, in case that was a value
+  typed where a name goes: `server has no setting below it with that name; did you mean
+  server.port? Values are never given in the path.`
+- `[[projects]]`, `[keys]` and `[macros]` are read with `get` but not written with `set`,
+  because each has rules of its own. Edit them in the file, or use dux itself.
+- A key whose own name contains a dot cannot be named this way. Edit the file for that
+  one.
+
+After writing, `set` asks a running dux to reload its config, and says whether it could
+ask. The running dux reports how the reload went in its status line, in the web UI's
+notifications and in `dux.log`; two `set`s in quick succession are both picked up. If dux
+is not running, the change applies the next time it starts.
+
+Writers take turns on the file, and a save dux makes from its own settings only writes the
+settings that changed inside dux since it last read or saved the file, keeping the comments
+around them. So a value you `set`, or edit or delete by hand, while dux runs stays as you
+left it across any number of saves, unless you then change that same setting inside dux
+before it reloads. The same goes for each field of a project. Projects are matched by their
+id and path together, then by id, then by path, so a project you add to the file by hand
+stays when dux adds one of its own, and a project written without an id is given one the
+first time dux saves. A setting the file has never had (one new in this version of dux) is
+written in with its current value. Once dux reloads the file, a setting missing from it
+counts as one the file has never had, so the next save writes it in with its default. The
+`[server.auth]` section is only ever changed by an explicit change to it (`set`, a password
+change, a block after failed logins), never by dux saving its other settings.
+
+> [!TIP]
+> After editing `config.toml` by hand, you can ask a running dux to reload it without
+> touching the app: `kill -USR1 <pid>`. The PID is the first line of `dux.lock`, next to the config.
+
+> [!CAUTION]
+> `kill -USR1` stops a dux older than this release instead of reloading it, and every
+> agent and terminal it runs stops with it. A dux that handles the signal says so in
+> `dux.lock`: a second line reading `reload-signal=usr1` under its PID. Without that
+> line, restart dux instead. `dux config set` checks this for you and never signals an
+> older dux.
 
 ### What `dux config diff` shows, and what it holds back
 
@@ -54,8 +151,11 @@ Two things are summarized rather than printed:
 - `[[projects]]` reports only a count, because projects carry their own `env` and a
   project's index is not a stable name.
 
-Macros report a count too, since a macro body is arbitrary prose. Everything else is
-shown as `setting: default -> yours`, with long values cut off at 40 characters.
+Macros report a count too, since a macro body is arbitrary prose. The web UI password's
+hash reports only `server.auth.password_hash: changed`, and `blocked_addresses` only a
+count: the first lets anyone who has it try guesses at your password, and the second is a
+list of other people's IP addresses. Everything else is shown as
+`setting: default -> yours`, with long values cut off at 40 characters.
 
 > [!CAUTION]
 > The plain summary is safe to paste into a bug report. **`dux config diff --raw` is
@@ -80,8 +180,117 @@ It is careful with your data:
 - Settings dux does not recognize are kept as they are, not quietly deleted, and are
   listed in the output.
 - A few sections dux genuinely no longer reads are removed, and the removal is reported.
+- The preview holds back sensitive values: an `[env]` value, a project's values, the
+  web UI's `password_hash` and `blocked_addresses`, a key binding dux cannot read and
+  anything below a setting it does not recognize show as their name and
+  `(not shown)`, and comments inside `[env]` and
+  `[projects]` (including one at the end of a header line) are hidden too. Add `--show`
+  to see them. A plaintext web UI password is never shown, `--show` or not.
+  `dux config regenerate` previews the same way, and when your file is not valid TOML
+  its preview shows none of it, `--show` included, and names the line to fix instead.
 - If the file cannot be parsed, the command refuses and changes nothing rather than
   falling back to defaults, which would throw your settings away.
+
+## The web UI password (`[server.auth]`)
+
+The web UI can ask for a password: one password for one owner, guarding the same single
+workspace as always. Set it from a terminal:
+
+```bash
+dux config set server.auth.password          # asks twice, shows how strong it is
+printf '%s\n' "$PW" | dux config set server.auth.password --stdin   # for scripts
+```
+
+The prompt never echoes what you type, and rates the password from weak through fair,
+good and strong to excellent as you go. `--stdin` drops one trailing line break, the one
+`printf '%s\n'` or a file's last line adds. A password cannot contain a line break, a tab
+or any other control character, because a browser's password field cannot type one: a
+pipe holding one more line break (a file ending in a blank line) is refused, and nothing
+is changed. The password is never accepted as a command-line
+argument, where shell history and the process list would keep it. What lands in
+`config.toml` is only its Argon2id hash, at `server.auth.password_hash`;
+`dux config get server.auth.password` prints that hash. Changing or clearing the
+password signs every browser out. To remove it, run
+`dux config set server.auth.password_hash ""`. While the file has a password setting
+where dux does not read it (a `minimum-password-length` spelled with dashes, say),
+setting a password is refused until that is fixed: dux cannot tell which minimum you
+meant.
+
+> [!IMPORTANT]
+> dux reads the password only from `[server.auth]`. A `password_hash` anywhere else, or a
+> table with a near-miss name such as `[server.auht]` or `[server.Auth]`, stops dux from
+> starting (and a running dux keeps its settings on reload) instead of letting it run
+> without the password you meant to set. The message names where the key is and where it
+> belongs.
+
+> [!WARNING]
+> The hash is safe to keep in a dotfiles repository in the sense that it is not your
+> password, but anyone who has it can try guesses offline as fast as their hardware
+> allows, and no ban slows that down. Use a long, unique, generated password.
+
+A new password has to meet two minimums, checked whenever dux sees the password itself
+(when you set it, and every time you log in with it):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `minimum_password_length` | `12` | The fewest characters a password may have. |
+| `minimum_password_score` | `2` | The lowest strength, from 0 (weak) to 4 (excellent). |
+
+The strength is an estimate of how many guesses a password would take, counting
+dictionary words, names, dates, keyboard runs and l33t spellings against it, which is why
+there are no rules about symbols or capitals: `P@ssw0rd!` rates weak, and four uncommon
+words rate excellent. `set` refuses a password below either minimum and says why. A hash
+pasted into the file by hand is only checked against them at your first login with it.
+
+Where the password is asked for, once one is set, is `require`:
+
+- `"network"` (the default): everyone except this machine and your own tailnet.
+- `"tailnet"`: everyone except this machine.
+- `"everywhere"`: every request, this machine included. Use this behind a reverse proxy
+  on the same machine, which makes outside visitors look local.
+
+The rest of the section, each documented inline in `config.toml`:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `session_idle_seconds` | `60` | How long a signed-in browser stays signed in with nothing happening. An open dux tab keeps it alive, so a tab left waiting on an agent never signs out. |
+| `max_failed_logins` | `5` | Failed logins one address may make before it is added to `blocked_addresses`. An IPv6 client is also counted by its /64, and when its addresses together reach the limit the whole /64 is added as one range; never for this machine's own network, link-local `fe80::` addresses, your tailnet or IPv4, which are counted one address at a time. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the logins down and its log names the address for you to add by hand. `0` never blocks. |
+| `blocked_addresses` | `[]` | Addresses and CIDR ranges dux refuses outright, with or without a password. A request matches when any address it names does, forwarding headers included. Loopback never matches: an entry covering it is accepted, warned about and ignored. dux adds single addresses, or an IPv6 /64 as one range that replaces the addresses of it already listed. Yours to edit. |
+| `failed_login_window_seconds` | `900` | How long a failed login counts against its address. |
+| `failed_login_delay_seconds` | `1` | The wait after a failed login or a wrong current password, doubling with each further one. |
+| `failed_login_max_delay_seconds` | `30` | The longest that wait grows. |
+| `max_failed_logins_per_minute` | `30` | Failures from many addresses together before they are told to slow down. Counted apart for the internet and unverified proxies, for devices on your network, and for sign-ins on this machine; tailnet devices and this machine are only slowed one address at a time. Visitors through a `tailscale serve` TCP forward look exactly like this machine and share its count. |
+| `disable_no_auth_warning` | `false` | Hides the web UI's red warning about having no password. Its "don't show again" sets this. |
+| `cookie_secure` | `"auto"` | Whether the sign-in cookie is marked Secure: `"auto"`, `"always"` or `"never"`. |
+| `max_concurrent_password_checks` | `2` | Password checks run at once, which bounds what a flood of login attempts costs. |
+| `password_check_queue` | `8` | Logins that may wait for a free check; more are turned away at once. |
+| `max_password_bytes` | `1024` | The longest password the login accepts. |
+| `max_tracked_addresses` | `10000` | Addresses whose failed logins dux remembers at once. |
+| `max_blocked_addresses` | `1000` | How long `blocked_addresses` may grow through dux's own additions. |
+
+This machine is never blocked, only slowed down. Everyone behind one shared address (an
+office network, a phone carrier) is blocked together, so if that is you, remove the
+address from `blocked_addresses` and the block lifts at once.
+
+> [!IMPORTANT]
+> A mistake in `[server.auth]` is never read as "no password". A misspelled key, a value
+> of the wrong type, a `password_hash` dux will not use, a password setting written
+> outside `[server.auth]` (`require` directly under `[server]`, a `password-hash` under
+> any spelling, a `[server.authentication]` table), a plaintext `password` written
+> anywhere in the file (dux keeps only the hash; set it with `dux config set
+> server.auth.password`), or a `config.toml` that is not valid TOML at all stops dux
+> from starting, with a message naming the file and the problem, and a reload while it
+> runs changes nothing until the file is fixed.
+> When the section is invalid, `dux config get` and `dux config set` keep working, so
+> you can inspect and repair it from the command line. When the file is not valid TOML,
+> they refuse it too; fix the line the error names by hand. `dux config set` itself
+> refuses any value that would leave the section invalid. If `config.toml` is deleted
+> while dux runs, a reload is refused the same way and the running settings, password
+> included, stay until the file is back; `dux config set` refuses to write a fresh file
+> then too, and points you at Recover config.
+
+`dux config regenerate --yes` writes fresh defaults, which have no password; it says so
+when the config it replaces had one.
 
 ## Logs (`[logging]`)
 

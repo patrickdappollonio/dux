@@ -94,9 +94,12 @@ async fn journey_01_sign_in_list_projects_sign_out_and_be_refused() {
         let asset = page
             .body
             .split('"')
-            .find(|part| part.starts_with("/assets/"))
-            .unwrap_or_else(|| panic!("the page links an asset: {}", page.body))
-            .to_string();
+            .find_map(|part| {
+                // The page links its assets relative to itself (`./assets/...`).
+                let path = part.strip_prefix('.').unwrap_or(part);
+                path.starts_with("/assets/").then(|| path.to_string())
+            })
+            .unwrap_or_else(|| panic!("the page links an asset: {}", page.body));
         for path in [
             "/index.html",
             asset.as_str(),
@@ -287,13 +290,7 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
             );
         }
 
-        let config = dux.config_text().await;
-        let blocked_line = config
-            .lines()
-            .skip_while(|l| !l.trim_start().starts_with("blocked_addresses"))
-            .take_while(|l| !l.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let blocked_line = blocked_addresses(&dux.config_text().await);
         assert!(
             blocked_line.contains(&address),
             "the guessing address {address} is appended to blocked_addresses:\n{blocked_line}"
@@ -366,10 +363,10 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
                 response.describe()
             );
         }
-        let config = dux.config_text().await;
+        let blocked = blocked_addresses(&dux.config_text().await);
         assert!(
-            !config.contains("\"127.0.0.1\"") && !config.contains("\"::1\""),
-            "loopback never lands in blocked_addresses"
+            !blocked.contains("\"127.0.0.1\"") && !blocked.contains("\"::1\""),
+            "loopback never lands in blocked_addresses:\n{blocked}"
         );
         let signed_in = dux_journeys::eventually(
             "this machine to sign in after the slow-down",
@@ -389,6 +386,17 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
         assert_eq!(signed_in.status, 204);
     })
     .await;
+}
+
+/// The `blocked_addresses` setting as config.toml writes it, on one line or
+/// across several.
+fn blocked_addresses(config: &str) -> String {
+    config
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("blocked_addresses"))
+        .take_while(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One wrong-password attempt that dux counted: a 429 is the slow-down asking
@@ -446,7 +454,9 @@ async fn wrong_password_until_counted(client: &Client) -> Response {
 )]
 async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
     journey("11-first-password", Duration::from_secs(300), async {
-        let dux = Dux::start(DuxOptions::exposed()).await;
+        // dux checks Tailscale (and finds none), so this machine is this
+        // machine; with the checks off it could not tell.
+        let dux = Dux::start(DuxOptions::exposed().with_tailscale_checks()).await;
         let network = dux.client().await;
 
         let status = network.auth_status().await;
@@ -457,7 +467,9 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
             .await;
         assert_eq!(attempt.status, 403, "{}", attempt.describe());
         assert!(
-            !dux.config_text().await.contains("$argon2id$"),
+            !dux.config_text()
+                .await
+                .contains("password_hash = \"$argon2id$"),
             "a refused first password writes nothing"
         );
 
@@ -489,7 +501,11 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
             short.describe()
         );
         assert_eq!(short.json()["minimum"], json!(12));
-        assert!(!dux.config_text().await.contains("$argon2id$"));
+        assert!(
+            !dux.config_text()
+                .await
+                .contains("password_hash = \"$argon2id$")
+        );
 
         let set = inside
             .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
@@ -534,8 +550,10 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
             200,
             "a refused change leaves the session alone"
         );
+        // The wrong current password is slowed like a failed sign-in, so the
+        // right one waits that out first.
         let changed = network
-            .post_json(
+            .post_json_waiting(
                 "/api/v1/auth/password",
                 &json!({ "current": STRONG_PASSWORD, "new": OTHER_STRONG_PASSWORD }),
             )
@@ -555,6 +573,16 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
         let tailnet_dux = Dux::start(DuxOptions::local().with_tailnet(4100)).await;
         let peer = tailnet_dux.client_on(4100).await;
         peer.wait_answering().await;
+        // A peer is the tailnet only once dux's first Tailscale look has named
+        // the address it reached, so wait for that look rather than racing it.
+        dux_journeys::eventually(
+            "the first Tailscale look",
+            Duration::from_secs(30),
+            || async {
+                (peer.auth_status().await["client_class"] == json!("tailnet")).then_some(())
+            },
+        )
+        .await;
         let set = peer
             .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
             .await;

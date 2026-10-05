@@ -58,10 +58,11 @@ pub struct ColorInputs<'a> {
 /// - `auto` (or any unrecognized value) → on only when stdout is a terminal AND
 ///   `NO_COLOR` is unset/empty AND `TERM` is not `dumb`.
 pub fn decide_color(inputs: &ColorInputs<'_>) -> bool {
-    match inputs.setting {
-        "always" => true,
-        "never" => false,
-        _ => {
+    use dux_core::config_effective::{ServerColor, effective_server_color};
+    match effective_server_color(inputs.setting) {
+        ServerColor::Always => true,
+        ServerColor::Never => false,
+        ServerColor::Auto => {
             let no_color_active = inputs.no_color.is_some_and(|v| !v.is_empty());
             let term_dumb = inputs.term == Some("dumb");
             inputs.stdout_is_terminal && !no_color_active && !term_dumb
@@ -72,7 +73,7 @@ pub fn decide_color(inputs: &ColorInputs<'_>) -> bool {
 /// Whether `setting` is a recognized `[server] color` value. An unrecognized
 /// value is honored as `auto` but the caller warns so a typo is visible.
 pub fn is_known_color_setting(setting: &str) -> bool {
-    matches!(setting, "auto" | "always" | "never")
+    dux_core::config_effective::ServerColor::parse(setting).is_some()
 }
 
 /// The warning for an unrecognized `[server] color` value.

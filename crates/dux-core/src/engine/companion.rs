@@ -224,7 +224,7 @@ impl Engine {
             // Normalized on every read rather than trusted, so a config that
             // never went through `load_config` still resolves a usable
             // directory.
-            relative: crate::config::normalized_upload_directory(&self.config.ui.upload_directory),
+            relative: crate::config::effective_upload_directory(&self.config.ui.upload_directory),
             write_gitignore: self.upload_seed_allowed(session),
         })
     }

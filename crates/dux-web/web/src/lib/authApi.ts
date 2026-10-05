@@ -13,10 +13,12 @@ import {
   blockedWhere,
   brokenDetail,
   count,
+  limitedFrom,
   readErrorBody,
   record,
   refusalSentence,
   retryAfterSeconds,
+  str,
 } from "./authErrors"
 import { reconnectAttemptTimeoutMs } from "./connectionTiming"
 import { isDeadline, withDeadline } from "./deadline"
@@ -43,6 +45,10 @@ export interface AuthStatus {
   auth_broken: string | null
   minimum_password_length: number | null
   minimum_password_score: number | null
+  /** Why this device, which reached dux over loopback, is treated as the
+   * network (so it signs in, and cannot set the first password). One line,
+   * setting names in backticks for the chip renderer. Null when it is not. */
+  required_reason: string | null
 }
 
 function flag(v: unknown): boolean {
@@ -70,6 +76,7 @@ export function normalizeAuthStatus(raw: unknown): AuthStatus {
           : null,
     minimum_password_length: count(r.minimum_password_length),
     minimum_password_score: count(r.minimum_password_score),
+    required_reason: str(r.required_reason),
   }
 }
 
@@ -113,7 +120,7 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
 export type LoginAnswer =
   | { kind: "ok" }
   | { kind: "wrong" }
-  | { kind: "rate_limited"; retryAfterSeconds: number | null }
+  | { kind: "rate_limited"; retryAfterSeconds: number | null; from: string | null }
   | { kind: "blocked"; where: string | null }
   | { kind: "broken"; detail: string }
   | { kind: "unreachable"; timedOut: boolean }
@@ -145,6 +152,7 @@ export async function postLogin(password: string): Promise<LoginAnswer> {
         body.json,
         Date.now(),
       ),
+      from: limitedFrom(body.json),
     }
   }
   const where = blockedWhere(resp.status, body)

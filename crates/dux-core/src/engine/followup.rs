@@ -195,6 +195,7 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // used to. Neither mutates what the other does.
             | EventReaction::ApplyReloadedConfig(_)
             | EventReaction::OpenConfigReloadFailedModal(_)
+            | EventReaction::ConfigAdopted { .. }
             // Project persistence: the engine already performed the mutation;
             // both arms only report and mirror it.
             | EventReaction::ProjectPersistenceOutcome(_)

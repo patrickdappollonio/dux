@@ -81,6 +81,11 @@ pub trait ConfigSurface: Send + Sync {
     /// Engine's `RecoverConfig` handler writes them over a corrupt on-disk
     /// config through `config_write::write_config_secure`.
     fn recover_render(&self, config: &Config) -> String;
+
+    /// Which surface's start checks [`ConfigSurface::reload`] refuses a file
+    /// by, so a caller that wrote the file can say whether this run will apply
+    /// it (a password is in force only when the reload will take it).
+    fn start_surface(&self) -> crate::config::Surface;
 }
 
 /// A no-op implementation for tests constructing an `Engine` with no front end.
@@ -90,6 +95,10 @@ pub trait ConfigSurface: Send + Sync {
 pub struct NoopConfigSurface;
 
 impl ConfigSurface for NoopConfigSurface {
+    fn start_surface(&self) -> crate::config::Surface {
+        crate::config::Surface::DuxServer
+    }
+
     fn reload(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         ReloadCompletionGuard::new(worker_tx).complete(Ok(Config::default()));
     }

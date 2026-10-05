@@ -242,11 +242,13 @@ pub trait BackgroundServeCompanion {
     /// Adopt the `[server]` section the terminal UI has just swapped in, so the
     /// handful of settings a running listener can honor take effect.
     ///
-    /// Post-apply, unlike [`Self::on_reaction`]: the reload's apply can fail
-    /// after validation passed, and a route answering on the incoming caps while
-    /// the old config is still in force is worse than one answering a request
-    /// late. Called only when the apply succeeded.
-    fn note_config_applied(&mut self, server: &crate::config::ServerConfig);
+    /// Post-apply, unlike [`Self::on_reaction`]: a route answering on the
+    /// incoming caps while the old config is still in force is worse than one
+    /// answering a request late. Called once the new config is in force: the
+    /// apply succeeded, or it failed and the config was adopted anyway. The
+    /// whole config, because the text it was read from is what tells the
+    /// server whether changes it wrote itself are in that text yet.
+    fn note_config_applied(&mut self, config: &crate::config::Config);
 
     /// Whether a listener is serving right now.
     fn is_serving(&self) -> bool;

@@ -14,9 +14,8 @@
 //! ```
 //!
 //! The journeys about the web password login run only with `--features auth`.
-//! Without it they compile and are listed as ignored with the reason; with it
-//! they run, and until the login is built they fail. They were written first:
-//! they are the definition of done for that feature.
+//! Without it they compile and are listed as ignored with the reason. They were
+//! written before the login was built, as its definition of done.
 #![cfg(target_os = "linux")]
 
 mod auth_browser;

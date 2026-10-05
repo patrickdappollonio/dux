@@ -114,6 +114,22 @@ describe("postPassword", () => {
     })
   })
 
+  it("reads a password stored but not in force as its own answer, never a success", async () => {
+    reply = async () =>
+      json(409, { error: "password_not_in_force", message: "Saved, but not in force: x." })
+    const { a, gate } = await load()
+    expect(await a.postPassword({ next: "a long new passphrase here" })).toEqual({
+      kind: "stored_not_in_force",
+      message: "Saved, but not in force: x.",
+    })
+    expect(gate.getAuthPhase().kind).toBe("open")
+    reply = async () => json(409, { error: "password_not_in_force" })
+    expect(await a.postPassword({ next: "a long new passphrase here" })).toEqual({
+      kind: "stored_not_in_force",
+      message: null,
+    })
+  })
+
   it("reads a wrong current password, even as a 401, without signing out", async () => {
     reply = async () => json(401, { error: "wrong_current_password" })
     const { a, gate } = await load()

@@ -27,6 +27,7 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
     auth_broken: null,
     minimum_password_length: null,
     minimum_password_score: null,
+    required_reason: null,
     ...overrides,
   }
 }
@@ -52,6 +53,27 @@ describe("LoginPage", () => {
     expect(screen.getByRole("heading", { name: "Sign in to dux" })).toBeTruthy()
   })
 
+  it("says in one line why this device signs in, with the setting as a chip", () => {
+    render(
+      <LoginPage
+        status={status({
+          required_reason: "`[server] tailscale` is `no`, so dux treats this device as the network.",
+        })}
+        reason="required"
+      />,
+    )
+    const line = screen.getByTestId("login-required-reason")
+    expect(line.textContent).toBe(
+      "[server] tailscale is no, so dux treats this device as the network.",
+    )
+    expect(line.querySelector("code")?.textContent).toBe("[server] tailscale")
+  })
+
+  it("says nothing extra when the server gives no reason", () => {
+    render(<LoginPage status={status()} reason="required" />)
+    expect(screen.queryByTestId("login-required-reason")).toBeNull()
+  })
+
   it("sends the typed password and leaves the URL alone", async () => {
     window.location.hash = "#/agent/s1"
     signIn.mockResolvedValue({ kind: "ok" })
@@ -73,12 +95,16 @@ describe("LoginPage", () => {
 
   it("counts down a rate limit and holds the button until it ends", async () => {
     vi.useFakeTimers()
-    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: 3 })
+    signIn.mockResolvedValue({
+      kind: "rate_limited",
+      retryAfterSeconds: 3,
+      from: "from the network",
+    })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
     // Announced once; the countdown itself is not a live region, so a screen
     // reader is not read every second.
-    expect(screen.getByRole("alert").textContent).toBe("Too many attempts from this address.")
+    expect(screen.getByRole("alert").textContent).toBe("Too many sign-in attempts from the network.")
     const countdown = screen.getByText("Try again in 3 seconds.")
     expect(countdown.closest("[role=alert]")).toBeNull()
     expect(countdown.closest("[aria-live=polite],[aria-live=assertive]")).toBeNull()
@@ -94,7 +120,7 @@ describe("LoginPage", () => {
   })
 
   it("says to wait when the server names no wait", async () => {
-    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: null })
+    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: null, from: null })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
     expect(screen.getByText("Wait a little, then try again.")).toBeTruthy()

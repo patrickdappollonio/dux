@@ -15,6 +15,14 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The `effective_*` functions that used to live here, under the module path
+/// their callers already reach them by.
+pub use crate::config_effective::{
+    effective_agent_tabs_max, effective_log_keep, effective_log_viewer_lines,
+    effective_pr_poll_inactive_interval_seconds, effective_pr_poll_interval_seconds,
+    effective_upload_directory,
+};
+
 /// Which surface(s) a macro is available on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -153,21 +161,6 @@ pub const DEFAULT_LOG_KEEP: u32 = 5;
 /// copies and the user is unlikely to want a thousand of them.
 pub const MAX_LOG_KEEP: u32 = 1000;
 
-/// The effective number of rotated copies to keep: values above
-/// [`MAX_LOG_KEEP`] are clamped with a warning, as the other numeric settings
-/// are. `0` is a real answer here (rotate and discard) rather than "use the
-/// default", so it passes through.
-pub fn normalized_log_keep(configured: u32) -> u32 {
-    if configured > MAX_LOG_KEEP {
-        crate::logger::warn(&format!(
-            "[logging] keep = {configured} exceeds the maximum of {MAX_LOG_KEEP} \
-             and is being clamped",
-        ));
-        return MAX_LOG_KEEP;
-    }
-    configured
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -180,7 +173,7 @@ pub struct LoggingConfig {
     pub max_bytes: u64,
     /// How many rotated copies to keep, numbered `dux.log.1` upwards. The
     /// oldest is deleted. `0` rotates and discards. Read through
-    /// [`normalized_log_keep`].
+    /// [`effective_log_keep`].
     pub keep: u32,
     /// Whether a rotated copy is gzipped to `dux.log.N.gz` in the background.
     pub compress: bool,
@@ -220,24 +213,6 @@ pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
 /// value can't ask the app to keep unbounded live PTYs per agent.
 pub const MAX_AGENT_TABS_MAX: u16 = 100;
 
-/// The effective per-agent tab cap: `0` (or an absent key) means "use the
-/// default"; larger values are clamped to [`MAX_AGENT_TABS_MAX`] with a warning,
-/// mirroring [`shutdown_grace`]'s clamp-at-use discipline so a bad value degrades
-/// gracefully instead of nuking the setting.
-pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
-    if configured == 0 {
-        return DEFAULT_AGENT_TABS_MAX;
-    }
-    if configured > MAX_AGENT_TABS_MAX {
-        crate::logger::warn(&format!(
-            "[ui] agent_tabs_max = {configured} exceeds the maximum of \
-             {MAX_AGENT_TABS_MAX} and is being clamped",
-        ));
-        return MAX_AGENT_TABS_MAX;
-    }
-    configured
-}
-
 /// Default cap on the file-search index flat walk (see
 /// [`crate::git::worktree_files`]). The web editor's file TREE is a lazy,
 /// per-directory browser and is never capped; this only bounds the flat list
@@ -254,12 +229,6 @@ pub const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
 /// The viewer keeps every line wrapped and ready to draw, so the bound is what
 /// keeps its memory and a resize's re-wrap small.
 pub const LOG_VIEWER_LINES_MAX: usize = 20_000;
-
-/// `[server] log_viewer_lines` as the viewer reads it: at least 1, at most
-/// [`LOG_VIEWER_LINES_MAX`].
-pub fn log_viewer_capacity(configured: usize) -> usize {
-    configured.clamp(1, LOG_VIEWER_LINES_MAX)
-}
 
 /// Default visible-time wait, in seconds, for a terminal pane's screen to
 /// arrive after its socket opens, before the pane stops waiting and offers
@@ -387,31 +356,6 @@ pub const MAX_PR_POLL_INTERVAL_SECONDS: u16 = 21_600;
 /// `1`) can't hammer the GitHub API every second.
 pub const MIN_PR_POLL_INTERVAL_SECONDS: u16 = 30;
 
-/// Normalize a configured `pr_poll_interval_seconds`: `0` is a valid
-/// "disable the blind poll" value and is preserved; any other value is clamped
-/// into `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INTERVAL_SECONDS]` (with a
-/// warning) so a fat-fingered entry can't hammer the API or neuter the backstop.
-pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
-    if seconds == 0 {
-        return 0;
-    }
-    if seconds > MAX_PR_POLL_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_interval_seconds = {seconds} exceeds the maximum of \
-             {MAX_PR_POLL_INTERVAL_SECONDS}s and is being clamped."
-        ));
-        return MAX_PR_POLL_INTERVAL_SECONDS;
-    }
-    if seconds < MIN_PR_POLL_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_interval_seconds = {seconds} is below the minimum of \
-             {MIN_PR_POLL_INTERVAL_SECONDS}s and is being clamped (use 0 to disable the poll)."
-        ));
-        return MIN_PR_POLL_INTERVAL_SECONDS;
-    }
-    seconds
-}
-
 /// Default seconds between blind GitHub PR-status polls for INACTIVE agents
 /// (twelve hours). An agent the sidebar has put under Inactive is one nobody is
 /// working in, so its pull request moves rarely and nothing on screen is waiting
@@ -423,36 +367,6 @@ pub const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
 /// useful backstop already, so a fat-fingered value is clamped rather than
 /// silently turning the slow clock off; `0` is how you turn it off on purpose.
 pub const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
-
-/// Normalize a configured `pr_poll_inactive_interval_seconds`: `0` means "never
-/// poll an inactive agent" and is preserved; any other value is clamped into
-/// `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS]`.
-///
-/// It shares the ACTIVE poll's floor deliberately: the floor exists to stop dux
-/// hammering the GitHub API, which is the same concern whichever clock the
-/// entries are on, and a second, different number would be one more thing to
-/// keep in step for no gain.
-pub fn normalized_pr_poll_inactive_interval(seconds: u32) -> u32 {
-    if seconds == 0 {
-        return 0;
-    }
-    if seconds > MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS {
-        crate::logger::warn(&format!(
-            "pr_poll_inactive_interval_seconds = {seconds} exceeds the maximum of \
-             {MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS}s and is being clamped."
-        ));
-        return MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS;
-    }
-    let floor = u32::from(MIN_PR_POLL_INTERVAL_SECONDS);
-    if seconds < floor {
-        crate::logger::warn(&format!(
-            "pr_poll_inactive_interval_seconds = {seconds} is below the minimum of \
-             {floor}s and is being clamped (use 0 to stop polling inactive agents)."
-        ));
-        return floor;
-    }
-    seconds
-}
 
 /// Default seconds between re-checks of `gh` while dux cannot use it. Five
 /// minutes is short enough that a rate limit or a brief outage clears itself
@@ -569,20 +483,14 @@ pub fn normalized_terminal_font_size(size: u16) -> u16 {
 pub const MAX_ATTENTION_GRACE_SECONDS: u64 = 300;
 
 /// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
-/// every shutdown path uses, clamped to [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. Logs a
-/// warning when the configured value is above the ceiling so the operator learns
-/// their setting is being capped (and is nudged that the unit is seconds, not
-/// milliseconds). Centralized so the TUI quit, the web flip, and `dux server`
-/// all derive the grace identically.
+/// every shutdown path uses, through
+/// [`crate::config_effective::effective_shutdown_timeout_seconds`], so the TUI
+/// quit, the web flip, and `dux server` all derive the grace identically. Pure:
+/// a value above the ceiling is said once, when the config loads.
 pub fn shutdown_grace(seconds: u16) -> std::time::Duration {
-    if seconds > MAX_SHUTDOWN_TIMEOUT_SECONDS {
-        crate::logger::warn(&format!(
-            "shutdown_timeout_seconds = {seconds} exceeds the maximum of \
-             {MAX_SHUTDOWN_TIMEOUT_SECONDS}s and is being clamped (the value is in \
-             SECONDS, not milliseconds)."
-        ));
-    }
-    std::time::Duration::from_secs(u64::from(seconds.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)))
+    std::time::Duration::from_secs(u64::from(
+        crate::config_effective::effective_shutdown_timeout_seconds(seconds),
+    ))
 }
 
 /// Whether the server binds this machine's Tailscale address alongside the
@@ -879,6 +787,8 @@ pub fn tailscale_load_warning(config: &Config) -> Option<String> {
     TailscaleMode::unknown_value_warning(&config.server.tailscale)
 }
 
+pub use crate::config_auth::{AddressBlock, AuthRequire, CookieSecure, ServerAuthConfig};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -928,7 +838,7 @@ pub struct ServerConfig {
     /// scrolling back. Older lines are dropped once it is full. `dux server`
     /// prints the same lines to its terminal, whose scrollback is the host
     /// terminal's own, so this only sizes the flip's viewer. Read through
-    /// [`log_viewer_capacity`]: 0 is read as 1 and values above
+    /// [`effective_log_viewer_lines`]: 0 is read as 1 and values above
     /// [`LOG_VIEWER_LINES_MAX`] (20000) as 20000. A negative value is not a valid
     /// value for it, so loading resets this one setting to its default (2000)
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
@@ -1134,6 +1044,12 @@ pub struct ServerConfig {
     /// it then retries forever. Read live, so a config reload applies to the
     /// next connection with no restart.
     pub pty_send_timeout_seconds: u32,
+    /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
+    /// section refuses the whole config rather than resetting to "no
+    /// password" (see [`crate::config_auth`] and [`load_config`]). Never
+    /// written from memory over a value already on disk: only the coordinated
+    /// mutation path (`crate::config_keys`) changes these keys.
+    pub auth: ServerAuthConfig,
 }
 
 impl ServerConfig {
@@ -1364,12 +1280,13 @@ impl WebDragDropPaste {
     /// that only ever reaches a file cannot be asserted on without racing the
     /// process-wide logger, and "warns once per load" is exactly the property
     /// worth pinning.
-    pub fn unknown_value_warning(provider: &str, s: &str) -> Option<String> {
+    /// `at` is the setting as printed, through the one formatter.
+    pub fn unknown_value_warning(at: &str, s: &str) -> Option<String> {
         if Self::parse(s).is_some() {
             return None;
         }
         Some(format!(
-            "unknown providers.{provider}.web_dragdrop_paste value {s:?}; falling back to \
+            "unknown {at} value {s:?}; falling back to \
              \"bare\" (valid: bare, single_quoted, double_quoted, backslash_escaped)"
         ))
     }
@@ -1379,7 +1296,11 @@ impl WebDragDropPaste {
     /// not per paste, so a typo is surfaced without spamming the log; the paste
     /// path uses the non-warning [`WebDragDropPaste::parse`].
     pub fn from_config_str(provider: &str, s: &str) -> Self {
-        if let Some(warning) = Self::unknown_value_warning(provider, s) {
+        let at = shown_path(
+            "",
+            &key_path(&["providers", provider, "web_dragdrop_paste"]),
+        );
+        if let Some(warning) = Self::unknown_value_warning(&at, s) {
             crate::logger::warn(&warning);
         }
         Self::parse(s).unwrap_or(Self::Bare)
@@ -1843,7 +1764,7 @@ pub const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 /// fail every drop into it, once per drop, with a message about the wrong subject
 /// (`Invalid argument` for a NUL, `File name too long` for an over-long path).
 /// Refusing them at load is what the warn-once-and-degrade design exists to do.
-fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
+pub(crate) fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     let trimmed = configured.trim();
     if trimmed.is_empty() {
         return Some("it is empty");
@@ -1894,32 +1815,6 @@ fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     None
 }
 
-/// Normalize a configured `ui.upload_directory` into the relative path dux will
-/// actually create: the configured value with its components rejoined, or
-/// [`DEFAULT_UPLOAD_DIRECTORY`] when the configured one is unusable.
-///
-/// Deliberately PURE: it does not log. The on-disk value is warned about and
-/// corrected exactly once, at load, in [`load_config`]; this is then called from
-/// read paths (every upload resolves its destination through it) that run far
-/// more often than the config loads. Same split as
-/// [`normalized_terminal_font_size`].
-pub fn normalized_upload_directory(configured: &str) -> String {
-    if upload_directory_rejection(configured).is_some() {
-        return DEFAULT_UPLOAD_DIRECTORY.to_string();
-    }
-    // NORMAL components only. Anything a usable value can still hold at this
-    // point is a `.`, which names the directory it sits in and so contributes
-    // nothing to the walk that creates the path.
-    std::path::Path::new(configured.trim())
-        .components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 /// Default `ui.upload_pasted_text_chars`, chosen from what the measured CLIs
 /// actually do with a long paste rather than from caution about it.
 ///
@@ -1960,7 +1855,7 @@ pub const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
 /// Deliberately PURE: it does not log. The on-disk value is warned about and
 /// corrected exactly once, at load, in [`load_config`]; this is then called
 /// from read paths (the bootstrap projection) that run far more often than the
-/// config loads. Same split as [`normalized_upload_directory`].
+/// config loads. Same split as [`effective_upload_directory`].
 pub fn normalized_upload_pasted_text_chars(configured: usize) -> usize {
     if configured == 0 {
         return 0;
@@ -2205,6 +2100,7 @@ impl Default for ServerConfig {
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
+            auth: ServerAuthConfig::default(),
         }
     }
 }
@@ -2589,6 +2485,12 @@ pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
+/// Whether `name` is a name dux accepts for an environment variable, in
+/// `[env]` and in a project's `env`: `[A-Za-z_][A-Za-z0-9_]*`.
+pub fn is_valid_env_name(name: &str) -> bool {
+    is_valid_var_name(name)
+}
+
 fn validate_project_env_name(name: &str) -> Result<()> {
     if is_valid_var_name(name) {
         Ok(())
@@ -2728,6 +2630,79 @@ pub struct Config {
     pub server: ServerConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
+    /// The exact text of the file this config was read from, or that dux
+    /// wrote from it, when there is one. Never serialized. The config
+    /// writer's three-way saves start from it: a config READ from the text is
+    /// re-parsed from it as written, while for a config dux WROTE the base is
+    /// that config itself, never a re-parse of the text (which, through the
+    /// three-way patch, can carry another writer's change dux never had).
+    #[serde(skip)]
+    pub source_text: SourceText,
+}
+
+/// The text behind a [`Config`] (see [`Config::source_text`]), and whether
+/// the config was read from it or dux wrote it. It never makes two configs
+/// differ: equality is about settings.
+#[derive(Clone, Default)]
+pub struct SourceText {
+    text: Option<std::sync::Arc<str>>,
+    /// For a text dux wrote: the config that write is known to have put in
+    /// the file (the base a later save compares memory with).
+    written_base: Option<std::sync::Arc<Config>>,
+}
+
+impl SourceText {
+    /// The text this config was read from.
+    pub fn of(text: &str) -> Self {
+        Self {
+            text: Some(std::sync::Arc::from(text)),
+            written_base: None,
+        }
+    }
+
+    /// A text dux wrote, with `base`, the config that write is known to have
+    /// put in the file. `text` is what dux has seen of the file (the text it
+    /// read plus what it wrote). `base` is never a re-parse of the written
+    /// text, which can carry another writer's change dux never had.
+    pub fn written(text: &str, mut base: Config) -> Self {
+        // The base's own source is dropped, so bases never nest one inside
+        // the other across saves.
+        base.source_text = SourceText::default();
+        Self {
+            text: Some(std::sync::Arc::from(text)),
+            written_base: Some(std::sync::Arc::new(base)),
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// Whether dux wrote the text, rather than read the config from it.
+    pub fn is_written(&self) -> bool {
+        self.written_base.is_some()
+    }
+
+    /// For a text dux wrote, the config that write put in the file.
+    pub fn written_base(&self) -> Option<&Config> {
+        self.written_base.as_deref()
+    }
+}
+
+impl PartialEq for SourceText {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for SourceText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.text.is_some() {
+            "SourceText(..)"
+        } else {
+            "SourceText(None)"
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2809,6 +2784,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
+            source_text: SourceText::default(),
         }
     }
 }
@@ -2842,65 +2818,2161 @@ pub fn provider_config(
 /// applied); callers that want to *adopt* the config should reload from disk via
 /// [`load_config`] so provider defaults are reapplied consistently.
 pub fn validate_config_str(s: &str) -> Result<Config, String> {
-    toml::from_str::<Config>(s).map_err(|e| e.to_string())
+    toml::from_str::<Config>(s).map_err(|e| describe_toml_error(s, &e))
 }
 
-/// Load config for a read-only consumer (the web server). Reads `config.toml` if
-/// present and parses it; on a missing file or parse error, falls back to defaults
-/// (logging the error). Always applies provider defaults. Unlike the TUI's
-/// `ensure_config`, this never creates, migrates, or writes the config file: the
-/// server must not mutate config (that's the TUI's canonical renderer).
+/// Why `config.toml` could not be used at all. Each of these means dux cannot
+/// tell whether `[server.auth]` sets a password, and reading that as "no
+/// password" would open the web UI to anyone who can reach it, so a start
+/// refuses to run and a reload refuses to change the running config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigLoadProblem {
+    /// The file exists but could not be read.
+    Unreadable(String),
+    /// The file is not valid TOML.
+    NotToml(String),
+    /// `[server.auth]` (or the `[server]` table holding it) is invalid.
+    AuthInvalid(String),
+    /// A web UI password setting is somewhere dux does not read one (see
+    /// [`misplaced_auth_problem_list`]); the file may have no `[server.auth]`.
+    AuthMisplaced(String),
+    /// The file was there when dux started and is gone now. Only a reload
+    /// reports this: a first start with no file is the defaults.
+    Missing,
+    /// The path is a symbolic link whose target (held here) does not exist.
+    /// Counted as missing, on a start as well as a reload: the link says
+    /// the user keeps their config somewhere, so the defaults (no password)
+    /// would be a guess.
+    DanglingLink(PathBuf),
+}
+
+/// The target of `path` when `path` is a symbolic link to something that
+/// does not exist, resolved against the link's own directory.
+pub fn dangling_link_target(path: &Path) -> Option<PathBuf> {
+    let link = std::fs::symlink_metadata(path).ok()?;
+    if !link.file_type().is_symlink() {
+        return None;
+    }
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let target = std::fs::read_link(path).ok()?;
+            Some(match path.parent() {
+                Some(dir) if target.is_relative() => dir.join(target),
+                _ => target,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A config parse or type error, described without any of the file's text.
+///
+/// The parser's own errors quote the offending line, and a type error repeats
+/// the value it found; either can be an API token under `[env]` or a password
+/// hash, and these messages reach the status line, toasts, dialogs and
+/// dux.log. So only the position and the kind of problem are kept: `line 2,
+/// column 16: string values must be quoted`. Not even the key name: a
+/// multi-line string or array can make any of its own lines look like one.
+pub fn describe_toml_error(raw: &str, error: &toml::de::Error) -> String {
+    describe_config_error(raw, error.message(), error.span())
+}
+
+/// [`describe_toml_error`] for a `toml_edit` parse error.
+pub fn describe_toml_edit_error(raw: &str, error: &toml_edit::TomlError) -> String {
+    describe_config_error(raw, error.message(), error.span())
+}
+
+fn describe_config_error(raw: &str, message: &str, span: Option<std::ops::Range<usize>>) -> String {
+    let kind = problem_kind(message);
+    let Some(span) = span else {
+        return kind;
+    };
+    let start = span.start.min(raw.len());
+    let before = &raw[..start];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |text| text.chars().count())
+        + 1;
+    format!("line {line}, column {column}: {kind}")
+}
+
+/// The kind of problem in a parser or serde message, with any value it
+/// repeats taken out: `invalid type: string "x", expected u32` becomes
+/// `invalid type, expected u32`, and an unknown variant drops the variant.
+pub(crate) fn problem_kind(message: &str) -> String {
+    let message = message.lines().next().unwrap_or_default().trim();
+    for prefix in ["invalid type", "invalid value", "invalid length"] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            return match rest.find(", expected ") {
+                Some(at) => format!("{prefix}, expected {}", &rest[at + ", expected ".len()..]),
+                None => prefix.to_string(),
+            };
+        }
+    }
+    // The name serde reports missing is a field of dux's own schema, never
+    // anything the file wrote, so it is kept: `missing field surface`.
+    if let Some(rest) = message.strip_prefix("missing field `")
+        && let Some((field, _)) = rest.split_once('`')
+    {
+        return format!("missing field {field}");
+    }
+    if let Some(rest) = message.strip_prefix("unknown variant") {
+        return match rest.find(", expected ") {
+            Some(at) => format!(
+                "unknown value, expected {}",
+                &rest[at + ", expected ".len()..]
+            ),
+            None => "unknown value".to_string(),
+        };
+    }
+    // Anything else (a duplicate key, an unknown field, a parser complaint):
+    // whatever it quotes before ", expected" came from the file (a key name,
+    // and a key name can be a value pasted in the wrong place), so it goes.
+    // What follows ", expected" is dux's own vocabulary and stays.
+    match message.find(", expected ") {
+        Some(at) => format!(
+            "{}, expected {}",
+            without_quoted(&message[..at]),
+            &message[at + ", expected ".len()..]
+        ),
+        None => without_quoted(message),
+    }
+}
+
+/// `text` with every backtick-, double- and single-quoted span removed.
+fn without_quoted(text: &str) -> String {
+    let mut out = String::new();
+    let mut closing: Option<char> = None;
+    for c in text.chars() {
+        match closing {
+            Some(end) if c == end => closing = None,
+            Some(_) => {}
+            None if matches!(c, '`' | '"' | '\'') => closing = Some(c),
+            None => out.push(c),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+impl ConfigLoadProblem {
+    /// What went wrong, in words, without the advice around it.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Unreadable(reason)
+            | Self::NotToml(reason)
+            | Self::AuthInvalid(reason)
+            | Self::AuthMisplaced(reason) => reason,
+            Self::Missing => "the file no longer exists",
+            Self::DanglingLink(_) => "it is a symbolic link to a file that does not exist",
+        }
+    }
+}
+
+/// A [`ConfigLoadProblem`] with the file it is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigLoadError {
+    pub path: PathBuf,
+    pub problem: ConfigLoadProblem,
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self.path.display();
+        match &self.problem {
+            ConfigLoadProblem::Unreadable(error) => write!(
+                f,
+                "{path} could not be read ({error}), so dux cannot tell whether [server.auth] \
+                 sets a password for the web UI. Check the file and its permissions."
+            ),
+            ConfigLoadProblem::NotToml(error) => write!(
+                f,
+                "{path} is not valid TOML, so dux cannot read [server.auth] and cannot tell \
+                 whether a password protects the web UI. Fix it at {error}, then start dux \
+                 or reload the config again."
+            ),
+            ConfigLoadProblem::Missing => write!(
+                f,
+                "{path} no longer exists, so dux cannot tell whether [server.auth] still sets a \
+                 password, and it keeps the running settings, password included. Put the file \
+                 back (or use Recover config to write the running settings to it), then reload."
+            ),
+            ConfigLoadProblem::DanglingLink(target) => write!(
+                f,
+                "{path} is a symbolic link to {}, which does not exist, so dux cannot tell \
+                 whether [server.auth] sets a password for the web UI: it does not start, and a \
+                 reload keeps the running settings, password included. Restore {} or point the \
+                 link at your config file, then start dux or reload again.",
+                target.display(),
+                target.display()
+            ),
+            ConfigLoadProblem::AuthInvalid(reason) => write!(
+                f,
+                "[server.auth] in {path} is invalid, and dux will not guess at a password \
+                 setting. Fix the setting named below by editing that file, or with \
+                 `dux config set server.auth.<setting> <value>` (`dux config get server.auth` \
+                 shows what the file holds; a new password is \
+                 `dux config set server.auth.password`).\n{reason}"
+            ),
+            ConfigLoadProblem::AuthMisplaced(reason) => write!(
+                f,
+                "{path} has a web UI password setting where dux does not read one, and dux will \
+                 not guess at it. Web UI password settings belong in [server.auth] (a new \
+                 password is `dux config set server.auth.password`).\n{reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigLoadError {}
+
 /// Deserialize `raw` into a [`Config`], recovering from a bad field or section
 /// instead of discarding the entire file. A full-document parse success is used
 /// directly; otherwise the offending key(s) are pruned (at FIELD granularity
 /// where a single field can be isolated, else the whole top-level section), reset
-/// to their defaults, warned to the log, and the rest is kept. A genuine TOML
-/// syntax error (or a structure that can't be recovered) still falls back to
-/// `Config::default()`. This means one bad value (e.g. `agent_tabs_max = -1`) can
-/// never silently discard every other setting the user configured.
-fn recover_config(raw: &str) -> Config {
-    let doc: toml::Table = match toml::from_str::<toml::Table>(raw) {
-        Ok(t) => t,
-        Err(e) => {
-            crate::logger::error(&format!("config is not valid TOML ({e}); using defaults"));
-            return Config::default();
+/// to their defaults, warned to the log, and the rest is kept. This means one bad
+/// value (e.g. `agent_tabs_max = -1`) can never silently discard every other
+/// setting the user configured.
+///
+/// `[server.auth]` is the exception, and it fails closed: it is taken out and
+/// read on its own BEFORE any recovery, and a problem there (or a file that is
+/// not TOML at all, where the section cannot be found) is an error rather than
+/// a reset, because its default is "no password".
+#[cfg(test)]
+fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
+    recover_config_with(raw, raw, Report::Log)
+}
+
+/// Whether a read of the config logs what its recovery and corrections do.
+/// The load that dux then runs with does, once; a check, a `get`, or the
+/// base of a save reads the same text again and says nothing, so one load is
+/// one set of log lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+    Log,
+    Quiet,
+}
+
+/// [`recover_config`] of `migrated` (the text after the load migrations),
+/// placing a name in a log line by its line in `raw` (the user's own text),
+/// logging or not as `report` says.
+fn recover_config_with(
+    migrated: &str,
+    raw: &str,
+    report: Report,
+) -> Result<Config, ConfigLoadProblem> {
+    let auth = auth_section_of(migrated)?;
+    let mut doc: toml::Table = toml::from_str::<toml::Table>(migrated)
+        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(migrated, &e)))?;
+    take_auth_section(&mut doc)?;
+    let mut config = recover_config_table(doc, raw, report);
+    config.server.auth = auth;
+    Ok(config)
+}
+
+/// Remove `server.auth` from `doc` and read it on its own, so the field-level
+/// recovery of `[server]` can never reset it.
+fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLoadProblem> {
+    let Some(server) = doc.get_mut("server") else {
+        return Ok(ServerAuthConfig::default());
+    };
+    // A `[server]` that is not a table holds no `[server.auth]`: it is left
+    // to the recovery, as dux always read it. One holding a password setting
+    // never gets here (see [`misplaced_auth_problem_list`]).
+    let toml::Value::Table(server) = server else {
+        return Ok(ServerAuthConfig::default());
+    };
+    let Some(auth) = server.remove("auth") else {
+        return Ok(ServerAuthConfig::default());
+    };
+    parse_auth_value(auth).map_err(ConfigLoadProblem::AuthInvalid)
+}
+
+/// The one form auth key names are matched in: lowercased, with `-` and `_`
+/// removed, so `password_hash`, `password-hash`, `passwordHash` and
+/// `PASSWORD_HASH` are one name. The stray-hash rule, the misplaced-setting
+/// rule and the auth-like table rule all compare through it.
+fn auth_key_form(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether `name` is, in [`auth_key_form`], a setting `[server.auth]` has.
+fn is_auth_key(name: &str) -> bool {
+    let form = auth_key_form(name);
+    crate::config_auth::auth_setting_names()
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once("password_hash"))
+        .chain(virtual_auth_settings().map(|(name, _)| name))
+        .any(|known| auth_key_form(known) == form)
+}
+
+/// The `[server.auth]` settings the command line takes that are never read
+/// from the file (`password`, which dux stores only as its hash), each with
+/// its whole path, from the one list the command line uses
+/// ([`crate::config_keys::VIRTUAL_KEYS`]), so a new one cannot be missed.
+fn virtual_auth_settings() -> impl Iterator<Item = (&'static str, &'static [&'static str])> {
+    crate::config_keys::VIRTUAL_KEYS
+        .iter()
+        .filter_map(|(path, _)| match path {
+            ["server", "auth", name] => Some((*name, *path)),
+            _ => None,
+        })
+}
+
+/// The virtual setting `name` is, in [`auth_key_form`], with its whole
+/// path, if it is one.
+fn virtual_auth_setting(name: &str) -> Option<&'static [&'static str]> {
+    let form = auth_key_form(name);
+    virtual_auth_settings()
+        .find(|(known, _)| auth_key_form(known) == form)
+        .map(|(_, path)| path)
+}
+
+/// Whether `name` is, exactly as written, a setting `[server.auth]` has: the
+/// one spelling dux reads there.
+fn is_exact_auth_setting(name: &str) -> bool {
+    name == "password_hash"
+        || crate::config_auth::auth_setting_names()
+            .iter()
+            .any(|known| known == name)
+}
+
+/// Every setting `[server.auth]` has, written anywhere dux does not read it,
+/// as one structural rule over the whole parsed file. dux would start
+/// without what the user meant to set (a password, `require`,
+/// `blocked_addresses`), reading a mistake as less protection, so each is a
+/// problem that stops the start, named by where it is (never its value),
+/// saying where it belongs, and attributed to that place.
+///
+/// Every key path is walked in every form the file can write it in: tables,
+/// arrays of tables, inline tables, inline arrays and dotted keys (which the
+/// parse makes one shape), and a quoted key holding dots (`"auth.require"`,
+/// `["server.auth"]`), split into its parts for this check only. Every
+/// segment is compared in [`auth_key_form`], so `password-hash`,
+/// `passwordHash` and `Require` are the settings they look like. A key that
+/// names an auth setting is misplaced unless its path is exactly
+/// `server` > `auth` > the setting, spelled as dux reads it, with no array
+/// and no quoted dotted key on the way: `[Server.auth]`, `[[server.auth]]`,
+/// `["server.auth"]`, `[server.auths]`, `require` directly under `[server]`
+/// or at the top level all hold misplaced settings.
+///
+/// A plaintext `password` (the setting the command line takes and stores only
+/// as its hash) is never read from the file, so it stops the start wherever
+/// it is written, `[server.auth]` included, saying how to set one.
+///
+/// Two places are exempt. A NAME the user chose (an `[env]` variable, a
+/// provider, a macro, a variable in a project's `env` inside the
+/// `[[projects]]` list) is just a name: a provider called `password_hash` is
+/// not a password hash, though a field inside it is a field of dux's schema
+/// like anywhere else. It is a name only when its value has the shape that
+/// map's entries have (a string for a variable, a table for a provider or a
+/// macro): `password = "…"` under `[macros]`, where a line added at the end
+/// of a file ending in `[macros]` lands, is no macro. A `[keys]` name is no
+/// name the user chose but one of dux's bindable actions, so only an action
+/// dux has, bound to a key or a list of keys, is exempt there.
+/// A key reached through an array is never such a name (the top-level
+/// `[[projects]]` list aside, whose entries are projects): a map of names
+/// written as an array (`[[env]]`, `[[providers]]`, `macros = [{…}]`) is no
+/// map of names, so an auth setting in it is misplaced like anywhere else.
+/// And the top-level `[auth]` the retired HTTP basic-auth feature wrote,
+/// which real configs still carry (`username = "…"`), is left alone while it
+/// holds nothing `[server.auth]` has; the documentation restore cleans it up.
+/// A table merely named like "auth" (`[path]`, `[oauth]`) and holding no
+/// auth setting is the user's own, as it always was.
+pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
+    misplaced_auth_problems_tagged(raw)
+        .into_iter()
+        .map(|(problem, _)| problem)
+        .collect()
+}
+
+/// The problems [`misplaced_auth_problem_list`] gives that are a plaintext
+/// password written in the file, each saying where it is, never its value.
+pub fn plaintext_password_problems(raw: &str) -> Vec<crate::config_auth::Problem> {
+    misplaced_auth_problems_tagged(raw)
+        .into_iter()
+        .filter_map(|(problem, plaintext)| plaintext.then_some(problem))
+        .collect()
+}
+
+/// What a printer shows in place of a plaintext password written in the
+/// file, `--show` included: it is never echoed.
+pub const PLAINTEXT_PASSWORD_NOT_SHOWN: &str = "(a plaintext password; not shown, and not read)";
+
+/// One step of a key path in a config file: a key as the file writes it (a
+/// quoted key holding dots is one key), or an entry of an array.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathStep {
+    Key(String),
+    Index(usize),
+}
+
+impl PathStep {
+    /// This step as the formatter takes it.
+    pub fn as_part(&self) -> PathPart<'_> {
+        match self {
+            PathStep::Key(key) => PathPart::Key(key),
+            PathStep::Index(index) => PathPart::Index(*index),
+        }
+    }
+}
+
+/// A plaintext password written in a config file, exactly where the start
+/// check found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaintextPassword {
+    /// The key's whole path as the start check's walk saw it.
+    pub steps: Vec<PathStep>,
+    /// The lines the key and its whole value sit on in the file's text,
+    /// counted from zero.
+    pub lines: std::ops::RangeInclusive<usize>,
+}
+
+/// THE answer to "is this a plaintext password": every plaintext password
+/// the start check finds in the file `raw` (the problems
+/// [`plaintext_password_problems`] gives), each with where it is. Every
+/// printer hides what this names and decides nothing of its own. Empty when
+/// `raw` is not TOML: a printer then prints none of the file's text.
+pub fn plaintext_passwords(raw: &str) -> Vec<PlaintextPassword> {
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
+    };
+    let doc = toml_edit::Document::parse(raw).ok();
+    let last_line = raw.lines().count().saturating_sub(1);
+    plaintext_password_steps(&toml::Value::Table(file))
+        .into_iter()
+        .map(|steps| {
+            let lines = doc
+                .as_ref()
+                .and_then(|doc| extent_of(doc.as_item(), &steps))
+                .map_or(0..=last_line, |extent| {
+                    line_index(raw, extent.start)..=line_index(raw, extent.end.saturating_sub(1))
+                });
+            PlaintextPassword { steps, lines }
+        })
+        .collect()
+}
+
+/// The paths of the plaintext passwords the start check finds in the parsed
+/// file `file`.
+fn plaintext_password_steps(file: &toml::Value) -> Vec<Vec<PathStep>> {
+    let mut found = Vec::new();
+    misplaced_auth_settings(file, &mut AuthWalk::default(), &mut found);
+    found
+        .into_iter()
+        .filter(|misplaced| misplaced.virtual_path.is_some())
+        .map(|misplaced| misplaced.shown)
+        .collect()
+}
+
+/// The plaintext passwords the start check finds in `value`, judged as it
+/// sits at `path` (keys only, as a printer is asked for them) in a file that
+/// holds nothing else: what [`plaintext_passwords`] says of the same value
+/// in the user's file, for a printer that holds a value rather than the
+/// text it came from. Each is a whole path from the file's top.
+pub fn plaintext_passwords_at(path: &[String], value: &toml::Value) -> Vec<Vec<PathStep>> {
+    let mut file = value.clone();
+    for key in path.iter().rev() {
+        let mut table = toml::Table::new();
+        table.insert(key.clone(), file);
+        file = toml::Value::Table(table);
+    }
+    plaintext_password_steps(&file)
+}
+
+/// The zero-based line of byte `offset` in `raw`.
+fn line_index(raw: &str, offset: usize) -> usize {
+    raw[..offset.min(raw.len())].matches('\n').count()
+}
+
+/// A place in a parsed document: a whole item, a table in an array of
+/// tables, or a value inside an inline value.
+#[derive(Clone, Copy)]
+enum DocNode<'a> {
+    Item(&'a toml_edit::Item),
+    Table(&'a toml_edit::Table),
+    Value(&'a toml_edit::Value),
+}
+
+impl<'a> DocNode<'a> {
+    /// The child at `step`, with where its key starts.
+    fn child(self, step: &PathStep) -> Option<(DocNode<'a>, Option<usize>)> {
+        let key_start = |key: &toml_edit::Key| key.span().map(|span| span.start);
+        match (self, step) {
+            (
+                DocNode::Item(toml_edit::Item::Table(table)) | DocNode::Table(table),
+                PathStep::Key(key),
+            ) => {
+                let (key, child) = table.get_key_value(key)?;
+                Some((DocNode::Item(child), key_start(key)))
+            }
+            (
+                DocNode::Item(toml_edit::Item::Value(toml_edit::Value::InlineTable(table)))
+                | DocNode::Value(toml_edit::Value::InlineTable(table)),
+                PathStep::Key(key),
+            ) => {
+                let (key, child) = table.get_key_value(key)?;
+                Some((DocNode::Item(child), key_start(key)))
+            }
+            (DocNode::Item(toml_edit::Item::ArrayOfTables(tables)), PathStep::Index(index)) => {
+                Some((DocNode::Table(tables.get(*index)?), None))
+            }
+            (
+                DocNode::Item(toml_edit::Item::Value(toml_edit::Value::Array(items)))
+                | DocNode::Value(toml_edit::Value::Array(items)),
+                PathStep::Index(index),
+            ) => Some((DocNode::Value(items.get(*index)?), None)),
+            _ => None,
+        }
+    }
+
+    /// The bytes this node spans, everything below it included.
+    fn extent(self) -> Option<std::ops::Range<usize>> {
+        let (own, children): (Option<std::ops::Range<usize>>, Vec<DocNode<'a>>) = match self {
+            DocNode::Item(toml_edit::Item::Value(value)) | DocNode::Value(value) => {
+                (value.span(), Vec::new())
+            }
+            DocNode::Item(toml_edit::Item::Table(table)) | DocNode::Table(table) => (
+                table.span(),
+                table
+                    .iter()
+                    .map(|(_, child)| DocNode::Item(child))
+                    .collect(),
+            ),
+            DocNode::Item(toml_edit::Item::ArrayOfTables(tables)) => {
+                (None, tables.iter().map(DocNode::Table).collect())
+            }
+            DocNode::Item(toml_edit::Item::None) => (None, Vec::new()),
+        };
+        own.into_iter()
+            .chain(children.into_iter().filter_map(DocNode::extent))
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+    }
+}
+
+/// The bytes the key at `steps` and its whole value span in a parsed
+/// document.
+fn extent_of(root: &toml_edit::Item, steps: &[PathStep]) -> Option<std::ops::Range<usize>> {
+    let mut node = DocNode::Item(root);
+    let mut key_start = None;
+    for step in steps {
+        let (child, start) = node.child(step)?;
+        node = child;
+        key_start = start.or(key_start);
+    }
+    let extent = node.extent()?;
+    Some(key_start.map_or(extent.start, |start| start.min(extent.start))..extent.end)
+}
+
+/// [`misplaced_auth_problem_list`], each problem with whether it is a
+/// plaintext password.
+fn misplaced_auth_problems_tagged(raw: &str) -> Vec<(crate::config_auth::Problem, bool)> {
+    use crate::config_auth::Problem;
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    misplaced_auth_settings(
+        &toml::Value::Table(file),
+        &mut AuthWalk::default(),
+        &mut found,
+    );
+    found
+        .into_iter()
+        .map(|misplaced| {
+            // Printed through the one formatter, array entries included; a
+            // name it does not print is placed by its line.
+            let parts: Vec<PathPart<'_>> = misplaced.shown.iter().map(PathStep::as_part).collect();
+            let shown = shown_parts(raw, &parts);
+            let message = if let Some(path) = misplaced.virtual_path {
+                format!(
+                    "{shown} is not read: a plaintext password is not read from config.toml; set \
+                     one with `dux config set {}` and remove this line, so dux will not start \
+                     until it is removed",
+                    path.join(".")
+                )
+            } else if misplaced.a_hash {
+                format!(
+                    "{shown} is not read: a password hash belongs in [server.auth] as \
+                     password_hash, so dux will not start until it is moved there or removed"
+                )
+            } else {
+                format!(
+                    "{shown} is not read: the web UI password settings belong in [server.auth], \
+                     so dux will not start until it is moved there or removed"
+                )
+            };
+            let plaintext = misplaced.virtual_path.is_some();
+            (Problem::about(misplaced.keys, message), plaintext)
+        })
+        .collect()
+}
+
+/// Where [`misplaced_auth_settings`] is in the file.
+#[derive(Default)]
+struct AuthWalk {
+    /// The path as printed: keys as written, array entries by index.
+    shown: Vec<PathStep>,
+    /// The keys as written, for attribution and the name rule.
+    keys: Vec<String>,
+    /// The keys with every quoted dotted key split into its parts: what the
+    /// check compares.
+    parts: Vec<String>,
+    /// Whether an array was passed on the way.
+    through_array: bool,
+    /// Whether an array other than the top-level `[[projects]]` list (the
+    /// one array of tables the schema has, whose entries are projects) was
+    /// passed on the way. Past one, no key is a name the user chose: a map
+    /// of names written as an array (`[[env]]`, `[[providers]]`,
+    /// `macros = [{…}]`) is no map of names at all.
+    through_other_array: bool,
+    /// Whether a quoted key holding dots was passed on the way.
+    through_split: bool,
+}
+
+/// An auth setting [`misplaced_auth_settings`] found where dux does not read
+/// it.
+struct MisplacedAuth {
+    shown: Vec<PathStep>,
+    keys: Vec<String>,
+    /// Whether it is a password hash, which is said as one.
+    a_hash: bool,
+    /// The setting's whole path when it is one the command line takes and
+    /// the file never holds (a plaintext password), said as one.
+    virtual_path: Option<&'static [&'static str]>,
+}
+
+fn misplaced_auth_settings(
+    value: &toml::Value,
+    walk: &mut AuthWalk,
+    found: &mut Vec<MisplacedAuth>,
+) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table {
+                let pieces: Vec<&str> = key.split('.').collect();
+                let split = pieces.len() > 1;
+                // The name position of a map of user-chosen names, reached
+                // without a quoted dotted key: the key is the name the user
+                // chose, never a setting.
+                // A project's `env` holds names only inside the `[[projects]]`
+                // list: a `[projects]` table is no list of projects. A value
+                // without the shape that map's entries have is no entry of
+                // it, whatever it is called.
+                let a_name = !walk.through_split
+                    && !walk.through_other_array
+                    && (walk.through_array
+                        || walk.keys.first().map(String::as_str) != Some("projects"))
+                    && names_a_user_entry(&walk.keys, key, child);
+                walk.shown.push(PathStep::Key(key.clone()));
+                walk.keys.push(key.clone());
+                if !a_name {
+                    for (at, piece) in pieces.iter().enumerate() {
+                        if !is_auth_key(piece) {
+                            continue;
+                        }
+                        let mut path = walk.parts.clone();
+                        path.extend(pieces[..=at].iter().map(|piece| (*piece).to_string()));
+                        let read_there = !walk.through_array
+                            && !walk.through_split
+                            && !split
+                            && path.len() == 3
+                            && path[0] == "server"
+                            && path[1] == "auth"
+                            && is_exact_auth_setting(piece);
+                        if !read_there {
+                            found.push(MisplacedAuth {
+                                shown: walk.shown.clone(),
+                                keys: walk.keys.clone(),
+                                a_hash: auth_key_form(piece) == auth_key_form("password_hash"),
+                                virtual_path: virtual_auth_setting(piece),
+                            });
+                            break;
+                        }
+                    }
+                }
+                let parts_before = walk.parts.len();
+                walk.parts
+                    .extend(pieces.iter().map(|piece| (*piece).to_string()));
+                let split_before = walk.through_split;
+                walk.through_split |= split;
+                misplaced_auth_settings(child, walk, found);
+                walk.through_split = split_before;
+                walk.parts.truncate(parts_before);
+                walk.keys.pop();
+                walk.shown.pop();
+            }
+        }
+        toml::Value::Array(items) => {
+            let array_before = walk.through_array;
+            let other_before = walk.through_other_array;
+            let the_projects_list = !walk.through_array && walk.keys == ["projects"];
+            walk.through_array = true;
+            walk.through_other_array |= !the_projects_list;
+            for (index, item) in items.iter().enumerate() {
+                walk.shown.push(PathStep::Index(index));
+                misplaced_auth_settings(item, walk, found);
+                walk.shown.pop();
+            }
+            walk.through_array = array_before;
+            walk.through_other_array = other_before;
+        }
+        _ => {}
+    }
+}
+
+/// Whether a key directly under `parent` (a path of keys, array entries
+/// left out) holding `value` is a name the user chose: an entry of a map of
+/// user-chosen names (`[env]`, `[providers]`, `[macros]`, `[keys]`) or of a
+/// project's `env`, with the shape that map's entries have (see
+/// [`NameRule::entry_fits`]). `[[projects]]` is a list, so a key directly in
+/// a project is one of a project's fields, never a name. A key whose value
+/// has another shape is no entry of the map at all (a string is never a
+/// macro), so it is judged like any other key: a password written at the
+/// end of a file whose last table is `[macros]` is a password.
+fn names_a_user_entry(parent: &[String], name: &str, value: &toml::Value) -> bool {
+    let rule = match parent {
+        [section] => user_name_rule(section),
+        [projects, env] if projects == "projects" && env == "env" => Some(NameRule::Variable),
+        _ => None,
+    };
+    rule.is_some_and(|rule| rule.entry_fits(name, value))
+}
+
+/// [`misplaced_auth_problem_list`]'s sentences.
+pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
+    misplaced_auth_problem_list(raw)
+        .into_iter()
+        .map(|problem| problem.message)
+        .collect()
+}
+
+/// The `[server.auth]` section of a whole config file's text, read exactly as
+/// [`load_config`] reads it. A writer checks a candidate file with this
+/// before it lands, so nothing it writes can stop dux from starting.
+///
+/// Read from the user's own text, so an error quotes their file with its real
+/// line numbers rather than a re-serialized copy of the section.
+pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
+    // Only `server.auth` is read; every other key is ignored here.
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        server: Option<ServerPart>,
+    }
+    #[derive(Deserialize)]
+    struct ServerPart {
+        #[serde(default)]
+        auth: Option<ServerAuthConfig>,
+    }
+    let table = toml::from_str::<toml::Table>(raw)
+        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
+    if let Some(problem) = misplaced_auth_problems(raw).into_iter().next() {
+        return Err(ConfigLoadProblem::AuthMisplaced(problem));
+    }
+    // A `[server]` that is not a table holds no `[server.auth]` (a password
+    // setting inside it was refused just above), so there is no password,
+    // as dux always read such a file; the rest is left to the recovery.
+    if table.get("server").is_some_and(|server| !server.is_table()) {
+        return Ok(ServerAuthConfig::default());
+    }
+    let file: File = toml::from_str(raw).map_err(|e| {
+        // A rule the section breaks as a whole (checked after every field
+        // parsed) has no position of its own; the parser then points at the
+        // start of the file. Point at the section's header instead.
+        if e.span().is_none_or(|span| span.start == 0) {
+            let kind = problem_kind(e.message());
+            let header = raw.lines().position(is_auth_section_header);
+            return ConfigLoadProblem::AuthInvalid(match header {
+                Some(index) => format!("line {} (the [server.auth] header): {kind}", index + 1),
+                None => format!("in [server.auth]: {kind}"),
+            });
+        }
+        ConfigLoadProblem::AuthInvalid(describe_toml_error(raw, &e))
+    })?;
+    Ok(file
+        .server
+        .and_then(|server| server.auth)
+        .unwrap_or_default())
+}
+
+/// Whether a line is the `[server.auth]` table header itself (spacing and
+/// quoting aside), never a table whose name merely contains it.
+fn is_auth_section_header(line: &str) -> bool {
+    let line = line.trim();
+    if !line.starts_with('[') || line.starts_with("[[") {
+        return false;
+    }
+    // Read the line as TOML on its own, so quoting, spacing and a trailing
+    // comment are the parser's business rather than a string match's.
+    let Ok(doc) = line.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    doc.get("server")
+        .and_then(|server| server.as_table())
+        .and_then(|server| server.get("auth"))
+        .and_then(|auth| auth.as_table())
+        .is_some_and(|auth| !auth.is_implicit())
+}
+
+// ---------------------------------------------------------------------------
+// Start checks: the one list of what stops dux starting with a config file
+// ---------------------------------------------------------------------------
+//
+// Every check either surface makes at start or on reload is here, tagged
+// with the surfaces it stops. The terminal UI's `ensure_config`, `dux
+// server`'s bootstrap, both reload workers and `dux config get`/`set` all
+// ask [`check_start`], so a check cannot exist for one of them and not the
+// others.
+
+/// A surface a start check can stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// The terminal UI, at start and on reload.
+    TerminalUi,
+    /// `dux server` (and the terminal UI's background server), at start and
+    /// on reload.
+    DuxServer,
+}
+
+/// One thing that stops dux starting with a config file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartProblem {
+    /// What it is about; two problems are the same when their ids are.
+    pub id: String,
+    /// The sentence shown: which surfaces will not start, and why. Never a
+    /// value from the file.
+    pub message: String,
+    /// Why, without which surfaces it stops: what a caller that words the
+    /// surfaces itself lists.
+    pub detail: String,
+    /// The settings it is about, each as its path's segments. Empty for the
+    /// file as a whole.
+    pub keys: Vec<Vec<String>>,
+    /// A rule spanning `keys`, rather than a problem with one value.
+    pub cross_key: bool,
+    /// About one entry of a list value, known by the entry's own text.
+    pub entry: bool,
+    /// Whether the terminal UI will not start (or reload) with the file.
+    pub stops_terminal_ui: bool,
+    /// Whether `dux server` will not start (or reload) with the file.
+    pub stops_dux_server: bool,
+    /// The `[server]` setting it is about when `dux server`'s command line
+    /// can take the file's value out of the picture (see
+    /// [`ServerFileSetting::overriding_flags`]), so its own start judges it.
+    pub dux_server_override: Option<ServerFileSetting>,
+}
+
+impl StartProblem {
+    /// Whether this stops `surface`.
+    pub fn stops(&self, surface: Surface) -> bool {
+        match surface {
+            Surface::TerminalUi => self.stops_terminal_ui,
+            Surface::DuxServer => self.stops_dux_server,
+        }
+    }
+
+    fn new(problem: crate::config_auth::Problem, terminal_ui: bool, dux_server: bool) -> Self {
+        let who = match (terminal_ui, dux_server) {
+            (true, true) => "the terminal UI and dux server",
+            (true, false) => "the terminal UI",
+            _ => "dux server",
+        };
+        Self {
+            message: format!("{who} will not start with this file: {}", problem.message),
+            detail: problem.message,
+            id: problem.id,
+            keys: problem.keys,
+            cross_key: problem.cross_key,
+            entry: problem.entry,
+            stops_terminal_ui: terminal_ui,
+            stops_dux_server: dux_server,
+            dux_server_override: None,
+        }
+    }
+}
+
+/// Everything [`check_start`] found, and the rules spanning keys it could
+/// not judge (a key they involve does not read), which therefore were not
+/// satisfied either.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartCheck {
+    pub problems: Vec<StartProblem>,
+    pub unjudgeable_rules: Vec<String>,
+}
+
+/// A check only the terminal UI's crate can make (its `[keys]`, after the
+/// key migrations its start applies), installed by it, so the one list holds
+/// it too. It gets the whole file's text and returns what it refuses.
+pub type TerminalUiCheck = fn(&str) -> Vec<String>;
+
+static TERMINAL_UI_CHECK: std::sync::OnceLock<TerminalUiCheck> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's own check (see [`TerminalUiCheck`]). Called by
+/// the terminal UI's crate before it reads or judges a config file; a second
+/// install is ignored.
+pub fn install_terminal_ui_check(check: TerminalUiCheck) {
+    let _ = TERMINAL_UI_CHECK.set(check);
+}
+
+/// The migrations only the terminal UI's start applies (its `[keys]`
+/// ones: retired actions pruned, legacy ones folded), installed by it, so
+/// the one list judges the file's types as that start reads them.
+pub type TerminalUiMigration = fn(&mut toml_edit::DocumentMut);
+
+static TERMINAL_UI_MIGRATION: std::sync::OnceLock<TerminalUiMigration> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's own migrations (see [`TerminalUiMigration`]);
+/// a second install is ignored.
+pub fn install_terminal_ui_migration(migration: TerminalUiMigration) {
+    let _ = TERMINAL_UI_MIGRATION.set(migration);
+}
+
+/// What the terminal UI's own `[keys]` migrations make of each `[keys]`
+/// entry in the whole config file `raw` they change, by path, with what the
+/// terminal UI uses instead: a binding folded into the action that replaced
+/// a retired one, or one it drops. Empty when the migrations are not
+/// installed (no terminal UI in this process) or change nothing.
+pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
+    terminal_ui_key_corrections_with_sources(raw)
+        .into_iter()
+        .map(|correction| (correction.path, correction.reason))
+        .collect()
+}
+
+/// [`terminal_ui_key_corrections`], each binding that gained a retired one's
+/// with the path it came from.
+pub fn terminal_ui_key_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
+    };
+    if TERMINAL_UI_MIGRATION.get().is_none() {
+        return Vec::new();
+    }
+    let Some(read) = start_reads(raw).map(|reads| reads.terminal_ui) else {
+        return Vec::new();
+    };
+    let keys_of = |table: &toml::Table| -> toml::Table {
+        table
+            .get("keys")
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (before, after) = (keys_of(&file), keys_of(&read));
+    let mut found = Vec::new();
+    for (name, value) in &before {
+        if after.get(name) == Some(value) {
+            continue;
+        }
+        // Where its binding went: an action that now has it and did not.
+        let moved_to = after
+            .iter()
+            .find(|(other, bound)| {
+                *other != name
+                    && before.get(*other) != Some(bound)
+                    && contains_binding(bound, value)
+            })
+            .map(|(other, _)| other.clone());
+        let reason = match (moved_to, after.get(name)) {
+            (Some(other), _) => format!("the terminal UI uses this binding as {other}"),
+            (None, Some(_)) => "the terminal UI reads this binding differently".to_string(),
+            (None, None) => {
+                "the terminal UI drops this binding: that action no longer exists".to_string()
+            }
+        };
+        found.push(LoadCorrection::new(
+            vec!["keys".to_string(), name.clone()],
+            reason,
+        ));
+    }
+    // And each action that gained the binding of a retired one.
+    for (name, value) in &after {
+        if before.get(name) == Some(value) {
+            continue;
+        }
+        let from: Vec<&String> = before
+            .iter()
+            .filter(|(old, bound)| !after.contains_key(*old) && contains_binding(value, bound))
+            .map(|(old, _)| old)
+            .collect();
+        if from.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = from.iter().map(|name| name.as_str()).collect();
+        found.push(LoadCorrection {
+            path: vec!["keys".to_string(), name.clone()],
+            reason: format!(
+                "it also carries the binding of the retired {}",
+                names.join(" and ")
+            ),
+            from: Some(vec!["keys".to_string(), from[0].clone()]),
+        });
+    }
+    found
+}
+
+/// Whether the binding `bound` carries everything `value` binds.
+fn contains_binding(bound: &toml::Value, value: &toml::Value) -> bool {
+    let items = |v: &toml::Value| -> Vec<toml::Value> {
+        match v {
+            toml::Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
         }
     };
-    // Fast path: the whole document deserializes cleanly.
-    if let Ok(cfg) = table_into_config(doc.clone()) {
-        return cfg;
+    let bound = items(bound);
+    items(value).iter().all(|item| bound.contains(item))
+}
+
+/// The terminal UI's own resolution of `[keys]` for a whole config file: every
+/// action's binding as it runs (the file's, after its key migrations, or the
+/// action's default), by action name, and `show_terminal_keys`. Installed by
+/// the terminal UI, which alone knows its actions and their defaults, so
+/// `dux config get` reports what it uses by running that resolution, never a
+/// copy of it. `None` for a `[keys]` it cannot read.
+pub type TerminalUiKeyResolution = fn(&str) -> Option<toml::Table>;
+
+static TERMINAL_UI_KEYS: std::sync::OnceLock<TerminalUiKeyResolution> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's key resolution (see
+/// [`TerminalUiKeyResolution`]); a second install is ignored.
+pub fn install_terminal_ui_key_resolution(resolution: TerminalUiKeyResolution) {
+    let _ = TERMINAL_UI_KEYS.set(resolution);
+}
+
+/// Whether a `[keys]` name is one of the terminal UI's bindable actions, by
+/// the list its binding parser reads (retired and folded names included,
+/// which its load still knows). Installed by the terminal UI, which alone
+/// knows its actions.
+pub type TerminalUiKeyActions = fn(&str) -> bool;
+
+static TERMINAL_UI_KEY_ACTIONS: std::sync::OnceLock<TerminalUiKeyActions> =
+    std::sync::OnceLock::new();
+
+/// Install the terminal UI's action list (see [`TerminalUiKeyActions`]); a
+/// second install is ignored.
+pub fn install_terminal_ui_key_actions(is_action: TerminalUiKeyActions) {
+    let _ = TERMINAL_UI_KEY_ACTIONS.set(is_action);
+}
+
+/// Whether `name` is an action `[keys]` binds. Without the terminal UI's
+/// list installed no name is one, so nothing under `[keys]` is exempt from
+/// the auth checks: an unknown answer never lets a password pass as a name.
+fn is_key_action(name: &str) -> bool {
+    TERMINAL_UI_KEY_ACTIONS
+        .get()
+        .is_some_and(|is_action| is_action(name))
+}
+
+/// The `[keys]` the terminal UI uses with the whole config file `raw`, by
+/// its own resolution, when installed.
+pub fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
+    TERMINAL_UI_KEYS.get().and_then(|resolve| resolve(raw))
+}
+
+/// Every problem that stops dux starting with the whole config file `raw`,
+/// each listed once, field by field, and each check run on its own so no
+/// problem hides another:
+///
+/// - the file is not TOML (both surfaces);
+/// - a password hash or an auth table where dux does not read one (both);
+/// - `[server.auth]`, key by key, and its rules (both);
+/// - a setting of the wrong type, each field on its own: the terminal UI
+///   reads the file strictly, while `dux server` resets it to its default;
+/// - `[server] host` not an IP literal (both; `--bind` overrides it for
+///   `dux server`);
+/// - `[server] port` 0 (`dux server`, overridable by `--port`/`--bind`; the
+///   terminal UI starts, and its background server takes any free port);
+/// - an environment variable dux cannot use (the terminal UI);
+/// - project records that conflict, such as duplicate ids (both);
+/// - the terminal UI's own `[keys]` check, when installed (the terminal UI).
+pub fn check_start(raw: &str) -> StartCheck {
+    use crate::config_auth::Problem;
+    let mut check = StartCheck::default();
+    let both = |problem: Problem| StartProblem::new(problem, true, true);
+    let file: toml::Table = match toml::from_str(raw) {
+        Ok(file) => file,
+        Err(error) => {
+            check.problems.push(both(Problem::plain(format!(
+                "the file is not valid TOML: {}",
+                problem_kind(error.message())
+            ))));
+            return check;
+        }
+    };
+    check
+        .problems
+        .extend(misplaced_auth_problem_list(raw).into_iter().map(both));
+    check
+        .problems
+        .extend(auth_section_problems(&file, raw).into_iter().map(both));
+    if let Some(auth) = file
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("auth"))
+    {
+        check.unjudgeable_rules = crate::config_auth::unjudgeable_rules_of(auth);
     }
-    // Recovery: a section that deserializes in isolation is fine (missing sections
-    // use serde defaults, so a single-section document is always structurally ok).
-    // For a bad section, drop only the offending FIELDS where each can be isolated;
-    // otherwise reset the whole section.
-    let mut pruned = doc.clone();
+    let Some(StartReads {
+        dux_server: rest,
+        terminal_ui,
+        migration_failures,
+    }) = start_reads(raw)
+    else {
+        return check;
+    };
+    // A deprecated key the migrations cannot carry over stops the terminal
+    // UI, whose start runs them on the file and refuses it; `dux server`
+    // reads such a file unmigrated, which is what the checks below judge.
+    for (key, message) in migration_failures {
+        check
+            .problems
+            .push(StartProblem::new(Problem::about(key, message), true, false));
+    }
+    // What `dux server`'s load does about each wrong-typed value is said as
+    // it is: the value read as its default, or the entry or section around
+    // it dropped with it.
+    let plan = recovery_plan(&rest);
+    // Wrong types stop the terminal UI, so they are judged as its start reads
+    // the file: after its own `[keys]` migrations, which drop a retired
+    // action whatever its value (where they reach it: a `[keys]` written as
+    // an inline table they leave as it is, and so does its start).
+    for (place, key, kind) in wrong_typed_settings(&terminal_ui, raw) {
+        let what = Recovery::covering(&plan, &key).map_or_else(
+            || "dux server reads it as its default".to_string(),
+            |r| r.said_of(&key, raw),
+        );
+        // The setting it is about, for attribution only; never printed.
+        check.problems.push(StartProblem::new(
+            Problem::about(key, format!("{place}: {kind} ({what})")),
+            true,
+            false,
+        ));
+    }
+    let mut config = recover_config_table(rest, raw, Report::Quiet);
+    config.providers.ensure_defaults();
+    let (config, _) = load_corrections(config);
+    check
+        .problems
+        .extend(config_start_problems(&config, Some(raw)));
+    if let Some(terminal_ui_check) = TERMINAL_UI_CHECK.get() {
+        for message in terminal_ui_check(raw) {
+            check.problems.push(StartProblem::new(
+                Problem::about(key_path(&["keys"]), message),
+                true,
+                false,
+            ));
+        }
+    }
+    check
+}
+
+/// [`check_start`]'s problems.
+pub fn start_problems_of(raw: &str) -> Vec<StartProblem> {
+    check_start(raw).problems
+}
+
+/// The first problem that stops `surface` with the whole config file `raw`,
+/// as the sentence to refuse with. For `dux server` a problem its command
+/// line can override is left to its own start, which knows the command line.
+pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
+    check_start(raw)
+        .problems
+        .into_iter()
+        .find(|problem| {
+            problem.stops(surface)
+                && !(surface == Surface::DuxServer && problem.dux_server_override.is_some())
+        })
+        .map(|problem| problem.message)
+}
+
+/// The problems a set of the setting `key` would add to a file: the
+/// problems in `after` it is answerable for, judged against `before`.
+///
+/// A set is answerable for a problem with its own value (a value of the
+/// wrong type or out of its range), and for a rule spanning its key that
+/// the file satisfied before. A rule that could not be judged before was
+/// not satisfied, so breaking it is not new. A list value's entries are
+/// known by their own text: an entry is new only when no entry of the old
+/// list had its text. Problems about other settings never block a set. A
+/// problem about no setting at all is answerable whenever it is new, known
+/// by its id, so no problem is ever invisible to a set.
+pub fn problems_added_by_set<'a>(
+    before: &StartCheck,
+    after: &'a StartCheck,
+    key: &[String],
+) -> Vec<&'a StartProblem> {
+    // Compared segment by segment: a name holding a dot is one segment, so
+    // a problem about `env."FOO.BAR"` is never taken for one about `env.FOO`.
+    let related = |other: &[String]| other.starts_with(key) || key.starts_with(other);
+    let is_new = |problem: &StartProblem| before.problems.iter().all(|old| old.id != problem.id);
+    after
+        .problems
+        .iter()
+        .filter(|problem| {
+            if problem.keys.is_empty() {
+                is_new(problem)
+            } else if !problem.keys.iter().any(|other| related(other)) {
+                false
+            } else if problem.entry {
+                is_new(problem)
+            } else if problem.cross_key {
+                let was_broken = before.problems.iter().any(|old| old.id == problem.id);
+                let was_unjudgeable = before.unjudgeable_rules.contains(&problem.id);
+                !was_broken && !was_unjudgeable
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
+/// Each deprecated key the load migrations cannot carry over: its path and
+/// the sentence the terminal UI's start refuses it with.
+type MigrationFailures = Vec<(Vec<String>, String)>;
+
+/// The rest of the file beside `[server.auth]` (judged on its own) as each
+/// surface's start reads it, and every deprecated key the migrations could
+/// not carry over, each with the sentence the terminal UI's start refuses it
+/// with.
+///
+/// Each read is the surface's own pipeline, on the representation it runs on:
+/// the file parsed as the toml_edit document it is written as, through the
+/// same migration functions in the same order, and only then read as a table.
+/// Never a re-print of the file: re-printing turns an inline table into a
+/// `[section]`, which the migrations then act on where a start's do not.
+struct StartReads {
+    /// `dux server`'s load ([`config_from_text`]): the load migrations, or
+    /// the file as written when they fail.
+    dux_server: toml::Table,
+    /// The terminal UI's start: the load migrations (a failure stops it, and
+    /// `migration_failures` says so), then its own `[keys]` migrations.
+    terminal_ui: toml::Table,
+    migration_failures: MigrationFailures,
+}
+
+fn start_reads(raw: &str) -> Option<StartReads> {
+    let written = raw.parse::<toml_edit::DocumentMut>().ok()?;
+    let migration_failures = crate::config_migrate::load_migration_failures(&written);
+    let mut migrated = written.clone();
+    let migrations_ran = crate::config_migrate::apply_load_migrations(&mut migrated).is_ok();
+    let dux_server_text = if migrations_ran {
+        migrated.to_string()
+    } else {
+        raw.to_string()
+    };
+    let mut terminal_ui = if migrations_ran { migrated } else { written };
+    if let Some(migrate) = TERMINAL_UI_MIGRATION.get() {
+        migrate(&mut terminal_ui);
+    }
+    // Read as the loads read their text, `[server.auth]` taken out as
+    // `take_auth_section` takes it.
+    let beside_auth = |text: &str| -> Option<toml::Table> {
+        let mut table: toml::Table = toml::from_str(text).ok()?;
+        if let Some(toml::Value::Table(server)) = table.get_mut("server") {
+            server.remove("auth");
+        }
+        Some(table)
+    };
+    Some(StartReads {
+        dux_server: beside_auth(&dux_server_text)?,
+        terminal_ui: beside_auth(&terminal_ui.to_string())?,
+        migration_failures,
+    })
+}
+
+/// Every setting of the wrong type in `table`, each judged on its own down
+/// to the field that is wrong, inside a provider or any other table:
+/// (where it is, its dotted key, the kind of problem). A table that fails
+/// although none of its entries does on its own is listed whole.
+///
+/// An entry of `[env]` whose name is not a variable name is placed by its
+/// line in `raw` rather than named: such a name may be a value pasted in
+/// the wrong place.
+fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, Vec<String>, String)> {
+    let mut found = Vec::new();
+    for (section, value) in table {
+        if !section_solo_ok(section, value.clone()) {
+            wrong_typed_inside(section, &mut Vec::new(), value, &mut found);
+        }
+    }
+    found
+        .into_iter()
+        .map(|(segments, kind)| (shown_place(raw, &segments), segments, kind))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Printing a setting's path
+// ---------------------------------------------------------------------------
+//
+// Every path dux prints (a problem, a correction, a table `get` prints, the
+// setting a command names, a log line, `dux config diff`) goes through the
+// formatter below, and the formatter decides from the SCHEMA. A segment the
+// file wrote is printed as itself only when the schema knows a key of that
+// name at that position (`ui.left_width_pct`, a `[server.auth]` setting), or
+// when it is an entry of a map of user-chosen names and follows that map's
+// naming rule. Anything else (an unknown key in a fixed table, a key under a
+// value that is not a table, a name that breaks its rule) may be a value
+// pasted in the wrong place, a token above all: it is never printed, and the
+// entry is placed by its line in the file instead.
+
+/// The rule a name in a map of user-chosen names must follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameRule {
+    /// An environment variable name.
+    Variable,
+    /// The characters a setting path allows: letters, digits, `_` and `-`.
+    Plain,
+    /// An action name: lowercase letters, digits and `_`.
+    Action,
+    /// None: the entries are a list, not names (`[[projects]]`).
+    Any,
+}
+
+impl NameRule {
+    /// Whether `name` holding `value` is an entry of a map named by this
+    /// rule: a variable's value is a string, a provider or a macro is a
+    /// table, and a list has no named entries. `[keys]` names are no names
+    /// the user chose but dux's own bindable actions, so a binding is an
+    /// action dux has (see [`is_key_action`]) bound to a key or a list of
+    /// keys.
+    fn entry_fits(self, name: &str, value: &toml::Value) -> bool {
+        match self {
+            Self::Variable => value.is_str(),
+            Self::Plain => value.is_table(),
+            Self::Action => {
+                is_key_action(name)
+                    && match value {
+                        toml::Value::String(_) => true,
+                        toml::Value::Array(items) => items.iter().all(toml::Value::is_str),
+                        _ => false,
+                    }
+            }
+            Self::Any => false,
+        }
+    }
+
+    fn allows(self, name: &str) -> bool {
+        let all = |ok: fn(char) -> bool| !name.is_empty() && name.chars().all(ok);
+        match self {
+            Self::Variable => is_valid_var_name(name),
+            Self::Plain => all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            Self::Action => all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            Self::Any => true,
+        }
+    }
+}
+
+/// The tables whose keys are names the user chose, each with the rule a name
+/// there follows. The ONE list: the formatter's schema and the
+/// misplaced-password rule both read it, so they cannot drift apart.
+const USER_NAMED_MAPS: &[(&str, NameRule)] = &[
+    ("env", NameRule::Variable),
+    ("providers", NameRule::Plain),
+    ("macros", NameRule::Plain),
+    ("keys", NameRule::Action),
+    ("projects", NameRule::Any),
+];
+
+/// The rule a name in the user-named map `section` must follow, if it is one.
+fn user_name_rule(section: &str) -> Option<NameRule> {
+    USER_NAMED_MAPS
+        .iter()
+        .find(|(map, _)| *map == section)
+        .map(|(_, rule)| *rule)
+}
+
+/// What the schema says of one segment under a path it knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaStep {
+    /// A key the schema knows at that position.
+    Known,
+    /// An entry of a map of user-chosen names, following its rule or not.
+    Entry { follows_rule: bool },
+    /// Neither: an unknown key, or one under a value that is not a table.
+    Unknown,
+}
+
+/// The schema's own trees, from the defaults: the whole config, one
+/// provider, one macro and one project, each with every field it has.
+struct SchemaTrees {
+    config: serde_json::Value,
+    provider: serde_json::Value,
+    macro_entry: serde_json::Value,
+    project: serde_json::Value,
+}
+
+fn schema_trees() -> &'static SchemaTrees {
+    static TREES: std::sync::OnceLock<SchemaTrees> = std::sync::OnceLock::new();
+    TREES.get_or_init(|| SchemaTrees {
+        config: serde_json::to_value(Config::default()).unwrap_or_default(),
+        provider: serde_json::to_value(ProviderCommandConfig::default()).unwrap_or_default(),
+        macro_entry: serde_json::to_value(MacroEntry {
+            text: String::new(),
+            surface: MacroSurface::default(),
+        })
+        .unwrap_or_default(),
+        project: toml::from_str::<ProjectConfig>("path = \"\"")
+            .ok()
+            .and_then(|project| serde_json::to_value(project).ok())
+            .unwrap_or_default(),
+    })
+}
+
+/// What the schema says of `segment` under `parent`, a path it knows.
+fn schema_step(parent: &[String], segment: &str) -> SchemaStep {
+    let trees = schema_trees();
+    let known_in = |tree: &serde_json::Value| {
+        if tree.get(segment).is_some() {
+            SchemaStep::Known
+        } else {
+            SchemaStep::Unknown
+        }
+    };
+    let parts: Vec<&str> = parent.iter().map(String::as_str).collect();
+    // dux's own former names: a deprecated key it still reads, a retired one
+    // a save removes, and a section it no longer reads.
+    let former = match parts.as_slice() {
+        [section] => {
+            crate::config_migrate::is_deprecated_key(section, segment)
+                || crate::config_write::is_retired_key(section, segment)
+        }
+        _ => false,
+    } || {
+        let mut whole: Vec<&str> = parts.clone();
+        whole.push(segment);
+        crate::config_write::ORPHANED_CONFIG_SECTIONS.contains(&whole.as_slice())
+            // A setting dux accepts on the command line with no key of its
+            // own in the file (`server.auth.password`) is dux's word too.
+            || crate::config_keys::VIRTUAL_KEYS
+                .iter()
+                .any(|(name, _)| *name == whole.as_slice())
+    };
+    // `password_hash` is dux's own word wherever it is written: a misplaced
+    // one is named as what it is (see `misplaced_auth_problem_list`).
+    if former || segment == "password_hash" {
+        return SchemaStep::Known;
+    }
+    match parts.as_slice() {
+        ["keys"] if segment == "show_terminal_keys" => SchemaStep::Known,
+        ["providers", _] => known_in(&trees.provider),
+        ["macros", _] => known_in(&trees.macro_entry),
+        ["projects"] => known_in(&trees.project),
+        ["projects", "env"] => SchemaStep::Entry {
+            follows_rule: NameRule::Variable.allows(segment),
+        },
+        [map] if user_name_rule(map).is_some_and(|rule| rule != NameRule::Any) => {
+            SchemaStep::Entry {
+                follows_rule: user_name_rule(map).is_some_and(|rule| rule.allows(segment)),
+            }
+        }
+        _ => {
+            let mut node = &trees.config;
+            for part in &parts {
+                match node.get(*part) {
+                    Some(child) => node = child,
+                    None => return SchemaStep::Unknown,
+                }
+            }
+            if node.is_object() {
+                known_in(node)
+            } else {
+                SchemaStep::Unknown
+            }
+        }
+    }
+}
+
+/// Where the schema stops printing `segments` as written: the index of the
+/// first segment it may not print, and whether the segments after it may be
+/// printed (they may under an entry whose name breaks its rule, when the
+/// schema knows each of them there; never under an unknown key).
+fn first_hidden(segments: &[String]) -> Option<(usize, bool)> {
+    let parts: Vec<PathPart<'_>> = segments.iter().map(|s| PathPart::Key(s)).collect();
+    first_hidden_part(&parts)
+}
+
+/// [`first_hidden`] for a path that may run through arrays, giving the
+/// index among `parts` of the first key it may not print. A key of an
+/// array's element is judged against the schema's element type: an entry of
+/// `[[projects]]` against a project's fields, and an element of any other
+/// array (a list setting, or an array where the schema has a table or a
+/// value) has no keys in the schema, so each of its keys is unknown.
+fn first_hidden_part(parts: &[PathPart<'_>]) -> Option<(usize, bool)> {
+    let mut parent: Vec<String> = Vec::new();
+    // Whether the next key is a key of an array's element, and if so
+    // whether that array's elements have keys in the schema.
+    let mut element: Option<bool> = None;
+    let mut hidden: Option<(usize, SchemaStep)> = None;
+    for (index, part) in parts.iter().enumerate() {
+        let key = match part {
+            PathPart::Index(_) => {
+                element = Some(parent == ["projects"]);
+                continue;
+            }
+            PathPart::Key(key) => *key,
+        };
+        let step = match element.take() {
+            Some(false) => SchemaStep::Unknown,
+            _ => schema_step(&parent, key),
+        };
+        parent.push(key.to_string());
+        let shown = matches!(
+            step,
+            SchemaStep::Known | SchemaStep::Entry { follows_rule: true }
+        );
+        match hidden {
+            None if !shown => hidden = Some((index, step)),
+            // Past a hidden key, the rest may be printed only under an entry
+            // whose name breaks its rule, when the schema knows each of them
+            // there.
+            Some((at, SchemaStep::Entry { .. })) if !shown => {
+                return Some((at, false));
+            }
+            _ => {}
+        }
+        if matches!(hidden, Some((_, SchemaStep::Unknown))) {
+            break;
+        }
+    }
+    hidden.map(|(at, step)| (at, matches!(step, SchemaStep::Entry { .. })))
+}
+
+/// The entry at `segments` (its last one hidden), placed by its line in
+/// `raw`, inside `within` (the printed table around it, if any).
+fn line_placeholder(raw: &str, steps: &[KeyStep<'_>], within: Option<&str>) -> String {
+    match (line_of_key(raw, steps), within) {
+        (Some(line), Some(table)) => format!("the entry on line {line} of [{table}]"),
+        (Some(line), None) => format!("the entry on line {line}"),
+        (None, Some(table)) => format!("an entry of [{table}] whose name is not shown"),
+        (None, None) => "an entry whose name is not shown".to_string(),
+    }
+}
+
+/// A setting's path as dux prints it, from its segments: `ui.left_width_pct`,
+/// or `the entry on line 2 of [env]` (`args of the entry on line 3 of
+/// [providers]`) where a segment may not be repeated (see the schema rule
+/// above).
+pub fn shown_path(raw: &str, segments: &[String]) -> String {
+    let parts: Vec<PathPart<'_>> = segments.iter().map(|s| PathPart::Key(s)).collect();
+    shown_parts(raw, &parts)
+}
+
+/// One step of a path that may run through an array of tables: a key, or
+/// the index of an entry (`projects[0]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathPart<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// [`shown_path`] for a path that may run through arrays. The keys of an
+/// element are judged against the schema's element type (see
+/// [`first_hidden_part`]): `[[projects]]` against a project's fields, and
+/// any other array's elements have no keys in the schema, so each is placed
+/// by its line.
+pub fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
+    let printed = |parts: &[PathPart<'_>]| {
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                PathPart::Key(key) => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(&dotted(&[(*key).to_string()]));
+                }
+                PathPart::Index(index) => out.push_str(&format!("[{index}]")),
+            }
+        }
+        out
+    };
+    let Some((part, rest_known)) = first_hidden_part(parts) else {
+        return printed(parts);
+    };
+    // The steps to the hidden key, an index taken with the key before it.
+    let mut steps: Vec<KeyStep<'_>> = Vec::new();
+    for (index, step) in parts[..=part].iter().enumerate() {
+        match step {
+            PathPart::Key(key) => match parts.get(index + 1) {
+                Some(PathPart::Index(entry)) if index < part => {
+                    steps.push(KeyStep::Entry(key, *entry));
+                }
+                _ => steps.push(KeyStep::Key(key)),
+            },
+            PathPart::Index(_) => {}
+        }
+    }
+    let table = (part > 0).then(|| printed(&parts[..part]));
+    let entry = line_placeholder(raw, &steps, table.as_deref());
+    let rest = &parts[part + 1..];
+    if rest_known && !rest.is_empty() {
+        format!("{} of {entry}", printed(rest))
+    } else {
+        entry
+    }
+}
+
+/// Segments joined as TOML writes a dotted key: a segment that is not a bare
+/// key (it holds a dot, a space or a quote) is quoted, so `["server.auth"]`
+/// never reads as `[server.auth]`.
+fn dotted(segments: &[String]) -> String {
+    segments
+        .iter()
+        .map(|segment| {
+            let bare = !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if bare {
+                segment.clone()
+            } else {
+                toml::Value::String(segment.clone()).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Whether any segment of `segments` is one the formatter never prints: then
+/// no value at that path is printed either (see
+/// [`crate::config_keys::printed_value`]).
+pub fn path_is_hidden(segments: &[String]) -> bool {
+    first_hidden(segments).is_some()
+}
+
+/// Whether the last segment of `segments` is one the formatter never prints.
+pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
+    first_hidden(segments).is_some_and(|(index, _)| index + 1 == segments.len())
+}
+
+/// Whether any part of `parts` (a path that may run through arrays) is one
+/// the formatter never prints, so nothing at or below it is printed either.
+pub fn first_hidden_part_of(parts: &[PathPart<'_>]) -> bool {
+    first_hidden_part(parts).is_some()
+}
+
+/// [`name_is_hidden`] for a path that may run through arrays: whether its
+/// last part, a key, is one the formatter never prints.
+pub fn part_is_hidden(parts: &[PathPart<'_>]) -> bool {
+    first_hidden_part(parts).is_some_and(|(index, _)| index + 1 == parts.len())
+}
+
+/// A setting's place in a problem sentence: `[ui] left_width_pct`, or
+/// `[env] the entry on line 2` where a segment may not be repeated.
+fn shown_place(raw: &str, segments: &[String]) -> String {
+    if let Some((index, rest_known)) = first_hidden(segments) {
+        let steps: Vec<KeyStep<'_>> = segments[..=index].iter().map(|s| KeyStep::Key(s)).collect();
+        let entry = line_placeholder(raw, &steps, None);
+        let rest = &segments[index + 1..];
+        let what = if rest_known && !rest.is_empty() {
+            format!("{} of {entry}", dotted(rest))
+        } else {
+            entry
+        };
+        return if index == 0 {
+            what
+        } else {
+            format!("[{}] {what}", dotted(&segments[..index]))
+        };
+    }
+    match segments {
+        [section] => format!("[{}]", dotted(std::slice::from_ref(section))),
+        [section, inner @ ..] => format!(
+            "[{}] {}",
+            dotted(std::slice::from_ref(section)),
+            dotted(inner)
+        ),
+        [] => String::new(),
+    }
+}
+
+/// One step into a config file, for [`line_of_key`]: a key of a table, or
+/// one entry of an array of tables under a key.
+pub(crate) enum KeyStep<'a> {
+    Key(&'a str),
+    Entry(&'a str, usize),
+}
+
+/// The line the project at `index` of `projects` starts on in `raw`: its
+/// `[[projects]]` header, or its inline table.
+pub(crate) fn line_of_project(raw: &str, index: usize) -> Option<usize> {
+    let doc = toml_edit::Document::parse(raw).ok()?;
+    let projects = doc.as_table().get("projects")?;
+    let start = match projects.as_array_of_tables() {
+        Some(entries) => entries.get(index)?.span()?.start,
+        None => projects.as_array()?.get(index)?.span()?.start,
+    };
+    Some(raw.get(..start)?.matches('\n').count() + 1)
+}
+
+/// The line of `raw` the key at `path` (keys only, no arrays) is written
+/// on, for a sentence that places a setting without repeating its value.
+pub fn line_of_setting(raw: &str, path: &[&str]) -> Option<usize> {
+    let steps: Vec<KeyStep<'_>> = path.iter().map(|key| KeyStep::Key(key)).collect();
+    line_of_key(raw, &steps)
+}
+
+/// The line (from 1) where the key at `steps` is written in `raw`, so a
+/// message can point at a key whose name it must not repeat.
+pub(crate) fn line_of_key(raw: &str, steps: &[KeyStep<'_>]) -> Option<usize> {
+    let doc = toml_edit::Document::parse(raw).ok()?;
+    let (last, walk) = steps.split_last()?;
+    let mut table: &dyn toml_edit::TableLike = doc.as_table();
+    for step in walk {
+        table = match step {
+            KeyStep::Key(key) => table.get(key)?.as_table_like()?,
+            KeyStep::Entry(key, index) => {
+                let item = table.get(key)?;
+                match item.as_array_of_tables() {
+                    Some(entries) => entries.get(*index)?,
+                    // An inline array of inline tables.
+                    None => item.as_array()?.get(*index)?.as_inline_table()?,
+                }
+            }
+        };
+    }
+    let KeyStep::Key(name) = last else {
+        return None;
+    };
+    let (key, _) = table.get_key_value(name)?;
+    let start = key.span()?.start;
+    Some(raw.get(..start)?.matches('\n').count() + 1)
+}
+
+/// [`wrong_typed_settings`] for `value`, at `inner` inside `section`, which
+/// fails on its own: the entries inside it that fail on their own, narrowed
+/// the same way, or `value` itself when none does.
+fn wrong_typed_inside(
+    section: &str,
+    inner: &mut Vec<String>,
+    value: &toml::Value,
+    found: &mut Vec<(Vec<String>, String)>,
+) {
+    // `value` alone, at its place inside `section`.
+    let alone = |inner: &[String], value: &toml::Value| {
+        inner.iter().rev().fold(value.clone(), |child, key| {
+            let mut table = toml::Table::new();
+            table.insert(key.clone(), child);
+            toml::Value::Table(table)
+        })
+    };
+    let before = found.len();
+    if let toml::Value::Table(entries) = value {
+        for (key, entry) in entries {
+            inner.push(key.clone());
+            // A field missing from the table holding `entry` makes `entry`
+            // fail alone too, but it is the table's problem, never its
+            // sibling's. A value that is not a table has no fields to miss,
+            // so one failing only that way is not descended into, and the
+            // table holding it is reported below; a table is descended into,
+            // where the same holds of its own values.
+            let alone_entry = alone(inner, entry);
+            if !section_solo_ok(section, alone_entry.clone())
+                && (entry.is_table()
+                    || !section_solo_problem(section, alone_entry).starts_with("missing field"))
+            {
+                wrong_typed_inside(section, inner, entry, found);
+            }
+            inner.pop();
+        }
+    }
+    if found.len() == before {
+        let segments: Vec<String> = std::iter::once(section.to_string())
+            .chain(inner.iter().cloned())
+            .collect();
+        found.push((segments, section_solo_problem(section, alone(inner, value))));
+    }
+}
+
+/// The checks a start makes on the config it read: the server host and
+/// port, the environment variables, and the project records. `raw` is the
+/// file's text, which places a variable whose name is not a variable name
+/// by its line (the name itself may be a value pasted in the wrong place,
+/// so it is never repeated).
+fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem> {
+    use crate::config_auth::Problem;
+    let mut problems = Vec::new();
+    if let Err(error) = parse_server_host(&config.server.host) {
+        let mut problem = StartProblem::new(
+            Problem::about(key_path(&["server", "host"]), error),
+            true,
+            true,
+        );
+        problem.dux_server_override = Some(ServerFileSetting::Host);
+        problems.push(problem);
+    }
+    // Port 0 never stops the terminal UI's start, whatever `serve_while_tui`
+    // says: its background server binds loopback on port 0, which the system
+    // turns into a free port, and shows the address it got. Whether it is a problem depends on the port alone (the
+    // host only words it), so it is known by the port, and changing the host
+    // or `serve_while_tui` beside a port of 0 is not a new problem.
+    if let Some(detail) = port_zero_problem(&config.server.host, config.server.port) {
+        let mut problem = StartProblem::new(
+            Problem {
+                id: "server.port: 0".to_string(),
+                ..Problem::about(key_path(&["server", "port"]), detail)
+            },
+            false,
+            true,
+        );
+        problem.message = format!(
+            "dux server will not start with this file (the terminal UI starts, and its background \
+             server listens on whatever free port it is given): {}",
+            problem
+                .message
+                .split_once(": ")
+                .map_or("", |(_, rest)| rest)
+        );
+        problem.dux_server_override = Some(ServerFileSetting::Port);
+        problems.push(problem);
+    }
+    // One problem per variable, never showing its value. A valid name says
+    // which variable; a name that is itself the problem is placed by its line.
+    let line = |steps: &[KeyStep<'_>]| raw.and_then(|raw| line_of_key(raw, steps));
+    for (name, value) in &config.env {
+        if let Some(problem) = env_variable_problem(name, value) {
+            let which = if is_valid_var_name(name) {
+                format!("global env variable {name}")
+            } else {
+                match line(&[KeyStep::Key("env"), KeyStep::Key(name)]) {
+                    Some(line) => format!("the global env variable on line {line}"),
+                    None => "a global env variable".to_string(),
+                }
+            };
+            problems.push(StartProblem::new(
+                Problem::about(key_path(&["env", name]), format!("{which}: {problem}")),
+                true,
+                false,
+            ));
+        }
+    }
+    for (index, project) in config.projects.iter().enumerate() {
+        // A project is named by its line, never by its path, name or id.
+        let label = raw.and_then(|raw| line_of_project(raw, index)).map_or_else(
+            || format!("{} (counting from 1)", index + 1),
+            |line| format!("on line {line}"),
+        );
+        for (name, value) in &project.env {
+            if let Some(problem) = env_variable_problem(name, value) {
+                let which = if is_valid_var_name(name) {
+                    format!("env variable {name} of the project {label}")
+                } else {
+                    match line(&[
+                        KeyStep::Entry("projects", index),
+                        KeyStep::Key("env"),
+                        KeyStep::Key(name),
+                    ]) {
+                        Some(line) => {
+                            format!("the env variable on line {line} of the project {label}")
+                        }
+                        None => format!("an env variable of the project {label}"),
+                    }
+                };
+                problems.push(StartProblem::new(
+                    Problem::about(key_path(&["projects"]), format!("{which}: {problem}")),
+                    true,
+                    false,
+                ));
+            }
+        }
+    }
+    if let Some(duplicate) = crate::config_sync::duplicate_project(&config.projects) {
+        // Each placed by its line, never by its path, name or id.
+        let say = |index: usize| {
+            raw.and_then(|raw| line_of_project(raw, index)).map_or_else(
+                || format!("project {} (counting from 1)", index + 1),
+                |line| format!("the project on line {line}"),
+            )
+        };
+        problems.push(StartProblem::new(
+            Problem::about(
+                key_path(&["projects"]),
+                format!(
+                    "Project sync conflict in config.toml: {}",
+                    duplicate.sentence(&say(duplicate.first), &say(duplicate.second))
+                ),
+            ),
+            true,
+            true,
+        ));
+    }
+    problems
+}
+
+/// The checks the terminal UI's start makes on the config it read (see
+/// [`check_start`] for the whole list), as sentences.
+pub fn start_check_problems(config: &Config) -> Vec<String> {
+    config_start_problems(config, config.source_text.as_str())
+        .into_iter()
+        .filter(|problem| problem.stops_terminal_ui)
+        .map(|problem| {
+            problem
+                .message
+                .split_once(": ")
+                .map_or(problem.message.clone(), |(_, rest)| rest.to_string())
+        })
+        .collect()
+}
+
+/// What is wrong with one environment variable as a start reads it (see
+/// [`resolve_project_env`]), without its value.
+fn env_variable_problem(name: &str, value: &str) -> Option<String> {
+    if !is_valid_var_name(name) {
+        return Some("the name must match [A-Za-z_][A-Za-z0-9_]*".to_string());
+    }
+    match expand_env_vars(value) {
+        None => Some("the value has invalid $VAR expansion syntax".to_string()),
+        Some(expanded) if expanded.contains('\0') => {
+            Some("the value contains a NUL byte".to_string())
+        }
+        Some(_) => None,
+    }
+}
+
+/// [`start_check_problems`], failing on the first.
+pub fn start_check(config: &Config) -> Result<()> {
+    match start_check_problems(config).into_iter().next() {
+        Some(problem) => Err(anyhow!(problem)),
+        None => Ok(()),
+    }
+}
+
+/// The config dux runs with from a whole file's text: read as a start reads
+/// it, with the corrections a load makes.
+pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
+}
+
+/// Every problem the `[server.auth]` section of a whole config file's text
+/// has, each described without positions (the same problem reads the same
+/// before and after an unrelated edit) and without values. Empty when the
+/// section loads. A `server` or `server.auth` that is not a table, or a
+/// value of the wrong type, is one problem; otherwise every rule the
+/// section breaks is listed.
+pub fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
+    let file: toml::Table = match toml::from_str(raw) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![crate::config_auth::Problem::plain(format!(
+                "the file is not valid TOML: {}",
+                problem_kind(error.message())
+            ))];
+        }
+    };
+    let mut problems = misplaced_auth_problem_list(raw);
+    problems.extend(auth_section_problems(&file, raw));
+    problems
+}
+
+/// The problems of `[server.auth]` itself, key by key.
+fn auth_section_problems(file: &toml::Table, raw: &str) -> Vec<crate::config_auth::Problem> {
+    let Some(server) = file.get("server") else {
+        return Vec::new();
+    };
+    // Not a table: no `[server.auth]` to judge; a password setting inside it
+    // is the misplaced-auth rule's.
+    let Some(server) = server.as_table() else {
+        return Vec::new();
+    };
+    let Some(auth) = server.get("auth") else {
+        return Vec::new();
+    };
+    if !auth.is_table() {
+        return vec![crate::config_auth::Problem::plain(
+            "server.auth is not a table",
+        )];
+    }
+    crate::config_auth::rule_problems_located(auth.clone(), &|key| {
+        line_of_key(
+            raw,
+            &[
+                KeyStep::Key("server"),
+                KeyStep::Key("auth"),
+                KeyStep::Key(key),
+            ],
+        )
+    })
+}
+
+/// Read one `server.auth` value through the same deserializer every other
+/// reader uses.
+pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
+    #[derive(Deserialize)]
+    struct Holder {
+        auth: ServerAuthConfig,
+    }
+    let mut holder = toml::Table::new();
+    holder.insert("auth".to_string(), auth);
+    let text = toml::to_string(&holder).map_err(|e| e.to_string())?;
+    toml::from_str::<Holder>(&text)
+        .map(|holder| holder.auth)
+        .map_err(|e| e.to_string())
+}
+
+/// What the field-level recovery does to one part of a file that does not
+/// read: drop one top-level field of a section (a setting, which then reads
+/// as its default, or a whole entry of a map such as one provider), or
+/// reset a whole section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Recovery {
+    DropField { section: String, field: String },
+    ResetSection { section: String },
+}
+
+impl Recovery {
+    /// The path of what it drops or resets.
+    fn key(&self) -> Vec<String> {
+        match self {
+            Self::DropField { section, field } => vec![section.clone(), field.clone()],
+            Self::ResetSection { section } => vec![section.clone()],
+        }
+    }
+
+    /// Whether the setting at `key` is inside what it drops or resets.
+    fn covers(&self, key: &[String]) -> bool {
+        key.starts_with(&self.key())
+    }
+
+    /// The action in `plan` that covers `key`, if any.
+    fn covering<'a>(plan: &'a [Recovery], key: &[String]) -> Option<&'a Recovery> {
+        plan.iter().find(|recovery| recovery.covers(key))
+    }
+
+    /// What it drops or resets, as printed (through the one formatter, so
+    /// an entry whose name breaks its map's rule is placed by its line).
+    fn place(&self, raw: &str) -> String {
+        match self {
+            Self::DropField { section, field } => {
+                shown_place(raw, &[section.clone(), field.clone()])
+            }
+            Self::ResetSection { section } => format!("[{section}]"),
+        }
+    }
+
+    /// What `dux server` does about the wrong value at `key`, which it covers.
+    fn said_of(&self, key: &[String], raw: &str) -> String {
+        let place = self.place(raw);
+        match self {
+            Self::DropField { .. } if self.key() == key => {
+                "dux server reads it as its default".to_string()
+            }
+            // A stock provider's name follows the rule, so it may be said.
+            Self::DropField { section, field }
+                if section == "providers" && is_stock_provider(field) =>
+            {
+                format!(
+                    "dux server drops all of {place} over it and runs dux's own {field} provider"
+                )
+            }
+            Self::DropField { .. } => format!("dux server drops all of {place} over it"),
+            Self::ResetSection { .. } => {
+                format!("dux server resets all of {place} to its defaults over it")
+            }
+        }
+    }
+}
+
+/// Whether `name` is a provider dux ships.
+fn is_stock_provider(name: &str) -> bool {
+    default_provider_commands()
+        .iter()
+        .any(|(stock, _)| *stock == name)
+}
+
+/// What the field-level recovery does to `doc` (see [`recover_config_table`]),
+/// in order. Empty for a document that reads as it is.
+fn recovery_plan(doc: &toml::Table) -> Vec<Recovery> {
+    if table_into_config(doc.clone()).is_ok() {
+        return Vec::new();
+    }
+    // A section that deserializes in isolation is fine (missing sections use
+    // serde defaults, so a single-section document is always structurally
+    // ok). For a bad section, drop only the offending FIELDS where each can be
+    // isolated; otherwise reset the whole section.
+    let mut plan = Vec::new();
     for (section, value) in doc.iter() {
         if section_solo_ok(section, value.clone()) {
             continue;
         }
         if let toml::Value::Table(tbl) = value
-            && let Some((fixed, reset_fields)) = prune_invalid_fields(section, tbl)
+            && let Some((_, reset_fields)) = prune_invalid_fields(section, tbl)
         {
-            for fk in &reset_fields {
-                crate::logger::warn(&format!(
-                    "config [{section}] {fk} is invalid; resetting it to its default"
-                ));
-            }
-            pruned.insert(section.clone(), toml::Value::Table(fixed));
+            plan.extend(reset_fields.into_iter().map(|field| Recovery::DropField {
+                section: section.clone(),
+                field,
+            }));
             continue;
         }
-        crate::logger::warn(&format!(
-            "config section [{section}] is invalid; resetting it to defaults"
-        ));
-        pruned.remove(section);
+        plan.push(Recovery::ResetSection {
+            section: section.clone(),
+        });
+    }
+    plan
+}
+
+/// The field-level recovery of every section but `[server.auth]`: the
+/// document with [`recovery_plan`] applied.
+///
+/// Every line it logs about a key goes through the one formatter against
+/// `raw`, so a name that breaks its map's rule is placed by its line.
+fn recover_config_table(doc: toml::Table, raw: &str, report: Report) -> Config {
+    let log = |level: fn(&str), line: String| {
+        if report == Report::Log {
+            level(&line);
+        }
+    };
+    let plan = recovery_plan(&doc);
+    if plan.is_empty()
+        && let Ok(cfg) = table_into_config(doc.clone())
+    {
+        return cfg;
+    }
+    let mut pruned = doc;
+    for recovery in &plan {
+        match recovery {
+            Recovery::DropField { section, field } => {
+                log(
+                    crate::logger::warn,
+                    format!(
+                        "config {} is invalid; resetting it to its default",
+                        recovery.place(raw)
+                    ),
+                );
+                if let Some(table) = pruned.get_mut(section).and_then(toml::Value::as_table_mut) {
+                    table.remove(field);
+                }
+            }
+            Recovery::ResetSection { section } => {
+                log(
+                    crate::logger::warn,
+                    format!(
+                        "config section {} is invalid; resetting it to defaults",
+                        recovery.place(raw)
+                    ),
+                );
+                pruned.remove(section);
+            }
+        }
     }
     match table_into_config(pruned) {
         Ok(cfg) => cfg,
         Err(e) => {
-            crate::logger::error(&format!(
-                "config could not be recovered ({e}); using defaults"
-            ));
+            // The kind of problem only: the parser's own message can quote a
+            // key, and a key can be a value pasted in the wrong place.
+            log(
+                crate::logger::error,
+                format!(
+                    "config could not be recovered ({}); using defaults",
+                    problem_kind(&e)
+                ),
+            );
             Config::default()
         }
     }
@@ -2945,6 +5017,18 @@ fn section_solo_ok(section: &str, value: toml::Value) -> bool {
     table_into_config(t).is_ok()
 }
 
+/// What is wrong with a document containing only `section = value`, as the
+/// kind of problem with no value in it.
+fn section_solo_problem(section: &str, value: toml::Value) -> String {
+    let mut t = toml::Table::new();
+    t.insert(section.to_string(), value);
+    let text = toml::to_string(&t).unwrap_or_default();
+    match toml::from_str::<Config>(&text) {
+        Ok(_) => "invalid".to_string(),
+        Err(error) => problem_kind(error.message()),
+    }
+}
+
 /// Deserialize a `toml::Table` into a `Config`, round-tripping through a string so
 /// this uses the exact same path as `toml::from_str` everywhere else (no reliance
 /// on a `Value::try_into` API that varies across toml versions).
@@ -2953,60 +5037,317 @@ fn table_into_config(table: toml::Table) -> Result<Config, String> {
     toml::from_str::<Config>(&s).map_err(|e| e.to_string())
 }
 
-pub fn load_config(paths: &DuxPaths) -> Config {
-    let mut config = match std::fs::read_to_string(&paths.config_path) {
-        Ok(raw) => {
+/// Load config for a read-only consumer (the web server, and every reload).
+/// Reads `config.toml` if present; a missing file is the defaults. Always
+/// applies provider defaults. Unlike the TUI's `ensure_config`, this never
+/// creates, migrates, or writes the config file.
+///
+/// Fails closed on `[server.auth]`: a file that cannot be read, is not TOML,
+/// or carries an invalid auth section is a [`ConfigLoadError`], never a
+/// silent fallback to defaults, because the default is "no password". A
+/// start then refuses to run and a reload keeps the running config.
+pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
+    load_config_file(&paths.config_path)
+}
+
+/// [`load_config`] for a reload: a file that has disappeared since dux started
+/// is an error ([`ConfigLoadProblem::Missing`]) rather than the defaults,
+/// because the defaults would quietly drop a password the running dux has.
+pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
+    config_present_for_reload(paths)?;
+    load_config(paths)
+}
+
+/// The check [`load_config_for_reload`] starts with, for a surface whose
+/// reload reads the file its own way (the terminal UI's `ensure_config`,
+/// which would otherwise create a fresh default file).
+pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
+    if let Some(target) = dangling_link_target(&paths.config_path) {
+        return Err(ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: ConfigLoadProblem::DanglingLink(target),
+        });
+    }
+    match std::fs::symlink_metadata(&paths.config_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: ConfigLoadProblem::Missing,
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// [`load_config`] for a bare file path.
+pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, ConfigLoadError> {
+    let config = load_config_file_as_written(config_path)?;
+    Ok(apply_load_corrections(config))
+}
+
+/// The file's values as written: migrated and recovered, with provider
+/// defaults, but without the in-memory corrections [`load_config`] makes to
+/// out-of-range values.
+pub fn load_config_file_as_written(
+    config_path: &Path,
+) -> std::result::Result<Config, ConfigLoadError> {
+    let fail = |problem| ConfigLoadError {
+        path: config_path.to_path_buf(),
+        problem,
+    };
+    match read_config_text(config_path)? {
+        Some(raw) => {
             // One-time migration notice: the single `[server] max_websocket_connections`
             // cap was split into three per-class caps. The unknown key is ignored on
             // load (ServerConfig has no deny_unknown_fields), so warn once so the
             // operator knows their old value is no longer in effect.
             warn_on_removed_max_websocket_connections(&raw);
-            // Apply load-time config migrations IN MEMORY at every entrypoint
-            // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
-            // retired-provider pruning), so `dux serve` honors deprecated keys
-            // instead of silently dropping them. The TUI's `ensure_config`
-            // additionally PERSISTS the migrated document; here it is memory-only.
-            // A parse or migration failure falls through to the normal recovery
-            // path on the raw text (best effort, never fatal at load).
-            let migrated = raw
-                .parse::<toml_edit::DocumentMut>()
-                .ok()
-                .and_then(|mut doc| {
-                    crate::config_migrate::apply_load_migrations(&mut doc)
-                        .ok()
-                        .map(|_| doc.to_string())
-                })
-                .unwrap_or_else(|| raw.clone());
-            recover_config(&migrated)
+            config_from_text_as_written(&raw).map_err(fail)
         }
-        Err(_) => Config::default(),
+        None => {
+            let mut config = Config::default();
+            config.providers.ensure_defaults();
+            Ok(config)
+        }
+    }
+}
+
+/// The config file's text as every reader takes it (a start, a reload,
+/// `dux config get`): `None` when there is no file yet, which means the
+/// defaults; an error when it cannot be read, or when it is a link to a file
+/// that is gone, which is not "no file yet" and stops every surface.
+pub fn read_config_text(
+    config_path: &Path,
+) -> std::result::Result<Option<String>, ConfigLoadError> {
+    let fail = |problem| ConfigLoadError {
+        path: config_path.to_path_buf(),
+        problem,
     };
+    match std::fs::read_to_string(config_path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match dangling_link_target(config_path) {
+                Some(target) => Err(fail(ConfigLoadProblem::DanglingLink(target))),
+                None => Ok(None),
+            }
+        }
+        Err(error) => Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
+    }
+}
+
+/// A config's text read as every surface loads it: [`config_from_text_as_written`]
+/// with the load's in-memory corrections, without warning about them. What
+/// memory starts as, and therefore the config writer's base: a correction is
+/// never a change dux made, so a save never writes it over what the file says.
+pub fn config_from_text_as_loaded(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
+}
+
+/// The load's in-memory corrections applied to a config a surface read
+/// itself (the terminal UI's own start), each warned about once, so every
+/// surface starts from the same config [`config_from_text_as_loaded`] reads.
+pub fn correct_loaded(config: Config) -> Config {
+    apply_load_corrections(config)
+}
+
+/// A config's text read as written: migrated in memory, recovered, with
+/// provider defaults, without the load corrections, and carrying the text
+/// itself as its [`Config::source_text`].
+pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text(raw, Report::Log)
+}
+
+/// [`config_from_text_as_written`], logging or not as `report` says.
+fn config_from_text(raw: &str, report: Report) -> std::result::Result<Config, ConfigLoadProblem> {
+    // `[server.auth]` is read from the user's own text first, so an error in
+    // it names the line in the file they have to fix: the migrations below
+    // rewrite other keys, which moves the lines after them.
+    auth_section_of(raw)?;
+    // Apply load-time config migrations IN MEMORY at every entrypoint
+    // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
+    // retired-provider pruning), so `dux serve` honors deprecated keys
+    // instead of silently dropping them. The TUI's `ensure_config`
+    // additionally PERSISTS the migrated document; here it is memory-only.
+    // A parse or migration failure falls through to the normal recovery
+    // path on the raw text (best effort, never fatal at load).
+    let migrated = raw
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|mut doc| {
+            crate::config_migrate::apply_load_migrations(&mut doc)
+                .ok()
+                .map(|_| doc.to_string())
+        })
+        .unwrap_or_else(|| raw.to_string());
+    let mut config = recover_config_with(&migrated, raw, report)?;
     config.providers.ensure_defaults();
-    // Surface a stale/unrecognized editor preference instead of silently falling
-    // back to the first editor detected on PATH, e.g. a config left pointing at a
-    // now-removed editor like "antigravity"/"windsurf".
-    let configured_editor = config.editor.default.trim();
-    if !configured_editor.is_empty() && crate::editor::editor_label(configured_editor).is_none() {
+    config.source_text = SourceText::of(raw);
+    Ok(config)
+}
+
+/// The corrections [`load_config`] makes in memory, each warned about once.
+fn apply_load_corrections(config: Config) -> Config {
+    let (config, corrections) = load_corrections(config);
+    for (_, warning) in corrections {
+        crate::logger::warn(&warning);
+    }
+    // Every value dux reads as another where it is used (a level it does not
+    // know, a ceiling, `0` meaning the default, an editor it does not know),
+    // said ONCE here, so the readers themselves stay silent: several of them
+    // run every engine tick or on every bootstrap fetch.
+    let raw = config.source_text.as_str().unwrap_or_default();
+    for correction in crate::config_effective::use_time_corrections(&config) {
         crate::logger::warn(&format!(
-            "config editor.default = \"{configured_editor}\" is not a recognized editor; \
-             open-in-editor will fall back to the first one detected on PATH \
-             (supported: cursor, vscode/code, zed, vscodium, sublime)"
+            "config {}: {}",
+            shown_path(raw, &correction.path),
+            correction.reason
         ));
     }
-    // Surface an unrecognized clipboard_passthrough here, once at load, so the
-    // per-tick forward path can parse without warning. from_config_str
-    // logs the warning as a side effect and returns the fallback we discard.
-    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
-    // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
-    // rather than on every dropped file, and let the resolution itself stay silent.
-    warn_on_unknown_web_dragdrop_paste_forms(&config.providers);
+    config
+}
+
+/// A setting's path as segments, from its names.
+fn key_path(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
+/// A value a load (or the terminal UI's key resolution) uses in place of
+/// what the file says at `path`, with why, and, for a value that came from
+/// another setting of the file (a deprecated key, a retired binding), that
+/// setting's path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadCorrection {
+    pub path: Vec<String>,
+    pub reason: String,
+    pub from: Option<Vec<String>>,
+}
+
+impl LoadCorrection {
+    fn new(path: Vec<String>, reason: String) -> Self {
+        Self {
+            path,
+            reason,
+            from: None,
+        }
+    }
+}
+
+/// Every value a load of the whole config file `raw` uses in place of what
+/// the file says, by the path of the setting (or entry) as segments, with
+/// why: an entry the load migrations drop (a retired provider's stock
+/// block), a value carried over from a deprecated key, what dux server's
+/// recovery drops or resets, and each value the load corrects. Empty for a
+/// file that does not read.
+pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
+    load_corrections_with_sources(raw)
+        .into_iter()
+        .map(|correction| (correction.path, correction.reason))
+        .collect()
+}
+
+/// [`load_corrections_of`], each with the setting a carried-over value came
+/// from.
+pub fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
+    let mut found: Vec<LoadCorrection> = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, reason)| LoadCorrection::new(path, reason))
+        .collect();
+    // A value carried over from a deprecated key: said with where it came
+    // from (and the line), and what to write instead.
+    if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
+        for carried in crate::config_migrate::carried_over(&doc) {
+            let line = line_of_key(
+                raw,
+                &[
+                    KeyStep::Key(carried.old_section),
+                    KeyStep::Key(carried.old_key),
+                ],
+            )
+            .map_or_else(String::new, |line| format!(" (line {line})"));
+            // Through the one value printer, at the deprecated key's path.
+            let old_value = toml::from_str::<toml::Table>(&format!("v = {}", carried.old_value))
+                .ok()
+                .and_then(|mut read| read.remove("v"))
+                .and_then(|value| {
+                    crate::config_keys::printed_value(
+                        raw,
+                        &key_path(&[carried.old_section, carried.old_key]),
+                        &value,
+                        crate::config_keys::ValueForm::Line,
+                    )
+                })
+                .unwrap_or_else(|| crate::config_keys::NOT_SHOWN.to_string());
+            found.push(LoadCorrection {
+                path: carried.key,
+                reason: format!(
+                    "carried over from the deprecated [{}] {} = {old_value}{line}; replace it \
+                     with {}",
+                    carried.old_section, carried.old_key, carried.replace_with
+                ),
+                from: Some(key_path(&[carried.old_section, carried.old_key])),
+            });
+        }
+    }
+    // What `dux server`'s recovery drops or resets (the terminal UI will not
+    // start with such a file at all), each with the wrong values that made it.
+    if let Some(rest) = start_reads(raw).map(|reads| reads.dux_server) {
+        let wrong = wrong_typed_settings(&rest, raw);
+        for recovery in recovery_plan(&rest) {
+            let causes: Vec<&(String, Vec<String>, String)> = wrong
+                .iter()
+                .filter(|(_, key, _)| recovery.covers(key))
+                .collect();
+            let reason = match (&recovery, causes.as_slice()) {
+                (Recovery::DropField { .. }, [(place, key, kind)]) if *key == recovery.key() => {
+                    format!("{place}: {kind}, so dux server reads it as its default")
+                }
+                _ => {
+                    let places: Vec<&str> =
+                        causes.iter().map(|(place, _, _)| place.as_str()).collect();
+                    let verb = if places.len() == 1 { "has" } else { "have" };
+                    let place = recovery.place(raw);
+                    let what = match &recovery {
+                        Recovery::DropField { .. } => format!("dux server drops all of {place}"),
+                        Recovery::ResetSection { .. } => {
+                            format!("dux server resets all of {place} to its defaults")
+                        }
+                    };
+                    if places.is_empty() {
+                        format!("{what}, because it does not read")
+                    } else {
+                        format!(
+                            "{what}, because {} {verb} the wrong type",
+                            places.join(" and ")
+                        )
+                    }
+                }
+            };
+            found.push(LoadCorrection::new(recovery.key(), reason));
+        }
+    }
+    if let Ok(config) = config_from_text(raw, Report::Quiet) {
+        found.extend(
+            load_corrections(config)
+                .1
+                .into_iter()
+                .map(|(path, reason)| LoadCorrection::new(path, reason)),
+        );
+    }
+    found
+}
+
+/// [`apply_load_corrections`] without the logging: the corrected config,
+/// and each correction's path and warning.
+fn load_corrections(mut config: Config) -> (Config, Vec<(Vec<String>, String)>) {
+    let mut corrections: Vec<(Vec<String>, String)> = Vec::new();
     // Same idea again for an out-of-range terminal_font_size: warn ONCE here and
     // correct it IN MEMORY, rather than letting `normalized_terminal_font_size`
     // (now pure, see its doc comment) warn on every bootstrap read. Correcting it
     // here also fixes on-disk persistence: a later save writes back the
     // already-valid in-memory value instead of re-persisting the bad one.
     if let Some(warning) = terminal_font_size_load_warning(config.ui.terminal_font_size) {
-        crate::logger::warn(&warning);
+        corrections.push((key_path(&["ui", "terminal_font_size"]), warning));
         config.ui.terminal_font_size = DEFAULT_TERMINAL_FONT_SIZE;
     }
     // And once more for an upload directory that names somewhere dux will not
@@ -3014,33 +5355,38 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     // later upload resolves the default silently rather than warning per file.
     if let Some(warning) = upload_pasted_text_chars_load_warning(config.ui.upload_pasted_text_chars)
     {
-        crate::logger::warn(&warning);
+        corrections.push((key_path(&["ui", "upload_pasted_text_chars"]), warning));
         config.ui.upload_pasted_text_chars =
             normalized_upload_pasted_text_chars(config.ui.upload_pasted_text_chars);
     }
     // And once more for the `gh` re-check interval, whose read path is an engine
     // tick rather than a bootstrap projection: correcting it here is what keeps a
     // mistyped value from warning tens of times a second for the whole run.
-    correct_github_probe_interval(&mut config.ui);
+    if let Some(warning) = github_probe_interval_load_warning(config.ui.github_probe_interval_secs)
+    {
+        corrections.push((key_path(&["ui", "github_probe_interval_secs"]), warning));
+        config.ui.github_probe_interval_secs =
+            normalized_github_probe_interval(config.ui.github_probe_interval_secs);
+    }
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
-        crate::logger::warn(&warning);
+        corrections.push((key_path(&["ui", "upload_directory"]), warning));
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
     // And once more for a `ui.compose_bar` naming a mode dux does not know.
     // Corrected in memory so the bootstrap projection publishes a mode the
     // browser can act on rather than passing the typo through to it.
     if let Some(warning) = compose_bar_load_warning(&config) {
-        crate::logger::warn(&warning);
+        corrections.push((key_path(&["ui", "compose_bar"]), warning));
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
     }
     // And once more for a `[server] tailscale` naming a mode dux does not know.
     // Corrected in memory so the serve path reads a real mode rather than
     // silently treating a typo as the default on every question it asks.
     if let Some(warning) = tailscale_load_warning(&config) {
-        crate::logger::warn(&warning);
+        corrections.push((key_path(&["server", "tailscale"]), warning));
         config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
     }
-    config
+    (config, corrections)
 }
 
 /// The warning [`load_config`] emits when `ui.terminal_font_size` is outside
@@ -3058,17 +5404,6 @@ fn terminal_font_size_load_warning(size: u16) -> Option<String> {
     ))
 }
 
-/// Warn once per unrecognized `providers.<name>.web_dragdrop_paste` value, at load.
-/// The value degrades to `bare` rather than failing the config load, exactly as an
-/// unrecognized `capabilities.clipboard_passthrough` does; without this the
-/// degradation would be silent and a user who typed `single-quoted` would never
-/// learn why their dropped path stopped being quoted.
-fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
-    for warning in web_dragdrop_paste_warnings(providers) {
-        crate::logger::warn(&warning);
-    }
-}
-
 /// Every warning a load would emit for an unrecognized
 /// `providers.<name>.web_dragdrop_paste`, in config order: exactly one per
 /// misspelled provider, and none at all for a config that is clean.
@@ -3077,12 +5412,16 @@ fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
 /// per-paste resolution ([`ProviderCommandConfig::resolved_web_dragdrop_paste`])
 /// deliberately does not go through this, which is what keeps the warning to once
 /// per load rather than once per dropped file.
-pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig) -> Vec<String> {
+///
+/// Each names its setting through the one formatter against the file's text
+/// `raw`, so a provider name that breaks the naming rule is placed by its line.
+pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig, raw: &str) -> Vec<String> {
     providers
         .commands
         .iter()
         .filter_map(|(name, provider)| {
-            WebDragDropPaste::unknown_value_warning(name, provider.web_dragdrop_paste.as_deref()?)
+            let at = shown_path(raw, &key_path(&["providers", name, "web_dragdrop_paste"]));
+            WebDragDropPaste::unknown_value_warning(&at, provider.web_dragdrop_paste.as_deref()?)
         })
         .collect()
 }
@@ -3259,6 +5598,70 @@ pub struct ServerPlan {
     pub forced_no: bool,
 }
 
+/// A `dux server` command-line flag that takes the place of a `[server]`
+/// setting from the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerFlag {
+    /// `--bind <ADDR:PORT>`: the host and the port.
+    Bind,
+    /// `--port <PORT>`: the port.
+    Port,
+}
+
+impl ServerFlag {
+    /// The flag as typed.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bind => "--bind",
+            Self::Port => "--port",
+        }
+    }
+
+    /// Whether `cli` carries it.
+    pub fn is_set(self, cli: &ServerCliOverrides) -> bool {
+        match self {
+            Self::Bind => cli.bind.is_some(),
+            Self::Port => cli.port.is_some(),
+        }
+    }
+}
+
+/// A `[server]` setting whose file value a `dux server` flag can take the
+/// place of. The one statement of which flag does that for which setting:
+/// [`resolve_server_plan`] decides with it, and the start checks name the
+/// same flags in what they say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerFileSetting {
+    /// `[server] host`, which only `--bind` replaces.
+    Host,
+    /// `[server] port`, which `--port` or `--bind` replaces.
+    Port,
+}
+
+impl ServerFileSetting {
+    /// The flags that take the place of the file's value.
+    pub fn flags(self) -> &'static [ServerFlag] {
+        match self {
+            Self::Host => &[ServerFlag::Bind],
+            Self::Port => &[ServerFlag::Port, ServerFlag::Bind],
+        }
+    }
+
+    /// Whether `cli` takes the file's value out of the picture.
+    pub fn overridden_by(self, cli: &ServerCliOverrides) -> bool {
+        self.flags().iter().any(|flag| flag.is_set(cli))
+    }
+
+    /// The flags, for a sentence: "--bind", or "--port or --bind".
+    pub fn overriding_flags(self) -> String {
+        self.flags()
+            .iter()
+            .map(|flag| flag.name())
+            .collect::<Vec<_>>()
+            .join(" or ")
+    }
+}
+
 /// CLI overrides for the server plan. Every field is `None`/`false` when the
 /// operator passed nothing, so config values win by default and a present CLI
 /// value takes precedence.
@@ -3289,6 +5692,23 @@ pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
     })
 }
 
+/// Why `host:port` cannot be served on, when the port is 0. Shared by
+/// [`resolve_server_plan`] and the start checks ([`check_start`]), so `dux
+/// config set` refuses exactly what `dux server` refuses.
+fn port_zero_problem(host: &str, port: u16) -> Option<String> {
+    let bind = match host.parse::<std::net::Ipv6Addr>() {
+        Ok(_) => format!("[{host}]:{port}"),
+        Err(_) => format!("{host}:{port}"),
+    };
+    (port == 0).then(|| {
+        format!(
+            "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
+             stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
+             a non-zero port."
+        )
+    })
+}
+
 /// Resolve the complete `dux server` listening plan from config + CLI overrides +
 /// the detected Tailscale address. This is the single source of truth for the
 /// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
@@ -3305,24 +5725,35 @@ pub fn resolve_server_plan(
     cli: &ServerCliOverrides,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Result<ServerPlan> {
-    let bind: std::net::SocketAddr = match cli.bind.as_deref() {
-        Some(raw) => raw.parse().map_err(|_| {
-            anyhow!(
-                "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:3890 \
-                 (hostnames are not resolved)"
-            )
-        })?,
-        None => {
-            let host = parse_server_host(&server.host).map_err(|e| anyhow!("{e}"))?;
-            std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
-        }
+    let bind_flag: Option<std::net::SocketAddr> = cli
+        .bind
+        .as_deref()
+        .map(|raw| {
+            raw.parse().map_err(|_| {
+                anyhow!(
+                    "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:3890 \
+                     (hostnames are not resolved)"
+                )
+            })
+        })
+        .transpose()?;
+    // Which flag takes the place of which `[server]` setting is decided in
+    // one place, [`ServerFileSetting`], which the start checks name too.
+    let host = match bind_flag {
+        Some(bind) if ServerFileSetting::Host.overridden_by(cli) => bind.ip(),
+        _ => parse_server_host(&server.host).map_err(|e| anyhow!("{e}"))?,
     };
-    if bind.port() == 0 {
-        bail!(
-            "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
-             stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
-             a non-zero port."
-        );
+    let port = if ServerFileSetting::Port.overridden_by(cli) {
+        bind_flag
+            .map(|bind| bind.port())
+            .or(cli.port)
+            .unwrap_or(server.port)
+    } else {
+        server.port
+    };
+    let bind = std::net::SocketAddr::new(host, port);
+    if let Some(problem) = port_zero_problem(&bind.ip().to_string(), bind.port()) {
+        bail!(problem);
     }
     let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli.no_tailscale);
     let ts = if tailscale.wants_tailscale() {
@@ -3543,6 +5974,100 @@ mod resolve_plan_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Every plaintext password the start check finds, with its whole path
+    /// as the walk saw it and the lines it spans, in every shape: through an
+    /// array of tables, a `[projects]` table, a quoted dotted key, over
+    /// several lines and as a table.
+    #[test]
+    fn plaintext_passwords_names_each_one_where_it_sits() {
+        use super::PathStep::{Index, Key};
+        let key = |name: &str| Key(name.to_string());
+        let cases: Vec<(&str, Vec<PathStep>, std::ops::RangeInclusive<usize>)> = vec![
+            (
+                "[[env]]\npassword = \"s\"\n",
+                vec![key("env"), Index(0), key("password")],
+                1..=1,
+            ),
+            (
+                "[projects.env]\npassword = \"s\"\n",
+                vec![key("projects"), key("env"), key("password")],
+                1..=1,
+            ),
+            (
+                "\"env.password\" = \"s\"\n",
+                vec![key("env.password")],
+                0..=0,
+            ),
+            (
+                "[server]\n\"auth.password\" = \"s\"\n",
+                vec![key("server"), key("auth.password")],
+                1..=1,
+            ),
+            (
+                "[ui]\nx = [{ password = \"s\" }]\n",
+                vec![key("ui"), key("x"), Index(0), key("password")],
+                1..=1,
+            ),
+            (
+                "[server.auth]\npassword = \"\"\"\ns\n\"\"\"\n",
+                vec![key("server"), key("auth"), key("password")],
+                1..=3,
+            ),
+            (
+                "[server.auth.password]\nvalue = \"s\"\n",
+                vec![key("server"), key("auth"), key("password")],
+                0..=1,
+            ),
+        ];
+        for (raw, steps, lines) in cases {
+            assert_eq!(
+                plaintext_passwords(raw),
+                vec![PlaintextPassword { steps, lines }],
+                "{raw:?}"
+            );
+            assert_eq!(plaintext_password_problems(raw).len(), 1, "{raw:?}");
+        }
+        // A project's own env variable called that is the user's name.
+        assert!(
+            plaintext_passwords("[[projects]]\npath = \"/p\"\nenv = { password = \"s\" }\n")
+                .is_empty()
+        );
+        assert!(plaintext_passwords("[env]\npassword = \"s\"\n").is_empty());
+        // `[keys]` names are actions, and `password` is none, whatever shape
+        // its value has.
+        for raw in ["[keys]\npassword = \"s\"\n", "[keys]\npassword = [\"s\"]\n"] {
+            assert_eq!(
+                plaintext_passwords(raw)
+                    .into_iter()
+                    .map(|found| found.steps)
+                    .collect::<Vec<_>>(),
+                vec![vec![key("keys"), key("password")]],
+                "{raw:?}"
+            );
+        }
+        assert!(plaintext_passwords("password = \"s\"\nbroken =\n").is_empty());
+    }
+
+    /// A printer holding only a value judges it as the start check judges
+    /// the file it came from.
+    #[test]
+    fn plaintext_passwords_at_judges_a_value_where_it_sits() {
+        use super::PathStep::Key;
+        let value: toml::Value = toml::from_str::<toml::Table>("env = { password = \"s\" }\n")
+            .map(toml::Value::Table)
+            .expect("parses");
+        assert_eq!(
+            plaintext_passwords_at(&["projects".to_string()], &value),
+            vec![vec![
+                Key("projects".into()),
+                Key("env".into()),
+                Key("password".into())
+            ]]
+        );
+        let inner = value.get("env").expect("env").clone();
+        assert!(plaintext_passwords_at(&["env".to_string()], &inner).is_empty());
+    }
+
     use std::path::Path;
 
     use super::*;
@@ -3634,7 +6159,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 500\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         // The in-memory value is corrected at load, so `normalized_terminal_font_size`
         // (now a pure clamp used elsewhere) never has to run to reach a valid value,
         // and a later save persists the corrected default rather than 500.
@@ -3648,7 +6173,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 22\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.terminal_font_size, 22);
     }
 
@@ -3657,7 +6182,7 @@ mod tests {
     #[test]
     fn a_usable_upload_directory_is_kept_as_written() {
         for value in [".dux/uploads", "uploads", "tmp/dux/drops", ".uploads"] {
-            assert_eq!(normalized_upload_directory(value), value);
+            assert_eq!(effective_upload_directory(value), value);
             assert_eq!(upload_directory_load_warning(value), None, "for {value:?}");
         }
     }
@@ -3667,9 +6192,9 @@ mod tests {
         // Surrounding whitespace and repeated or trailing separators are
         // cosmetic, not a rejection: the walk that creates the directory works
         // in components anyway, so these all name the same place.
-        assert_eq!(normalized_upload_directory("  uploads  "), "uploads");
-        assert_eq!(normalized_upload_directory("uploads/"), "uploads");
-        assert_eq!(normalized_upload_directory(".dux//uploads"), ".dux/uploads");
+        assert_eq!(effective_upload_directory("  uploads  "), "uploads");
+        assert_eq!(effective_upload_directory("uploads/"), "uploads");
+        assert_eq!(effective_upload_directory(".dux//uploads"), ".dux/uploads");
     }
 
     #[test]
@@ -3681,14 +6206,14 @@ mod tests {
         // position and drops it everywhere else, so `uploads/./x` was already
         // being accepted and quietly normalized to `uploads/x` while the
         // leading form was refused.
-        assert_eq!(normalized_upload_directory("./uploads"), "uploads");
-        assert_eq!(normalized_upload_directory("./"), DEFAULT_UPLOAD_DIRECTORY);
+        assert_eq!(effective_upload_directory("./uploads"), "uploads");
+        assert_eq!(effective_upload_directory("./"), DEFAULT_UPLOAD_DIRECTORY);
         assert_eq!(upload_directory_load_warning("./uploads"), None);
-        assert_eq!(normalized_upload_directory("uploads/./x"), "uploads/x");
+        assert_eq!(effective_upload_directory("uploads/./x"), "uploads/x");
         assert_eq!(upload_directory_load_warning("uploads/./x"), None);
         // A trailing `.` is dropped by `components()` too, leaving the named
         // directory behind, so it names a real place and is kept.
-        assert_eq!(normalized_upload_directory("uploads/."), "uploads");
+        assert_eq!(effective_upload_directory("uploads/."), "uploads");
         assert_eq!(upload_directory_load_warning("uploads/."), None);
     }
 
@@ -3727,7 +6252,7 @@ mod tests {
         ];
         for (value, expected_reason) in cases {
             assert_eq!(
-                normalized_upload_directory(value),
+                effective_upload_directory(value),
                 DEFAULT_UPLOAD_DIRECTORY,
                 "{value:?} must degrade to the default"
             );
@@ -3770,7 +6295,7 @@ mod tests {
             upload_directory_load_warning("../escape").is_some(),
             "the value on disk must be one that warns, or this proves nothing"
         );
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.upload_directory, DEFAULT_UPLOAD_DIRECTORY);
         assert_eq!(
             upload_directory_load_warning(&config.ui.upload_directory),
@@ -3789,7 +6314,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.upload_directory, "tmp/drops");
         assert!(!config.ui.upload_write_gitignore);
     }
@@ -3859,7 +6384,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 3\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(
             config.ui.upload_pasted_text_chars,
             MIN_UPLOAD_PASTED_TEXT_CHARS
@@ -3878,7 +6403,13 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 0\n")
             .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.upload_pasted_text_chars, 0);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .upload_pasted_text_chars,
+            0
+        );
     }
 
     #[test]
@@ -4241,17 +6772,19 @@ mod tests {
     /// of `[server]` is kept.
     #[test]
     fn a_negative_log_viewer_lines_falls_back_to_its_default() {
-        let recovered = recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n");
+        let recovered =
+            recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n").expect("recovers");
         assert_eq!(recovered.server.log_viewer_lines, DEFAULT_LOG_VIEWER_LINES);
         assert_eq!(recovered.server.port, 4321);
-        assert_eq!(log_viewer_capacity(0), 1);
+        assert_eq!(effective_log_viewer_lines(0), 1);
     }
 
     #[test]
     fn recover_config_keeps_the_settings_around_one_invalid_field() {
         let recovered = recover_config(
             "[ui]\nagent_tabs_max = -1\nleft_width_pct = 33\n\n[server]\nport = 4321\n",
-        );
+        )
+        .expect("recovers");
         assert_eq!(
             recovered.ui.agent_tabs_max,
             Config::default().ui.agent_tabs_max,
@@ -4263,7 +6796,7 @@ mod tests {
 
     #[test]
     fn recover_config_resets_a_section_whose_fields_cannot_be_isolated() {
-        let recovered = recover_config("ui = 5\n\n[server]\nport = 4321\n");
+        let recovered = recover_config("ui = 5\n\n[server]\nport = 4321\n").expect("recovers");
         assert_eq!(
             recovered.ui.left_width_pct,
             Config::default().ui.left_width_pct,
@@ -4272,10 +6805,460 @@ mod tests {
         assert_eq!(recovered.server.port, 4321);
     }
 
+    // ── [server.auth] fails closed ───────────────────────────────────────────
+
+    fn a_real_hash() -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .expect("hash")
+    }
+
+    /// The error points at the user's own file by its real line number, and
+    /// quotes none of it.
     #[test]
-    fn recover_config_falls_back_to_defaults_on_unparseable_toml() {
-        let recovered = recover_config("[ui\nnot toml at all");
-        assert_eq!(recovered.server.port, Config::default().server.port);
+    fn an_auth_error_points_at_the_users_own_line() {
+        let raw = "# my config\n\n[ui]\nleft_width_pct = 20\n\n[server.auth]\nrequire = \"lan\"\n";
+        let err = recover_config(raw).expect_err("refused");
+        let ConfigLoadProblem::AuthInvalid(reason) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(reason.contains("line 7"), "{reason}");
+        assert!(
+            !reason.contains("(") && !reason.contains("lan"),
+            "the real line, never the key or the value: {reason}"
+        );
+    }
+
+    /// A file that is not valid TOML because of an unquoted token must not
+    /// have the token quoted back in the error, which reaches the status
+    /// line, toasts, modals and dux.log. The line, column and key name stay.
+    #[test]
+    fn an_error_quoting_a_line_never_carries_its_value() {
+        let raw = "[env]\nGITHUB_TOKEN = ghp_abcdef123456\n";
+        let err = recover_config(raw).expect_err("not toml");
+        let text = err.reason().to_string();
+        assert!(!text.contains("ghp_abcdef123456"), "{text}");
+        assert!(
+            !text.contains("GITHUB_TOKEN"),
+            "not even the key name: {text}"
+        );
+        assert!(text.contains("line 2"), "{text}");
+
+        let raw = "[server.auth]\npassword_hash = \"$argon2id$v=19$nope\"\n";
+        let err = recover_config(raw).expect_err("bad hash");
+        assert!(
+            !err.reason().contains("$argon2id$v=19$nope"),
+            "{}",
+            err.reason()
+        );
+    }
+
+    /// The header found for a rule error is exactly `[server.auth]`, never a
+    /// table whose name merely contains it.
+    /// A written source keeps the config its write put in the file, without
+    /// that config's own source: bases never nest, however many saves run.
+    #[test]
+    fn a_written_source_never_nests_the_one_before_it() {
+        let mut config = Config::default();
+        let mut source = SourceText::of("[ui]\n");
+        for round in 0..3 {
+            config.source_text = source.clone();
+            source = SourceText::written(&format!("# {round}\n"), config.clone());
+            let base = source.written_base().expect("a written base");
+            assert!(base.source_text.as_str().is_none(), "round {round}");
+        }
+    }
+
+    fn a_password_hash() -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .expect("hash")
+    }
+
+    /// config.toml kept as a symlink (into a dotfiles repository, say) whose
+    /// target disappears while dux runs: a reload is refused like a deleted
+    /// file, naming the link and its missing target, never read as the
+    /// defaults, which have no password.
+    #[test]
+    fn a_reload_through_a_dangling_symlink_keeps_the_running_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let target = dir.path().join("dotfiles-config.toml");
+        std::fs::write(
+            &target,
+            format!("[server.auth]\npassword_hash = \"{}\"\n", a_password_hash()),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let running = load_config(&paths).expect("starts");
+        assert!(running.server.auth.has_password());
+
+        std::fs::remove_file(&target).unwrap();
+        let error = load_config_for_reload(&paths).expect_err("refused");
+        assert_eq!(
+            error.problem,
+            ConfigLoadProblem::DanglingLink(target.clone())
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&paths.config_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(config_present_for_reload(&paths).is_err());
+        assert!(
+            std::fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// A start through a config.toml symlink whose target is missing is
+    /// refused, naming the link and the target: the defaults would mean no
+    /// password, and nothing is created at either path.
+    #[test]
+    fn a_start_through_a_dangling_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let target = dir.path().join("gone.toml");
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let error = load_config(&paths).expect_err("refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&paths.config_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(!target.exists(), "nothing was created at the target");
+    }
+
+    /// `dux server` refuses an invalid [server.auth] at startup and names the
+    /// line in the user's own file, not in the text the in-memory migrations
+    /// made of it (a deprecated `bind` becomes two keys, shifting lines).
+    #[test]
+    fn the_startup_error_names_the_line_in_the_users_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let body = "[server]\nbind = \"0.0.0.0:9000\"\n\n[server.auth]\nsession_idle_seconds = \"sixty\"\n";
+        std::fs::write(&paths.config_path, body).unwrap();
+        let error = load_config(&paths).expect_err("refused").to_string();
+        assert!(error.contains("line 5,"), "{error}");
+    }
+
+    #[test]
+    fn an_auth_rule_error_never_points_at_a_look_alike_header() {
+        let raw = "[server.authority]\nx = 1\n\n[server.auth]\nminimum_password_score = 9\n";
+        let text = recover_config(raw)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(text.contains("line 4"), "{text}");
+        // The header search a position-less rule error falls back to.
+        for header in [
+            "[server.auth]",
+            "  [server.auth]  ",
+            "[ server . auth ]",
+            "[\"server\".\"auth\"]",
+            "[server.auth] # mine",
+        ] {
+            assert!(is_auth_section_header(header), "{header}");
+        }
+        for header in [
+            "[server.oauth]",
+            "[server.oauthauth]",
+            "[server.auth.extra]",
+            "[server]",
+            "[[server.auth]]",
+            "server.auth = 1",
+        ] {
+            assert!(!is_auth_section_header(header), "{header}");
+        }
+    }
+
+    /// A rule `[server.auth]` breaks as a whole (a value out of range) points
+    /// at the section's own header line, not at a made-up line 1.
+    #[test]
+    fn an_auth_rule_error_points_at_the_section_header() {
+        let raw = "[ui]\nleft_width_pct = 20\n\n[server.auth]\nminimum_password_score = 9\n";
+        let err = recover_config(raw).expect_err("refused");
+        let text = err.reason().to_string();
+        assert!(text.contains("line 4"), "{text}");
+        assert!(!text.contains("line 1,"), "{text}");
+        // The full-config readers (the terminal UI's load, the raw editor)
+        // must point at it too.
+        let text = validate_config_str(raw).unwrap_err();
+        assert!(text.contains("line 4"), "{text}");
+        assert!(!text.contains("line 1,"), "{text}");
+        // And a section written inline under [server].
+        let inline = "[ui]
+left_width_pct = 20
+
+[server]
+auth = { minimum_password_score = 9 }
+";
+        let text = recover_config(inline)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(!text.contains("line 1,"), "{text}");
+        // A file that starts with the section: line 1 is the header, and the
+        // message says so rather than reading like a made-up position.
+        let first = "[server.auth]\nminimum_password_score = 9\n";
+        let text = recover_config(first)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(text.contains("line 1 (the [server.auth] header)"), "{text}");
+    }
+
+    /// A parser message about a duplicate or unknown key would name the key
+    /// the file wrote; that name is file text too, and can be a value pasted
+    /// where a key should be. It is never repeated.
+    #[test]
+    fn duplicate_and_unknown_key_errors_repeat_no_name_from_the_file() {
+        for (body, secret) in [
+            (
+                "[env]\nghp_dupsecret = \"1\"\nghp_dupsecret = \"2\"\n",
+                "ghp_dupsecret",
+            ),
+            (
+                "[server.auth]\nghp_unknownsecret = 1\n",
+                "ghp_unknownsecret",
+            ),
+            ("[server]\n[server]\n", "[server]"),
+        ] {
+            let err = recover_config(body).expect_err(body);
+            let text = err.reason().to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(text.starts_with("line "), "{text}");
+        }
+    }
+
+    /// Text inside a multi-line string or array is never read back as a key
+    /// name: an error there says only where it is and what is wrong.
+    #[test]
+    fn errors_inside_multi_line_values_name_no_key_and_quote_nothing() {
+        for (body, secret) in [
+            (
+                "[env]\nCERT = \"\"\"\nmy_secret_part=QUJDREVGRw\n\"\"\"\nBAD = ,\n",
+                "my_secret_part",
+            ),
+            (
+                "[server]\nallowed_hosts = [\n  \"a\",\n[hidden_secret_line\n]\n",
+                "hidden_secret_line",
+            ),
+            (
+                "[env]\nX = \"\"\"\n[looks_like_a_header_secret]\nk=v\n",
+                "looks_like_a_header_secret",
+            ),
+        ] {
+            let err = recover_config(body).expect_err(body);
+            let text = err.reason().to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(!text.contains('('), "no key name at all: {text}");
+            assert!(text.starts_with("line "), "{text}");
+        }
+    }
+
+    /// Config errors carry no file text and no value in any shape: a line
+    /// with no `=`, the continuation of a multi-line string, an element of a
+    /// multi-line array, and a type error that would repeat the value. They
+    /// say the line, the column and what is wrong.
+    #[test]
+    fn config_errors_never_carry_file_text_or_values() {
+        let cases: [(&str, &str, &str); 5] = [
+            ("[env]\nGITHUB_TOKEN ghp_secret1\n", "ghp_secret1", "line 2"),
+            ("[env]\nX = \"\"\"\nghp_secret2\n", "ghp_secret2", "line 4"),
+            (
+                "[server]\nallowed_hosts = [\n  \"a\",\n  ghp_secret3,\n]\n",
+                "ghp_secret3",
+                "line 4",
+            ),
+            (
+                "[server.auth]\nsession_idle_seconds = \"ghp_secret4\"\n",
+                "ghp_secret4",
+                "line 2",
+            ),
+            (
+                "[env]\nGITHUB_TOKEN = ghp_secret5\n",
+                "ghp_secret5",
+                "line 2",
+            ),
+        ];
+        for (body, secret, line) in cases {
+            let err = recover_config(body).expect_err(body);
+            let text = ConfigLoadError {
+                path: PathBuf::from("/x/config.toml"),
+                problem: err,
+            }
+            .to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(text.contains(line), "{body:?}: {text}");
+            assert!(!text.contains(" | "), "no quoted file text: {text}");
+        }
+        let err = validate_config_str("[env]\nTOKEN = 12345678\n").unwrap_err();
+        assert!(!err.contains("12345678"), "{err}");
+        assert!(err.contains("line 2") && !err.contains("TOKEN"), "{err}");
+    }
+
+    /// The advice fits any problem in the section, not only the password.
+    #[test]
+    fn the_auth_error_advice_names_the_ways_to_fix_any_key() {
+        let err = ConfigLoadError {
+            path: PathBuf::from("/x/config.toml"),
+            problem: ConfigLoadProblem::AuthInvalid("bad require".to_string()),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("dux config set server.auth.<setting>"),
+            "{text}"
+        );
+        assert!(text.contains("dux config get server.auth"), "{text}");
+        assert!(!text.contains("set a new password"), "{text}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_toml_is_refused_because_its_password_cannot_be_read() {
+        let err = recover_config("[ui\nnot toml at all").expect_err("refused");
+        assert!(matches!(err, ConfigLoadProblem::NotToml(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_invalid_password_hash_is_refused_rather_than_read_as_no_password() {
+        let err =
+            recover_config("[server.auth]\npassword_hash = \"hunter2\"\n").expect_err("refused");
+        let ConfigLoadProblem::AuthInvalid(reason) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(reason.contains("PHC"), "{reason}");
+    }
+
+    #[test]
+    fn wrong_types_in_server_auth_are_refused() {
+        for body in [
+            "[server.auth]\nsession_idle_seconds = \"sixty\"\n",
+            "[server.auth]\nblocked_addresses = 5\n",
+            "[server]\nauth = \"on\"\n",
+            "[server.auth]\npasword_hash = \"\"\n",
+        ] {
+            let err = recover_config(body).expect_err(body);
+            assert!(
+                matches!(err, ConfigLoadProblem::AuthInvalid(_)),
+                "{body}: {err:?}"
+            );
+        }
+    }
+
+    /// A `[server]` that is not a table is read as dux always read it (the
+    /// recovery resets it), unless it holds a web UI password setting, which
+    /// is refused as misplaced, never as an invalid `[server.auth]`.
+    #[test]
+    fn a_server_section_that_is_not_a_table_reads_as_dux_always_read_it() {
+        for body in ["server = 5\n", "server = []\n", "[[server]]\nport = 1\n"] {
+            let config = recover_config(body).expect("read as before");
+            assert_eq!(config.server.port, Config::default().server.port, "{body}");
+        }
+        for body in [
+            "[[server]]\npassword_hash = \"x\"\n",
+            "[[server]]\n[server.auth]\npassword_hash = \"x\"\n",
+            "server = [{auth = {require = \"network\"}}]\n",
+        ] {
+            let err = recover_config(body).expect_err("misplaced");
+            assert!(
+                matches!(err, ConfigLoadProblem::AuthMisplaced(_)),
+                "{body}: {err:?}"
+            );
+            let shown = ConfigLoadError {
+                path: PathBuf::from("config.toml"),
+                problem: err,
+            }
+            .to_string();
+            assert!(!shown.contains("[server.auth] in"), "{shown}");
+            assert!(shown.contains("belong in [server.auth]"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_valid_auth_section_survives_the_recovery_of_a_bad_neighbour() {
+        let hash = a_real_hash();
+        let body = format!(
+            "[server]\nport = \"not a port\"\nhost = \"127.0.0.1\"\n\n[server.auth]\n\
+             password_hash = \"{hash}\"\nrequire = \"everywhere\"\n\n[ui]\nagent_tabs_max = -1\n"
+        );
+        let config = recover_config(&body).expect("recovered");
+        assert_eq!(
+            config.server.port,
+            Config::default().server.port,
+            "the bad field resets"
+        );
+        assert_eq!(config.server.auth.password_hash(), Some(hash.as_str()));
+        assert_eq!(config.server.auth.require, AuthRequire::Everywhere);
+        assert_eq!(
+            config.ui.agent_tabs_max,
+            Config::default().ui.agent_tabs_max
+        );
+    }
+
+    #[test]
+    fn load_config_reads_a_missing_file_as_no_password() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        let config = load_config(&paths).expect("no file is the defaults");
+        assert!(!config.server.auth.has_password());
+    }
+
+    #[test]
+    fn load_config_refuses_each_unreadable_auth_shape_and_names_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        for body in [
+            "[server\n",
+            "[server.auth]\npassword_hash = \"$argon2id$nope\"\n",
+            "[server.auth]\nrequire = 3\n",
+        ] {
+            std::fs::write(&paths.config_path, body).expect("write");
+            let err = load_config(&paths).expect_err(body);
+            let text = err.to_string();
+            assert!(
+                text.contains(&paths.config_path.display().to_string()),
+                "the error names the file: {text}"
+            );
+            assert!(
+                text.contains("server.auth"),
+                "the error names the section: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_refuses_a_file_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::create_dir(&paths.config_path).expect("a directory where the file should be");
+        let err = load_config(&paths).expect_err("a directory cannot be read as a file");
+        assert!(
+            matches!(err.problem, ConfigLoadProblem::Unreadable(_)),
+            "{err:?}"
+        );
+        let _ = std::fs::Permissions::from_mode(0o600);
+    }
+
+    #[test]
+    fn load_config_reads_a_valid_password_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        let hash = a_real_hash();
+        std::fs::write(
+            &paths.config_path,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .expect("write");
+        let config = load_config(&paths).expect("valid");
+        assert_eq!(config.server.auth.password_hash(), Some(hash.as_str()));
     }
 
     #[test]
@@ -4308,7 +7291,7 @@ mod tests {
 
     #[test]
     fn recover_config_keeps_a_clean_document_intact() {
-        let recovered = recover_config("[ui]\nleft_width_pct = 21\n");
+        let recovered = recover_config("[ui]\nleft_width_pct = 21\n").expect("recovers");
         assert_eq!(recovered.ui.left_width_pct, 21);
     }
 
@@ -4519,7 +7502,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[server]\nbind = \"0.0.0.0:9000\"\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 9000);
     }
@@ -4538,7 +7521,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert!(
             !config.providers.commands.contains_key("gemini"),
             "an untouched stock retired provider must be pruned"
@@ -4557,7 +7540,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert!(
             config.providers.commands.contains_key("gemini"),
             "a user-customized retired provider block must be kept"
@@ -4574,7 +7557,13 @@ mod tests {
         )
         .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 900);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
+            900
+        );
     }
 
     #[test]
@@ -4585,7 +7574,10 @@ mod tests {
             .expect("write config");
 
         assert_eq!(
-            load_config(&paths).ui.github_probe_interval_secs,
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
             DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
         );
     }
@@ -4601,7 +7593,10 @@ mod tests {
             .expect("write config");
 
         assert_eq!(
-            load_config(&paths).ui.github_probe_interval_secs,
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
             MIN_GITHUB_PROBE_INTERVAL_SECONDS,
         );
     }
@@ -4614,7 +7609,13 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\ngithub_probe_interval_secs = 0\n")
             .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 0);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
+            0
+        );
     }
 
     #[test]
@@ -4674,7 +7675,7 @@ github_integration = false
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
 
         assert_eq!(
             config.providers.commands["claude"].command, "/custom/claude",
@@ -4697,7 +7698,7 @@ github_integration = false
         let paths = make_test_paths(dir.path());
         // No config.toml written: file does not exist.
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
 
         // Provider defaults must be present.
         assert!(
@@ -5028,18 +8029,18 @@ port = 3890
     }
 
     #[test]
-    fn load_config_falls_back_to_defaults_on_malformed_toml() {
+    fn load_config_refuses_malformed_toml_instead_of_falling_back_to_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
         std::fs::write(&paths.config_path, "this is not valid toml ][[[")
             .expect("write bad config");
 
-        // Must not panic; must return usable defaults.
-        let config = load_config(&paths);
-
+        // The defaults would read as "no password", which a file whose
+        // [server.auth] cannot be seen may well contradict.
+        let err = load_config(&paths).expect_err("refused");
         assert!(
-            config.providers.commands.contains_key("claude"),
-            "claude provider should be present via defaults after parse failure"
+            matches!(err.problem, ConfigLoadProblem::NotToml(_)),
+            "{err:?}"
         );
     }
 
@@ -5073,6 +8074,590 @@ max_websocket_connections = 16
         ));
         assert!(!raw_has_removed_max_websocket_connections("[server]\n"));
     }
+
+    /// A password hash in a place dux does not read fails closed: a
+    /// `password_hash` outside `[server.auth]`, or a table named "auth" (or
+    /// within two edits of it) under `[server]` or at the top level stops the
+    /// start, naming where it is and where it belongs, never the hash.
+    /// The misplaced-setting rule reads any key named like a `[server.auth]`
+    /// setting, anywhere but `[server.auth]` itself, as an auth setting in
+    /// the wrong place. That holds only while no other setting in the schema
+    /// (the whole config, a provider, a macro, a project) shares its name in
+    /// [`auth_key_form`]; this pins it.
+    #[test]
+    fn no_setting_outside_server_auth_shares_a_name_with_an_auth_setting() {
+        fn names(value: &serde_json::Value, path: &mut Vec<String>, clashes: &mut Vec<String>) {
+            let Some(map) = value.as_object() else {
+                return;
+            };
+            for (name, child) in map {
+                path.push(name.clone());
+                if path.as_slice() != ["server", "auth"] {
+                    if is_auth_key(name) {
+                        clashes.push(path.join("."));
+                    }
+                    names(child, path, clashes);
+                }
+                path.pop();
+            }
+        }
+        let trees = schema_trees();
+        let mut clashes = Vec::new();
+        for tree in [
+            &trees.config,
+            &trees.provider,
+            &trees.macro_entry,
+            &trees.project,
+        ] {
+            names(tree, &mut Vec::new(), &mut clashes);
+        }
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
+
+    /// An auth setting one level too high, any spelling of a password hash,
+    /// and an auth-like table under a longer word all stop the start; a name
+    /// the user chose stays exempt.
+    #[test]
+    fn auth_settings_in_any_spelling_or_one_level_off_stop_the_start() {
+        for body in [
+            "require = \"everywhere\"\n",
+            "[server]\nrequire = \"everywhere\"\n",
+            "[server]\nminimum-password-length = 20\n",
+            "[server]\nCookieSecure = \"always\"\n",
+            "[server]\npassword-hash = \"x\"\n",
+            "[server]\npasswordHash = \"x\"\n",
+            "password-hash = \"x\"\n",
+            "[ui]\nPassword-Hash = \"x\"\n",
+            "[server.authentication]\nrequire = \"everywhere\"\n",
+            "[server.login]\nrequire = \"everywhere\"\n",
+            "[server.Au-th]\nrequire = \"everywhere\"\n",
+            "[authentication]\nrequire = \"everywhere\"\n",
+            "server = [{ require = \"everywhere\" }]\n",
+            "[macros.m]\ntext = \"x\"\nsurface = \"agent\"\npassword-hash = \"x\"\n",
+        ] {
+            let problems = misplaced_auth_problems(body);
+            assert!(!problems.is_empty(), "{body}");
+            assert!(
+                problems.iter().all(|p| p.contains("[server.auth]")),
+                "{body}: {problems:?}"
+            );
+        }
+        for body in [
+            "[env]\npassword-hash = \"x\"\n",
+            "[providers.password-hash]\ncommand = \"x\"\n",
+            "[server.authentication]\nx = 1\n",
+            "[server.login]\nbanner = \"hi\"\n",
+            "[auth]\nusername = \"ada\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+    }
+
+    /// A plaintext password is never read from the file, wherever it is
+    /// written, `[server.auth]` included: the start stops, the sentence names
+    /// the command that sets one, and it never repeats the password. A name
+    /// the user chose stays a name, and the retired `[auth]` holding only its
+    /// `username` still loads.
+    #[test]
+    fn a_plaintext_password_stops_the_start_wherever_it_is_written() {
+        const SECRET: &str = "correct horse battery staple veranda";
+        for body in [
+            format!("password = \"{SECRET}\"\n"),
+            format!("[server]\npassword = \"{SECRET}\"\n"),
+            format!("[server.auth]\npassword = \"{SECRET}\"\n"),
+            format!("[server.Auth]\nPassword = \"{SECRET}\"\n"),
+            format!("[auth]\nusername = \"ada\"\npassword = \"{SECRET}\"\n"),
+            format!("[ui]\nx = [{{ password = \"{SECRET}\" }}]\n"),
+        ] {
+            let problems = misplaced_auth_problems(&body);
+            assert!(
+                problems.iter().any(|p| p.contains(
+                    "a plaintext password is not read from \
+                     config.toml; set one with `dux config set server.auth.password`"
+                )),
+                "{body}: {problems:?}"
+            );
+            assert!(
+                problems.iter().all(|p| !p.contains("staple")),
+                "{problems:?}"
+            );
+        }
+        for body in [
+            "[auth]\nusername = \"ada\"\n",
+            "[env]\npassword = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword = \"x\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+        // A `[projects]` table is no list of projects: its `env` holds no names.
+        assert!(!misplaced_auth_problems("[projects.env]\nrequire = \"everywhere\"\n").is_empty());
+    }
+
+    #[test]
+    fn a_password_hash_in_a_misspelled_place_stops_the_start() {
+        let hash = a_password_hash();
+        for (body, named) in [
+            (
+                format!("[server.auht]\npassword_hash = \"{hash}\"\n"),
+                "the entry on line 1 of [server]",
+            ),
+            (
+                format!("[server]\npassword_hash = \"{hash}\"\n"),
+                "server.password_hash",
+            ),
+            (
+                format!("[auth]\npassword_hash = \"{hash}\"\n"),
+                "auth.password_hash",
+            ),
+            (
+                "[auht]\nrequire = \"network\"\n".to_string(),
+                "the entry on line 1",
+            ),
+            (format!("password_hash = \"{hash}\"\n"), "password_hash"),
+            (
+                "[server.Auth]\nrequire = \"network\"\n".to_string(),
+                "the entry on line 1 of [server]",
+            ),
+            // A hash outside [server.auth] is misplaced whatever the table
+            // around it is called, in any case, quoted or dotted.
+            (
+                format!("[ui]\npassword_hash = \"{hash}\"\n"),
+                "ui.password_hash",
+            ),
+            (
+                format!("[Server.auth]\npassword_hash = \"{hash}\"\n"),
+                "the entry on line 1",
+            ),
+            (
+                format!("[SERVER.AUTH]\npassword_hash = \"{hash}\"\n"),
+                "the entry on line 1",
+            ),
+            (
+                format!("[\"server.auth\"]\npassword_hash = \"{hash}\"\n"),
+                "the entry on line 1",
+            ),
+            (
+                format!("[server]\n\"auth.password_hash\" = \"{hash}\"\n"),
+                "the entry on line 2 of [server]",
+            ),
+        ] {
+            let error = recover_config(&body).expect_err(&body);
+            let message = error.reason().to_string();
+            assert!(message.contains(named), "{body}: {message}");
+            assert!(message.contains("[server.auth]"), "{body}: {message}");
+            assert!(!message.contains(&hash), "{message}");
+        }
+        // Not every unknown key is fatal, and the retired basic-auth `[auth]`
+        // section real older configs carry (no password hash in it) still loads.
+        recover_config("[ui]\nsomething_new = 1\n[server.limits]\nx = 1\n").expect("loads");
+        recover_config("[auth]\nusername = \"ada\"\n").expect("the retired section loads");
+        // A field inside a provider, a macro or a project is a field of
+        // dux's schema, never a name, so a hash there is misplaced.
+        for body in [
+            "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
+            "[macros.greet]\ntext = \"x\"\nsurface = \"agent\"\npassword_hash = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\npassword_hash = \"x\"\n",
+            // `[keys]` names are dux's actions, never the user's own.
+            "[keys]\npassword_hash = [\"x\"]\n",
+        ] {
+            let problems = misplaced_auth_problems(body);
+            assert_eq!(problems.len(), 1, "{body}: {problems:?}");
+            assert!(problems[0].contains("[server.auth]"), "{problems:?}");
+        }
+        // A name the user chose is never a misplaced hash.
+        for body in [
+            "[env]\npassword_hash = \"x\"\n",
+            "[providers.password_hash]\ncommand = \"mytool\"\n",
+            "[macros.password_hash]\ntext = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword_hash = \"x\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+    }
+
+    /// A problem about no setting is answerable for any set that makes it
+    /// appear, and never for one that leaves it as it was.
+    #[test]
+    fn a_problem_about_no_setting_counts_against_a_set_whenever_it_is_new() {
+        let keyless = |message: &str| {
+            StartProblem::new(crate::config_auth::Problem::plain(message), true, true)
+        };
+        let check = |problems: Vec<StartProblem>| StartCheck {
+            problems,
+            unjudgeable_rules: Vec::new(),
+        };
+        let before = check(vec![keyless("already there")]);
+        let after = check(vec![keyless("already there"), keyless("new")]);
+        let added = problems_added_by_set(&before, &after, &key_path(&["ui", "left_width_pct"]));
+        let added: Vec<&str> = added.iter().map(|p| p.detail.as_str()).collect();
+        assert_eq!(added, vec!["new"]);
+    }
+
+    /// A wrong-typed field inside a provider is a problem of that field, not
+    /// of the whole provider.
+    #[test]
+    fn a_wrong_typed_field_inside_a_provider_is_named_by_the_field() {
+        let problems = start_problems_of("[providers.mytool]\ncommand = \"m\"\nargs = \"oops\"\n");
+        let keys: Vec<&Vec<Vec<String>>> = problems.iter().map(|p| &p.keys).collect();
+        assert_eq!(
+            keys,
+            vec![&vec![key_path(&["providers", "mytool", "args"])]],
+            "{problems:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_flags_and_names_tests {
+    use super::*;
+
+    /// A wrong value is said to cost what `dux server`'s recovery actually
+    /// drops: itself, the entry around it, or its whole section.
+    #[test]
+    fn a_wrong_value_says_what_dux_server_drops_with_it() {
+        let said = |raw: &str| -> Vec<String> {
+            start_problems_of(raw)
+                .into_iter()
+                .map(|problem| problem.detail)
+                .collect()
+        };
+        assert_eq!(
+            said("[ui]\nleft_width_pct = \"wide\"\n"),
+            vec![
+                "[ui] left_width_pct: invalid type, expected u16 (dux server reads it as its default)"
+            ]
+        );
+        let provider = said("[providers.mytool]\ncommand = \"m\"\nargs = 5\n");
+        assert!(
+            provider[0].contains("dux server drops all of [providers] mytool over it"),
+            "{provider:?}"
+        );
+        let stock = said("[providers.claude]\ncommand = \"m\"\nargs = 5\n");
+        assert!(
+            stock[0].contains("runs dux's own claude provider"),
+            "{stock:?}"
+        );
+        let section = said("[ui]\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n");
+        assert_eq!(section.len(), 2, "{section:?}");
+        assert!(
+            section
+                .iter()
+                .all(|detail| detail.contains("dux server resets all of [ui] to its defaults")),
+            "{section:?}"
+        );
+        // The recovery the load runs is the plan the wording reads.
+        let doc: toml::Table =
+            toml::from_str("[ui]\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n")
+                .unwrap();
+        assert_eq!(
+            recovery_plan(&doc),
+            vec![Recovery::ResetSection {
+                section: "ui".to_string()
+            }]
+        );
+    }
+
+    /// The reason `get` gives for a value its section's reset took names the
+    /// siblings that caused it.
+    #[test]
+    fn a_reset_section_names_the_fields_that_caused_it() {
+        let raw =
+            "[ui]\nleft_width_pct = 40\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n";
+        let corrections = load_corrections_of(raw);
+        let (_, reason) = corrections
+            .iter()
+            .find(|(key, _)| *key == ["ui"])
+            .expect("the reset is recorded");
+        assert!(reason.contains("dux server resets all of [ui]"), "{reason}");
+        assert!(reason.contains("[ui] right_width_pct"), "{reason}");
+        assert!(reason.contains("[ui] status_clear_seconds"), "{reason}");
+    }
+
+    /// Each `[server]` setting names exactly the flags `resolve_server_plan`
+    /// lets take its place: a bad host only `--bind`, port 0 `--port` too.
+    #[test]
+    fn the_overriding_flags_are_the_ones_the_plan_honours() {
+        let server = |raw: &str| load_config_from_text(raw).server;
+        let plan = |raw: &str, bind: Option<&str>, port: Option<u16>| {
+            resolve_server_plan(
+                &server(raw),
+                &ServerCliOverrides {
+                    bind: bind.map(str::to_string),
+                    port,
+                    no_tailscale: true,
+                },
+                None,
+            )
+            .is_ok()
+        };
+        // For each overridable problem the start checks raise, every flag
+        // gets `dux server` past it exactly when the problem names it, and
+        // without a flag it does not start.
+        for raw in ["[server]\nhost = \"localhost\"\n", "[server]\nport = 0\n"] {
+            let problems = start_problems_of(raw);
+            let [problem] = problems.as_slice() else {
+                panic!("{raw}: {problems:?}");
+            };
+            let setting = problem.dux_server_override.expect("overridable");
+            assert!(!plan(raw, None, None), "{raw}");
+            for flag in [ServerFlag::Bind, ServerFlag::Port] {
+                let starts = match flag {
+                    ServerFlag::Bind => plan(raw, Some("127.0.0.1:4000"), None),
+                    ServerFlag::Port => plan(raw, None, Some(4000)),
+                };
+                assert_eq!(
+                    starts,
+                    setting.flags().contains(&flag),
+                    "{raw}: {} says {}",
+                    flag.name(),
+                    setting.overriding_flags()
+                );
+            }
+        }
+        assert_eq!(ServerFileSetting::Host.overriding_flags(), "--bind");
+        assert_eq!(
+            ServerFileSetting::Port.overriding_flags(),
+            "--port or --bind"
+        );
+    }
+
+    fn load_config_from_text(raw: &str) -> Config {
+        recover_config(raw).expect("loads")
+    }
+
+    /// A key name that is itself the problem is placed by its line, never
+    /// repeated: a global or project env name, and an unknown `[server.auth]`
+    /// setting (a password typed as a key, say).
+    #[test]
+    fn a_name_that_is_the_problem_is_placed_by_its_line() {
+        let token = "sk-proj-AbCdEf0123456789";
+        let cases = [
+            (format!("[env]\n{token} = \"1\"\n"), "line 2"),
+            (
+                format!(
+                    "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\n{token} = \"1\"\n"
+                ),
+                "line 5",
+            ),
+            (format!("[server.auth]\n{token} = \"1\"\n"), "line 2"),
+            (format!("[env]\n{token} = 5\n"), "line 2"),
+        ];
+        for (raw, line) in cases {
+            let messages: Vec<String> = start_problems_of(&raw)
+                .into_iter()
+                .map(|problem| problem.message)
+                .collect();
+            assert!(!messages.is_empty(), "{raw}");
+            assert!(
+                messages.iter().all(|message| !message.contains(token)),
+                "{messages:?}"
+            );
+            assert!(
+                messages.iter().any(|message| message.contains(line)),
+                "{raw}: {messages:?}"
+            );
+        }
+        // A valid name that only says which variable still names it.
+        let messages: Vec<String> = start_problems_of("[env]\nFOO = \"${\"\n")
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect();
+        assert!(
+            messages[0].contains("global env variable FOO"),
+            "{messages:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod printed_paths_and_carried_values_tests {
+    use super::*;
+
+    /// The one formatter prints a valid path as it is and places an entry
+    /// whose name breaks its map's rule by its line, in every map with a rule.
+    #[test]
+    fn the_formatter_never_prints_a_name_that_breaks_its_rule() {
+        let raw = "[env]\n\"sk-live-SECRET\" = 5\nGOOD = \"1\"\n\n\
+                   [providers.\"bad name!\"]\ncommand = \"x\"\nargs = 5\n";
+        assert_eq!(
+            shown_path(raw, &key_path(&["ui", "left_width_pct"])),
+            "ui.left_width_pct"
+        );
+        assert_eq!(shown_path(raw, &key_path(&["env", "GOOD"])), "env.GOOD");
+        assert_eq!(
+            shown_path(raw, &["env".to_string(), "sk-live-SECRET".to_string()]),
+            "the entry on line 2 of [env]"
+        );
+        assert_eq!(
+            shown_path(
+                raw,
+                &[
+                    "providers".to_string(),
+                    "bad name!".to_string(),
+                    "command".to_string()
+                ]
+            ),
+            "command of the entry on line 5 of [providers]"
+        );
+        // Problem sentences and the load's reasons go through it too: the
+        // wrong-typed field inside the badly named provider is placed by the
+        // provider's line, never by its name.
+        let problems = start_problems_of(raw);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("args of the entry on line 5")),
+            "{problems:?}"
+        );
+        for problem in problems {
+            assert!(!problem.message.contains("SECRET"), "{problem:?}");
+            assert!(!problem.message.contains("bad name!"), "{problem:?}");
+        }
+        for (_, reason) in load_corrections_of(raw) {
+            assert!(
+                !reason.contains("SECRET") && !reason.contains("bad name!"),
+                "{reason}"
+            );
+        }
+    }
+
+    /// Every deprecated-key migration that writes a value is a correction
+    /// that says where the value came from, on which line, and what to
+    /// write instead.
+    #[test]
+    fn every_value_a_migration_writes_says_where_it_came_from() {
+        for (raw, key, said) in [
+            (
+                "[server]\nbind = \"0.0.0.0:4000\"\n",
+                &["server", "host"][..],
+                "carried over from the deprecated [server] bind = \"0.0.0.0:4000\" (line 2); \
+                 replace it with server.host and server.port",
+            ),
+            (
+                "[server]\nbind = \"0.0.0.0:4000\"\n",
+                &["server", "port"][..],
+                "carried over from the deprecated [server] bind",
+            ),
+            (
+                "[defaults]\nprompt_for_name = true\n",
+                &["defaults", "enable_randomized_pet_name_by_default"][..],
+                "carried over from the deprecated [defaults] prompt_for_name = true (line 2)",
+            ),
+            (
+                "[server]\ntailscale_enabled = false\n",
+                &["server", "tailscale"][..],
+                "carried over from the deprecated [server] tailscale_enabled = false (line 2); \
+                 replace it with server.tailscale",
+            ),
+        ] {
+            let corrections = load_corrections_of(raw);
+            let reason = corrections
+                .iter()
+                .find(|(corrected, _)| *corrected == key_path(key))
+                .map(|(_, reason)| reason.as_str())
+                .unwrap_or_else(|| panic!("{key:?}: {corrections:?}"));
+            assert!(reason.contains(said), "{key:?}: {reason}");
+        }
+        // A loopback bind writes nothing (the default already covers it),
+        // and a new key the file sets beside the old one wins, so nothing
+        // is carried over into it.
+        assert!(load_corrections_of("[server]\nbind = \"127.0.0.1:3890\"\n").is_empty());
+        assert!(
+            load_corrections_of("[server]\nbind = \"0.0.0.0:4000\"\nhost = \"1.2.3.4\"\n")
+                .iter()
+                .all(|(key, _)| *key != ["server", "host"])
+        );
+    }
+}
+
+#[cfg(test)]
+mod names_with_dots_quotes_and_spaces_tests {
+    use super::*;
+
+    /// A name that breaks its map's rule and holds a dot, a quote or a
+    /// space is carried as one segment from the file to every sentence:
+    /// the formatter places it by its line, and no problem or correction
+    /// ever prints it, in each map with a naming rule.
+    #[test]
+    fn a_name_with_a_dot_quote_or_space_is_one_segment_everywhere() {
+        for name in ["ghp.SECRET one", "ghp\"SECRET\"", "ghp SECRET.x.y"] {
+            let quoted = toml::Value::String(name.to_string()).to_string();
+            for (body, section) in [
+                (format!("[env]\n{quoted} = 5\n"), "env"),
+                (format!("[providers.{quoted}]\nargs = 5\n"), "providers"),
+                (format!("[macros]\n{quoted} = 5\n"), "macros"),
+            ] {
+                let segments = vec![section.to_string(), name.to_string()];
+                let shown = shown_path(&body, &segments);
+                assert!(!shown.contains("SECRET"), "{body}: {shown}");
+                assert!(
+                    shown.contains("line 2") || shown.contains("line 1"),
+                    "{body}: {shown}"
+                );
+                for problem in start_problems_of(&body) {
+                    assert!(!problem.message.contains("SECRET"), "{body}: {problem:?}");
+                }
+                for (path, reason) in load_corrections_of(&body) {
+                    assert!(!reason.contains("SECRET"), "{body}: {reason}");
+                    assert!(
+                        path.iter()
+                            .all(|segment| !segment.contains('.') || segment == name),
+                        "{body}: a path was split on a dot: {path:?}"
+                    );
+                }
+                // `get` of the table, its corrections printed as the CLI
+                // prints them.
+                let key = crate::config_keys::lookup(section).expect("a table");
+                let report = crate::config_keys::get_report(&body, &key).expect("get");
+                for correction in &report.corrections {
+                    let at = shown_path(&body, &correction.path);
+                    assert!(!at.contains("SECRET"), "{body}: {at}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod near_auth_tables_tests {
+    use super::*;
+
+    /// A table named close to "auth" stops a start only when it holds a
+    /// setting `[server.auth]` has; otherwise it is the user's own.
+    #[test]
+    fn a_near_auth_table_counts_only_with_an_auth_setting_in_it() {
+        for (body, stops) in [
+            ("[path]\nx = 1\n", false),
+            ("[math]\nx = 1\n", false),
+            ("[auto]\nenabled = true\n", false),
+            ("[oauth]\nclient_id = \"x\"\n", false),
+            ("[server.oauth]\nclient_id = \"x\"\n", false),
+            ("[auth]\nusername = \"ada\"\n", false),
+            ("[server.auht]\npassword_hash = \"x\"\n", true),
+            ("[server.auht]\nrequire = \"network\"\n", true),
+            ("[oauth]\npassword_hash = \"x\"\n", true),
+            ("[auht]\nsession_idle_seconds = 60\n", true),
+        ] {
+            assert_eq!(
+                !misplaced_auth_problems(body).is_empty(),
+                stops,
+                "{body:?}: {:?}",
+                misplaced_auth_problems(body)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5081,32 +8666,32 @@ mod agent_tabs_cap_tests {
 
     #[test]
     fn normalized_agent_tabs_max_substitutes_default_for_zero() {
-        assert_eq!(normalized_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
+        assert_eq!(effective_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
     }
 
     /// `0` is a real answer for `keep` (rotate and discard) rather than "use the
     /// default", which is what tells it apart from the settings above.
     #[test]
     fn normalized_log_keep_passes_zero_and_sane_values_through() {
-        assert_eq!(normalized_log_keep(0), 0);
-        assert_eq!(normalized_log_keep(5), 5);
-        assert_eq!(normalized_log_keep(MAX_LOG_KEEP), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(0), 0);
+        assert_eq!(effective_log_keep(5), 5);
+        assert_eq!(effective_log_keep(MAX_LOG_KEEP), MAX_LOG_KEEP);
     }
 
     #[test]
     fn normalized_log_keep_clamps_an_absurd_value() {
-        assert_eq!(normalized_log_keep(100_000), MAX_LOG_KEEP);
-        assert_eq!(normalized_log_keep(u32::MAX), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(100_000), MAX_LOG_KEEP);
+        assert_eq!(effective_log_keep(u32::MAX), MAX_LOG_KEEP);
     }
 
     #[test]
     fn normalized_agent_tabs_max_clamps_oversized_values() {
-        assert_eq!(normalized_agent_tabs_max(10_000), MAX_AGENT_TABS_MAX);
+        assert_eq!(effective_agent_tabs_max(10_000), MAX_AGENT_TABS_MAX);
     }
 
     #[test]
     fn normalized_agent_tabs_max_passes_through_sane_values() {
-        assert_eq!(normalized_agent_tabs_max(8), 8);
+        assert_eq!(effective_agent_tabs_max(8), 8);
     }
 
     #[test]
@@ -5157,23 +8742,23 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_inactive_interval_keeps_zero_and_clamps_the_rest() {
         // 0 is the user turning the slow clock off, not a mistake.
-        assert_eq!(normalized_pr_poll_inactive_interval(0), 0);
+        assert_eq!(effective_pr_poll_inactive_interval_seconds(0), 0);
         assert_eq!(
-            normalized_pr_poll_inactive_interval(43_200),
+            effective_pr_poll_inactive_interval_seconds(43_200),
             43_200,
             "a sane value passes through"
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(1),
+            effective_pr_poll_inactive_interval_seconds(1),
             u32::from(MIN_PR_POLL_INTERVAL_SECONDS),
             "the active poll's floor is shared, because it is the same API"
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(u32::MAX),
+            effective_pr_poll_inactive_interval_seconds(u32::MAX),
             MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS
         );
         assert_eq!(
-            normalized_pr_poll_inactive_interval(MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS),
+            effective_pr_poll_inactive_interval_seconds(MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS),
             MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
             "the ceiling itself is allowed"
         );
@@ -5182,28 +8767,31 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_interval_preserves_zero_as_disabled() {
         // 0 is a valid "disable the blind poll" value, NOT substituted with a default.
-        assert_eq!(normalized_pr_poll_interval(0), 0);
+        assert_eq!(effective_pr_poll_interval_seconds(0), 0);
     }
 
     #[test]
     fn normalized_pr_poll_interval_clamps_oversized_values() {
         assert_eq!(
-            normalized_pr_poll_interval(u16::MAX),
+            effective_pr_poll_interval_seconds(u16::MAX),
             MAX_PR_POLL_INTERVAL_SECONDS
         );
     }
 
     #[test]
     fn normalized_pr_poll_interval_passes_through_sane_values() {
-        assert_eq!(normalized_pr_poll_interval(180), 180);
+        assert_eq!(effective_pr_poll_interval_seconds(180), 180);
     }
 
     #[test]
     fn normalized_pr_poll_interval_clamps_small_nonzero_up_to_floor() {
-        assert_eq!(normalized_pr_poll_interval(1), MIN_PR_POLL_INTERVAL_SECONDS);
+        assert_eq!(
+            effective_pr_poll_interval_seconds(1),
+            MIN_PR_POLL_INTERVAL_SECONDS
+        );
         // The floor itself passes through unchanged.
         assert_eq!(
-            normalized_pr_poll_interval(MIN_PR_POLL_INTERVAL_SECONDS),
+            effective_pr_poll_interval_seconds(MIN_PR_POLL_INTERVAL_SECONDS),
             MIN_PR_POLL_INTERVAL_SECONDS
         );
     }
@@ -5211,7 +8799,7 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_pr_poll_interval_allows_exact_ceiling() {
         assert_eq!(
-            normalized_pr_poll_interval(MAX_PR_POLL_INTERVAL_SECONDS),
+            effective_pr_poll_interval_seconds(MAX_PR_POLL_INTERVAL_SECONDS),
             MAX_PR_POLL_INTERVAL_SECONDS
         );
     }
@@ -5492,7 +9080,7 @@ mod agent_tabs_cap_tests {
         )
         .expect("a typo must not fail the whole config load");
 
-        let warnings = web_dragdrop_paste_warnings(&config.providers);
+        let warnings = web_dragdrop_paste_warnings(&config.providers, "");
         // ONE per misspelled provider. Not one per provider, and not one per
         // dropped file.
         assert_eq!(
@@ -5525,10 +9113,10 @@ mod agent_tabs_cap_tests {
                 WebDragDropPaste::Bare
             );
         }
-        assert_eq!(web_dragdrop_paste_warnings(&config.providers).len(), 2);
+        assert_eq!(web_dragdrop_paste_warnings(&config.providers, "").len(), 2);
 
         // A clean config says nothing at all.
-        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default()).is_empty());
+        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default(), "").is_empty());
     }
 
     #[test]

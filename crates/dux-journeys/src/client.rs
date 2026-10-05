@@ -308,10 +308,12 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
-            .send()
-            .await
-            .unwrap_or_else(|err| panic!("{method} {path} did not get a response: {err}"));
+        let response = request.send().await.unwrap_or_else(|err| {
+            panic!(
+                "{method} {path} did not get a response: {}",
+                error_chain(&err)
+            )
+        });
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -341,14 +343,47 @@ impl Client {
     }
 
     /// Log in and panic unless it worked.
+    /// Sign in, waiting out any slow-down the way a person does: a 429 says
+    /// how long to wait (`Retry-After`), and dux slows every address down after
+    /// a failed attempt, this machine included.
     pub async fn login_ok(&self, password: &str) {
-        let response = self.login(password).await;
+        let mut response = self.login(password).await;
+        for _ in 0..5 {
+            if response.status != 429 {
+                break;
+            }
+            let wait: u64 = response
+                .header("retry-after")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(1, 30))).await;
+            response = self.login(password).await;
+        }
         assert_eq!(
             response.status,
             204,
             "login should succeed: {}",
             response.describe()
         );
+    }
+
+    /// `POST` a JSON body the way a person retries a refused password check:
+    /// a 429 is waited out (as its `Retry-After` says) and sent again, up to
+    /// five times, the way [`Self::login_ok`] waits out a sign-in.
+    pub async fn post_json_waiting(&self, path: &str, body: &serde_json::Value) -> Response {
+        let mut response = self.post_json(path, body).await;
+        for _ in 0..5 {
+            if response.status != 429 {
+                break;
+            }
+            let wait: u64 = response
+                .header("retry-after")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(1, 30))).await;
+            response = self.post_json(path, body).await;
+        }
+        response
     }
 
     /// `POST /api/v1/auth/logout`.
@@ -367,4 +402,17 @@ impl Client {
         );
         response.json()
     }
+}
+
+/// An error and every cause beneath it, so a failed request says WHY it got
+/// no response (refused, reset, a TLS alert) rather than only that it did not.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }

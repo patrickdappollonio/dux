@@ -33,7 +33,7 @@ import { discardConfirmation, discardOutcome } from "./discardOutcome"
 import { terminalsApi } from "./terminalsApi"
 import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
-import { configApi } from "./configApi"
+import { ConfigChangedError, configApi } from "./configApi"
 import { setConnectionId } from "./connection"
 import {
   fetchServerIdentity,
@@ -595,6 +595,11 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
+  /// The token the open editor's read was given; its save carries it back.
+  configEditorToken: string | null
+  /// Set when a save met a file that changed on disk since it was read: the
+  /// server's sentence, shown with the choice to reload or keep editing.
+  configEditorConflict: string | null
   // The Preferences dialog (the app menu's "Preferences…"). Gates the
   // modal that sets the browser tab title + favicon colour + Changes pane
   // visibility; the dialog seeds its fields from the bootstrap document, so it
@@ -1021,6 +1026,8 @@ let state: DuxState = {
   configEditorContent: "",
   configEditorLoading: false,
   configEditorError: null,
+  configEditorToken: null,
+  configEditorConflict: null,
   customizeWebappOpen: false,
   firstLoad: null,
   firstLoadDismissed: false,
@@ -6593,12 +6600,18 @@ export function openConfigEditor(): void {
     configEditorLoading: true,
     configEditorError: null,
     configEditorContent: "",
+    configEditorToken: null,
+    configEditorConflict: null,
   })
   configApi
     .readRawConfig()
-    .then((content) => {
+    .then(({ content, token }) => {
       if (configEditorEpoch !== epoch) return
-      setState({ configEditorContent: content, configEditorLoading: false })
+      setState({
+        configEditorContent: content,
+        configEditorToken: token,
+        configEditorLoading: false,
+      })
     })
     .catch((e) => {
       if (configEditorEpoch !== epoch) return
@@ -6618,7 +6631,15 @@ export function closeConfigEditor(): void {
     configEditorContent: "",
     configEditorLoading: false,
     configEditorError: null,
+    configEditorToken: null,
+    configEditorConflict: null,
   })
+}
+
+/// Close the conflict notice and keep editing; the next save still meets the
+/// changed file until the editor reloads it.
+export function dismissConfigEditorConflict(): void {
+  setState({ configEditorConflict: null })
 }
 
 // Save the edited config.toml. The server validates the TOML before writing: a
@@ -6626,9 +6647,9 @@ export function closeConfigEditor(): void {
 // modal open so the user can fix it. On a successful write we adopt it with the
 // existing reload (best-effort: the file is already persisted), close, and toast.
 export function saveConfigEditor(content: string): void {
-  setState({ configEditorError: null })
+  setState({ configEditorError: null, configEditorConflict: null })
   configApi
-    .writeRawConfig(content)
+    .writeRawConfig(content, state.configEditorToken ?? "")
     .then(() => {
       // Save persists but does not apply: config.toml is written and the running
       // config is untouched until the user runs "Reload config", which the toast
@@ -6638,6 +6659,12 @@ export function saveConfigEditor(content: string): void {
       notifySuccess("Saved config.toml. Run “Reload config” to apply it.")
     })
     .catch((e) => {
+      if (e instanceof ConfigChangedError) {
+        // Nothing was written; the edits stay in the editor, and the dialog
+        // offers to reload the file or keep editing.
+        setState({ configEditorConflict: e.message })
+        return
+      }
       setState({
         configEditorError:
           e instanceof Error ? e.message : "Could not save config.toml.",

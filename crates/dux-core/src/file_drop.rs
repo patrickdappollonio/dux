@@ -526,7 +526,7 @@ impl DropDir {
     /// This is the ONE place the upload directory comes into existence.
     ///
     /// `relative` must already have been through
-    /// [`crate::config::normalized_upload_directory`], which guarantees it is
+    /// [`crate::config::effective_upload_directory`], which guarantees it is
     /// relative and made of named components only. That check is about the SHAPE
     /// of the path; the enforcement is here: the walk opens one component at a time
     /// from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at ANY
@@ -1020,7 +1020,7 @@ pub enum FileDropDestination {
         /// The agent's worktree, the root the walk starts from.
         worktree: PathBuf,
         /// The upload directory relative to it, already normalized through
-        /// [`crate::config::normalized_upload_directory`].
+        /// [`crate::config::effective_upload_directory`].
         relative: String,
         /// Whether to seed the self-ignoring `.gitignore`
         /// (`ui.upload_write_gitignore`).

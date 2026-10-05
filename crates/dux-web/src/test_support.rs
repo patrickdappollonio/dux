@@ -1,6 +1,6 @@
 //! Test-only helpers shared by the REST route modules' `#[cfg(test)]` suites:
-//! a minimal headless engine handle plus a plain router builder. dux is
-//! trusted-local with no login gate, so every route is served plainly.
+//! a minimal headless engine handle plus a plain router builder. With no
+//! password in the test config, the auth layer lets every route through.
 //! Mirrors the private `test_engine_handle` in `server.rs`, lifted here so every
 //! route module can boot the same engine without duplicating the recipe.
 
@@ -18,11 +18,19 @@ use crate::server;
 /// a plain `sh`, so no test that creates or launches an agent can exec the
 /// developer's real agent CLI, and none depends on the developer's `$SHELL`. Every
 /// test in this crate boots through here rather than the production function.
+///
+/// The `gh` probe the engine loop starts is pointed at a program that does not
+/// exist, so it settles at once on "not installed" and never runs the
+/// developer's real `gh`. A real `gh` answers on its own schedule (it may ask
+/// GitHub over the network), and the moment it does it flips availability and
+/// fires `config.changed`, an event no test asked for that arrives whenever it
+/// likes. A test that needs `gh` points the probe at a stand-in of its own.
 pub(crate) fn bootstrap_test_engine(
     paths: &dux_core::config::DuxPaths,
 ) -> anyhow::Result<dux_core::engine::Engine> {
     let mut engine = crate::bootstrap::bootstrap_engine(paths)?;
     dux_core::test_provider::defuse_config(&mut engine.config);
+    engine.gh_probe.program = paths.root.join("gh-is-not-installed").into_os_string();
     Ok(engine)
 }
 

@@ -142,7 +142,7 @@ impl SingleInstanceLock {
                 // from flock(), and the PID is diagnostic for colliders.
                 let _ = file.set_len(0);
                 let _ = file.seek(SeekFrom::Start(0));
-                let _ = writeln!(file, "{}", std::process::id());
+                let _ = file.write_all(lock_file_text(std::process::id()).as_bytes());
                 let _ = file.flush();
                 Ok(Self { _file: file })
             }
@@ -206,7 +206,48 @@ fn read_holder_pid_once(file: &mut File) -> Option<u32> {
     let mut buf = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
     file.read_to_string(&mut buf).ok()?;
-    buf.trim().parse::<u32>().ok()
+    LockFileContents::parse(&buf).pid
+}
+
+/// The line a dux adds to its lock file, after its PID, once it handles the
+/// reload signal (see [`crate::reload_signal`]). `dux config set` signals
+/// only a holder that wrote it: a dux from before the reload signal has no
+/// handler, and the signal's default action would terminate it.
+pub const RELOAD_SIGNAL_MARKER: &str = "reload-signal=usr1";
+
+/// What this process writes into the lock file it holds: its PID on the
+/// first line, as every reader expects, then the reload-signal marker when
+/// the reload handler is already installed (never before: a marker the
+/// process cannot yet honour would invite the signal that kills it).
+fn lock_file_text(pid: u32) -> String {
+    if crate::reload_signal::is_installed() {
+        format!("{pid}\n{RELOAD_SIGNAL_MARKER}\n")
+    } else {
+        format!("{pid}\n")
+    }
+}
+
+/// A lock file's contents as written by any dux: the holder's PID on the
+/// first line (the whole file, for a dux from before the marker), and
+/// whether a later line says it handles the reload signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LockFileContents {
+    pub pid: Option<u32>,
+    pub handles_reload_signal: bool,
+}
+
+impl LockFileContents {
+    pub fn parse(text: &str) -> Self {
+        let mut lines = text.lines();
+        let pid = lines
+            .next()
+            .and_then(|line| line.trim().parse::<u32>().ok());
+        let handles_reload_signal = lines.any(|line| line.trim() == RELOAD_SIGNAL_MARKER);
+        Self {
+            pid,
+            handles_reload_signal,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,12 +280,45 @@ mod tests {
 
         let _lock = SingleInstanceLock::acquire(&path).expect("first acquire should succeed");
         let contents = fs::read_to_string(&path).unwrap();
-        let written: u32 = contents.trim().parse().expect("pid should parse");
+        let written = LockFileContents::parse(&contents).pid;
         assert_eq!(
             written,
-            std::process::id(),
+            Some(std::process::id()),
             "lockfile should contain the holder's PID"
         );
+        assert!(
+            contents.starts_with(&format!("{}\n", std::process::id())),
+            "the PID is the whole first line: {contents:?}"
+        );
+    }
+
+    /// A lock file from before the marker is the PID alone; one from now
+    /// may add the marker on a later line. Both read the same PID.
+    #[test]
+    fn a_lock_file_reads_with_and_without_the_reload_marker() {
+        assert_eq!(
+            LockFileContents::parse("1234"),
+            LockFileContents {
+                pid: Some(1234),
+                handles_reload_signal: false
+            }
+        );
+        assert_eq!(
+            LockFileContents::parse(&format!("1234\n{RELOAD_SIGNAL_MARKER}\n")),
+            LockFileContents {
+                pid: Some(1234),
+                handles_reload_signal: true
+            }
+        );
+        assert_eq!(LockFileContents::parse("").pid, None);
+    }
+
+    /// The marker is written only by a process whose reload handler is in
+    /// place.
+    #[test]
+    fn the_marker_follows_the_installed_handler() {
+        crate::reload_signal::install().expect("install");
+        assert_eq!(lock_file_text(7), format!("7\n{RELOAD_SIGNAL_MARKER}\n"));
     }
 
     #[test]

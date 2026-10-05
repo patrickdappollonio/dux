@@ -168,6 +168,14 @@ async fn journey_a_headerless_forward_onto_loopback_is_not_this_machine() {
         .await;
         dux.client_on(4100).await.wait_answering().await;
         let relayed = dux.client_on(4200).await;
+        // Until its first look at Tailscale lands dux trusts no loopback
+        // request, so the starting point is the moment it trusts this machine.
+        eventually(
+            "dux to take this machine for this machine before any forward exists",
+            Duration::from_secs(30),
+            || async { (dux.inside().get("/api/v1/projects").await.status == 200).then_some(()) },
+        )
+        .await;
 
         dux.set_fake_serve(&format!(
             r#"{{"TCP":{{"443":{{"TCPForward":"127.0.0.1:{}"}}}}}}"#,

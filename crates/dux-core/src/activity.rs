@@ -67,10 +67,10 @@ impl Default for ActivityRing {
 
 impl ActivityRing {
     /// A ring holding at most `capacity` lines past the pinned ones, read
-    /// through [`crate::config::log_viewer_capacity`] (at least 1, at most
+    /// through [`crate::config::effective_log_viewer_lines`] (at least 1, at most
     /// [`crate::config::LOG_VIEWER_LINES_MAX`]).
     pub fn new(capacity: usize) -> Self {
-        let capacity = crate::config::log_viewer_capacity(capacity);
+        let capacity = crate::config::effective_log_viewer_lines(capacity);
         Self(Arc::new(ActivityInner {
             held: Mutex::new(Held {
                 pinned: Vec::new(),

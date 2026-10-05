@@ -15,6 +15,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     closeConfigEditor: vi.fn(),
     openConfigEditor: vi.fn(),
     saveConfigEditor: vi.fn(),
+    dismissConfigEditorConflict: vi.fn(),
   }
 })
 
@@ -90,5 +91,24 @@ describe("ConfigEditorDialog", () => {
     expect(screen.getByText("boom")).toBeTruthy()
     expect(screen.getByText("Retry")).toBeTruthy()
     expect(screen.queryByTestId("code-editor")).toBeNull()
+  })
+})
+
+describe("ConfigEditorDialog conflict", () => {
+  it("offers keep editing and reloading when the file changed on disk", async () => {
+    const store = await import("@/lib/store")
+    seed({
+      configEditorOpen: true,
+      configEditorContent: "[ui]\n",
+      configEditorConflict: "config.toml changed on disk since you opened it",
+    } as Partial<DuxState>)
+    render(<ConfigEditorDialog />)
+    expect(screen.getByText("config.toml changed on disk since you opened it")).toBeTruthy()
+    const keep = screen.getByRole("button", { name: "Keep editing" })
+    const reload = screen.getByRole("button", { name: "Reload the file" })
+    keep.click()
+    expect(store.dismissConfigEditorConflict).toHaveBeenCalled()
+    reload.click()
+    expect(store.openConfigEditor).toHaveBeenCalled()
   })
 })

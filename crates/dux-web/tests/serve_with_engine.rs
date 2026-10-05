@@ -559,7 +559,7 @@ async fn the_flip_logs_what_dux_server_prints() {
             .iter()
             .any(|l| l.contains("dux is not checking Tailscale")
                 && l.contains("tailscale = \"no\"")
-                && l.contains("no login")),
+                && l.contains("signs in too")),
         "tailscale = \"no\" says once what it costs:\n{joined}"
     );
     assert!(

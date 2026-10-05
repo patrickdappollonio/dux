@@ -677,13 +677,6 @@ fn clamp_right_width_pct(right_width_pct: u16, left_width_pct: u16) -> u16 {
     right_width_pct.clamp(MIN_RIGHT_WIDTH_PCT, max_right.max(MIN_RIGHT_WIDTH_PCT))
 }
 
-const MIN_TERMINAL_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_TERMINAL_PANE_HEIGHT_PCT: u16 = 80;
-const MIN_STAGED_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_STAGED_PANE_HEIGHT_PCT: u16 = 80;
-const MIN_COMMIT_PANE_HEIGHT_PCT: u16 = 10;
-const MAX_COMMIT_PANE_HEIGHT_PCT: u16 = 80;
-
 fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     if total_width == 0 {
         return 0;
@@ -10483,7 +10476,7 @@ impl App {
                     let term_rows = left_bottom.saturating_sub(row).clamp(1, left.height);
                     let pct = pct_from_columns(term_rows, left.height); // reuse same % helper
                     self.terminal_pane_height_pct =
-                        pct.clamp(MIN_TERMINAL_PANE_HEIGHT_PCT, MAX_TERMINAL_PANE_HEIGHT_PCT);
+                        dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
             Some(ResizeDragState::StagedDivider) => {
@@ -10494,7 +10487,7 @@ impl App {
                     let staged_rows = right_bottom.saturating_sub(row).clamp(1, right.height);
                     let pct = pct_from_columns(staged_rows, right.height);
                     self.staged_pane_height_pct =
-                        pct.clamp(MIN_STAGED_PANE_HEIGHT_PCT, MAX_STAGED_PANE_HEIGHT_PCT);
+                        dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
             Some(ResizeDragState::CommitDivider) => {
@@ -10515,7 +10508,7 @@ impl App {
                         let commit_rows = sub_bottom.saturating_sub(row).clamp(1, sub_height);
                         let pct = pct_from_columns(commit_rows, sub_height);
                         self.commit_pane_height_pct =
-                            pct.clamp(MIN_COMMIT_PANE_HEIGHT_PCT, MAX_COMMIT_PANE_HEIGHT_PCT);
+                            dux_core::config_effective::effective_pane_height_pct(pct);
                     }
                 }
             }
@@ -13070,6 +13063,213 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// A reload that meets an unreadable `[server.auth]` is rejected whole:
+    /// the running config, password included, is exactly what it was, and
+    /// the failure dialog says why.
+    #[test]
+    fn reload_config_refuses_a_file_whose_server_auth_cannot_be_read() {
+        let running_hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "the running password stays".to_string(),
+        ))
+        .expect("hash");
+        for body in [
+            "[server.auth\n",
+            "[server.auth]\npassword_hash = \"not a hash\"\n",
+            "[server.auth]\nblocked_addresses = 7\n",
+        ] {
+            let mut app = test_app(default_bindings());
+            app.engine.config.ui.right_width_pct = 41;
+            app.engine.config.server.auth.password_hash = running_hash.clone();
+            let before = app.engine.config.clone();
+            std::fs::write(&app.engine.paths.config_path, body).expect("write config");
+
+            app.execute_command("reload-config".to_string())
+                .expect("start reload config");
+            drain_until(&mut app, |app| {
+                matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
+            });
+
+            assert_eq!(app.engine.config, before, "{body:?}: nothing changed");
+            match &app.prompt {
+                PromptState::ConfigReloadFailed { error, .. } => {
+                    assert!(error.contains("server.auth"), "{body:?}: {error}");
+                }
+                other => panic!("expected the reload failure prompt, got {other:?}"),
+            }
+        }
+    }
+
+    /// `dux config set` signals the running dux with SIGUSR1; the terminal UI
+    /// answers with its ordinary reload, so the change is live at once.
+    #[test]
+    fn a_sigusr1_runs_the_ordinary_config_reload() {
+        dux_core::reload_signal::install().expect("install the handler");
+        let mut app = test_app(default_bindings());
+        let mut config = Config::default();
+        config.ui.right_width_pct = 38;
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        std::fs::write(
+            &app.engine.paths.config_path,
+            crate::config::render_config_with(&config, &bindings),
+        )
+        .expect("write valid config");
+
+        assert!(
+            !app.reload_config_on_signal(),
+            "nothing to do before a signal"
+        );
+        // SAFETY: raising a signal whose handler only sets an atomic flag.
+        unsafe { libc::raise(libc::SIGUSR1) };
+        assert!(app.reload_config_on_signal(), "the signal starts a reload");
+        drain_until(&mut app, |app| app.engine.config.ui.right_width_pct == 38);
+        assert_eq!(app.engine.config.ui.right_width_pct, 38);
+        assert!(!app.reload_config_on_signal(), "one signal is one reload");
+    }
+
+    /// config.toml deleted while dux runs: a reload is refused whole rather
+    /// than reading "no file" as "no password", and the file is not quietly
+    /// recreated from defaults either.
+    #[test]
+    fn reload_config_refuses_a_deleted_config_file() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("the running password stays".to_string()),
+        )
+        .expect("hash");
+        let before = app.engine.config.clone();
+        let _ = std::fs::remove_file(&app.engine.paths.config_path);
+
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
+        });
+        assert_eq!(app.engine.config, before);
+        match &app.prompt {
+            PromptState::ConfigReloadFailed { error, .. } => {
+                assert!(error.contains("no longer exists"), "{error}");
+            }
+            other => panic!("expected the reload failure prompt, got {other:?}"),
+        }
+        assert!(!app.engine.paths.config_path.exists(), "not recreated");
+    }
+
+    /// When the engine's own apply of a reload fails (a reload with deferred
+    /// commands), it keeps the new config: the view follows it, the pending
+    /// reload resolves as an apply that failed rather than a refused file,
+    /// and both surfaces read that the new settings are in force. A plain
+    /// reload failure (the file was refused) leaves the view alone, unsaved
+    /// resize included.
+    #[test]
+    fn an_adopted_reload_moves_the_view_and_a_refused_one_leaves_it() {
+        use dux_core::engine::EventReaction;
+        let mut app = test_app(default_bindings());
+        assert_ne!(app.left_width_pct, 37);
+        app.engine.config.ui.left_width_pct = 37;
+        app.engine.config.ui.show_changes_pane = false;
+        app.apply_reaction(EventReaction::OpenConfigReloadFailedModal(
+            "the file is not valid TOML".to_string(),
+        ));
+        assert_ne!(app.left_width_pct, 37, "a refused reload adopts nothing");
+        app.prompt = PromptState::None;
+        let mut before = app.engine.config.clone();
+        before.ui.left_width_pct = 20;
+        before.ui.show_changes_pane = true;
+        while app.engine.worker_rx.try_recv().is_ok() {}
+        app.apply_reaction(EventReaction::ConfigAdopted {
+            github_was_enabled: before.ui.github_integration,
+            before: Box::new(before),
+            error: "the session database could not be read".to_string(),
+        });
+        assert_eq!(app.left_width_pct, 37);
+        assert!(app.right_hidden);
+        assert!(
+            !matches!(app.prompt, PromptState::ConfigReloadFailed { .. }),
+            "the config was not refused"
+        );
+        let said = std::iter::from_fn(|| app.engine.worker_rx.try_recv().ok())
+            .find_map(|event| match event {
+                dux_core::worker::WorkerEvent::PollerStatus(status) => Some(status),
+                _ => None,
+            })
+            .expect("the outcome rides the lane both surfaces drain");
+        assert!(said.message.contains("in force"), "{}", said.message);
+        assert!(
+            said.message.contains("session database"),
+            "{}",
+            said.message
+        );
+    }
+
+    #[test]
+    fn a_failed_reload_apply_never_reverts_the_file() {
+        let mut app = test_app(default_bindings());
+        std::fs::write(
+            &app.engine.paths.config_path,
+            "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
+        app.engine.config = dux_core::config::load_config(&app.engine.paths).unwrap();
+        app.engine.retune_after_config_swap();
+        std::fs::write(
+            &app.engine.paths.config_path,
+            "[ui]\nleft_width_pct = 33\nshow_changes_pane = false\n\n[env]\n",
+        )
+        .unwrap();
+        let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
+        assert!(!app.right_hidden, "precondition: the changes pane shows");
+        rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
+            .unwrap()
+            .execute("DROP TABLE projects", [])
+            .unwrap();
+
+        app.apply_reloaded_config_reaction(reloaded);
+        assert_eq!(
+            app.engine.config.ui.left_width_pct, 33,
+            "the engine keeps the new config though the apply failed"
+        );
+        assert_eq!(app.left_width_pct, 33, "the view follows the kept config");
+        assert!(
+            app.right_hidden,
+            "every view setting follows the kept config"
+        );
+
+        for round in 0..2 {
+            let mut memory = app.engine.config.clone();
+            memory.ui.copy_on_select = round == 0;
+            app.engine.config_writer.save_eager(memory).expect("save");
+        }
+        let after = std::fs::read_to_string(&app.engine.paths.config_path).unwrap();
+        assert!(
+            !after.contains("FOO"),
+            "the deletion survives two saves:\n{after}"
+        );
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "not reverted:\n{after}"
+        );
+    }
+
+    #[test]
+    fn reload_config_applies_a_valid_new_password() {
+        let mut app = test_app(default_bindings());
+        let mut config = Config::default();
+        config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("a brand new passphrase here".to_string()),
+        )
+        .expect("hash");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        std::fs::write(
+            &app.engine.paths.config_path,
+            crate::config::render_config_with(&config, &bindings),
+        )
+        .expect("write valid config");
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        drain_until(&mut app, |app| app.engine.config.server.auth.has_password());
+        assert_eq!(app.engine.config.server.auth, config.server.auth);
+    }
+
     #[test]
     fn reload_config_failure_can_recover_last_working_config_file() {
         let mut app = test_app(default_bindings());
@@ -13087,10 +13287,20 @@ not_a_real_action = ["x"]
         // RecoverConfig is synchronous: it writes through the engine while
         // holding the quiesce barrier and returns the FINAL status directly.
         // There is no trailing Busy (which would never clear) and nothing to drain.
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert_eq!(
-            app.status.message(),
-            "Restored the last working configuration to config.toml."
+        // The file was not TOML, so its [server.auth] could not be kept, and
+        // the status says the running password setting was written instead.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(
+            app.status
+                .message()
+                .starts_with("Restored the last working configuration to config.toml."),
+            "{}",
+            app.status.message()
+        );
+        assert!(
+            app.status.message().contains("no password"),
+            "{}",
+            app.status.message()
         );
 
         assert!(matches!(app.prompt, PromptState::None));
@@ -13098,6 +13308,43 @@ not_a_real_action = ["x"]
             std::fs::read_to_string(&app.engine.paths.config_path).expect("read recovered");
         let parsed: Config = toml::from_str(&recovered).expect("parse recovered config");
         assert_eq!(parsed.ui.right_width_pct, 42);
+    }
+
+    /// Recovering after a failed reload keeps the file's own `[server.auth]`
+    /// when it reads, never the running dux's older one: a password set with
+    /// `dux config set` after dux started must survive the recovery.
+    #[test]
+    fn recovering_keeps_the_files_server_auth_rather_than_the_running_one() {
+        let hash = |text: &str| {
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(text.to_string()))
+                .expect("hash")
+        };
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.auth.password_hash = hash("the password dux started with");
+        let newer = hash("the password set afterwards");
+        std::fs::write(
+            &app.engine.paths.config_path,
+            format!(
+                "[keys]\nnot_a_real_action = [\"x\"]\n\n[server.auth]\npassword_hash = \"{newer}\"\n"
+            ),
+        )
+        .expect("write config");
+        app.prompt = PromptState::ConfigReloadFailed {
+            error: "unknown action".to_string(),
+            recover_old_config: true,
+            focus: ConfigReloadFailedFocus::Apply,
+            scroll: 0,
+        };
+        app.resolve_config_reload_failed(true);
+        let recovered: Config =
+            toml::from_str(&std::fs::read_to_string(&app.engine.paths.config_path).expect("read"))
+                .expect("parse");
+        assert_eq!(recovered.server.auth.password_hash, newer);
+        assert!(
+            app.status.message().contains("[server.auth] was kept"),
+            "{}",
+            app.status.message()
+        );
     }
 
     /// A long, multi-line error must be reachable with the keyboard, and the

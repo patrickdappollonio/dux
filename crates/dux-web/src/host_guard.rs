@@ -48,65 +48,25 @@
 //!   suffix, and that suffix under `.ts.net`. A name from another control server
 //!   (Headscale, say) is in a domain its operator chose and needs
 //!   `allowed_hosts`.
-//! - Never while ANY Tailscale Funnel route is on for this machine, whatever it
-//!   forwards to. This is NOT what keeps a Funnel out (see the next two points):
-//!   Tailscale's serve proxy routes by the TLS name and forwards the public
-//!   client's own Host, so a request through Funnel can claim `localhost` or a
-//!   tailnet literal and never needs this name. It only stops dux offering a
-//!   name a Funnel is using.
+//! - Never while ANY Tailscale Funnel route is on for this machine and NO
+//!   password is set, whatever the Funnel forwards to. This is not what keeps
+//!   a Funnel's visitors out: Tailscale's serve proxy routes by the TLS name
+//!   and forwards the public client's own Host, so a request through Funnel
+//!   can claim `localhost` or a tailnet literal and never needs this name. It
+//!   stops dux offering a name a Funnel is using while nothing would stop its
+//!   visitors. With a password set the name stays admitted, so a Funnel's
+//!   visitors reach the login page (`crate::auth`), which is where they are
+//!   stopped.
 //! - Only on a CURRENT reading: a failed look at the Tailscale CLI withdraws the
 //!   name until a look succeeds. The name is watched on `yes` too.
 //!
-//! What actually keeps a Funnel out is two checks that run before any rule:
-//!
-//! - The `Tailscale-Funnel-Request` marker Tailscale's serve proxy sets on every
-//!   request that came through Funnel (and strips from client input), daemons
-//!   1.72 and later. A request carrying it is refused, on EVERY mode, `no`
-//!   included, because it costs nothing to read.
-//! - The Funnel lockout ([`FunnelLockout`]). While the serve configuration shows
-//!   a Funnel forwarding to dux's port (a raw TCP forward, TLS-terminated or not,
-//!   or a web handler on any path), EVERY request is refused with a `503`:
-//!   neither a raw TCP stream nor a web request through a daemon older than 1.72
-//!   carries the marker, both come from loopback, and both can claim any Host.
-//!   It fails closed on unknown: a serve answers `503` until its first look at
-//!   Tailscale lands, and any look that fails, times out or cannot reach the
-//!   daemon refuses until a look succeeds, after an open state too. Once a
-//!   Funnel to dux has been seen, NOTHING but a successful look that shows it
-//!   gone lifts the refusal: not a daemon outage, not a missing CLI. A
-//!   successful look at a node that is down, logged out or awaiting approval
-//!   shows no Funnel unless its saved configuration still Funnels dux, which
-//!   `tailscale up` would bring straight back ([`FunnelLockout::FunnelSaved`],
-//!   whose way out starts with `tailscale up`, since a node that is down
-//!   cannot turn a Funnel off). A CLI missing while Tailscale is
-//!   evidently here is its own refusal ([`FunnelLockout::CliNotFound`]), whose
-//!   way out is the CLI rather than tailscaled.
-//!   Two answers serve without a successful look, both only while nothing of
-//!   Tailscale is on this machine (no Tailscale-range address on Tailscale's
-//!   own interface or on an address its last status reported, so another
-//!   CGNAT VPN does not count; no daemon socket that answers; no `tailscaled` or macOS
-//!   network-extension process): no CLI anywhere dux looks (a CLI it could not
-//!   run for any other reason is a failure), and a CLI that says in its own
-//!   words that no daemon is running. Nothing can publish dux then, as far as
-//!   dux can see: inside a container a Tailscale outside it is invisible, so
-//!   there dux serves and warns once at start (`CONTAINER_WARNING`). A Funnel
-//!   to another port is never locked for either (it may be the operator's own
-//!   relay); it withdraws the name and warns. The moment the state
-//!   leaves Open, every socket already upgraded closes itself (see
-//!   [`FunnelLockoutWatch`]), because a socket never passes this guard again.
-//!   Funnel and its handler are paired the way Tailscale pairs them: each
-//!   `host:port` an `AllowFunnel` switches on, at the top level or in any
-//!   foreground session, with the handler for that same `host:port` (a
-//!   foreground session's before the top level's), so a Funnel for another
-//!   port never pairs with dux served on this one. A target's path, query and
-//!   fragment are ignored, and a port written by name, or one dux cannot read,
-//!   counts as dux's.
-//!
-//! Limits, stated plainly: the lockout is read every watch period, so a Funnel
-//! switched on mid-run is refused at the next look, while an HTTP Funnel through
-//! a 1.72 or later daemon is refused at once by the marker. Only THIS machine's
-//! serve configuration is visible, so another tailnet node funnelling to this
-//! machine's Tailscale address is not. On `no` dux does not consult Tailscale,
-//! so the lockout never arms there, and switching to `no` lifts one out loud.
+//! This guard refuses nothing because of a Funnel. What dux knows about one
+//! (`crate::exposure`) decides how a request is CLASSIFIED instead: a request
+//! carrying Tailscale's Funnel marker is the internet, and while a Funnel or a
+//! raw TCP forward may reach dux's port (or nobody knows yet whether one
+//! does), a loopback request with no trustworthy origin is the network, so a
+//! configured password applies to it. With no password dux serves and says
+//! loudly what that exposes; that choice is the owner's.
 //!
 //! Within those limits it is safe for the same reason the literal rules are: DNS
 //! rebinding needs a name the ATTACKER controls, pointed at this machine's
@@ -203,142 +163,6 @@ fn is_tailscale_range(ip: IpAddr) -> bool {
     }
 }
 
-// ── The Funnel lockout ─────────────────────────────────────────────────────
-
-/// Whether the Host guard serves at all, as far as Tailscale Funnel goes.
-///
-/// Every state but [`FunnelLockout::Open`] refuses every request with a `503`
-/// before any Host rule runs, because a request a Funnel forwards to dux's port
-/// arrives from loopback and can claim any Host (`localhost`, a tailnet
-/// literal), and only the marker of a new enough daemon would tell it apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FunnelLockout {
-    /// No Funnel forwards to dux, as far as the last look could tell, or dux
-    /// is not consulting Tailscale at all (`tailscale = "no"`).
-    Open,
-    /// The serve has started and its first look at Tailscale has not answered
-    /// yet. Fail closed: unknown is not clear.
-    Checking,
-    /// The Tailscale CLI is there but failed or did not answer, so nobody knows
-    /// whether a Funnel publishes dux.
-    Unconfirmed,
-    /// Tailscale is evidently on this machine but its CLI is not where dux
-    /// looks, so nobody knows whether a Funnel publishes dux. Its own state
-    /// because its way out is the CLI, not tailscaled.
-    CliNotFound,
-    /// A Funnel forwards to dux's port.
-    Funnel,
-    /// The node is down, but its saved configuration Funnels dux's port, which
-    /// comes back the moment it is brought up. Its own state because a node
-    /// that is down cannot turn a Funnel off: the way out starts with
-    /// `tailscale up`.
-    FunnelSaved,
-}
-
-/// Why [`FunnelLockout::FunnelSaved`] refuses, and the way out, in the order
-/// it works. Shared by the `503` body and the warning.
-pub const FUNNEL_SAVED_REFUSAL: &str = "Tailscale is down on this machine, but its saved \
-     settings Funnel this dux server to the public internet, and Tailscale brings that Funnel \
-     back the moment it is up again. dux has no login, so it refuses every request until a look \
-     at Tailscale shows that Funnel gone. Bring Tailscale up (`tailscale up`; dux keeps \
-     refusing meanwhile), then turn the Funnel off (`tailscale funnel status` lists it). As a \
-     last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns \
-     off this Funnel protection.";
-
-/// Why [`FunnelLockout::CliNotFound`] refuses, and the way out. Shared by the
-/// `503` body and the warning, so both name the same places.
-pub const CLI_NOT_FOUND_REFUSAL: &str = "Tailscale is running on this machine, but dux cannot \
-     find the tailscale command to ask it whether a Tailscale Funnel publishes this server to \
-     the public internet, and dux has no login, so it refuses every request until it can. dux \
-     looks for the command on your PATH, in /usr/local/bin, and in \
-     /Applications/Tailscale.app/Contents/MacOS/Tailscale: put it in one of those places. Or \
-     set [server] tailscale = \"no\" to stop dux consulting Tailscale, which also turns off \
-     this Funnel protection.";
-
-impl FunnelLockout {
-    /// The body of the `503` this state answers with, or `None` when it serves.
-    pub(crate) fn refusal(self) -> Option<&'static str> {
-        match self {
-            Self::Open => None,
-            Self::Checking => Some(
-                "This dux server is checking whether a Tailscale Funnel publishes it to the \
-                 public internet, and dux has no login, so it answers nothing until it knows. \
-                 Try again in a moment.",
-            ),
-            Self::Unconfirmed => Some(
-                "This dux server could not confirm that no Tailscale Funnel publishes it to the \
-                 public internet (the tailscale CLI failed, did not answer, or cannot reach its \
-                 daemon), and dux has no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection.",
-            ),
-            Self::CliNotFound => Some(CLI_NOT_FOUND_REFUSAL),
-            Self::FunnelSaved => Some(FUNNEL_SAVED_REFUSAL),
-            Self::Funnel => Some(
-                "A Tailscale Funnel is publishing this dux server to the public internet, and \
-                 dux has no login, so it refuses every request until that Funnel is turned off. \
-                 Run `tailscale funnel status` on the machine dux runs on to see it.",
-            ),
-        }
-    }
-}
-
-/// The lockout state a serve's loop writes and its Host guard reads. Cloning
-/// shares it. It is a watch channel rather than a bare atomic because a socket
-/// opened while dux served is not stopped by the guard, which only sees new
-/// requests: every long-lived socket loop subscribes and closes itself the
-/// moment the state leaves [`FunnelLockout::Open`].
-#[derive(Clone, Debug)]
-pub struct FunnelLockoutCell(Arc<tokio::sync::watch::Sender<FunnelLockout>>);
-
-impl FunnelLockoutCell {
-    pub fn new(state: FunnelLockout) -> Self {
-        Self(Arc::new(tokio::sync::watch::Sender::new(state)))
-    }
-
-    pub fn get(&self) -> FunnelLockout {
-        *self.0.borrow()
-    }
-
-    /// Set the state, answering with the one it replaced. Every subscriber is
-    /// woken, receivers or not.
-    pub fn set(&self, state: FunnelLockout) -> FunnelLockout {
-        self.0.send_replace(state)
-    }
-
-    /// A handle that resolves [`FunnelLockoutWatch::engaged`] once the state
-    /// is anything but Open.
-    pub fn watch(&self) -> FunnelLockoutWatch {
-        FunnelLockoutWatch(Some(self.0.subscribe()))
-    }
-}
-
-/// What a long-lived socket holds to learn that dux stopped serving. A serve
-/// with no lockout (Tailscale off) holds [`FunnelLockoutWatch::never`].
-#[derive(Debug)]
-pub struct FunnelLockoutWatch(Option<tokio::sync::watch::Receiver<FunnelLockout>>);
-
-impl FunnelLockoutWatch {
-    /// A watch that never engages.
-    pub fn never() -> Self {
-        Self(None)
-    }
-
-    /// Resolves once the lockout is anything but Open, at once when it already
-    /// is. Never resolves for [`FunnelLockoutWatch::never`]; a dropped cell
-    /// leaves the last state standing, so it never resolves on that alone.
-    pub async fn engaged(&mut self) {
-        let Some(rx) = self.0.as_mut() else {
-            return std::future::pending().await;
-        };
-        if rx
-            .wait_for(|state| *state != FunnelLockout::Open)
-            .await
-            .is_err()
-        {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
 // ── HostAllowlist ──────────────────────────────────────────────────────────
 
 /// The Host allowlist built from the server's bound IPs and the operator's
@@ -346,7 +170,7 @@ impl FunnelLockoutWatch {
 /// Thread-safe by interior immutability: clone the `Arc` per request, never mutate
 /// after construction. Built with [`HostAllowlist::new`], asked with
 /// [`HostAllowlist::allows_host`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostAllowlist {
     /// The raw bound IPs (for rule 3 membership test). Loopback IPs here are
     /// redundant (rule 1 covers them) but harmless.
@@ -365,13 +189,19 @@ pub struct HostAllowlist {
     /// This machine's own MagicDNS name, at most one, written by the serve loop
     /// whenever the Tailscale watcher reads a different one. Rule 6.
     own_magicdns_name: LiveHostNames,
-    /// Set while a Tailscale Funnel forwards raw TCP to dux's port: every
-    /// request is refused, whatever its Host. See the module doc.
-    funnel_lockout: Option<FunnelLockoutCell>,
+    /// What the serve knows about a Funnel, which withdraws rule 6's name while
+    /// no password is set. `None` for a router no serve loop writes to.
+    exposure: Option<crate::exposure::ExposureCell>,
+    /// Whether a password is set right now. Read per request, so setting or
+    /// clearing one moves rule 6 with no restart.
+    password_set: Option<PasswordSet>,
     /// Whether the Host rules run at all. Off only for a router built with no
-    /// bound address and no configured host; the Funnel checks run regardless.
+    /// bound address and no configured host.
     host_rules: bool,
 }
+
+/// Answers whether the web password is set right now.
+pub type PasswordSet = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// A set of Host names a running serve can replace in place: the configured
 /// `allowed_hosts` (rule 4), which a config reload rewrites, and this machine's
@@ -457,30 +287,40 @@ impl HostAllowlist {
             configured: LiveHostNames::new(configured),
             tailscale_literals: TailscaleLiterals::Fixed(tailscale_literals),
             own_magicdns_name: LiveHostNames::default(),
-            funnel_lockout: None,
+            exposure: None,
+            password_set: None,
             host_rules: true,
         }
     }
 
-    /// Skip the Host rules, keeping the Funnel checks. For a router with no
-    /// bound address to pin Hosts to; no serve path builds one.
+    /// Skip the Host rules. For a router with no bound address to pin Hosts
+    /// to; no serve path builds one.
     pub fn without_host_rules(mut self) -> Self {
         self.host_rules = false;
         self
     }
 
-    /// Refuse every request while `cell` is in any state but open. See
-    /// [`FunnelLockout`].
-    pub fn with_funnel_lockout(mut self, cell: FunnelLockoutCell) -> Self {
-        self.funnel_lockout = Some(cell);
+    /// Read whether a Funnel is on from the serve's exposure, and whether a
+    /// password is set from `password_set`: together they decide whether rule
+    /// 6's name is withdrawn.
+    pub fn with_exposure(
+        mut self,
+        cell: crate::exposure::ExposureCell,
+        password_set: PasswordSet,
+    ) -> Self {
+        self.exposure = Some(cell);
+        self.password_set = Some(password_set);
         self
     }
 
-    /// The `503` body to answer every request with right now, if any.
-    fn funnel_refusal(&self) -> Option<&'static str> {
-        self.funnel_lockout
+    /// Whether rule 6's name is withdrawn right now: a Funnel is on for
+    /// anything on this machine and no password would stop its visitors.
+    fn name_withdrawn_for_funnel(&self) -> bool {
+        let funnel = self
+            .exposure
             .as_ref()
-            .and_then(|cell| cell.get().refusal())
+            .is_some_and(|cell| cell.get().funnel_any());
+        funnel && !self.password_set.as_ref().is_some_and(|set| set())
     }
 
     /// Read rule 4 from a set a config reload rewrites, instead of the list
@@ -554,49 +394,13 @@ impl HostAllowlist {
         // serve the tailnet at all. Any port: dux's own port for plain HTTP, and
         // whatever port a `tailscale serve` route answers on, which forwards the
         // name unchanged.
-        self.tailscale_literals.allowed() && self.own_magicdns_name.contains(&host)
+        self.tailscale_literals.allowed()
+            && self.own_magicdns_name.contains(&host)
+            && !self.name_withdrawn_for_funnel()
     }
 }
 
 // ── Middleware ─────────────────────────────────────────────────────────────
-
-/// The header Tailscale's serve proxy sets on every request that arrived through
-/// Funnel, from the public internet. Measured in its source
-/// (`ipn/ipnlocal/serve.go`, `addTailscaleIdentityHeaders`): it deletes any copy
-/// the client sent, then sets this to `?1` for a Funnel request only.
-const FUNNEL_REQUEST_HEADER: &str = "tailscale-funnel-request";
-
-/// The shortest gap between two log lines about refused Funnel requests.
-const MARKER_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Rate limit for the Funnel-marker log line, process-wide.
-static MARKER_LOG: std::sync::Mutex<MarkerLog> = std::sync::Mutex::new(MarkerLog {
-    last: None,
-    skipped: 0,
-});
-
-/// Says once per [`MARKER_LOG_WINDOW`], counting what it skipped in between.
-#[derive(Debug, Default)]
-struct MarkerLog {
-    last: Option<std::time::Instant>,
-    skipped: u64,
-}
-
-impl MarkerLog {
-    /// `Some(skipped)` when a line is due now, `None` when this one is skipped.
-    fn should_log(&mut self, now: std::time::Instant) -> Option<u64> {
-        let due = self
-            .last
-            .is_none_or(|last| now.saturating_duration_since(last) >= MARKER_LOG_WINDOW);
-        if due {
-            self.last = Some(now);
-            Some(std::mem::take(&mut self.skipped))
-        } else {
-            self.skipped += 1;
-            None
-        }
-    }
-}
 
 /// Middleware: reject requests whose `Host` is not in the allowlist.
 /// A present-but-disallowed Host gets `403 Forbidden` (DNS-rebinding defense).
@@ -607,48 +411,13 @@ async fn host_allowlist_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // A request a Funnel forwards to dux's port arrives from loopback and can
-    // claim any Host, and only a new enough daemon marks it, so while a Funnel
-    // to dux stands, or nobody knows yet whether one does, nothing is served.
-    if let Some(body) = allowlist.funnel_refusal() {
-        return (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
-    }
-    // Refused whatever the Host, as defence in depth behind rule 6's Funnel
-    // check: the watcher notices a Funnel switched on within a period, and this
-    // closes that window for HTTP Funnel. A raw TCP Funnel forward carries no
-    // headers at all, which is why the name is also withdrawn whenever ANY
-    // Funnel is on (see `serve_legs::admitted_own_name`).
-    if request.headers().contains_key(FUNNEL_REQUEST_HEADER) {
-        // Once a window, with what was skipped: a public client can send these
-        // as fast as it likes, and the log is not where that should land.
-        let said = MARKER_LOG
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .should_log(std::time::Instant::now());
-        if let Some(skipped) = said {
-            dux_core::logger::warn(&format!(
-                "[server] refused a request that came through Tailscale Funnel: Funnel \
-                 publishes this machine to the public internet, and dux has no login{}.",
-                if skipped == 0 {
-                    String::new()
-                } else {
-                    format!(" ({skipped} more refused since the last line like this)")
-                }
-            ));
-        }
-        return (
-            StatusCode::FORBIDDEN,
-            "this dux server does not answer requests that come through Tailscale Funnel",
-        )
-            .into_response();
-    }
     if !allowlist.host_rules {
         return next.run(request).await;
     }
     let host = request
         .headers()
         .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok());
+        .and_then(crate::auth::provenance::header_text);
     match host {
         Some(h) if allowlist.allows_host(h) => next.run(request).await,
         Some(_) => (
@@ -676,52 +445,6 @@ pub fn host_allowlist_layer(router: Router, allowlist: HostAllowlist) -> Router 
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
-
-    // ── FunnelLockoutWatch ────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn a_lockout_watch_engages_on_any_state_but_open_and_never_without_a_cell() {
-        let quick = Duration::from_millis(50);
-        let cell = FunnelLockoutCell::new(FunnelLockout::Open);
-        let mut watch = cell.watch();
-        assert!(
-            tokio::time::timeout(quick, watch.engaged()).await.is_err(),
-            "Open serves"
-        );
-        for state in [
-            FunnelLockout::Checking,
-            FunnelLockout::Unconfirmed,
-            FunnelLockout::CliNotFound,
-            FunnelLockout::Funnel,
-            FunnelLockout::FunnelSaved,
-        ] {
-            cell.set(FunnelLockout::Open);
-            let mut watch = cell.watch();
-            cell.set(state);
-            assert!(
-                tokio::time::timeout(quick, watch.engaged()).await.is_ok(),
-                "{state:?}"
-            );
-            // Already engaged when subscribed: at once.
-            assert!(
-                tokio::time::timeout(quick, cell.watch().engaged())
-                    .await
-                    .is_ok(),
-                "{state:?}"
-            );
-        }
-        assert!(
-            tokio::time::timeout(quick, FunnelLockoutWatch::never().engaged())
-                .await
-                .is_err()
-        );
-        // A dropped cell leaves the last state standing rather than engaging.
-        let cell = FunnelLockoutCell::new(FunnelLockout::Open);
-        let mut watch = cell.watch();
-        drop(cell);
-        assert!(tokio::time::timeout(quick, watch.engaged()).await.is_err());
-    }
 
     // ── strip_host_port ───────────────────────────────────────────────────
 
@@ -757,30 +480,6 @@ mod tests {
 
     /// Rule 1: `localhost` and loopback IPs are ALWAYS allowed, regardless of the
     /// bound IP set.
-    #[test]
-    fn the_funnel_marker_warning_is_said_at_most_once_a_window_with_what_it_skipped() {
-        let start = std::time::Instant::now();
-        let mut limit = MarkerLog::default();
-        assert_eq!(limit.should_log(start), Some(0), "the first one is said");
-        assert_eq!(limit.should_log(start + Duration::from_secs(1)), None);
-        assert_eq!(limit.should_log(start + Duration::from_secs(2)), None);
-        assert_eq!(
-            limit.should_log(start + MARKER_LOG_WINDOW),
-            Some(2),
-            "the next one says how many were skipped"
-        );
-        assert_eq!(limit.should_log(start + MARKER_LOG_WINDOW), None);
-    }
-
-    #[test]
-    fn the_unconfirmed_refusal_puts_fixing_tailscaled_first_and_says_what_no_costs() {
-        let body = FunnelLockout::Unconfirmed.refusal().expect("it refuses");
-        let fix = body.find("tailscaled").expect("names tailscaled");
-        let no = body.find("tailscale = \"no\"").expect("names the way out");
-        assert!(fix < no, "{body}");
-        assert!(body.contains("turns off"), "{body}");
-    }
-
     #[test]
     fn loopback_always_allowed() {
         // No bound IPs, no configured hosts -- still allows loopback.
@@ -1007,6 +706,59 @@ mod tests {
         );
         assert!(al.allows_host("BOX.Tail.TS.NET"), "case-insensitive");
         assert!(al.allows_host("box.tail.ts.net."), "trailing dot");
+    }
+
+    /// A Funnel withdraws the name only while no password would stop its
+    /// visitors: with one set they must reach the login page, which needs the
+    /// name.
+    #[test]
+    fn a_funnel_withdraws_the_name_only_while_no_password_is_set() {
+        let (al, _, _) = with_own_name("box.tail.ts.net");
+        let exposure = crate::exposure::ExposureCell::new(crate::exposure::FunnelState::Open);
+        let password = Arc::new(AtomicBool::new(false));
+        let reads = Arc::clone(&password);
+        let al = al.with_exposure(
+            exposure.clone(),
+            Arc::new(move || reads.load(std::sync::atomic::Ordering::SeqCst)),
+        );
+        assert!(al.allows_host("box.tail.ts.net"));
+        exposure.set_identity(Some(crate::exposure::IdentityFacts {
+            funnel_any: true,
+            ..Default::default()
+        }));
+        assert!(
+            !al.allows_host("box.tail.ts.net"),
+            "a Funnel with no password withdraws the name"
+        );
+        assert!(al.allows_host("localhost"), "nothing else is refused");
+        password.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            al.allows_host("box.tail.ts.net"),
+            "with a password the Funnel's visitors reach the login page"
+        );
+    }
+
+    /// The marker of a request that came through Funnel is a classification
+    /// (the internet), never a refusal by this guard.
+    #[tokio::test]
+    async fn a_request_carrying_the_funnel_marker_passes_the_guard() {
+        use tower::ServiceExt;
+        let router = host_allowlist_layer(
+            Router::new().route("/x", axum::routing::get(|| async { "ok" })),
+            HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true),
+        );
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/x")
+                    .header("Host", "localhost")
+                    .header("Tailscale-Funnel-Request", "?1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

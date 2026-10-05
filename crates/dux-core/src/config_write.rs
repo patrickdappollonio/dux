@@ -14,9 +14,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use rustix::fs::{FlockOperation, flock};
+use rustix::io::Errno;
 use toml_edit::{Array, Decor, DocumentMut, Formatted, InlineTable, Item, Key, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
@@ -38,11 +41,235 @@ pub enum Durability {
     NoFsync,
 }
 
+/// The cross-process lock every write of `config.toml` holds, so writers in
+/// different processes (a running dux, `dux config set`, a second thread of
+/// the same dux) take turns instead of interleaving.
+///
+/// What it protects is the READ-modify-write: a writer that re-reads the file
+/// and patches it under this lock can never land on top of an update another
+/// writer made between its read and its write. The rename itself was already
+/// atomic; that only ever ruled out a torn file, never a lost update.
+///
+/// It is an advisory `flock(2)` on a lock file beside the config, kept apart
+/// from `dux.lock` (which a running dux holds for its whole life). The kernel
+/// releases it when the holder exits, crash included. Not reentrant: a holder
+/// must not try to take it again on the same thread.
+#[derive(Debug)]
+pub struct ConfigFileLock {
+    file: fs::File,
+}
+
+impl ConfigFileLock {
+    /// How long a writer waits for another one before giving up out loud.
+    pub const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+
+    /// The lock file guarding writes to `config_path`.
+    pub fn lock_path(config_path: &Path) -> PathBuf {
+        let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        dir.join(CONFIG_WRITE_LOCK_NAME)
+    }
+
+    /// Take the lock, waiting up to [`Self::DEFAULT_WAIT`].
+    pub fn acquire(config_path: &Path) -> Result<Self> {
+        Self::acquire_within(config_path, Self::DEFAULT_WAIT)
+    }
+
+    /// Take the lock, waiting up to `wait`. A lock still held after that is
+    /// an error naming the lock file, never an endless wait.
+    pub fn acquire_within(config_path: &Path, wait: Duration) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = Self::lock_path(config_path);
+        // flock needs only a readable descriptor, so the file is opened
+        // read-only: a lock file left read-only, or owned by root after a
+        // `sudo dux`, still locks. It is created (owner-only) when missing.
+        if let Err(error) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(CONFIG_FILE_MODE)
+            .open(&lock_path)
+            && error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(error).with_context(|| {
+                format!("failed to create the config lock {}", lock_path.display())
+            });
+        }
+        let file = fs::File::open(&lock_path).with_context(|| {
+            format!(
+                "failed to open the config lock {}; it must be readable by you, its owner \
+                 (if another user owns it, `chown` it back or delete it)",
+                lock_path.display()
+            )
+        })?;
+        let deadline = Instant::now() + wait;
+        loop {
+            let outcome = crate::io_retry::retry_on_interrupt_errno(|| {
+                flock(&file, FlockOperation::NonBlockingLockExclusive)
+            });
+            match outcome {
+                Ok(()) => return Ok(Self { file }),
+                Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "another dux process has been writing {} for over {} seconds, so \
+                             this change was not saved; try again in a moment (lock file {})",
+                            config_path.display(),
+                            wait.as_secs_f32(),
+                            lock_path.display()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => {
+                    return Err(std::io::Error::from(err))
+                        .with_context(|| format!("failed to lock {}", lock_path.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let _ =
+            crate::io_retry::retry_on_interrupt_errno(|| flock(&self.file, FlockOperation::Unlock));
+    }
+}
+
+/// The lock file's name, in the config file's own directory. One name for
+/// the whole directory, so a backup written beside the config takes turns
+/// with it too and leaves no lock file of its own behind.
+const CONFIG_WRITE_LOCK_NAME: &str = ".config-write.lock";
+
 /// Atomically write `contents` to `path`: a temp file in the same directory
 /// (created `0600`), optionally fsync'd, then `rename`d into place. The temp file
 /// self-deletes on drop if the rename never happens, so a failed/panicking write
-/// leaves no orphan and never a partial real file.
+/// leaves no orphan and never a partial real file. Holds the
+/// [`ConfigFileLock`] for the write.
 pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    let _lock = ConfigFileLock::acquire(path)?;
+    // Judged against the file as it is on disk, under the lock.
+    let on_disk = std::fs::read_to_string(path).ok();
+    check_auth_added_by(path, on_disk.as_deref(), contents, "write")?;
+    write_config_atomic_unlocked(path, contents, durability)
+}
+
+/// Each `[server.auth]` problem `raw` has (the section's own, and a password
+/// setting where dux does not read it), each known by what it is about
+/// rather than by a sentence: positions move when a write patches the file,
+/// and the same problem must read as the same problem before and after.
+fn auth_problem_identities(raw: &str) -> std::collections::BTreeSet<String> {
+    crate::config::auth_problems_of(raw)
+        .into_iter()
+        .map(|problem| {
+            // A line the sentence names is no part of what the problem is.
+            let without_positions: String = problem
+                .message
+                .chars()
+                .filter(|c| !c.is_ascii_digit())
+                .collect();
+            format!("{:?}:{without_positions}", problem.keys)
+        })
+        .collect()
+}
+
+/// Refuse a write (`act`) that would ADD a `[server.auth]` problem to the
+/// file, `before` being the file's text as the user left it (`None` for a
+/// file that does not exist yet): dux refuses to start with such a file, so
+/// no writer may make one. A problem the user's file already has is the
+/// user's to fix, not the write's: it never blocks the write (dux's own
+/// change, a preference toggled in a browser, would be lost), and it is
+/// logged once, worded from the user's own file so any line it names is a
+/// line of that file, never of dux's patched copy.
+fn check_auth_added_by(path: &Path, before: Option<&str>, contents: &str, act: &str) -> Result<()> {
+    let after = auth_problem_identities(contents);
+    if after.is_empty() {
+        return Ok(());
+    }
+    let had = before.map(auth_problem_identities).unwrap_or_default();
+    if after.iter().any(|problem| !had.contains(problem)) {
+        // Each problem the write would add, named by the setting it is about
+        // and never by a line: the result is dux's text, which was never
+        // written, so a line of it is no line of the user's file.
+        let reason = crate::config::auth_problems_of(contents)
+            .into_iter()
+            .filter(|problem| {
+                let without_positions: String = problem
+                    .message
+                    .chars()
+                    .filter(|c| !c.is_ascii_digit())
+                    .collect();
+                !had.contains(&format!("{:?}:{without_positions}", problem.keys))
+            })
+            .map(|problem| match problem.keys.first() {
+                Some(keys) => format!("a problem with {}", crate::config::shown_path("", keys)),
+                None => "a problem with the section".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(auth_refusal(path, contents, &reason, act));
+    }
+    if let Some(before) = before {
+        log_existing_auth_problems_once(before);
+    }
+    Ok(())
+}
+
+/// Log, once per process for each, the `[server.auth]` problems the user's
+/// file `raw` already has, a write having gone ahead beside them.
+fn log_existing_auth_problems_once(raw: &str) {
+    static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let Err(problem) = crate::config::auth_section_of(raw) else {
+        return;
+    };
+    let line = format!(
+        "config.toml has a [server.auth] problem dux did not make, so dux will not start with \
+         it until it is fixed; the change dux saved left it as it was: {}",
+        problem.reason()
+    );
+    // Once per problem, known as the attribution knows it: the same mistake
+    // reads as itself even when the lines around it move.
+    let identity = auth_problem_identities(raw)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if logged.insert(identity) {
+        crate::logger::warn(&line);
+    }
+}
+
+/// The refusal of a write (`act`) that would leave `contents`, whose
+/// `[server.auth]` cannot be read for `reason`. It names the shape that is
+/// actually wrong: a `server` or a `server.auth` that is not a table is not
+/// an invalid `[server.auth]` section, because there is no such section.
+fn auth_refusal(path: &Path, contents: &str, reason: &str, act: &str) -> anyhow::Error {
+    let file = toml::from_str::<toml::Table>(contents).ok();
+    let server = file.as_ref().and_then(|file| file.get("server"));
+    let auth = server
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("auth"));
+    let what = match (server, auth) {
+        (Some(server), _) if !server.is_table() => {
+            format!("[server] in {} is not a table", path.display())
+        }
+        (_, Some(auth)) if !auth.is_table() => {
+            format!("server.auth in {} is not a table", path.display())
+        }
+        _ => format!("[server.auth] in {} is invalid", path.display()),
+    };
+    anyhow::anyhow!(
+        "after that {act}, {what} ({reason}), and dux refuses to start when it cannot read its \
+         [server.auth] settings; nothing was written"
+    )
+}
+
+/// [`write_config_atomic`] for a caller already holding the lock.
+fn write_config_atomic_unlocked(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    let target = write_target(path)?;
+    let path = target.as_path();
     let dir = path
         .parent()
         .with_context(|| format!("config path {} has no parent directory", path.display()))?;
@@ -68,6 +295,31 @@ pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) 
         .map_err(|e| e.error)
         .with_context(|| format!("failed to rename temp config over {}", path.display()))?;
     Ok(())
+}
+
+/// Where a write of the config at `path` lands. A symbolic link is written
+/// through, to the file it points at (renaming over the link would replace
+/// it with a plain file). A link whose target does not exist is refused,
+/// naming both: nothing is created or replaced at either path, because the
+/// link says the user keeps their config somewhere dux cannot see now.
+fn write_target(path: &Path) -> Result<PathBuf> {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Ok(path.to_path_buf());
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(target) = crate::config::dangling_link_target(path) {
+        anyhow::bail!(
+            "{} is a symbolic link to {}, which does not exist; dux writes only through the \
+             link and will not create or replace either, so nothing was written. Restore {} or \
+             point the link at your config file.",
+            path.display(),
+            target.display(),
+            target.display()
+        );
+    }
+    fs::canonicalize(path).with_context(|| format!("failed to resolve {}", path.display()))
 }
 
 /// Atomic write at the default (Fsync) durability. Kept for existing callers.
@@ -104,13 +356,1241 @@ pub fn patch_config_file_with(
     config: &Config,
     durability: Durability,
 ) -> Result<()> {
+    patch_config_file_three_way(config_path, None, config, durability).map(|_| ())
+}
+
+/// What a three-way save compares memory with.
+///
+/// `config` is the config the file last agreed with: the config as read
+/// (parsed from the text, as written, with no load corrections) or, after a
+/// save, the config that save wrote. `seen` is the file's text as dux has seen
+/// it since it last read it: the text it read, plus every key it has written
+/// since. It answers one question: was this setting ever in the file? A
+/// setting that was, and is gone now, was deleted by hand.
+#[derive(Clone, Copy)]
+pub struct SaveBase<'a> {
+    pub config: &'a Config,
+    pub seen: Option<&'a str>,
+}
+
+impl<'a> SaveBase<'a> {
+    /// The base for a config just read from a file: the text it was read from
+    /// (its [`Config::source_text`]).
+    pub fn read(config: &'a Config) -> Self {
+        Self {
+            config,
+            seen: config.source_text.as_str(),
+        }
+    }
+}
+
+/// Patch the file from memory, three ways against `base`. Setting by setting
+/// (and field by field inside a project):
+///
+/// - memory differs from the base config: memory's value is written, even
+///   over a hand edit or a hand deletion of that same setting;
+/// - memory equals the base config: the file keeps whatever it has now, so a
+///   setting changed or deleted on disk stays that way across any number of
+///   saves;
+/// - a setting the file has never had (absent from what dux has seen of it,
+///   and from the file now) that memory has is new to this version of dux:
+///   it is filled in.
+///
+/// With no base every managed setting counts as changed (the full patch).
+/// Either way comments around a written value are kept. `[server.auth]` is
+/// never written from memory at all (see [`mutate_config_file`]). Reading and
+/// writing happen under one [`ConfigFileLock`], and the result's
+/// `[server.auth]` is checked first. Returns the text written.
+pub fn patch_config_file_three_way(
+    config_path: &Path,
+    base: Option<SaveBase<'_>>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<String> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    apply_patches(&mut doc, config);
-    write_config_atomic(config_path, &doc.to_string(), durability)
+    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            config_path.display(),
+            crate::config::describe_toml_edit_error(&raw, &e)
+        )
+    })?;
+    apply_patches_three_way(&mut doc, base, ours);
+    let text = doc.to_string();
+    check_auth_added_by(config_path, Some(&raw), &text, "write")?;
+    write_config_atomic_unlocked(config_path, &text, durability)?;
+    Ok(text)
+}
+
+/// [`save_config_with`] for a writer that knows its base: patch the file
+/// three ways when it exists, write the documented template when it does
+/// not. Returns the text written.
+pub fn save_config_three_way(
+    config_path: &Path,
+    base: Option<SaveBase<'_>>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<String> {
+    if config_path.exists() {
+        patch_config_file_three_way(config_path, base, ours, durability)
+    } else {
+        let text = render_config_documented(ours);
+        write_config_atomic(config_path, &text, durability)?;
+        Ok(text)
+    }
+}
+
+/// The source of a config right after a sync wrote its projects as
+/// `written`, starting from `read` (the config's source before the sync).
+/// The base is what the file is known to hold: the config as it was read
+/// (as loaded, its corrections included, so a correction is never a change
+/// dux made), with the projects the sync wrote. What has been seen is the
+/// read text and the written one together.
+pub fn source_after_sync(
+    read: &crate::config::SourceText,
+    written: &str,
+    synced: &Config,
+) -> crate::config::SourceText {
+    let mut base = match read.written_base() {
+        Some(base) => base.clone(),
+        None => read
+            .as_str()
+            .and_then(|text| crate::config::config_from_text_as_loaded(text).ok())
+            .unwrap_or_else(|| synced.clone()),
+    };
+    base.projects = synced.projects.clone();
+    // What the read text expressed, its carried-over keys included.
+    let read_seen = read
+        .as_str()
+        .map(|text| seen_of_read(text, &synced.projects));
+    crate::config::SourceText::written(
+        &union_seen(read_seen.as_deref(), written, &synced.projects),
+        base,
+    )
+}
+
+/// What the writer has seen of the file after writing `written` on top of
+/// what it had seen (`seen`): every key and project entry of either. Keeps a
+/// setting it filled in, and later found deleted, deleted.
+///
+/// The result is rendered with every table in its natural place, so it
+/// always parses: tables taken from two documents keep the positions they
+/// had in their own, and rendering those together can put an array's
+/// nested header before its parent's. A `seen` that does not parse (which
+/// this never writes) is kept as it is, so every later save keeps treating
+/// every setting as seen rather than as new (see
+/// [`apply_patches_three_way`]).
+///
+/// A `[[projects]]` entry neither memory (`projects`) nor the written file
+/// has any more is forgotten: no decision needs it, and keeping it would let
+/// what has been seen grow with every project a session adds and removes.
+/// What dux has seen of a file it just read, `text`: every key the file
+/// sets, and every key a load migration writes from one of them (a
+/// deprecated `[server] bind` seen as `server.host` and `server.port`, for
+/// instance). A value carried over from a deprecated key came from the file,
+/// so its new key counts as one the file has expressed: when the deprecated
+/// key is later deleted by hand, the new keys count as deleted with it, and
+/// a save never fills them in. Only a key the file has never expressed in
+/// any form is filled with its default.
+pub fn seen_of_read(text: &str, projects: &[ProjectConfig]) -> String {
+    let Ok(mut migrated) = text.parse::<DocumentMut>() else {
+        return text.to_string();
+    };
+    if crate::config_migrate::apply_load_migrations(&mut migrated).is_err() {
+        return text.to_string();
+    }
+    union_seen(Some(text), &migrated.to_string(), projects)
+}
+
+pub fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig]) -> String {
+    let Some(seen) = seen else {
+        return written.to_string();
+    };
+    let Ok(mut seen_doc) = seen.parse::<DocumentMut>() else {
+        crate::logger::warn(
+            "what dux has seen of config.toml could not be read back; settings missing from the \
+             file are left out rather than filled in",
+        );
+        return seen.to_string();
+    };
+    let Ok(written_doc) = written.parse::<DocumentMut>() else {
+        return seen.to_string();
+    };
+    union_tables(seen_doc.as_table_mut(), written_doc.as_table(), true);
+    forget_gone_projects(&mut seen_doc, &written_doc, projects);
+    clear_positions(seen_doc.as_table_mut());
+    seen_doc.to_string()
+}
+
+/// Drop the seen `[[projects]]` entries that are in neither `projects`
+/// (memory) nor `written`.
+fn forget_gone_projects(seen: &mut DocumentMut, written: &DocumentMut, projects: &[ProjectConfig]) {
+    let Some(Item::ArrayOfTables(seen_projects)) = seen.get_mut("projects") else {
+        return;
+    };
+    let written_entries: Vec<&Table> = written
+        .get("projects")
+        .and_then(Item::as_array_of_tables)
+        .map(|entries| entries.iter().collect())
+        .unwrap_or_default();
+    let field =
+        |entry: &Table, name: &str| entry.get(name).and_then(Item::as_str).map(str::to_string);
+    seen_projects.retain(|entry| {
+        let in_file = written_entries
+            .iter()
+            .any(|written| (0..MATCH_TIERS).any(|tier| same_entry_at(tier, entry, written)));
+        let in_memory = projects.iter().any(|project| {
+            field(entry, "id").as_deref() == Some(project.id.as_str())
+                || field(entry, "path").as_deref() == Some(project.path.as_str())
+        });
+        in_file || in_memory
+    });
+}
+
+/// Forget where each table sat in the document it came from, so the whole
+/// renders in its natural order: every header after its parent's.
+fn clear_positions(table: &mut Table) {
+    table.set_position(None);
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => clear_positions(child),
+            Item::ArrayOfTables(array) => {
+                for entry in array.iter_mut() {
+                    clear_positions(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `root` when `seen` is the file itself (see [`merges_entries`]).
+fn union_tables(seen: &mut Table, written: &Table, root: bool) {
+    for (key, item) in written.iter() {
+        match seen.get_mut(key) {
+            None => {
+                seen.insert(key, item.clone());
+            }
+            Some(seen_item) => union_items(seen_item, item, merges_entries(key, root)),
+        }
+    }
+}
+
+/// Fold `written` into `seen` at one key, everywhere a key can live: inside
+/// a table in either form (a subtable, an inline table, one nested inline in
+/// another), and inside each entry of an array of tables matched to its
+/// written entry by the same assignment the merge uses, for `[[projects]]`
+/// (`by_entry`). Any other array of tables is one value to the merge, so it
+/// is seen as the one written; nothing is ever appended to it, because an
+/// entry with nothing to identify it by would be appended on every save. A
+/// value is already seen; its text does not matter here.
+fn union_items(seen: &mut Item, written: &Item, by_entry: bool) {
+    if let (Item::ArrayOfTables(seen_array), Item::ArrayOfTables(written_array)) =
+        (&mut *seen, written)
+    {
+        if by_entry {
+            union_arrays(seen_array, written_array);
+        } else {
+            *seen_array = written_array.clone();
+        }
+        return;
+    }
+    let Some(written_table) = table_like(written) else {
+        return;
+    };
+    match seen {
+        Item::Table(seen_table) => union_tables(seen_table, &written_table, false),
+        Item::Value(Value::InlineTable(inline)) => {
+            let mut table = inline.clone().into_table();
+            union_tables(&mut table, &written_table, false);
+            let decor = inline.decor().clone();
+            *inline = table.into_inline_table();
+            *inline.decor_mut() = decor;
+        }
+        _ => {}
+    }
+}
+
+/// Each written entry folded into the seen entry it is (see
+/// [`assign_entries`]), and one with no seen entry added.
+fn union_arrays(seen: &mut toml_edit::ArrayOfTables, written: &toml_edit::ArrayOfTables) {
+    let written_entries: Vec<&Table> = written.iter().collect();
+    let matched = {
+        let seen_entries: Vec<&Table> = seen.iter().collect();
+        let mut used = vec![false; seen_entries.len()];
+        assign_entries(
+            &written_entries
+                .iter()
+                .map(|entry| vec![*entry])
+                .collect::<Vec<_>>(),
+            &seen_entries,
+            &mut used,
+        )
+    };
+    for (entry, matched) in written_entries.into_iter().zip(matched) {
+        match matched.and_then(|index| seen.get_mut(index)) {
+            Some(seen_entry) => union_tables(seen_entry, entry, false),
+            None => seen.push(entry.clone()),
+        }
+    }
+}
+
+fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, ours: &Config) {
+    // A save removes the retired keys (below). Removing one that still
+    // carries a value and writing that value under the key that replaced it
+    // is ONE rewrite, made on the file as it is now, before anything is
+    // merged: the replacement lands unless the file already sets it, and a
+    // key the user deleted by hand is not there to carry anything.
+    for (section, key) in RETIRED_KEYS {
+        crate::config_migrate::carry_over_deprecated_key(disk, section, key);
+    }
+    let original = disk.clone();
+    let mut with_ours = original.clone();
+    apply_patches(&mut with_ours, ours);
+    match base {
+        Some(base) => {
+            let mut with_base = original.clone();
+            apply_patches(&mut with_base, base.config);
+            // What dux has seen of the file. One that cannot be read back
+            // fails SAFE: every setting dux writes counts as seen, so a
+            // setting missing from the file stays out rather than being
+            // filled in over a deletion nobody can now tell from a new key.
+            let seen = match base.seen.map(str::parse::<DocumentMut>) {
+                Some(Ok(seen)) => Some(seen),
+                Some(Err(_)) => {
+                    crate::logger::warn(
+                        "what dux has seen of config.toml could not be read back; this save \
+                         treats every setting as seen and fills nothing in",
+                    );
+                    Some(with_base.clone())
+                }
+                None => None,
+            };
+            merge_changed_at(
+                disk.as_table_mut(),
+                original.as_table(),
+                Some(MergeBase {
+                    raw: seen.as_ref().map(DocumentMut::as_table),
+                    base: with_base.as_table(),
+                }),
+                with_ours.as_table(),
+                true,
+            );
+        }
+        None => merge_changed_at(
+            disk.as_table_mut(),
+            original.as_table(),
+            None,
+            with_ours.as_table(),
+            true,
+        ),
+    }
+    if let Some(base) = base {
+        note_macro_order_limit(disk, base.config, ours);
+    }
+    // Retired keys still go on every save, as they always have.
+    for (section, key) in RETIRED_KEYS {
+        remove_table_key(disk, section, key);
+    }
+}
+
+/// Say so when memory reordered its macros and the file cannot read back in
+/// that order. A macro's written form is never changed, and TOML prints a
+/// table's inline entries before its `[macros.<name>]` sections, so the order
+/// set in dux is kept within each form (see [`merge_changed_at`]) and a
+/// section can never read back ahead of an inline macro. What the file reads
+/// back is taken from the file itself, parsed, never guessed from how it is
+/// stored.
+fn note_macro_order_limit(doc: &DocumentMut, base: &Config, ours: &Config) {
+    let shared = |config: &Config, other: &Config| -> Vec<String> {
+        config
+            .macros
+            .entries
+            .keys()
+            .filter(|name| other.macros.entries.contains_key(*name))
+            .cloned()
+            .collect()
+    };
+    if shared(base, ours) == shared(ours, base) {
+        return;
+    }
+    let Ok(written) = crate::config::config_from_text_as_written(&doc.to_string()) else {
+        return;
+    };
+    let read_back: Vec<&String> = written
+        .macros
+        .entries
+        .keys()
+        .filter(|name| ours.macros.entries.contains_key(*name))
+        .collect();
+    let wanted: Vec<&String> = ours
+        .macros
+        .entries
+        .keys()
+        .filter(|name| written.macros.entries.contains_key(*name))
+        .collect();
+    if read_back != wanted {
+        crate::logger::info(
+            "config.toml: the macro order set in dux is kept within each form, but macros \
+             written as [macros.<name>] sections always read back after the inline ones; write \
+             them all in one form to keep any order",
+        );
+    }
+}
+
+/// Whether `[section] key` is a key dux once wrote and every save removes.
+/// The formatter's schema knows these names.
+pub(crate) fn is_retired_key(section: &str, key: &str) -> bool {
+    RETIRED_KEYS
+        .iter()
+        .any(|(retired_section, retired_key)| *retired_section == section && *retired_key == key)
+}
+
+/// Keys dux once wrote and every save removes (see `apply_patches`).
+const RETIRED_KEYS: &[(&str, &str)] = &[
+    ("defaults", "commit_prompt"),
+    ("defaults", "prompt_for_name"),
+    ("server", "tailscale_enabled"),
+    ("server", "max_websocket_connections"),
+];
+
+/// The base side of a merge at one table: what dux has seen of the file
+/// there (`raw`, absent where it has seen none) and the file patched with
+/// the base config (`base`).
+#[derive(Clone, Copy)]
+struct MergeBase<'a> {
+    raw: Option<&'a Table>,
+    base: &'a Table,
+}
+
+/// Copy into `target` (the file) what memory changed relative to the base,
+/// recursing into tables (see [`patch_config_file_three_way`] for the
+/// rules). `disk` is the file before this save. With no base, everything
+/// in `ours` counts as changed.
+fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, ours: &Table) {
+    merge_changed_at(target, disk, base, ours, false);
+}
+
+/// Whether the array of tables at `key` is one dux merges entry by entry:
+/// `[[projects]]` at the top of the file, the one array dux writes and whose
+/// entries it can identify (by `id` and `path`). Every other array of
+/// tables (a hand-added `[[extra]]`, one nested in a section, one under a
+/// provider, a newer dux's) is one value: memory's when memory changed it,
+/// the file's otherwise, so an entry with nothing to identify it by is never
+/// written twice.
+fn merges_entries(key: &str, root: bool) -> bool {
+    root && key == "projects"
+}
+
+/// [`merge_changed`] at one table, `root` when it is the file itself.
+fn merge_changed_at(
+    target: &mut Table,
+    disk: &Table,
+    base: Option<MergeBase<'_>>,
+    ours: &Table,
+    root: bool,
+) {
+    for (key, ours_item) in ours.iter() {
+        let Some(base_side) = base else {
+            // No base: the full patch, through the same in-place writes.
+            match (ours_item, disk.get(key), target.get_mut(key)) {
+                (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
+                    merge_changed(t, disk_table, None, ours_table)
+                }
+                (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
+                    *t = ours_array.clone();
+                }
+                _ => put_in_place(target, key, ours_item.clone()),
+            }
+            continue;
+        };
+        let base_item = base_side.base.get(key);
+        let raw_item = base_side.raw.and_then(|raw| raw.get(key));
+        let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
+        // A whole table or array missing from the file is merged as an empty
+        // one, so each setting (or project) in it gets the same rule as a
+        // single deleted setting, and it reappears only if something in it is
+        // written.
+        if disk.get(key).is_none() {
+            match (ours_item, base_item) {
+                (Item::Table(ours_table), Some(Item::Table(base_table))) => {
+                    // What dux has seen there, in either form: an inline
+                    // section deleted by hand was seen, so what it held
+                    // stays deleted.
+                    let raw_table = raw_item.and_then(table_like);
+                    let empty = Table::new();
+                    let mut out = Table::new();
+                    merge_changed(
+                        &mut out,
+                        &empty,
+                        Some(MergeBase {
+                            raw: raw_table.as_ref(),
+                            base: base_table,
+                        }),
+                        ours_table,
+                    );
+                    if !out.is_empty() {
+                        put_in_place(target, key, Item::Table(out));
+                    }
+                    continue;
+                }
+                (ours_item, Some(base_item))
+                    if is_inline_table(ours_item) && table_like(base_item).is_some() =>
+                {
+                    let (Some(ours_table), Some(base_table)) =
+                        (table_like(ours_item), table_like(base_item))
+                    else {
+                        continue;
+                    };
+                    let raw_table = raw_item.and_then(table_like);
+                    let empty = Table::new();
+                    let mut out = Table::new();
+                    merge_changed(
+                        &mut out,
+                        &empty,
+                        Some(MergeBase {
+                            raw: raw_table.as_ref(),
+                            base: &base_table,
+                        }),
+                        &ours_table,
+                    );
+                    if !out.is_empty() {
+                        put_in_place(target, key, toml_edit::value(out.into_inline_table()));
+                    }
+                    continue;
+                }
+                (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
+                    if merges_entries(key, root) =>
+                {
+                    let empty = toml_edit::ArrayOfTables::new();
+                    let mut out = toml_edit::ArrayOfTables::new();
+                    merge_array_of_tables(
+                        &mut out,
+                        &empty,
+                        raw_item.and_then(Item::as_array_of_tables),
+                        Some(base_array),
+                        ours_array,
+                    );
+                    if !out.is_empty() {
+                        put_in_place(target, key, Item::ArrayOfTables(out));
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let Some(disk_item) = disk.get(key) else {
+            // Missing from the file. Memory's own change is written; an
+            // unchanged setting is filled in only when the file has never had
+            // it (new to this version), and otherwise stays deleted, because
+            // someone deleted it by hand.
+            if !unchanged || raw_item.is_none() {
+                put_in_place(target, key, ours_item.clone());
+            }
+            continue;
+        };
+        match (ours_item, disk_item, target.get_mut(key)) {
+            (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
+                if base_item.is_some_and(Item::is_table) =>
+            {
+                // What dux has seen there, in either form: a section the user
+                // rewrote from inline to a table was seen with every key it
+                // held, so one left out in the rewrite stays out.
+                let raw_table = raw_item.and_then(table_like);
+                let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+                    raw: raw_table.as_ref(),
+                    base,
+                });
+                merge_changed(t, disk_table, child, ours_table);
+            }
+            // An array the base never had (memory and the file each started
+            // one) is merged against an empty one, so the file's own entries
+            // stay beside memory's.
+            (
+                Item::ArrayOfTables(ours_array),
+                Item::ArrayOfTables(disk_array),
+                Some(Item::ArrayOfTables(t)),
+            ) if merges_entries(key, root) && base_item.is_none_or(Item::is_array_of_tables) => {
+                let empty = toml_edit::ArrayOfTables::new();
+                merge_array_of_tables(
+                    t,
+                    disk_array,
+                    raw_item.and_then(Item::as_array_of_tables),
+                    Some(
+                        base_item
+                            .and_then(Item::as_array_of_tables)
+                            .unwrap_or(&empty),
+                    ),
+                    ours_array,
+                );
+            }
+            // A table written inline on either side (a project's `env`, as
+            // dux writes it, or as the user wrote it in either form) is
+            // merged entry by entry like any other table, and keeps the
+            // file's form: a `[projects.env]` subtable stays one, with its
+            // comments, and an inline table stays inline. A table the base
+            // never had (memory and the file each started one) is merged
+            // against an empty one, so the file's own entries stay.
+            (ours_item, disk_item, Some(target_item))
+                if table_like(ours_item).is_some()
+                    && table_like(disk_item).is_some()
+                    && base_item.is_none_or(|item| table_like(item).is_some()) =>
+            {
+                let (Some(ours_table), Some(disk_table), Some(base_table)) = (
+                    table_like(ours_item),
+                    table_like(disk_item),
+                    base_item.map_or(Some(Table::new()), table_like),
+                ) else {
+                    continue;
+                };
+                let raw_table = raw_item.and_then(table_like);
+                let entry_base = Some(MergeBase {
+                    raw: raw_table.as_ref(),
+                    base: &base_table,
+                });
+                match target_item {
+                    Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
+                    Item::Value(Value::InlineTable(inline)) => {
+                        let mut out = disk_table.clone();
+                        merge_changed(&mut out, &disk_table, entry_base, &ours_table);
+                        let decor = inline.decor().clone();
+                        *inline = out.into_inline_table();
+                        *inline.decor_mut() = decor;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                if !unchanged {
+                    put_in_place(target, key, ours_item.clone());
+                }
+            }
+        }
+    }
+    // Removed in memory (an env variable, a provider): in the base, gone
+    // from ours. Something the base never had stays: it was added on disk.
+    // With no base, whatever the patch left out goes, as in the full patch.
+    let gone: Vec<String> = disk
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| {
+            ours.get(key).is_none() && base.is_none_or(|base| base.base.get(key).is_some())
+        })
+        .collect();
+    for key in gone {
+        // A whole array of tables memory emptied (its last project removed)
+        // is merged entry by entry against an empty one, so an entry added on
+        // disk by someone else stays; only the base's entries go.
+        if let (Some(base_side), Some(Item::ArrayOfTables(disk_array))) = (base, disk.get(&key))
+            && merges_entries(&key, root)
+            && let Some(Item::ArrayOfTables(base_array)) = base_side.base.get(&key)
+        {
+            let raw_array = base_side
+                .raw
+                .and_then(|raw| raw.get(&key))
+                .and_then(Item::as_array_of_tables);
+            let mut out = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                &mut out,
+                disk_array,
+                raw_array,
+                Some(base_array),
+                &toml_edit::ArrayOfTables::new(),
+            );
+            if !out.is_empty() {
+                put_in_place(target, &key, Item::ArrayOfTables(out));
+                continue;
+            }
+        }
+        target.remove(&key);
+    }
+    // Order is meaningful in some tables (`[macros]` above all), so a pure
+    // reorder in memory is a change: the keys ours shares with the file take
+    // ours' order, and anything added on disk keeps its place after them.
+    let reference: Vec<String> = match base {
+        Some(base) => base.base.iter().map(|(key, _)| key.to_string()).collect(),
+        None => disk.iter().map(|(key, _)| key.to_string()).collect(),
+    };
+    let ours_order: Vec<String> = ours.iter().map(|(key, _)| key.to_string()).collect();
+    let shared = |order: &[String]| -> Vec<String> {
+        order
+            .iter()
+            .filter(|key| ours_order.contains(key) && reference.contains(key))
+            .cloned()
+            .collect()
+    };
+    if shared(&reference) != shared(&ours_order) {
+        let rank = |key: &str| {
+            ours_order
+                .iter()
+                .position(|k| k == key)
+                .unwrap_or(ours_order.len())
+        };
+        target.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
+        // Child sections (`[macros.<name>]`) print where their position puts
+        // them, not in the table's key order: they take ours' order by
+        // trading the positions they already hold, so they stay in the same
+        // slots of the file and keep their form and every comment.
+        let mut sections: Vec<(String, isize)> = target
+            .iter()
+            .filter_map(|(key, item)| match item {
+                Item::Table(table) if !table.is_dotted() => {
+                    table.position().map(|position| (key.to_string(), position))
+                }
+                _ => None,
+            })
+            .collect();
+        if sections.len() > 1 {
+            let mut positions: Vec<isize> =
+                sections.iter().map(|(_, position)| *position).collect();
+            positions.sort_unstable();
+            sections.sort_by_key(|(key, _)| rank(key));
+            for ((key, _), position) in sections.iter().zip(positions) {
+                if let Some(Item::Table(table)) = target.get_mut(key) {
+                    table.set_position(Some(position));
+                }
+            }
+        }
+    }
+}
+
+/// Whether `item` is a table written inline (`env = { A = "1" }`).
+fn is_inline_table(item: &Item) -> bool {
+    matches!(item, Item::Value(Value::InlineTable(_)))
+}
+
+/// `item` as a table, whether it is written as one or inline.
+fn table_like(item: &Item) -> Option<Table> {
+    match item {
+        Item::Table(table) => Some(table.clone()),
+        Item::Value(Value::InlineTable(inline)) => Some(inline.clone().into_table()),
+        _ => None,
+    }
+}
+
+/// Write `item` at `key`, keeping the key itself (and so the comment above
+/// it) and the comment trailing the old value. `Table::insert` on an existing
+/// key would replace the key and drop its comment.
+fn put_in_place(target: &mut Table, key: &str, mut item: Item) {
+    match target.get_mut(key) {
+        Some(existing) => {
+            match (&*existing, &mut item) {
+                (Item::Value(old), Item::Value(new)) => *new.decor_mut() = old.decor().clone(),
+                (Item::Table(old), Item::Table(new)) => *new.decor_mut() = old.decor().clone(),
+                _ => {}
+            }
+            *existing = item;
+        }
+        None => {
+            target.insert(key, item);
+        }
+    }
+}
+
+/// How strongly two entries are the same entry, strongest first: the same
+/// `id` AND the same `path`; the same `id`; the same `path`. The exact pair
+/// comes first so a copy-pasted entry with the original's id but its own
+/// path never takes the original's place. Falling back past a differing
+/// `id` is deliberate: a hand-written project has no id of its own, so each
+/// read mints a fresh one, and an id adopted from the session database
+/// replaces the file's for the same path. Never by `name`: two different
+/// projects can share one (two folders both called `api`), and matching them
+/// would drop one or give it the other's id.
+const MATCH_TIERS: usize = 3;
+
+fn same_entry_at(tier: usize, a: &Table, b: &Table) -> bool {
+    let field = |table: &Table, name: &str| table.get(name).map(item_text);
+    let same =
+        |name: &str| matches!((field(a, name), field(b, name)), (Some(x), Some(y)) if x == y);
+    match tier {
+        0 => same("id") && same("path"),
+        1 => same("id"),
+        _ => same("path"),
+    }
+}
+
+/// Match each of `probes` (an entry, through any of the tables standing for
+/// it, in order of preference) to at most one entry of `list` not yet
+/// `used`, as ONE assignment: every match at a stronger tier is made, across
+/// all the entries, before any at a weaker one, so a weak match (the same
+/// path) never takes an entry a strong one (the same id) wants, whatever
+/// order the entries come in. Marks what it matched as used.
+fn assign_entries(
+    probes: &[Vec<&Table>],
+    list: &[&Table],
+    used: &mut [bool],
+) -> Vec<Option<usize>> {
+    let mut matched = vec![None; probes.len()];
+    for tier in 0..MATCH_TIERS {
+        // Within a tier, the closest candidates are paired first, so two
+        // entries that share a path (two id-less projects at one folder) are
+        // told apart by what else they hold before their position decides.
+        for closeness in (0..=CLOSEST).rev() {
+            for (slot, tables) in probes.iter().enumerate() {
+                if matched[slot].is_some() {
+                    continue;
+                }
+                let found = tables.iter().find_map(|probe| {
+                    (0..list.len()).find(|&i| {
+                        !used[i]
+                            && same_entry_at(tier, list[i], probe)
+                            && entry_closeness(list[i], probe) >= closeness
+                    })
+                });
+                if let Some(i) = found {
+                    used[i] = true;
+                    matched[slot] = Some(i);
+                }
+            }
+        }
+    }
+    matched
+}
+
+/// The highest [`entry_closeness`].
+const CLOSEST: u8 = 2;
+
+/// How much more than their identity two entries share: everything but the
+/// `id` (each parse mints one for an id-less entry), then the same `name`,
+/// then nothing.
+fn entry_closeness(a: &Table, b: &Table) -> u8 {
+    if entry_text(a, true) == entry_text(b, true) {
+        return CLOSEST;
+    }
+    let name = |table: &Table| table.get("name").map(item_text);
+    match (name(a), name(b)) {
+        (Some(x), Some(y)) if x == y => 1,
+        _ => 0,
+    }
+}
+
+/// `entry` with only the keys dux writes for a project (see
+/// [`merge_array_of_tables`]).
+fn managed_keys(entry: &Table) -> Table {
+    let mut managed = entry.clone();
+    let unmanaged: Vec<String> = managed
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| is_unmanaged_project_key(key))
+        .collect();
+    for key in unmanaged {
+        managed.remove(&key);
+    }
+    managed
+}
+
+/// An entry's text for comparing base and memory. When the file's own entry
+/// has no `id`, the id is left out: each parse mints one, so it says nothing
+/// about whether memory changed the entry.
+fn entry_text(entry: &Table, ignore_id: bool) -> String {
+    let mut entry = entry.clone();
+    if ignore_id {
+        entry.remove("id");
+    }
+    entry.to_string()
+}
+
+/// `[[projects]]` and any other array of tables, merged entry by entry with
+/// the same rules as single settings (see [`patch_config_file_three_way`]):
+/// entries are matched across memory, the base and the file with
+/// [`find_entry`], each used at most once. A matched entry is merged field
+/// by field against its own base entry; an entry memory added is written; one
+/// memory removed goes; one deleted by hand that memory did not change stays
+/// deleted; one added on disk is kept after memory's entries. When memory
+/// has an `id` the file's entry lacks, the id is written, so a hand-written
+/// project settles on one id.
+fn merge_array_of_tables(
+    target: &mut toml_edit::ArrayOfTables,
+    disk: &toml_edit::ArrayOfTables,
+    raw: Option<&toml_edit::ArrayOfTables>,
+    base: Option<&toml_edit::ArrayOfTables>,
+    ours: &toml_edit::ArrayOfTables,
+) {
+    let Some(base) = base else {
+        *target = ours.clone();
+        return;
+    };
+    // Memory and the base are compared on the keys dux manages only. The
+    // user's own keys in an entry (a note, a fork's setting) are carried into
+    // memory's rendering of the file by a guess that cannot tell two id-less
+    // entries at one path apart once one is renamed, so they have no say
+    // here: the file's own entry keeps them, whatever the guess was.
+    let ours_full: Vec<&Table> = ours.iter().collect();
+    let ours_managed: Vec<Table> = ours_full.iter().map(|entry| managed_keys(entry)).collect();
+    let bases_managed: Vec<Table> = base.iter().map(managed_keys).collect();
+    let disks: Vec<&Table> = disk.iter().collect();
+    let bases: Vec<&Table> = bases_managed.iter().collect();
+    let raws: Vec<&Table> = raw.map(|raw| raw.iter().collect()).unwrap_or_default();
+    let ours: Vec<&Table> = ours_managed.iter().collect();
+    // Every side is matched on the keys dux manages too, so how alike two
+    // entries are never depends on keys only the file has: two id-less
+    // projects at one path are told apart by their own settings, and the
+    // user's keys go with whichever file entry is matched.
+    let raws_managed: Vec<Table> = raws.iter().map(|entry| managed_keys(entry)).collect();
+    let disks_managed: Vec<Table> = disks.iter().map(|entry| managed_keys(entry)).collect();
+    let raws_matched: Vec<&Table> = raws_managed.iter().collect();
+    let disks_matched: Vec<&Table> = disks_managed.iter().collect();
+    let mut disk_used = vec![false; disks.len()];
+    let mut base_used = vec![false; bases.len()];
+    let mut raw_used = vec![false; raws.len()];
+    // Memory's entries against the base, then against what dux has seen
+    // (through their base entry first), then against the file, through what
+    // dux has seen of the entry first: that is the file's own entry as it
+    // was, the user's keys included, so it finds it even when memory renamed
+    // the project to the name another entry at the same path has.
+    let base_of = assign_entries(
+        &ours.iter().map(|entry| vec![*entry]).collect::<Vec<_>>(),
+        &bases,
+        &mut base_used,
+    );
+    let raw_of = assign_entries(
+        &ours
+            .iter()
+            .zip(&base_of)
+            .map(|(entry, b)| b.map(|b| bases[b]).into_iter().chain([*entry]).collect())
+            .collect::<Vec<_>>(),
+        &raws_matched,
+        &mut raw_used,
+    );
+    let disk_of = assign_entries(
+        &ours
+            .iter()
+            .zip(base_of.iter().zip(&raw_of))
+            .map(|(entry, (b, r))| {
+                r.map(|r| raws_matched[r])
+                    .into_iter()
+                    .chain(b.map(|b| bases[b]))
+                    .chain(std::iter::once(*entry))
+                    .collect()
+            })
+            .collect::<Vec<_>>(),
+        &disks_matched,
+        &mut disk_used,
+    );
+    let mut merged = toml_edit::ArrayOfTables::new();
+    for (slot, entry) in ours.iter().copied().enumerate() {
+        let base_index = base_of[slot];
+        let raw_entry = raw_of[slot].map(|r| raws[r]);
+        let disk_index = disk_of[slot];
+        let ignore_id = raw_entry.is_some_and(|r| !r.contains_key("id"))
+            || disk_index.is_some_and(|d| !disks[d].contains_key("id"));
+        let unchanged = base_index
+            .is_some_and(|b| entry_text(bases[b], ignore_id) == entry_text(entry, ignore_id));
+        let Some(d) = disk_index else {
+            // Not in the file: deleted by hand when the file once had it and
+            // memory did not change it; otherwise memory's entry is written.
+            if !(unchanged && raw_entry.is_some()) {
+                merged.push(ours_full[slot].clone());
+            }
+            continue;
+        };
+        let mut out = disks[d].clone();
+        let entry_base = base_index.map(|b| MergeBase {
+            raw: raw_entry,
+            base: bases[b],
+        });
+        merge_changed(&mut out, disks[d], entry_base, entry);
+        // Keys every write drops from a project (its `leading_branch`) go
+        // from the file's entry too.
+        for key in PROJECT_KEYS_DROPPED_ON_WRITE {
+            if !entry.contains_key(key) {
+                out.remove(key);
+            }
+        }
+        if !out.contains_key("id")
+            && let Some(id) = entry.get("id")
+        {
+            out.insert("id", id.clone());
+        }
+        merged.push(out);
+    }
+    // In the file but matched by nothing memory has: removed in memory when
+    // the base CONFIG had it (and memory no longer does), added on disk by
+    // someone else otherwise. Only the base config answers this: what dux
+    // has seen of the file says nothing about what memory removed, and
+    // asking it would drop an entry added by hand on the save after it was
+    // first written, or one dux removed and the user put back.
+    // Each base entry answers for one file entry at most, matched as one
+    // assignment: a file entry with the base entry's id takes it before
+    // another that only shares its path (moved by hand, then a new one
+    // added at the old path), in whichever order the file lists them.
+    let leftovers: Vec<usize> = (0..disks.len()).filter(|&d| !disk_used[d]).collect();
+    let removed = assign_entries(
+        &leftovers
+            .iter()
+            .map(|&d| vec![disks_matched[d]])
+            .collect::<Vec<_>>(),
+        &bases,
+        &mut base_used,
+    );
+    for (&d, removed) in leftovers.iter().zip(removed) {
+        if removed.is_none() {
+            merged.push(disks[d].clone());
+        }
+    }
+    *target = merged;
+}
+
+/// An item's TOML text without the comments and spacing around it.
+fn item_text(item: &Item) -> String {
+    match item {
+        Item::Value(value) => {
+            let mut value = value.clone();
+            value.decor_mut().clear();
+            value.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Replace the whole file with what `render` makes of its current text
+/// (`None` when there is no file), reading that text only once the
+/// [`ConfigFileLock`] is held, so a writer that finishes while this one waits
+/// is part of what `render` sees. For the whole-file writers that depend on
+/// what the file holds now: recovering the last working config, restoring the
+/// documentation. The result's `[server.auth]` is checked before it lands.
+pub fn replace_config_file<T>(
+    config_path: &Path,
+    render: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    let current = match fs::read_to_string(config_path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let (text, outcome) = render(current.as_deref())?;
+    check_auth_added_by(config_path, current.as_deref(), &text, "write")?;
+    write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    Ok(outcome)
+}
+
+/// Read the config, decide, and write only when `decide` asks to, all under
+/// the [`ConfigFileLock`], so a writer that lands while this one waits is
+/// part of what `decide` reads and is never overwritten by a stale copy.
+/// `decide` gets the read's own result (a missing or unreadable file is its
+/// to judge) and returns the text to write, if any, with its outcome. A
+/// text to write is checked for a readable `[server.auth]` first. For a
+/// load-time migration, which rewrites keys of whatever the file holds.
+pub fn migrate_config_file<T>(
+    config_path: &Path,
+    decide: impl FnOnce(std::io::Result<String>) -> Result<(Option<String>, T)>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    let read = fs::read_to_string(config_path);
+    let before = read.as_ref().ok().cloned();
+    let (text, outcome) = decide(read)?;
+    if let Some(text) = text {
+        check_auth_added_by(config_path, before.as_deref(), &text, "write")?;
+        write_config_atomic_unlocked(config_path, &text, Durability::Fsync)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+    }
+    Ok(outcome)
+}
+
+/// Write a private (0600) file beside the config while the caller holds the
+/// [`ConfigFileLock`] inside [`replace_config_file`]'s `render`: a backup of
+/// the file being replaced. Taking the lock again there would wait forever.
+pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
+    write_config_atomic_unlocked(path, contents, Durability::Fsync)
+}
+
+/// The ONE way to change specific keys of `config.toml` while anything else
+/// may be writing it: take the [`ConfigFileLock`], re-read the file as it is
+/// on disk NOW, let `change` edit only the keys it means to, check the result,
+/// and write it atomically (fsync'd) before releasing the lock. Comments,
+/// formatting and every other key stay exactly as the file had them.
+///
+/// `dux config set`, password changes and the login's ban appends all go
+/// through here, so concurrent writers never lose each other's updates.
+///
+/// A missing file starts from the documented default template. A file that is
+/// not TOML is refused (there is nothing safe to patch), and so is a result
+/// whose `[server.auth]` would not load, because that would stop dux from
+/// starting; in both cases nothing is written.
+pub fn mutate_config_file<T>(
+    config_path: &Path,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<T> {
+    mutate_config_file_with(config_path, MissingConfig::CreateDocumented, change)
+}
+
+/// What [`mutate_config_file_with`] does when there is no config file.
+pub enum MissingConfig<'a> {
+    /// Start from the documented default template.
+    CreateDocumented,
+    /// Run this check first, inside the config write lock, and start from the
+    /// template only when it passes. `dux config set` refuses here while a
+    /// dux is running: a fresh default file would drop its password.
+    CheckFirst(Box<dyn Fn() -> Result<()> + 'a>),
+}
+
+/// [`mutate_config_file`] with a choice of what a missing file means.
+pub fn mutate_config_file_with<T>(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<T> {
+    mutate_config_file_ruled(config_path, missing, AuthRule::Valid, change)
+        .map(|(outcome, _)| outcome)
+}
+
+/// [`mutate_config_file_with`] for a change that may leave problems the file
+/// ALREADY has, so a file with several can be repaired one at a time. A
+/// problem is anything that stops dux starting with the file
+/// ([`crate::config::start_problems_of`]: `[server.auth]` key by key, then
+/// the start checks), so a change that adds one is refused with the start's
+/// own words, and nothing is written. Returns the problems left, each with
+/// the surfaces it stops.
+pub fn mutate_config_file_repairing<T>(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    key: &[String],
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<(T, Vec<crate::config::StartProblem>)> {
+    mutate_config_file_ruled(
+        config_path,
+        missing,
+        AuthRule::NothingAddedBy(key.to_vec()),
+        change,
+    )
+}
+
+/// What a locked change must leave of `[server.auth]`.
+enum AuthRule {
+    /// A section that loads.
+    Valid,
+    /// Nothing that stops a start which the change of this setting is
+    /// answerable for (see [`crate::config::problems_added_by_set`]).
+    NothingAddedBy(Vec<String>),
+}
+
+/// The file identity of one locked write: the [`read_token`] of the text it
+/// replaced and of the text it wrote. A writer that also changes running
+/// state in memory keeps these, so a later reload can tell whether the text
+/// IT read came before the write (it carries `before`) or not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileWrite {
+    pub before: String,
+    pub after: String,
+}
+
+thread_local! {
+    static LAST_WRITE: std::cell::RefCell<Option<FileWrite>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The [`FileWrite`] of the last locked mutation this THREAD completed, taken
+/// (so a second call answers `None`). For a caller that ran a `config_keys`
+/// write on this thread and needs the file identity it produced.
+pub fn take_last_write() -> Option<FileWrite> {
+    LAST_WRITE.with(|slot| slot.borrow_mut().take())
+}
+
+fn mutate_config_file_ruled<T>(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    rule: AuthRule,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<(T, Vec<crate::config::StartProblem>)> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    LAST_WRITE.with(|slot| *slot.borrow_mut() = None);
+    let mut found = true;
+    let raw = match fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let MissingConfig::CheckFirst(check) = missing {
+                check()?;
+            }
+            found = false;
+            render_config_documented(&Config::default())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let before_token = read_token(found.then_some(raw.as_str()));
+    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "{} is not valid TOML, so it cannot be changed safely; fix it by hand first.\n{}",
+            config_path.display(),
+            crate::config::describe_toml_edit_error(&raw, &e)
+        )
+    })?;
+    let before = match &rule {
+        AuthRule::Valid => crate::config::StartCheck::default(),
+        AuthRule::NothingAddedBy(_) => crate::config::check_start(&raw),
+    };
+    let outcome = change(&mut doc)?;
+    let text = doc.to_string();
+    let remaining = match rule {
+        AuthRule::Valid => {
+            check_auth_added_by(config_path, Some(&raw), &text, "change")?;
+            Vec::new()
+        }
+        AuthRule::NothingAddedBy(key) => {
+            // Attributed to the setting changed: its own value, and a rule
+            // spanning it that held before. Problems about other settings
+            // never block it; they are listed after.
+            let after = crate::config::check_start(&text);
+            let added: Vec<&str> = crate::config::problems_added_by_set(&before, &after, &key)
+                .into_iter()
+                .map(|p| p.message.as_str())
+                .collect();
+            if !added.is_empty() {
+                // Each sentence names the surfaces it stops, never "dux" as
+                // a whole.
+                anyhow::bail!(
+                    "{} was not changed, because with that change {}. Nothing was written.",
+                    config_path.display(),
+                    added.join("; ").trim_end_matches('.')
+                );
+            }
+            after.problems
+        }
+    };
+    write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    LAST_WRITE.with(|slot| {
+        *slot.borrow_mut() = Some(FileWrite {
+            before: before_token,
+            after: read_token(Some(&text)),
+        })
+    });
+    Ok((outcome, remaining))
+}
+
+/// Write the whole `[server.auth]` section from `auth`, for a render of a
+/// fresh file (first creation, recovery) and nothing else. A save from
+/// memory never calls this: these keys change from outside the running dux
+/// (`dux config set`, a ban, a password change), so only
+/// [`mutate_config_file`] changes them in an existing file.
+fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthConfig) {
+    let Some(server) = doc
+        .entry("server")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+    else {
+        return;
+    };
+    let Some(table) = server
+        .entry("auth")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+    else {
+        return;
+    };
+    let Ok(rendered) = toml::to_string(auth) else {
+        return;
+    };
+    let Ok(rendered) = rendered.parse::<DocumentMut>() else {
+        return;
+    };
+    for (key, item) in rendered.iter() {
+        table.insert(key, item.clone());
+    }
 }
 
 /// Save config: patch in place if the file exists, otherwise write a plain
@@ -126,7 +1606,7 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     if config_path.exists() {
-        patch_config_file_with(config_path, config, durability)
+        patch_config_file_three_way(config_path, None, config, durability).map(|_| ())
     } else {
         // FIRST CREATION. This must emit the fully-commented template, not the
         // plain one: "the config file is the documentation" (CLAUDE.md), and the
@@ -198,12 +1678,85 @@ pub fn write_config_plain_with(
 pub fn render_config_plain(config: &Config) -> String {
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
+    render_auth_section(&mut doc, &config.server.auth);
     doc.to_string()
 }
 
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's
 /// existing-file branch ran, so both surfaces produce the same managed shape.
+///
+/// A user-edited file can hold any shape. A section written inline
+/// (`env = { A = "1" }` before any header, or a provider written inline) is
+/// patched as a table and written back inline, so it keeps the user's form.
 fn apply_patches(doc: &mut DocumentMut, config: &Config) {
+    let inline = inline_sections(doc);
+    apply_section_patches(doc, config);
+    restore_inline_sections(doc, &inline);
+}
+
+/// The paths of the sections the patches write that the file holds inline:
+/// every top-level inline table, and every inline table directly under
+/// `[providers]`.
+fn inline_sections(doc: &DocumentMut) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for (key, item) in doc.iter() {
+        if is_inline_table(item) {
+            paths.push(vec![key.to_string()]);
+        }
+    }
+    let providers: Option<Vec<String>> = match doc.get("providers") {
+        Some(Item::Table(table)) => Some(
+            table
+                .iter()
+                .filter(|(_, item)| is_inline_table(item))
+                .map(|(key, _)| key.to_string())
+                .collect(),
+        ),
+        Some(Item::Value(Value::InlineTable(table))) => Some(
+            table
+                .iter()
+                .filter(|(_, value)| value.is_inline_table())
+                .map(|(key, _)| key.to_string())
+                .collect(),
+        ),
+        _ => None,
+    };
+    for name in providers.unwrap_or_default() {
+        paths.push(vec!["providers".to_string(), name]);
+    }
+    // Innermost first, so a provider goes back inline before its parent.
+    paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    paths
+}
+
+/// Put each section of `paths` that the patches turned into a table back
+/// inline, in place, so its position and the comment above it stay.
+fn restore_inline_sections(doc: &mut DocumentMut, paths: &[Vec<String>]) {
+    for path in paths {
+        restore_inline_at(doc.as_table_mut(), path);
+    }
+}
+
+fn restore_inline_at(table: &mut Table, path: &[String]) {
+    match path {
+        [] => {}
+        [last] => {
+            if let Some(item) = table.get_mut(last)
+                && let Item::Table(section) = item
+            {
+                let inline = std::mem::take(section).into_inline_table();
+                *item = toml_edit::value(inline);
+            }
+        }
+        [parent, rest @ ..] => {
+            if let Some(Item::Table(next)) = table.get_mut(parent) {
+                restore_inline_at(next, rest);
+            }
+        }
+    }
+}
+
+fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     // --- top-level (no table) keys ---
     // A dotless root key must render before any table header or TOML would parse
     // it as belonging to the preceding table. `patch_root_u16` positions it at
@@ -608,6 +2161,8 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.server.file_drop_max_concurrency as usize,
     );
 
+    // [server.auth] is deliberately absent: see `render_auth_section`.
+
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(doc, "terminal", "args", &config.terminal.args);
@@ -634,11 +2189,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.keys.show_terminal_keys,
     );
     {
-        let keys_table = doc
-            .entry("keys")
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
+        let keys_table = ensure_table(doc, "keys");
         for (action, key_strs) in &config.keys.bindings {
             let mut arr = Array::new();
             for s in key_strs {
@@ -666,10 +2217,30 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
 ///
 /// Public because the TUI's deprecation migrations reuse it.
 pub fn ensure_table<'a>(doc: &'a mut DocumentMut, section: &str) -> &'a mut Table {
-    doc.entry(section)
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap()
+    table_in(doc.as_table_mut(), section)
+}
+
+/// Get or create the table at `key` of `parent`, whatever the file holds
+/// there: a table written inline becomes a table with the same entries (see
+/// [`apply_patches`], which puts it back inline), and any other value, which
+/// no reader takes as that section anyway (a load reads it as the
+/// defaults), is replaced by an empty table. Never panics on a user's shape.
+fn table_in<'a>(parent: &'a mut Table, key: &str) -> &'a mut Table {
+    let item = parent
+        .entry(key)
+        .or_insert_with(|| Item::Table(Table::new()));
+    if !item.is_table() {
+        let table = match std::mem::take(item) {
+            Item::Value(Value::InlineTable(inline)) => inline.into_table(),
+            _ => Table::new(),
+        };
+        *item = Item::Table(table);
+    }
+    match item {
+        Item::Table(table) => table,
+        // Set to a table just above.
+        _ => unreachable!("the item was just made a table"),
+    }
 }
 
 fn patch_table_str(doc: &mut DocumentMut, section: &str, key: &str, value: &str) {
@@ -744,18 +2315,10 @@ fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, val
 }
 
 fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
-    let providers_table = doc
-        .entry("providers")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap();
+    let providers_table = ensure_table(doc, "providers");
 
     for (name, config) in &providers.commands {
-        let tbl = providers_table
-            .entry(name)
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
+        let tbl = table_in(providers_table, name);
 
         tbl["command"] = toml_edit::value(&config.command);
 
@@ -892,6 +2455,9 @@ struct CarriedProject {
     /// would mean attaching one project's keys to another project's entry, which is
     /// worse than dropping them.
     path: Option<String>,
+    /// The entry's `name`, which tells apart two id-less entries at the same
+    /// path (two projects for one folder) before their position does.
+    name: Option<String>,
     /// The comment block the user wrote ABOVE the entry, as comment lines with the
     /// surrounding whitespace already dropped (see [`carried_comment_prefix`]).
     /// `toml_edit` files it on the entry's own decor rather than on any of its keys,
@@ -959,6 +2525,7 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
                 carried.push(Some(CarriedProject {
                     id: table.get("id").and_then(Item::as_str).map(str::to_string),
                     path: table.get("path").and_then(Item::as_str).map(str::to_string),
+                    name: table.get("name").and_then(Item::as_str).map(str::to_string),
                     header_comment: decor_comment(table.decor()),
                     first_key_comment,
                     keys,
@@ -985,6 +2552,10 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
                     id: inline.get("id").and_then(Value::as_str).map(str::to_string),
                     path: inline
                         .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    name: inline
+                        .get("name")
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     // A comment written between two elements of a multi-line array
@@ -1020,7 +2591,9 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
 ///    env-expands it, so a file that spells it `$HOME/p` holds `/home/ada/p` in
 ///    memory and never matches on the pair.
 /// 3. the raw `path` alone, and only for an entry that carried NO id, whose id was
-///    minted by the loader and therefore cannot match anything in the file.
+///    minted by the loader and therefore cannot match anything in the file; one
+///    with the project's own `name` first, so two such entries at one path keep
+///    their own keys.
 ///
 /// Step 3 accepts a miss (an id-less entry whose path is env-expanded loses its
 /// extras) rather than guessing, because the wrong guess attaches one project's
@@ -1040,6 +2613,15 @@ fn take_carried_project(
     })
     .or_else(|| {
         position(&|entry: &CarriedProject| entry.id.as_deref() == Some(project.id.as_str()))
+    })
+    .or_else(|| {
+        // Two id-less entries at one path are told apart by their name first.
+        position(&|entry: &CarriedProject| {
+            entry.id.is_none()
+                && entry.path.as_deref() == Some(project.path.as_str())
+                && entry.name.is_some()
+                && entry.name == project.name
+        })
     })
     .or_else(|| {
         position(&|entry: &CarriedProject| {
@@ -1183,13 +2765,15 @@ fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, 
 ///
 /// Entries are dotted table paths. A path matches when it is equal to an entry
 /// or nested beneath one.
-pub const ORPHANED_CONFIG_SECTIONS: &[&str] = &[
-    // Removed with the HTTP-basic-auth experiment. The server is single-tenant /
-    // trusted-access by design (CLAUDE.md) and has no login of any kind.
-    "auth",
+pub const ORPHANED_CONFIG_SECTIONS: &[&[&str]] = &[
+    // Removed with the HTTP-basic-auth experiment. Only this TOP-LEVEL `[auth]`
+    // table: the web login's live settings are `[server.auth]`, which a dotted
+    // path match never confuses with it (pinned by
+    // `the_orphan_cleanup_never_touches_server_auth`).
+    &["auth"],
     // Removed with the built-in ACME/TLS listener. TLS is delegated to an
     // upstream proxy or to Tailscale.
-    "server.acme",
+    &["server", "acme"],
 ];
 
 /// One step of a path through a TOML document: a table key, or an index into an
@@ -1201,40 +2785,54 @@ enum PathSeg {
 }
 
 /// Render a path for display: `server.acme.production`, `projects[0].custom_key`.
-fn path_display(path: &[PathSeg]) -> String {
-    let mut out = String::new();
-    for seg in path {
-        match seg {
-            PathSeg::Key(k) => {
-                if !out.is_empty() {
-                    out.push('.');
-                }
-                out.push_str(k);
-            }
-            PathSeg::Index(i) => {
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("[{i}]"));
-            }
-        }
-    }
-    out
-}
-
-/// The dotted TABLE path (indices elided), used for drop-list matching so that
-/// `projects[0].auth` never collides with the top-level `[auth]` section.
-fn dotted_key_path(path: &[PathSeg]) -> String {
-    let keys: Vec<&str> = path
+/// Every path, an index into an array of tables included, goes through the
+/// one formatter ([`crate::config::shown_parts`]) against the file's text
+/// `raw`, so a name that breaks its schema is placed by its line, never printed.
+fn path_display(raw: &str, path: &[PathSeg]) -> String {
+    let parts: Vec<crate::config::PathPart<'_>> = path
         .iter()
         .map(|seg| match seg {
-            PathSeg::Key(k) => k.as_str(),
-            PathSeg::Index(_) => "[]",
+            PathSeg::Key(key) => crate::config::PathPart::Key(key),
+            PathSeg::Index(index) => crate::config::PathPart::Index(*index),
         })
         .collect();
-    keys.join(".")
+    crate::config::shown_parts(raw, &parts)
 }
 
-/// Whether `dotted` is exactly an orphaned section.
-fn is_orphan_root(dotted: &str) -> bool {
-    ORPHANED_CONFIG_SECTIONS.contains(&dotted)
+/// The path's keys when it holds no array index, for drop-list matching
+/// segment by segment: `projects[0].auth` never collides with the top-level
+/// `[auth]`, and a top-level key named `"server.acme"` never with
+/// `[server.acme]`.
+fn key_segments(path: &[PathSeg]) -> Option<Vec<&str>> {
+    path.iter()
+        .map(|seg| match seg {
+            PathSeg::Key(key) => Some(key.as_str()),
+            PathSeg::Index(_) => None,
+        })
+        .collect()
+}
+
+/// Whether `item` holds a `password_hash` key anywhere inside it.
+fn holds_password_hash(item: &Item) -> bool {
+    match item {
+        Item::Table(table) => table
+            .iter()
+            .any(|(key, child)| key == "password_hash" || holds_password_hash(child)),
+        Item::Value(Value::InlineTable(table)) => table.iter().any(|(key, child)| {
+            key == "password_hash" || holds_password_hash(&Item::Value(child.clone()))
+        }),
+        Item::ArrayOfTables(array) => array.iter().any(|entry| {
+            entry
+                .iter()
+                .any(|(key, child)| key == "password_hash" || holds_password_hash(child))
+        }),
+        _ => false,
+    }
+}
+
+/// Whether `path` is exactly an orphaned section, segment by segment.
+fn is_orphan_root(path: &[PathSeg]) -> bool {
+    key_segments(path).is_some_and(|keys| ORPHANED_CONFIG_SECTIONS.contains(&keys.as_slice()))
 }
 
 /// What the documentation-restore merge did to a user's non-canonical content.
@@ -1276,7 +2874,9 @@ pub fn merge_unmanaged_keys(
     let mut report = RestoreMergeReport::default();
     let mut carry: Vec<CarriedLeaf> = Vec::new();
     let mut path = Vec::new();
+    let raw = original.to_string();
     collect_unmanaged(
+        &raw,
         original.as_table(),
         Some(rendered.as_table()),
         &mut path,
@@ -1285,7 +2885,7 @@ pub fn merge_unmanaged_keys(
     );
 
     for leaf in carry {
-        let display = path_display(&leaf.path);
+        let display = path_display(&raw, &leaf.path);
         if insert_at_path(rendered, &leaf.path, leaf.key, leaf.item) {
             report.preserved.push(display);
         } else {
@@ -1314,6 +2914,7 @@ struct CarriedLeaf {
 /// Walk `orig` alongside its counterpart in the rendered document, collecting
 /// leaf keys the rendered document lacks and noting dropped orphan sections.
 fn collect_unmanaged(
+    raw: &str,
     orig: &Table,
     rendered: Option<&Table>,
     path: &mut Vec<PathSeg>,
@@ -1322,12 +2923,14 @@ fn collect_unmanaged(
 ) {
     for (key, item) in orig.iter() {
         path.push(PathSeg::Key(key.to_string()));
-        let dotted = dotted_key_path(path);
 
-        if is_orphan_root(&dotted) {
+        // An orphaned section holding a password hash is never cleaned up:
+        // that is a password in the wrong place, and the load refuses the
+        // file over it (see `misplaced_auth_problems`) rather than lose it.
+        if is_orphan_root(path) && !holds_password_hash(item) {
             // Report the section once and do not descend: everything beneath it
             // goes away with it.
-            dropped.push(dotted);
+            dropped.push(path_display(raw, path));
             path.pop();
             continue;
         }
@@ -1335,7 +2938,7 @@ fn collect_unmanaged(
         match item {
             Item::Table(table) => {
                 let counterpart = rendered.and_then(|r| r.get(key)).and_then(Item::as_table);
-                collect_unmanaged(table, counterpart, path, carry, dropped);
+                collect_unmanaged(raw, table, counterpart, path, carry, dropped);
             }
             Item::ArrayOfTables(arrays) => {
                 let counterpart = rendered
@@ -1344,6 +2947,7 @@ fn collect_unmanaged(
                 for (index, table) in arrays.iter().enumerate() {
                     path.push(PathSeg::Index(index));
                     collect_unmanaged(
+                        raw,
                         table,
                         counterpart.and_then(|a| a.get(index)),
                         path,
@@ -1558,13 +3162,24 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "config must be 0600, got {mode:o}");
 
-        // No leftover temp files in the config directory.
+        // No leftover temp files in the config directory. The write lock's
+        // file stays by design (unlinking a lock file someone may be waiting
+        // on would let two writers lock two different files), and is private.
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name() != "config.toml")
+            .filter(|e| e.file_name() != "config.toml" && e.file_name() != CONFIG_WRITE_LOCK_NAME)
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+        let lock_mode = fs::metadata(ConfigFileLock::lock_path(&path))
+            .expect("lock meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            lock_mode, 0o600,
+            "the lock file is private, got {lock_mode:o}"
+        );
     }
 
     /// A REPLACE, not an edit in place, and the mode of the destination does
@@ -1811,11 +3426,11 @@ build = { text = \"cargo build\", surface = \"terminal\" }
 
     #[test]
     fn log_viewer_lines_is_read_within_its_documented_bounds() {
-        use crate::config::{LOG_VIEWER_LINES_MAX, log_viewer_capacity};
-        assert_eq!(log_viewer_capacity(0), 1);
-        assert_eq!(log_viewer_capacity(500), 500);
+        use crate::config::{LOG_VIEWER_LINES_MAX, effective_log_viewer_lines};
+        assert_eq!(effective_log_viewer_lines(0), 1);
+        assert_eq!(effective_log_viewer_lines(500), 500);
         assert_eq!(
-            log_viewer_capacity(LOG_VIEWER_LINES_MAX + 1),
+            effective_log_viewer_lines(LOG_VIEWER_LINES_MAX + 1),
             LOG_VIEWER_LINES_MAX
         );
     }
@@ -3326,9 +4941,11 @@ knob = 42
         assert!(!out.contains("users"), "out:\n{out}");
         // And their removal is reported, not silent.
         assert_eq!(report.dropped, vec!["auth", "server.acme"]);
+        // A key the schema does not know is placed by its line, never named:
+        // its name may be a value pasted in the wrong place.
         assert_eq!(
             report.preserved,
-            vec!["my_fork_section.knob", "server.listen_addrs"]
+            vec!["the entry on line 12", "the entry on line 3 of [server]"]
         );
         // The merged document is still valid TOML.
         let _: toml_edit::DocumentMut = out.parse().expect("merged output re-parses");
@@ -3370,7 +4987,12 @@ id = \"b\"
             out.contains("custom_note = \"do not lose me\""),
             "out:\n{out}"
         );
-        assert_eq!(report.preserved, vec!["projects[0].custom_note"]);
+        // A key the project schema does not know is placed by its line: it
+        // may be anything pasted where a name goes.
+        assert_eq!(
+            report.preserved,
+            vec!["the entry on line 3 of [projects[0]]"]
+        );
         assert!(report.dropped.is_empty());
     }
 
@@ -3405,10 +5027,13 @@ second_note = \"nowhere to go\"
         let out = rendered.to_string();
         assert!(out.contains("note = \"kept\""), "out:\n{out}");
         assert!(!out.contains("second_note"), "out:\n{out}");
-        assert_eq!(report.preserved, vec!["projects[0].note"]);
+        assert_eq!(
+            report.preserved,
+            vec!["the entry on line 3 of [projects[0]]"]
+        );
         assert_eq!(
             report.unplaceable,
-            vec!["projects[1].id", "projects[1].second_note"],
+            vec!["projects[1].id", "the entry on line 7 of [projects[1]]"],
             "a key that could not be placed must be named, not vanish"
         );
         assert!(
@@ -3487,5 +5112,917 @@ second_note = \"nowhere to go\"
             !crate::config::raw_has_removed_max_websocket_connections(&stripped),
             "key must remain absent; got: {stripped}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // [server.auth]: never overwritten from memory, never orphaned
+    // -----------------------------------------------------------------------
+
+    fn a_hash(text: &str) -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(text.to_string())).expect("hash")
+    }
+
+    /// Orphaned sections are matched segment by segment: a top-level key
+    /// whose name is `"server.acme"` is a user's own key, kept, and never
+    /// taken for the retired `[server.acme]` section.
+    #[test]
+    fn a_key_named_like_an_orphaned_section_is_not_that_section() {
+        let original: DocumentMut = "\"server.acme\" = 1\n\n[server.acme]\nx = 1\n"
+            .parse()
+            .unwrap();
+        let mut rendered = DocumentMut::new();
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+        assert_eq!(
+            report.dropped,
+            vec!["server.acme".to_string()],
+            "{report:?}"
+        );
+        assert_eq!(report.preserved.len(), 1, "{report:?}");
+        assert!(
+            rendered.to_string().contains("\"server.acme\" = 1"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.to_string().contains("[server.acme]"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_orphan_cleanup_never_touches_server_auth() {
+        let hash = a_hash("correct horse battery staple");
+        let original: DocumentMut = format!(
+            "[auth]\nusers = []\n\n[server]\nport = 8080\n\n[server.auth]\n\
+             password_hash = \"{hash}\"\nblocked_addresses = [\"203.0.113.7\"]\n"
+        )
+        .parse()
+        .expect("parse original");
+        // A render that does not carry the section at all is the worst case:
+        // everything in it must come across from the original.
+        let mut rendered: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        assert_eq!(
+            report.dropped,
+            vec!["auth"],
+            "only the old top-level [auth] goes"
+        );
+        assert!(out.contains(&hash), "out:\n{out}");
+        assert!(out.contains("203.0.113.7"), "out:\n{out}");
+    }
+
+    #[test]
+    fn a_save_from_memory_never_overwrites_an_auth_value_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let on_disk = a_hash("the password somebody just set");
+        std::fs::write(
+            &path,
+            format!(
+                "[server]\nport = 4000\n\n[server.auth]\npassword_hash = \"{on_disk}\"\n\
+                 blocked_addresses = [\"203.0.113.7\"]\n"
+            ),
+        )
+        .expect("seed");
+
+        // The running dux still remembers the OLD password and no bans.
+        let mut stale = Config::default();
+        stale.server.auth.password_hash = a_hash("the password from before");
+        stale.server.port = 4001;
+        patch_config_file_with(&path, &stale, Durability::NoFsync).expect("patch");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            after.contains("port = 4001"),
+            "an ordinary setting still saves:\n{after}"
+        );
+        assert!(
+            after.contains(&on_disk),
+            "the newer password survives:\n{after}"
+        );
+        assert!(after.contains("203.0.113.7"), "the ban survives:\n{after}");
+    }
+
+    /// Saves from memory never write `[server.auth]`: not a changed key, not
+    /// a missing one. A key the user deleted by hand stays deleted.
+    #[test]
+    fn a_save_from_memory_never_writes_server_auth_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // The user removed `require` (and everything else) by hand.
+        let before = "[server]\nport = 4000\n\n[server.auth]\nmax_failed_logins = 3\n";
+        std::fs::write(&path, before).expect("seed");
+        let mut config = Config::default();
+        config.server.auth.require = crate::config::AuthRequire::Everywhere;
+        config.server.auth.password_hash = a_hash("a stale password in memory");
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        let auth = after
+            .split("[server.auth]")
+            .nth(1)
+            .expect("section kept")
+            .split("\n[")
+            .next()
+            .unwrap_or_default();
+        assert_eq!(auth.trim(), "max_failed_logins = 3", "untouched:\n{after}");
+        let mut no_auth = DocumentMut::new();
+        apply_patches(&mut no_auth, &config);
+        assert!(
+            no_auth.get("server").and_then(|s| s.get("auth")).is_none(),
+            "apply_patches has no auth keys at all"
+        );
+    }
+
+    /// Every write path refuses a result whose `[server.auth]` would stop dux
+    /// from starting.
+    #[test]
+    fn writes_refuse_a_result_with_an_invalid_server_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let broken = "[server.auth]\npassword_hash = \"hunter2\"\n";
+        assert!(write_config_atomic(&path, broken, Durability::NoFsync).is_err());
+        assert!(!path.exists(), "nothing was written");
+        // A file the user left broken is the user's to fix: a save from
+        // memory, which writes no auth key, goes ahead beside it and leaves
+        // the user's line as it was.
+        std::fs::write(&path, broken).expect("seed");
+        let mut ours = Config::default();
+        ours.ui.copy_on_select = false;
+        patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("password_hash = \"hunter2\""), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
+    }
+
+    /// A save beside a `[server.auth]` mistake the user made logs it once,
+    /// naming the line in the user's own file even though dux's change moves
+    /// it down in the text written, and logs it no more on the next save.
+    #[test]
+    fn a_save_beside_a_users_auth_mistake_logs_it_once_by_the_users_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // A distinct value, so this test's line is its own in the log.
+        let user =
+            "[ui]\ncopy_on_select = true\n\n[server.auth]\nminimum_password_length = \"27\"\n";
+        std::fs::write(&path, user).expect("seed");
+        let mut ours = Config::default();
+        ours.ui.copy_on_select = false;
+        ours.ui.left_width_pct = 31;
+        let ((), lines) = crate::logger::capture_for_test(|| {
+            patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        });
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("left_width_pct = 31"), "{after}");
+        let logged: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("a [server.auth] problem dux did not make"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{lines:?}\n{after}");
+        // Line 5 of the user's file; dux's copy has it on line 6.
+        assert!(logged[0].contains("line 5"), "{logged:?}\n{after}");
+        ours.ui.left_width_pct = 32;
+        let ((), lines) = crate::logger::capture_for_test(|| {
+            patch_config_file_with(&path, &ours, Durability::NoFsync).expect("the save lands");
+        });
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("a [server.auth] problem dux did not make")),
+            "{lines:?}"
+        );
+    }
+
+    /// The three-way save: a key changed on disk by someone else, and not in
+    /// memory, keeps the disk value; a key changed in memory is written.
+    fn base_and_file(path: &Path, body: &str) -> Config {
+        std::fs::write(path, body).expect("seed");
+        crate::config::config_from_text_as_written(body).expect("parse")
+    }
+
+    /// A setting a save changes keeps the documentation comment above it and
+    /// the one trailing it.
+    #[test]
+    fn a_changed_key_keeps_its_comments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[ui]\n# Copy on select.\ncopy_on_select = true # trailing\nleft_width_pct = 20\n",
+        );
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        for base in [Some(SaveBase::read(&base)), None] {
+            std::fs::write(
+                &path,
+                "[ui]\n# Copy on select.\ncopy_on_select = true # trailing\nleft_width_pct = 20\n",
+            )
+            .unwrap();
+            save_config_three_way(&path, base, &ours, Durability::NoFsync).expect("save");
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                after.contains("# Copy on select.\ncopy_on_select = false # trailing\n"),
+                "{after}"
+            );
+        }
+    }
+
+    /// A pure reorder of an ordered table is a change and is written.
+    #[test]
+    fn a_reorder_in_memory_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[macros]\na = { text = \"a\", surface = \"agent\" }\nb = { text = \"b\", surface = \"agent\" }\nc = { text = \"c\", surface = \"agent\" }\n",
+        );
+        let mut ours = base.clone();
+        ours.macros.entries.move_index(2, 0);
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let order: Vec<&str> = parsed.macros.entries.keys().map(String::as_str).collect();
+        assert_eq!(order, ["c", "a", "b"]);
+    }
+
+    /// A project added to the file by hand survives a save that adds another
+    /// project from memory; projects are matched by id, not by position.
+    fn project_ids(path: &Path) -> Vec<(String, String)> {
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        parsed
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect()
+    }
+
+    /// A hand-written project with no `id`: the base and memory each mint
+    /// their own, so the entry is matched by path, written once, and given
+    /// memory's id, which then stays.
+    #[test]
+    fn an_id_less_project_is_not_duplicated_and_gets_its_id_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = "[[projects]]\npath = \"/tmp/hand\"\nname = \"hand\"\n";
+        let base = base_and_file(&path, body);
+        let mut ours: Config = toml::from_str(body).unwrap();
+        assert_ne!(
+            base.projects[0].id, ours.projects[0].id,
+            "two parses, two ids"
+        );
+        ours.ui.copy_on_select = false;
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        assert_eq!(
+            project_ids(&path),
+            vec![(ours.projects[0].id.clone(), "/tmp/hand".to_string())]
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("name = \"hand\"")
+        );
+    }
+
+    /// Memory adopted the id SQLite has for the same path: one entry, with
+    /// the adopted id.
+    #[test]
+    fn an_adopted_project_id_replaces_the_files_without_duplicating() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[[projects]]\nid = \"from-file\"\npath = \"/tmp/p\"\n",
+        );
+        let mut ours = base.clone();
+        ours.projects[0].id = "from-sqlite".to_string();
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        assert_eq!(
+            project_ids(&path),
+            vec![("from-sqlite".to_string(), "/tmp/p".to_string())]
+        );
+    }
+
+    /// Renamed in memory while another field of the same project changed on
+    /// disk: both changes land, field by field.
+    #[test]
+    fn a_project_entry_merges_field_by_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nname = \"old\"\n",
+        );
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nname = \"old\"\nstartup_command = \"make\"\n",
+        )
+        .unwrap();
+        let mut ours = base.clone();
+        ours.projects[0].name = Some("new".to_string());
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].name.as_deref(), Some("new"));
+        assert_eq!(parsed.projects[0].startup_command.as_deref(), Some("make"));
+    }
+
+    /// Two entries with one identity never make a save push one twice or
+    /// lose one.
+    /// A copy-pasted entry shares the original's id but not its path; a
+    /// rename in memory lands on the entry with the matching id AND path.
+    #[test]
+    fn a_rename_lands_on_the_entry_matching_id_and_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/copy\"\nname = \"copy\"\nstartup_command = \"a\"\n\n[[projects]]\nid = \"same\"\npath = \"/tmp/original\"\nname = \"original\"\n";
+        let base = base_and_file(&path, body);
+        // The copy's command is changed on disk meanwhile; memory never saw it.
+        std::fs::write(
+            &path,
+            body.replace("startup_command = \"a\"", "startup_command = \"disk-edit\""),
+        )
+        .unwrap();
+        let mut ours = base.clone();
+        let original = ours
+            .projects
+            .iter_mut()
+            .find(|p| p.path == "/tmp/original")
+            .unwrap();
+        original.name = Some("renamed".to_string());
+        // Memory lists the original first, so a match by id alone would pair it
+        // with the copy above it in the file.
+        ours.projects.swap(0, 1);
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let names: Vec<(String, Option<String>)> = parsed
+            .projects
+            .iter()
+            .map(|p| (p.path.clone(), p.name.clone()))
+            .collect();
+        assert!(
+            names.contains(&("/tmp/copy".to_string(), Some("copy".to_string()))),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&("/tmp/original".to_string(), Some("renamed".to_string()))),
+            "{names:?}"
+        );
+        let copy = parsed
+            .projects
+            .iter()
+            .find(|p| p.path == "/tmp/copy")
+            .unwrap();
+        assert_eq!(
+            copy.startup_command.as_deref(),
+            Some("disk-edit"),
+            "the copy's own disk edit"
+        );
+    }
+
+    #[test]
+    fn duplicate_identities_are_neither_doubled_nor_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"same\"\npath = \"/tmp/b\"\n";
+        let base = base_and_file(&path, body);
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        assert_eq!(project_ids(&path).len(), 2);
+    }
+
+    /// A setting deleted from the file by hand stays deleted; one the file
+    /// never had (new in this version) is filled in.
+    #[test]
+    fn a_hand_deleted_key_stays_deleted_and_a_new_one_is_filled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let at_read = "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n";
+        let base = base_and_file(&path, at_read);
+        // The user deletes `left_width_pct` and the FOO variable.
+        std::fs::write(&path, "[ui]\n\n[env]\n").unwrap();
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("left_width_pct"), "{after}");
+        assert!(!after.contains("FOO"), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
+        assert!(
+            after.contains("right_width_pct"),
+            "a setting the file never had: {after}"
+        );
+    }
+
+    #[test]
+    fn projects_merge_by_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(&path, "[[projects]]\nid = \"one\"\npath = \"/tmp/one\"\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"one\"\npath = \"/tmp/one\"\n\n[[projects]]\nid = \"hand\"\npath = \"/tmp/hand\"\n",
+        )
+        .unwrap();
+        let mut ours = base.clone();
+        let mut added = ours.projects[0].clone();
+        added.id = "two".to_string();
+        added.path = "/tmp/two".to_string();
+        ours.projects.push(added);
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ids: Vec<&str> = parsed.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["one", "two", "hand"]);
+    }
+
+    #[test]
+    fn a_three_way_save_keeps_a_disk_change_memory_did_not_make() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[ui]\n# how wide\nleft_width_pct = 20\ncopy_on_select = true\n",
+        )
+        .expect("seed");
+        let base =
+            crate::config::config_from_text_as_written(&std::fs::read_to_string(&path).unwrap())
+                .unwrap();
+        // `dux config set ui.left_width_pct 33` happens on disk.
+        std::fs::write(
+            &path,
+            "[ui]\n# how wide\nleft_width_pct = 33\ncopy_on_select = true\n",
+        )
+        .expect("external set");
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way(
+            &path,
+            Some(SaveBase::read(&base)),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let after: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.ui.left_width_pct, 33, "the disk change survives");
+        assert!(!after.ui.copy_on_select, "the memory change lands");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# how wide")
+        );
+    }
+
+    #[test]
+    fn a_plain_render_carries_the_running_password() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = a_hash("the running password");
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("valid");
+        assert_eq!(parsed.server.auth, config.server.auth, "{rendered}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The coordinated mutation path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_mutations_of_different_keys_never_lose_an_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 4000\n").expect("seed");
+        let rounds = 40;
+        let threads: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..rounds {
+                        mutate_config_file(&path, |doc| {
+                            let server = doc["server"].as_table_mut().expect("server");
+                            let list = server
+                                .entry("allowed_hosts")
+                                .or_insert_with(|| toml_edit::value(Array::new()))
+                                .as_array_mut()
+                                .expect("array");
+                            list.push(format!("{name}{i}.example"));
+                            Ok(())
+                        })
+                        .expect("mutate");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("join");
+        }
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("valid");
+        assert_eq!(
+            parsed.server.allowed_hosts.len(),
+            3 * rounds,
+            "every append from every writer landed"
+        );
+    }
+
+    #[test]
+    fn a_save_from_memory_waits_for_a_held_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 4000\n").expect("seed");
+        let held = ConfigFileLock::acquire(&path).expect("lock");
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut config = Config::default();
+                config.server.port = 4002;
+                patch_config_file_with(&path, &config, Durability::NoFsync)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 4000"),
+            "nothing is written while another writer holds the lock"
+        );
+        drop(held);
+        saver.join().expect("join").expect("save");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 4002")
+        );
+    }
+
+    /// A whole-file replacement reads the current file only once it holds the
+    /// lock, so a writer that finishes while it waits is seen, not lost.
+    #[test]
+    fn a_replacement_reads_the_file_inside_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").expect("seed");
+        let held = ConfigFileLock::acquire(&path).expect("lock");
+        let replacer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                replace_config_file(&path, |current| {
+                    Ok((current.unwrap_or_default().replace("# x", "# seen"), ()))
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // The other writer lands while the replacement waits on the lock.
+        write_config_atomic_unlocked(
+            &path,
+            "[ui]\n# x\nleft_width_pct = 33\n",
+            Durability::NoFsync,
+        )
+        .expect("other writer");
+        drop(held);
+        replacer.join().expect("join").expect("replace");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ui]\n# seen\nleft_width_pct = 33\n"
+        );
+    }
+
+    /// The lock needs only read access to its file, so a lock file left
+    /// read-only (or owned by root after a `sudo dux`) still works, and one
+    /// that cannot be opened at all says how to fix it.
+    #[test]
+    fn the_lock_file_needs_only_read_access_and_says_when_it_has_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let lock = ConfigFileLock::lock_path(&path);
+        std::fs::write(&lock, "").expect("lock file");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o400)).unwrap();
+        drop(ConfigFileLock::acquire(&path).expect("a read-only lock file locks"));
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = ConfigFileLock::acquire(&path).expect_err("unreadable");
+        let text = format!("{err:#}");
+        assert!(text.contains(&lock.display().to_string()), "{text}");
+        assert!(text.contains("owner"), "{text}");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn a_lock_that_never_frees_is_an_error_not_a_hang() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("seed");
+        let _held = ConfigFileLock::acquire(&path).expect("lock");
+        let path2 = path.clone();
+        let err = std::thread::spawn(move || {
+            ConfigFileLock::acquire_within(&path2, std::time::Duration::from_millis(150))
+        })
+        .join()
+        .expect("join")
+        .expect_err("times out");
+        assert!(err.to_string().contains("another"), "{err:#}");
+    }
+
+    #[test]
+    fn a_mutation_that_would_break_server_auth_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let before = "[server]\nport = 4000\n";
+        std::fs::write(&path, before).expect("seed");
+        let err = mutate_config_file(&path, |doc| {
+            doc["server"]["auth"]["password_hash"] = toml_edit::value("hunter2");
+            Ok(())
+        })
+        .expect_err("refused");
+        assert!(err.to_string().contains("server.auth"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_file_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let before = "[server]\nport = 4000\n";
+        std::fs::write(&path, before).expect("seed");
+        // Create the lock file first so only the temp file's creation fails.
+        drop(ConfigFileLock::acquire(&path).expect("lock"));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("chmod");
+        let result = mutate_config_file(&path, |doc| {
+            doc["server"]["port"] = toml_edit::value(4001);
+            Ok(())
+        });
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod back");
+        assert!(
+            result.is_err(),
+            "a directory dux cannot write to fails the write"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_mutation_of_a_file_that_is_not_toml_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server\n").expect("seed");
+        assert!(mutate_config_file(&path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[server\n");
+    }
+
+    #[test]
+    fn a_mutation_with_no_file_starts_from_the_documented_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        mutate_config_file(&path, |doc| {
+            doc["server"]["port"] = toml_edit::value(4005);
+            Ok(())
+        })
+        .expect("mutate");
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("valid");
+        assert_eq!(parsed.server.port, 4005);
+        assert_eq!(
+            parsed.ui.left_width_pct,
+            Config::default().ui.left_width_pct
+        );
+    }
+
+    /// A refusal names the shape that is actually wrong: a `server.auth`
+    /// that is not a table is not called an invalid `[server.auth]` section.
+    /// A `server` that is not a table holds no password and is written
+    /// around, as dux always read it.
+    #[test]
+    fn a_refused_write_names_the_shape_that_is_actually_wrong() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "server = 1\n").unwrap();
+        mutate_config_file(&path, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            Ok(())
+        })
+        .expect("a [server] that is not a table holds no password");
+        // The write itself makes `server.auth` something other than a table.
+        let clean = "[ui]\nleft_width_pct = 20\n";
+        fs::write(&path, clean).unwrap();
+        let text = "[server]\nauth = [1]\n";
+        let err = mutate_config_file(&path, |doc| {
+            doc["server"] = toml_edit::Item::Table(toml_edit::Table::new());
+            doc["server"]["auth"] = toml_edit::value(toml_edit::Array::from_iter([1i64]));
+            Ok(())
+        })
+        .expect_err("refused");
+        let message = format!("{err:#}");
+        assert!(message.contains("server.auth in"), "{message}");
+        assert!(message.contains("is not a table"), "{message}");
+        assert!(!message.contains("make [server.auth]"), "{message}");
+        let err = replace_config_file(&path, |_| Ok((text.to_string(), ()))).expect_err("refused");
+        let message = format!("{err:#}");
+        assert!(message.contains("server.auth in"), "{message}");
+        assert!(!message.contains("leave [server.auth]"), "{message}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            clean,
+            "nothing was written"
+        );
+    }
+
+    /// A config.toml kept as a symlink stays one: every write goes to the
+    /// file the link points at, never replacing the link with a file.
+    #[test]
+    fn writes_go_through_a_config_symlink_to_its_target() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dotfiles = dir.path().join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("dux.toml");
+        let link = dir.path().join("config.toml");
+        fs::write(&target, "[ui]\nleft_width_pct = 20\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let is_link = || {
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        };
+
+        mutate_config_file(&link, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(30);
+            Ok(())
+        })
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 30")
+        );
+
+        let loaded = crate::config::load_config_file(&link).unwrap();
+        let mut config = loaded.clone();
+        config.ui.left_width_pct = 35;
+        save_config_three_way(
+            &link,
+            Some(SaveBase::read(&loaded)),
+            &config,
+            Durability::NoFsync,
+        )
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 35")
+        );
+
+        replace_config_file(&link, |_| {
+            Ok(("[ui]\nleft_width_pct = 40\n".to_string(), ()))
+        })
+        .unwrap();
+        assert!(is_link());
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("left_width_pct = 40")
+        );
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the target is kept owner-only");
+    }
+
+    /// Nothing is created or replaced at a config.toml symlink whose target
+    /// is missing: every writer refuses, naming the link and its target.
+    #[test]
+    fn no_writer_creates_anything_at_a_dangling_config_symlink() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let target = dir.path().join("gone.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let results = [
+            mutate_config_file(&link, |doc| {
+                doc["ui"]["left_width_pct"] = toml_edit::value(30);
+                Ok(())
+            })
+            .map(|_| ()),
+            replace_config_file(&link, |_| Ok(("[ui]\n".to_string(), ()))),
+            write_config_secure(&link, "[ui]\n"),
+            save_config_three_way(&link, None, &Config::default(), Durability::NoFsync).map(|_| ()),
+        ];
+        for result in results {
+            let message = format!("{:#}", result.expect_err("refused"));
+            assert!(message.contains(&target.display().to_string()), "{message}");
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!target.exists(), "nothing was created at the target");
+        }
+    }
+}
+
+/// The token a reader of `config.toml` hands back with a whole-file write, so
+/// the write can be refused when the file changed since the read: a digest of
+/// the text as read, or of "no file" when there was none. Compared under the
+/// [`ConfigFileLock`] by the writer (see the web's raw config editor).
+pub fn read_token(current: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = match current {
+        Some(text) => Sha256::new()
+            .chain_update(b"file\0")
+            .chain_update(text.as_bytes()),
+        None => Sha256::new().chain_update(b"missing\0"),
+    }
+    .finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod last_write_tests {
+    use super::*;
+
+    /// A locked write leaves its file identity for the thread that made it:
+    /// the digest of the text it replaced and of the text it wrote, taken once.
+    #[test]
+    fn a_locked_write_leaves_the_identity_of_both_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        mutate_config_file(&path, |doc| {
+            doc["ui"]["left_width_pct"] = toml_edit::value(25);
+            Ok(())
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            take_last_write(),
+            Some(FileWrite {
+                before: read_token(Some(&before)),
+                after: read_token(Some(&after)),
+            })
+        );
+        assert_eq!(take_last_write(), None, "taken once");
+    }
+}
+
+#[cfg(test)]
+mod read_token_tests {
+    use super::read_token;
+
+    #[test]
+    fn the_token_follows_the_text_and_tells_no_file_from_an_empty_one() {
+        assert_eq!(read_token(Some("a = 1\n")), read_token(Some("a = 1\n")));
+        assert_ne!(read_token(Some("a = 1\n")), read_token(Some("a = 2\n")));
+        assert_ne!(read_token(Some("")), read_token(None));
+        assert_eq!(read_token(None).len(), 64);
     }
 }

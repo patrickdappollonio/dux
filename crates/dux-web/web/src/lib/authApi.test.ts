@@ -57,7 +57,16 @@ describe("normalizeAuthStatus", () => {
       auth_broken: null,
       minimum_password_length: null,
       minimum_password_score: null,
+      required_reason: null,
     })
+  })
+
+  it("reads why this device is treated as the network, and nothing else as a reason", () => {
+    expect(
+      normalizeAuthStatus({ required_reason: "`[server] tailscale` is `no`." }).required_reason,
+    ).toBe("`[server] tailscale` is `no`.")
+    expect(normalizeAuthStatus({ required_reason: "" }).required_reason).toBeNull()
+    expect(normalizeAuthStatus({ required_reason: 7 }).required_reason).toBeNull()
   })
 
   it("reads a missing flag as false, so an older or partial answer never invents a login", () => {
@@ -194,7 +203,7 @@ describe("postLogin", () => {
 
   it("reads 429 with the wait the server asks for", async () => {
     stubFetch(reply(429, { error: "rate_limited" }, { "retry-after": "12" }))
-    expect(await postLogin("x")).toEqual({ kind: "rate_limited", retryAfterSeconds: 12 })
+    expect(await postLogin("x")).toEqual({ kind: "rate_limited", retryAfterSeconds: 12, from: null })
   })
 
   it("reads 403 as blocked, keeping where", async () => {

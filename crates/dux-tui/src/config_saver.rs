@@ -19,14 +19,26 @@ use crate::storage::SessionStore;
 pub struct TuiConfigSurface;
 
 impl ConfigSurface for TuiConfigSurface {
+    /// Its reload (`ensure_config`) refuses what stops the terminal UI. The
+    /// flip and the background server both run on this engine, so both judge
+    /// a file the terminal UI's way.
+    fn start_surface(&self) -> dux_core::config::Surface {
+        dux_core::config::Surface::TerminalUi
+    }
+
     fn reload(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
             // load/validate/sync work below panics; otherwise the engine's
             // reload barrier would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
-            let result = crate::config::ensure_config(&paths)
-                .map_err(|err| format!("{err:#}"))
+            // A file deleted while dux runs is refused rather than recreated
+            // from defaults, which would drop the running password.
+            let result = dux_core::config::config_present_for_reload(&paths)
+                .map_err(|err| format!("{err}"))
+                .and_then(|()| {
+                    crate::config::ensure_config(&paths).map_err(|err| format!("{err:#}"))
+                })
                 .and_then(
                     |mut config| match crate::config::validate_keys(&config.keys) {
                         Ok(()) => {
@@ -67,5 +79,63 @@ impl ConfigSurface for TuiConfigSurface {
     fn recover_render(&self, config: &Config) -> String {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         crate::config::render_config_with(config, &bindings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// config.toml is a symlink whose target vanished while dux runs: the
+    /// terminal UI's reload is refused like a deleted file, the running
+    /// config (password included) stays, and nothing is written over the
+    /// symlink.
+    #[test]
+    fn a_reload_through_a_dangling_symlink_is_refused_and_keeps_the_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().unwrap();
+        let target = root.join("dotfiles-config.toml");
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .unwrap();
+        std::fs::write(
+            &target,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &paths.config_path).unwrap();
+        let running = crate::config::ensure_config(&paths).expect("starts");
+        assert!(running.server.auth.has_password());
+
+        std::fs::remove_file(&target).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        TuiConfigSurface.reload(paths.clone(), tx);
+        let result = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("reload ends")
+            {
+                WorkerEvent::ConfigReloadReady(result) => break *result,
+                _ => continue,
+            }
+        };
+        let message = result.expect_err("refused");
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(
+            std::fs::symlink_metadata(&paths.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!target.exists(), "nothing was created at the target");
     }
 }

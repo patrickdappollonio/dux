@@ -38,6 +38,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
     let config_writer = crate::config_queue::ConfigWriteQueue::with_status_lane(
         paths.config_path.clone(),
         worker_tx.clone(),
+        &crate::config::Config::default(),
     );
     let engine = Engine {
         // Stock provider names, harmless commands: a test that launches an agent
@@ -103,6 +104,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         changed_files_refresh: Default::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        serve_memory: Default::default(),
         current_origin: crate::statusline::StatusScope::All,
         in_flight: HashSet::new(),
         rename_expected: std::collections::HashMap::new(),

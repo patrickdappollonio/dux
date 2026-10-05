@@ -106,9 +106,13 @@ EOF
   install -m 0755 /usr/local/share/dux-preview/tailscale-stand-in /usr/local/bin/tailscale
   ip addr show dev lo | grep -q "inet $ts_ip/" || ip addr add "$ts_ip/32" dev lo
   # A second tailnet address for the stand-in PEER, so a relayed tailnet
-  # connection comes from somebody other than dux itself.
+  # connection comes from somebody other than dux itself. It is a local ROUTE,
+  # not an address on an interface: the relay can still connect from it, but
+  # it is not one of this machine's own addresses, which dux reads from the
+  # interfaces and counts as the network, the way a real tailnet peer is not.
   peer_ip="${DUX_TAILNET_PEER_IP:-100.101.102.104}"
-  ip addr show dev lo | grep -q "inet $peer_ip/" || ip addr add "$peer_ip/32" dev lo
+  ip route show table local | grep -q "^local $peer_ip " ||
+    ip route add local "$peer_ip/32" dev lo
   echo "entrypoint: stand-in tailscale answering with $ts_ip (peer $peer_ip)"
   DUX_NO_TAILSCALE=0
 fi
