@@ -22,8 +22,9 @@ if (!ansiPath || !pngPath || !Number.isInteger(cols) || !Number.isInteger(rows) 
   console.error("usage: node tui-shot.js <input.ansi> <output.png> <cols> <rows> <font.woff2> [crop]")
   process.exit(64)
 }
-if (cropArg && cropArg !== "sidebar") {
-  console.error(`unknown crop mode: ${cropArg} (the only mode is "sidebar")`)
+const CROP_MODES = ["sidebar", "content"]
+if (cropArg && !CROP_MODES.includes(cropArg)) {
+  console.error(`unknown crop mode: ${cropArg} (the modes are ${CROP_MODES.join(", ")})`)
   process.exit(64)
 }
 
@@ -124,6 +125,37 @@ function sidebarCropCells(grid, cell) {
   }
 
   return { column: 0, row: topRow, columns: endColumn + 1, rows: endRow - topRow + 1 }
+}
+
+// "content" frames what a command printed into a plain terminal: from the top
+// row down to the last row with anything in it, and from the left edge to two
+// columns past the widest such row, plus one cell of air on each of those two
+// sides. A shell transcript fills a few rows of a screen that has to be at least
+// 24 tall, and the rest is a blank the docs would carry for nothing.
+function contentCropCells(grid) {
+  const filled = (line) => {
+    let last = -1
+    line.forEach((cell, at) => {
+      if (cell !== " " && cell !== undefined) last = at
+    })
+    return last
+  }
+  let lastRow = -1
+  let lastColumn = -1
+  grid.forEach((line, row) => {
+    const column = filled(line)
+    if (column === -1) return
+    lastRow = row
+    lastColumn = Math.max(lastColumn, column)
+  })
+  if (lastRow === -1) throw new Error("crop: the text grid is empty")
+  const gridWidth = Math.max(...grid.map((line) => line.length))
+  return {
+    column: 0,
+    row: 0,
+    columns: Math.min(gridWidth, lastColumn + 3),
+    rows: Math.min(grid.length, lastRow + 2),
+  }
 }
 
 // --- What the picture has to say -------------------------------------------
@@ -296,17 +328,21 @@ function checkPicture(png) {
   await new Promise((resolve) => setTimeout(resolve, 100))
 
   const grid = readGrid(ansiPath.replace(/\.ansi$/, ".txt"))
-  if (cropArg === "sidebar") {
-    const cells = sidebarCropCells(grid, {
-      width: metrics.cellWidth,
-      height: metrics.cellHeight,
-    })
+  if (cropArg) {
+    const cells =
+      cropArg === "sidebar"
+        ? sidebarCropCells(grid, { width: metrics.cellWidth, height: metrics.cellHeight })
+        : contentCropCells(grid)
     checkCells(grid, cells)
+    // A content crop starts at the screen's own top-left corner, so it keeps the
+    // capture's frame on every side: there are no neighbouring cells for it to
+    // drag in, only the frame's padding, which is the terminal's background.
+    const margin = cropArg === "content" ? FRAME : 0
     const clip = {
-      x: metrics.left + cells.column * metrics.cellWidth,
-      y: metrics.top + cells.row * metrics.cellHeight,
-      width: cells.columns * metrics.cellWidth,
-      height: cells.rows * metrics.cellHeight,
+      x: metrics.left + cells.column * metrics.cellWidth - margin,
+      y: metrics.top + cells.row * metrics.cellHeight - margin,
+      width: cells.columns * metrics.cellWidth + 2 * margin,
+      height: cells.rows * metrics.cellHeight + 2 * margin,
     }
     for (const [name, value] of Object.entries(clip)) {
       if (Math.abs(value * DEVICE_SCALE - Math.round(value * DEVICE_SCALE)) > 1e-6) {

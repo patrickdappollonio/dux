@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${DUX_SRC:-$(cd "$HERE/../.." && pwd)}"
 
 usage() {
-  echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME] [--crop sidebar]"
+  echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME] [--crop sidebar|content]"
 }
 
 fail() {

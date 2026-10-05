@@ -26,11 +26,18 @@ const fixture = journey.fixture || "steady"
 // (a serving port, a set of macros, a theme) does not have to type it into a
 // dialog first. Takes the rendered config text and returns the text to write.
 const patchConfig = journey.config || ((text) => text)
-// What runs in the captured terminal: the terminal UI (the default), or
+// What runs in the captured terminal: the terminal UI (the default),
 // `dux server`, whose console is what a journey shooting the server's own
-// output wants on screen.
+// output wants on screen, or a plain shell, for a journey that types a dux
+// command (`dux config set`) and shoots what it prints.
 const launch = journey.launch || "tui"
-if (!["tui", "server"].includes(launch)) fail(`journey.launch must be "tui" or "server", not ${launch}`, 64)
+if (!["tui", "server", "shell"].includes(launch)) {
+  fail(`journey.launch must be "tui", "server" or "shell", not ${launch}`, 64)
+}
+// Where the shell's user lives. A dux command typed there finds its config
+// through the platform default under this home, so what it prints names the
+// path a reader has rather than the capture's own DUX_HOME.
+const shellHome = "/home/you"
 // An optional stand-in for the Tailscale CLI, so a journey can show dux on a
 // tailnet in a container that has none. See standInTailscale below.
 const tailscale = journey.tailscale || null
@@ -386,10 +393,20 @@ async function main() {
   seedState()
   standInTailscale()
   const searchPath = tailscale ? `${standInBin}:${process.env.PATH}` : process.env.PATH
-  const command = launch === "server" ? "dux server" : "dux"
+  if (launch === "shell") {
+    // The seeded state, reached through the home's default config directory.
+    fs.mkdirSync(path.join(shellHome, ".config"), { recursive: true })
+    fs.symlinkSync(duxHome, path.join(shellHome, ".config", "dux"))
+  }
+  const command = { tui: "dux", server: "dux server", shell: "bash --noprofile --norc -i" }[launch]
+  const environment =
+    launch === "shell"
+      ? `env -u DUX_HOME HOME='${shellHome}' PS1='$ ' PATH='${searchPath}' TERM=xterm-256color COLORTERM=truecolor`
+      : `env DUX_HOME='${duxHome}' DUX_FAKE_FIXTURE='${fixture}' PATH='${searchPath}' TERM=xterm-256color COLORTERM=truecolor`
   tmux(
-    "new-session", "-d", "-c", "/", "-x", String(cols), "-y", String(rows), "-s", session,
-    `env DUX_HOME='${duxHome}' DUX_FAKE_FIXTURE='${fixture}' PATH='${searchPath}' TERM=xterm-256color COLORTERM=truecolor ${command}`,
+    "new-session", "-d", "-c", launch === "shell" ? shellHome : "/",
+    "-x", String(cols), "-y", String(rows), "-s", session,
+    `${environment} ${command}`,
   )
   if (launch === "tui") {
     await waitFor("Press a to add a project")

@@ -39,7 +39,7 @@ dux is not running, so the change applies the next time it starts.
 With dux running, the last line instead says dux was asked to reload, and that once it has,
 the new password is in force and every signed-in browser is signed out.
 
-<!-- screenshot: config-set-password -->
+![A terminal running dux config set server.auth.password: the hidden prompt with its strength meter reading weak > fair > good > strong > EXCELLENT, the second prompt, and the lines saying the hash is stored in /home/you/.config/dux/config.toml and that the change applies the next time dux starts.](/screens/config-set-password.png)
 
 For scripts, pipe it in instead:
 
@@ -69,7 +69,7 @@ set a password and lock you out of your own workspace. While dux
 [cannot tell](#when-dux-cannot-tell-it-asks) whether a connection to `localhost` really is
 this machine, the browser there is told the same, and why.
 
-<!-- screenshot: preferences-password -->
+![The Password row at the top of Preferences, under Signing in: the current password field, a new password typed into the next field with a five-step strength meter reading Excellent under it, and the field to type it again.](/screens/preferences-password.png)
 
 To remove the password again:
 
@@ -95,7 +95,7 @@ in with it. A password below today's minimums still signs you in, and from then 
 browser using dux shows a banner saying the password is weaker than dux asks for, with a way to change
 it. dux says the same once in its log and on the terminal UI's status line.
 
-<!-- screenshot: weak-password-banner -->
+![The banner across the top of the web UI saying the dux password is weaker than the minimum it asks for, with Dismiss and Change it in Preferences… buttons.](/screens/weak-password-banner.png)
 
 ## Who is asked for it
 
@@ -166,7 +166,7 @@ A browser that needs the password gets the sign-in page in dux's own look. Sign 
 land back on the exact page you asked for, the same agent and the same tab, because the
 address in the URL is kept across the sign-in.
 
-<!-- screenshot: login-trusted -->
+![The sign-in page: the dux logo, Sign in to dux, a line saying this dux asks for a password, a password field and the Sign in button.](/screens/login-trusted.png)
 
 A session lasts as long as you use it:
 
@@ -194,7 +194,7 @@ is a session to end. Your place and any unsaved editor drafts stay in the page, 
 back in picks up where you were. On a connection that needs no password, signing out
 reopens dux at once, and a note says so.
 
-<!-- screenshot: app-menu-sign-out -->
+![The cog menu open under the Settings button, with Sign out as its last item.](/screens/app-menu-sign-out.png)
 
 ## Changing the password
 
@@ -226,9 +226,9 @@ in `dux server`'s output, in the start-web-server flip's log viewer, and on the 
 UI's status line while it serves in the background. The browser shows a red banner across
 the top saying anyone who can reach the address can use dux.
 
-<!-- screenshot: server-no-password-warning -->
-<!-- screenshot: tui-flip-no-password-warning -->
-<!-- screenshot: no-password-banner -->
+![dux server's startup output while listening on 0.0.0.0:3890 with no password: yellow warnings about the non-loopback address, and a red line saying no password is set and dux is reachable beyond this machine, so anyone who can reach it controls your agents and terminals.](/screens/server-no-password-warning.png)
+![The start-web-server flip's log viewer serving on loopback and a Tailscale address, with the same red line saying no password is set and dux is reachable beyond this machine.](/screens/tui-flip-no-password-warning.png)
+![The red banner across the top of the web UI: No password, anyone who can reach this address can use dux, with Dismiss and Don't show again buttons.](/screens/no-password-banner.png)
 
 The banner has two buttons. **Dismiss** hides it for this page load only; it is meant to
 come back. **Don't show again** sets `disable_no_auth_warning = true` in `config.toml` and
@@ -242,7 +242,7 @@ reaches you. dux leaves the warning off only where it knows the path is encrypte
 leaves the machine: this machine, a direct tailnet connection (Tailscale encrypts it end to
 end), `tailscale serve`, and Tailscale Funnel, which always serves HTTPS.
 
-<!-- screenshot: login-plain-http -->
+![The sign-in page with a red box reading This connection is not encrypted, explaining that anyone on the network can read the password, take the session cookie and change the page.](/screens/login-plain-http.png)
 
 > [!NOTE]
 > Behind your own HTTPS proxy, the browser's side of the connection is encrypted, but dux
@@ -271,7 +271,7 @@ A wrong password costs time, and repeated wrong passwords cost the address:
 A blocked address gets a page saying it is blocked and where the block lives, and nothing
 else: no sign-in page, no app, with or without a password.
 
-<!-- screenshot: blocked-page -->
+![The page a blocked address gets: This address is blocked, a paragraph saying the block is an entry in blocked_addresses in the [server.auth] section of dux's config.toml, and a Try again button.](/screens/blocked-page.png)
 
 Which address a block lands on depends on what dux can check for itself:
 
@@ -434,7 +434,7 @@ it and repair it one problem at a time; see
 Should a broken section ever reach a running dux anyway, the browser shows a page saying
 sign-in is misconfigured and lets nobody in until the file is fixed.
 
-<!-- screenshot: broken-config-page -->
+![The page saying sign-in is misconfigured: dux refuses every protected request until the [server.auth] section of config.toml is fixed, with a Try again button.](/screens/broken-config-page.png)
 
 ## Changing settings while dux runs
 
@@ -460,7 +460,7 @@ On macOS the lock file is `~/.dux/dux.lock`.
 Before it shows anything, the page asks dux whether this browser needs to sign in. If dux
 does not answer, it says so, with a button to try again, rather than guessing either way.
 
-<!-- screenshot: cant-reach-dux -->
+![The page saying Can't reach dux: dux did not answer in time, so the page cannot tell whether it needs a password yet, with a Retry button.](/screens/cant-reach-dux.png)
 
 ## Every setting
 
