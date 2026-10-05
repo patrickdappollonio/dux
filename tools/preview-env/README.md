@@ -178,6 +178,12 @@ air) and multiplied by the cell metrics measured off the live terminal, so a
 crop edge always lands on a cell boundary rather than slicing a border column
 down the middle. Crops are flush to their cells and never exceed 1.5:1.
 
+`--crop content` frames what a command printed into a plain terminal instead:
+from the top-left corner down to the last row with anything in it and across to
+just past the widest such row, keeping the capture's frame around it. It is for
+a shell transcript or a server console that fills a few rows of a screen that
+must be at least 24 tall.
+
 Each run writes four artifacts beside the requested PNG: the image, styled ANSI
 cells, a plain-text grid, and JSON capture details. The example journey does not use
 the network. Their repositories, commit dates, project names, provider output,
@@ -196,7 +202,10 @@ export, which refuses the capture unless those strings are on the screen it
 captured (a throwaway may leave it off and is told on stderr that nothing
 checked what it captured). Two more optional exports change what runs:
 `launch = "server"` starts `dux server` in the captured terminal instead of the
-terminal UI (and skips adding the demo projects, which only the TUI needs), and
+terminal UI (and skips adding the demo projects, which only the TUI needs),
+`launch = "shell"` starts a plain `bash` with a `$ ` prompt for a journey that
+types a dux command, with `HOME=/home/you` and the seeded state at that home's
+default config directory so what dux prints names a path a reader recognizes, and
 `tailscale = { ip, status, serve }` puts a stand-in `tailscale` CLI on dux's PATH
 that answers `ip`, `status --json --peers=false` and `serve status --json` with
 those values, and adds `ip` to the container's loopback so the Tailscale listener
