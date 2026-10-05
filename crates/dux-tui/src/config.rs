@@ -669,7 +669,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "compose_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a touch device, show a compose box below the terminal\n# keys. You type into it with your keyboard's autocorrect and swipe input,\n# then the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While it is up, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it; otherwise a tap types straight into the terminal.\n#\n#   \"auto\"   show it when your browser reports touch as the primary way you\n#            point at the screen. The default.\n#   \"always\" show it whatever you are on.\n#   \"never\"  hide it and always type directly into the terminal.\n#\n# \"auto\" is a capability check, not a screen-width one, so rotating a tablet\n# no longer changes your typing surface mid-session. It cannot tell a tablet\n# with a keyboard case from one without (the browser reports them\n# identically), which is what \"always\" and \"never\" are for. An older config\n# holding true/false still loads: true means \"auto\", false means \"never\".\n# Change it at runtime from the web UI's Preferences dialog.",
+                "# Web UI only: on a touch device, show a compose box below the terminal\n# keys. You type into it with your keyboard's autocorrect and swipe input,\n# then the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While it is up, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it; otherwise a tap types straight into the terminal.\n#\n#   \"auto\"   show it when your browser reports touch as the primary way you\n#            point at the screen. The default.\n#   \"always\" show it whatever you are on.\n#   \"never\"  hide it and always type directly into the terminal.\n#\n# \"auto\" is a capability check, not a screen-width one, so rotating a tablet\n# no longer changes your typing surface mid-session. It cannot tell a tablet\n# with a keyboard case from one without (the browser reports them\n# identically), which is what \"always\" and \"never\" are for.\n# Change it at runtime from the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.compose_bar.clone()),
         },
@@ -1291,8 +1291,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # tab, unlocking the phone or the network returning all start it over, so\n\
                  # this only runs out on a page left sitting in front of a server that is\n\
                  # not there. Set to 0 to keep trying forever, though each attempt is\n\
-                 # still abandoned on the deadline below: dux's older behaviour was\n\
-                 # 0 attempts with that deadline at 30. Default 8.\n\
+                 # still abandoned on the deadline below. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.reconnect_attempts as usize),

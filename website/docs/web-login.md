@@ -497,12 +497,6 @@ kill -USR1 "$(head -n 1 ~/.config/dux/dux.lock)"   # the first line is the runni
 
 On macOS the lock file is `~/.dux/dux.lock`.
 
-> [!CAUTION]
-> A dux older than this release stops instead of reloading when it gets that signal, and
-> takes every agent and terminal with it. Send it only when `dux.lock` has a second line
-> reading `reload-signal=usr1`; otherwise restart dux. `dux config set` checks this for
-> you.
-
 ## When the page cannot reach dux
 
 Before it shows anything, the page asks dux whether this browser needs to sign in. If dux

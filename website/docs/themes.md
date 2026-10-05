@@ -117,9 +117,7 @@ You have two ways to define colors:
 Names inside dialogs (branches, paths, agent and project names) are drawn as small
 chips in your dialog's own colors, swapped: the dialog background (`dux.overlay_bg`)
 on the dialog text color (`dux.text_fg`). A chip is therefore exactly as readable as
-the sentence around it, and there is nothing extra to set. If your theme still sets
-`dux.name_fg` or `dux.name_bg` from an older version of dux, you can delete them: dux
-no longer reads either token and ignores them if they are there.
+the sentence around it, and there is nothing extra to set.
 
 Save the file and open the theme picker: your theme is listed alongside the built-ins,
 labeled as user-authored, with the same live preview. Tweak, save, re-pick, repeat.

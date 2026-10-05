@@ -567,9 +567,6 @@ three values:
   still cannot produce Esc or a Ctrl chord and there is no switch under **Never** to bring
   them back with; it is only the message box that goes.
 
-An older config that says `compose_bar = true` or `false` keeps working: `true` is read as
-Automatic and `false` as Never.
-
 > [!IMPORTANT]
 > **Width decides the layout; your pointer decides which typing surface you start with.** A
 > tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A

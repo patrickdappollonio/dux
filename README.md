@@ -327,10 +327,10 @@ paths out of the output, which makes the summary safe to paste into a bug report
 `--raw` is the opposite: it prints your whole config, `[env]` values and all, so
 redact it before you share it.
 
-If your `config.toml` is missing its explanatory comments (older versions could
-create one without them), `dux config restore-docs` puts them back without
-touching a single value. It previews the change by default; `--yes` applies it
-and writes a timestamped backup first.
+If your `config.toml` is missing its explanatory comments,
+`dux config restore-docs` puts them back without touching a single value. It
+previews the change by default; `--yes` applies it and writes a timestamped
+backup first.
 
 Override the config directory with the `DUX_HOME` environment variable.
 
