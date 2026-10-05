@@ -422,10 +422,10 @@ Worktrees an agent is holding are listed under **Held By An Agent** but unselect
 removing one from under a session leaves it broken. Delete the agent instead. A worktree
 something else is still using (an agent being created in it, a terminal open in it, the CLI
 of an agent you just deleted still stopping, a standalone agent working inside it) sits
-with them. Each of those rows says `in use:` and what holds it, an agent included, which
-reads like `in use: agent "fix-login" has its worktree at ~/…; delete that agent first`. A
-worktree whose agent was just deleted is listed under
-**Being removed** until it is gone, and cannot be removed a second time.
+with them too, and its row says `in use:` and what is using it. An agent's own row reads
+**held by an agent**, and adds `in use:` only when something besides that agent is using
+the folder as well, such as a terminal open in it. A worktree whose agent was just deleted
+is listed under **Being removed** until it is gone, and cannot be removed a second time.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the
