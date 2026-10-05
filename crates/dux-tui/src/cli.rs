@@ -888,6 +888,23 @@ fn folders_reset_removes(
     removing
 }
 
+/// The grace a factory reset gives each process before forcing it. A config
+/// dux cannot load still gets a reset: the grace falls back to the default
+/// rather than stopping the reset over an unrelated setting.
+fn reset_grace(paths: &DuxPaths) -> std::time::Duration {
+    let timeout_seconds = match dux_core::config::load_config(paths) {
+        Ok(config) => config.shutdown_timeout_seconds,
+        Err(error) => {
+            eprintln!(
+                "warning: could not read config.toml, so processes get the default grace \
+                 period before they are forced to stop: {error}"
+            );
+            dux_core::config::Config::default().shutdown_timeout_seconds
+        }
+    };
+    dux_core::config::shutdown_grace(timeout_seconds)
+}
+
 /// End what an earlier run of dux started (this boot only: a session from
 /// another boot is void) that is in the way of the reset, before it removes
 /// anything and before the database that recorded it goes, with the same
@@ -919,19 +936,7 @@ fn end_recorded_processes(
             return Vec::new();
         }
     };
-    // A config dux cannot load still gets a reset: its grace period falls back
-    // to the default rather than stopping the reset over an unrelated setting.
-    let timeout_seconds = match dux_core::config::load_config(paths) {
-        Ok(config) => config.shutdown_timeout_seconds,
-        Err(error) => {
-            eprintln!(
-                "warning: could not read config.toml, so processes get the default grace \
-                 period before they are forced to stop: {error}"
-            );
-            dux_core::config::Config::default().shutdown_timeout_seconds
-        }
-    };
-    let grace = dux_core::config::shutdown_grace(timeout_seconds);
+    let grace = reset_grace(paths);
     // In or under a folder the reset removes.
     let under_root = |dir: &Path| {
         removing
@@ -1330,6 +1335,34 @@ mod tests {
     use crate::config::{self, Config};
     use crate::keybindings::RuntimeBindings;
     use crate::model::{AgentSession, ProviderKind, SessionStatus};
+
+    /// A factory reset still runs on a config.toml dux cannot load: the grace
+    /// it gives each process falls back to the default instead of stopping the
+    /// reset, and a loadable file's own setting is honoured.
+    #[test]
+    fn a_reset_grace_falls_back_to_the_default_when_the_config_will_not_load() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let default_grace = dux_core::config::shutdown_grace(
+            dux_core::config::Config::default().shutdown_timeout_seconds,
+        );
+        fs::write(&paths.config_path, "this is [not toml\n").expect("write");
+        assert!(dux_core::config::load_config(&paths).is_err());
+        assert_eq!(reset_grace(&paths), default_grace);
+
+        fs::write(&paths.config_path, "shutdown_timeout_seconds = 3\n").expect("write");
+        assert_eq!(
+            reset_grace(&paths),
+            dux_core::config::shutdown_grace(3),
+            "a loadable file's own grace is used",
+        );
+    }
 
     /// Review 21: a startup command's job that dux left running (recorded in
     /// the saved process registry for agent m1, in m1's worktree) is still

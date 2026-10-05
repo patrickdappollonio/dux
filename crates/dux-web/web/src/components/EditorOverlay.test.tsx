@@ -2496,6 +2496,44 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
   })
 
+  // A revisit that lands while a check is still out is not dropped: the check
+  // in flight may have been asked before the change the user came back for,
+  // so its answer cannot stand in for the revisit. One more check follows it.
+  it("runs one more check when a revisit arrives while a check is out", async () => {
+    await mountOne(true)
+    let releaseInfo: (() => void) | null = null
+    const held = new Promise<void>((resolve) => {
+      releaseInfo = resolve
+    })
+    const entry = disk.get(PATH)!
+    infoMock.mockImplementationOnce(async () => {
+      await held
+      return {
+        path: PATH,
+        kind: "file" as const,
+        size: entry.content.length,
+        modified: entry.modified,
+        mode: "644",
+        permissions: "rw-r--r--",
+        symlink_target: null,
+        git: { state: "clean" as const },
+      }
+    })
+    const before = infoMock.mock.calls.length
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(infoMock).toHaveBeenCalledTimes(before + 1))
+
+    // Two revisits while the first check is held: they fold into ONE more.
+    fireEvent(window, new Event("focus"))
+    fireEvent(window, new Event("focus"))
+    expect(infoMock).toHaveBeenCalledTimes(before + 1)
+
+    releaseInfo!()
+    await waitFor(() => expect(infoMock).toHaveBeenCalledTimes(before + 2))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(infoMock).toHaveBeenCalledTimes(before + 2)
+  })
+
   // A symlinked file. The read followed the link and stamped the file it
   // actually read; the info route stats the LINK, on purpose, because the info
   // panel describes the link. Comparing the buffer's stamp against the link's

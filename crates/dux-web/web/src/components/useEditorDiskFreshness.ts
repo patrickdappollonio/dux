@@ -127,6 +127,11 @@ export function useEditorDiskFreshness({
   reloadFileInPlace,
 }: UseEditorDiskFreshnessOptions): void {
   const inFlightRef = useRef<Map<string, string>>(new Map())
+  // Tabs asked to check again while their check was out. The check in flight
+  // may have been asked before whatever the user came back for, so its answer
+  // cannot stand in for the later ask; every ask made meanwhile folds into one
+  // more check once it settles.
+  const recheckRef = useRef<Map<string, string>>(new Map())
 
   function adoptFreshnessSignal(
     request: FreshnessRequest,
@@ -195,7 +200,10 @@ export function useEditorDiskFreshness({
 
   function checkDiskFreshness(tabId: string, path: string): void {
     if (!bufferCanBeChecked(buffersRef.current.get(tabId), path)) return
-    if (inFlightRef.current.get(tabId) === path) return
+    if (inFlightRef.current.get(tabId) === path) {
+      recheckRef.current.set(tabId, path)
+      return
+    }
     inFlightRef.current.set(tabId, path)
 
     const request: FreshnessRequest = {
@@ -210,6 +218,10 @@ export function useEditorDiskFreshness({
       .finally(() => {
         if (inFlightRef.current.get(tabId) === path) {
           inFlightRef.current.delete(tabId)
+        }
+        if (recheckRef.current.get(tabId) === path) {
+          recheckRef.current.delete(tabId)
+          checkDiskFreshness(tabId, path)
         }
       })
   }
