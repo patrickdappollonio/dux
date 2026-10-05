@@ -1211,7 +1211,7 @@ pub fn append_blocked_entry(
         MissingConfig::CreateDocumented,
         &blocked_path,
         |doc| {
-            let mut array = doc
+            let array = doc
                 .get("server")
                 .and_then(|server| server.get("auth"))
                 .and_then(|auth| auth.get("blocked_addresses"))
@@ -1247,9 +1247,56 @@ pub fn append_blocked_entry(
             if entries.len() - folded >= max_entries as usize {
                 return Err(anyhow::Error::new(BanNoop(BanWrite::AtLimit)));
             }
-            array.retain(|value| !folds(value));
-            array.push(new_entry);
-            set_in_doc(doc, &blocked_path, Value::Array(array))
+            // toml_edit keeps the comment trailing an entry in the NEXT
+            // value's prefix, so a dropped value hands its prefix on to the
+            // next value that stays (or to the new entry, which always comes
+            // last) rather than taking the kept entry's comment with it.
+            let mut kept = toml_edit::Array::new();
+            kept.set_trailing(array.trailing().as_str().unwrap_or_default());
+            kept.set_trailing_comma(array.trailing_comma());
+            let mut carry: Option<String> = None;
+            let prefix_of = |value: &toml_edit::Value| {
+                value
+                    .decor()
+                    .prefix()
+                    .and_then(|prefix| prefix.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            for value in array.iter() {
+                if folds(value) {
+                    let dropped = prefix_of(value);
+                    carry = Some(match carry.take() {
+                        Some(carried) if dropped.contains('#') => format!("{carried}{dropped}"),
+                        Some(carried) => carried,
+                        None => dropped,
+                    });
+                    continue;
+                }
+                let mut value = value.clone();
+                if let Some(carried) = carry.take() {
+                    value.decor_mut().set_prefix(carried);
+                }
+                kept.push_formatted(value);
+            }
+            let mut appended = toml_edit::Value::from(new_entry);
+            match carry {
+                Some(carried) => appended.decor_mut().set_prefix(carried),
+                None => {
+                    // Laid out like the entries before it: their line break
+                    // and indentation, never a comment of theirs.
+                    if let Some(last) = kept.iter().last() {
+                        let prefix = prefix_of(last);
+                        let layout = match prefix.rfind('\n') {
+                            Some(at) => format!("\n{}", &prefix[at + 1..]),
+                            None => " ".to_string(),
+                        };
+                        appended.decor_mut().set_prefix(layout);
+                    }
+                }
+            }
+            kept.push_formatted(appended);
+            set_in_doc(doc, &blocked_path, Value::Array(kept))
         },
     );
     match written {
@@ -3749,6 +3796,50 @@ port = 3890
             .unwrap_err();
         assert!(matches!(err, SetPasswordError::BelowMinimums(_)), "{err}");
         assert_eq!(hash_in(&path), "");
+    }
+
+    /// a fold must keep the comments of the entries it does not
+    /// fold. A comment trailing an entry on its line belongs to that entry.
+    #[test]
+    fn a_fold_keeps_the_trailing_comment_of_the_entry_before_it() {
+        let (_dir, path) = temp_config(
+            "[server.auth]\nblocked_addresses = [\n  \"203.0.113.7\", # a scanner I keep seeing\n  \
+             \"2001:db8:1:2::5\",\n]\n",
+        );
+        let ip: std::net::IpAddr = "2001:db8:1:2::77".parse().unwrap();
+        assert_eq!(
+            append_blocked_entry(&path, ip, "2001:db8:1:2::/64", 10).unwrap(),
+            BanWrite::Written
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"203.0.113.7\""), "{raw}");
+        assert!(
+            raw.contains("# a scanner I keep seeing"),
+            "the kept entry lost its comment: {raw}"
+        );
+        assert_eq!(
+            crate::config::auth_section_of(&raw)
+                .unwrap()
+                .blocked_addresses,
+            ["203.0.113.7", "2001:db8:1:2::/64"]
+        );
+        // The dropped value in the middle, its neighbour's comment carried on
+        // to the entry that stays after it, and the layout kept.
+        let (_dir, path) = temp_config(
+            "[server.auth]\nblocked_addresses = [\n  \"203.0.113.7\", # a scanner\n  \
+             \"2001:db8:1:2::5\", # mine\n  \"198.51.100.0/24\",\n]\n",
+        );
+        append_blocked_entry(&path, ip, "2001:db8:1:2::/64", 10).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"203.0.113.7\", # a scanner\n"), "{raw}");
+        assert!(raw.contains("\"198.51.100.0/24\",\n"), "{raw}");
+        assert_eq!(raw.matches("# a scanner").count(), 1, "{raw}");
+        assert_eq!(
+            crate::config::auth_section_of(&raw)
+                .unwrap()
+                .blocked_addresses,
+            ["203.0.113.7", "198.51.100.0/24", "2001:db8:1:2::/64"]
+        );
     }
 
     /// A /64 written as one range takes the place of the single addresses

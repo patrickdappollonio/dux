@@ -1494,8 +1494,10 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # before dux adds it to blocked_addresses below and says so in its log.\n\
                  # One device can send from any address in its IPv6 /64, so an IPv6\n\
                  # client on your network is also counted by its /64: when its addresses\n\
-                 # together reach the limit, the whole /64 is added as one range (never\n\
-                 # your tailnet, whose devices share one, and never IPv4).\n\
+                 # together reach the limit, the whole /64 is added as one range. Never\n\
+                 # grouped, so slowed and added one address at a time: this machine's\n\
+                 # own network (every device on your LAN shares its /64), link-local\n\
+                 # fe80:: addresses, your tailnet, and IPv4.\n\
                  # dux only adds an address it can verify: a client connected to it\n\
                  # directly, or one that came through your tailscale serve. Behind any\n\
                  # other proxy the address is only what the request claims, so dux\n\

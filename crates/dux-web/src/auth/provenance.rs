@@ -296,6 +296,10 @@ pub struct Classification {
     /// How the request reached dux, which keeps the slow-downs of requests
     /// dux cannot verify apart by route.
     pub via: Via,
+    /// Whether the connecting peer is on one of this machine's own IPv6 /64s
+    /// (an interface's, a Tailscale address's, or the one it reached): dux's
+    /// own network, which is never grouped into a /64 for slow-downs or bans.
+    pub own_network: bool,
 }
 
 /// How a request reached dux. Unverified requests are slowed in one bucket
@@ -395,6 +399,7 @@ pub fn classify(
     };
     let base = Classification {
         via: via(facts, exposure, interfaces, arrival),
+        own_network: on_own_network(arrival, exposure, interfaces),
         ..untrusted_base(facts)
     };
     let candidate = match candidate(facts, exposure, interfaces, arrival, &base) {
@@ -478,7 +483,30 @@ fn untrusted_base(facts: &RequestFacts) -> Classification {
         unvouched_proxy: false,
         loopback_distrusted: None,
         via: Via::Forwarded,
+        own_network: false,
     }
+}
+
+/// Whether `arrival`'s peer shares an IPv6 /64 with any of this machine's own
+/// addresses, read from the same sources as the own-address rule.
+fn on_own_network(arrival: Arrival, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
+    let canonical = dux_core::config_auth::canonical;
+    let prefix = |ip: IpAddr| match canonical(ip) {
+        IpAddr::V6(v6) => Some(u128::from(v6) >> 64),
+        IpAddr::V4(_) => None,
+    };
+    let Some(peer) = prefix(arrival.peer.ip()) else {
+        return false;
+    };
+    let own_tailscale = exposure
+        .identity
+        .as_ref()
+        .map(|facts| facts.own_ips.clone())
+        .unwrap_or_default();
+    std::iter::once(arrival.local.ip())
+        .chain(interfaces.iter().copied())
+        .chain(own_tailscale)
+        .any(|own| prefix(own) == Some(peer))
 }
 
 /// The route a recorded request took to dux.

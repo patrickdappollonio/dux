@@ -126,11 +126,21 @@ fn ipv6_prefix(ip: IpAddr) -> Option<std::net::Ipv6Addr> {
 /// ban, another. IPv4 has no prefix.
 /// Never the all-zero /64 either, which holds loopback (`::1`) and is no
 /// host's own network: a range written for it would cover addresses dux never
-/// blocks.
+/// blocks. And never dux's own network (decided, after review): SLAAC puts
+/// every device on the LAN, dux's machine included, in one /64, so grouping
+/// it let a guest's guesses and one typo from the owner ban the owner's whole
+/// network. Nor link-local (`fe80::/10`), which is every LAN's own. Clients
+/// there are slowed and banned one address at a time, as IPv4 is.
 fn prefix_counted(c: &Classification, ip: IpAddr) -> Option<std::net::Ipv6Addr> {
     let network = Level::of(c) == Level::Network;
+    let link_local = matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local());
     ipv6_prefix(ip).filter(|prefix| {
-        network && blockable(ip) && !prefix.is_unspecified() && !super::provenance::is_tailscale(ip)
+        network
+            && blockable(ip)
+            && !prefix.is_unspecified()
+            && !link_local
+            && !c.own_network
+            && !super::provenance::is_tailscale(ip)
     })
 }
 
@@ -477,6 +487,7 @@ impl Admission {
         }
 
         let mut strike = Strike::Counted;
+        let mut banned_alone: Option<(IpAddr, u32)> = None;
         for key in keys {
             let count = inner.count(cfg, key, window, now);
             if cfg.max_failed_logins == 0
@@ -492,6 +503,7 @@ impl Admission {
                 // the rest of the /64 a fresh run of quick guesses.
                 TrackKey::Verified(ip) if blockable(ip) => {
                     inner.tracked.remove(&key);
+                    banned_alone = Some((ip, count));
                     strike = Strike::Block(Ban::of(ip));
                 }
                 // The /64's combined count reached the limit with no single
@@ -513,6 +525,16 @@ impl Admission {
                 | TrackKey::Claimed(_)
                 | TrackKey::Unverified(_) => {}
             }
+        }
+        // Each failure counts toward one ban only (decided, after review): an
+        // address banned on its own takes its failures off its /64's combined
+        // count, so the guesses that banned it cannot also ban the range. The
+        // /64's wait from them stands.
+        if let Some((ip, count)) = banned_alone
+            && let Some(prefix) = prefix_counted(c, ip)
+            && let Some(failures) = inner.tracked.get_mut(&TrackKey::Prefix(prefix))
+        {
+            failures.count = failures.count.saturating_sub(count);
         }
         strike
     }
@@ -633,6 +655,7 @@ mod tests {
             unvouched_proxy: false,
             loopback_distrusted: None,
             via: Via::Direct,
+            own_network: false,
         }
     }
 
@@ -745,6 +768,7 @@ mod tests {
             unvouched_proxy: false,
             loopback_distrusted: None,
             via: Via::Forwarded,
+            own_network: false,
         }
     }
 
@@ -1144,6 +1168,61 @@ mod tests {
         for n in 1..=3 {
             let tailnet = from(ClientClass::Tailnet, &format!("2001:db8:5:5::{n}"));
             assert_eq!(a.record_failure(&c, &tailnet, t0), Strike::Counted);
+        }
+    }
+
+    /// The failures that banned one address come off its /64's count, so they
+    /// cannot ban the range as well; and dux's own network and link-local are
+    /// never grouped at all.
+    #[test]
+    fn one_failure_counts_toward_one_ban_and_some_networks_never_group() {
+        let c = ServerAuthConfig {
+            failed_login_delay_seconds: 0,
+            max_failed_logins: 3,
+            ..cfg()
+        };
+        let t0 = Instant::now();
+        let a = Admission::default();
+        for _ in 0..2 {
+            assert_eq!(
+                a.record_failure(&c, &net("2001:db8:1:2::b"), t0),
+                Strike::Counted
+            );
+        }
+        assert_eq!(
+            a.record_failure(&c, &net("2001:db8:1:2::b"), t0),
+            Strike::Block(Ban::of("2001:db8:1:2::b".parse().unwrap()))
+        );
+        // Two more from neighbours: the /64 holds only those two.
+        for n in ["2001:db8:1:2::c", "2001:db8:1:2::d"] {
+            assert_eq!(a.record_failure(&c, &net(n), t0), Strike::Counted, "{n}");
+        }
+        assert!(matches!(
+            a.record_failure(&c, &net("2001:db8:1:2::e"), t0),
+            Strike::Block(Ban { entry, .. }) if entry == "2001:db8:1:2::/64"
+        ));
+
+        let own = |ip: &str| Classification {
+            own_network: true,
+            ..net(ip)
+        };
+        for (what, at) in [
+            ("dux's own network", own as fn(&str) -> Classification),
+            ("link-local", net),
+        ] {
+            let a = Admission::default();
+            let base = if what == "link-local" {
+                "fe80::"
+            } else {
+                "2001:db8:7:7::"
+            };
+            for n in 1..=3 {
+                assert_eq!(
+                    a.record_failure(&c, &at(&format!("{base}{n}")), t0),
+                    Strike::Counted,
+                    "{what}"
+                );
+            }
         }
     }
 }

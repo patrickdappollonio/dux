@@ -408,6 +408,7 @@ mod tests {
             unvouched_proxy: true,
             loopback_distrusted: None,
             via: Via::Forwarded,
+            own_network: false,
         };
         assert_eq!(Unverified::of(&base), Unverified::UnconfirmedProxy);
         let funnel = Classification {

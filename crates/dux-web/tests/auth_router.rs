@@ -3401,3 +3401,74 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
         other => panic!("a signed-out socket was not closed with 4401: {other:?}"),
     }
 }
+
+// ── a /64 ban on the server's own LAN segment ─────────────────
+
+/// A device on dux's own LAN, where SLAAC hands every host an address in the
+/// same /64 dux itself is on.
+fn lan(peer: &str) -> Arrival {
+    Arrival {
+        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
+        local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
+    }
+}
+
+/// A guest on the owner's Wi-Fi (one address, never rotating) guesses until it
+/// is banned as itself; one typo from the owner's phone afterwards then bans
+/// the whole LAN /64, the segment dux's own address is on, and the owner's
+/// laptop, which never failed once, is locked out with the right password.
+#[tokio::test]
+async fn a_guest_and_one_owner_typo_lock_the_owners_laptop_out() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 5\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 30",
+    );
+    // The owner's laptop signs in first and is working.
+    let cookie = dux.signed_in(lan("2001:db8:1:1::cccc")).await;
+    // A guest on the same Wi-Fi guesses from ONE address and is banned as itself.
+    for _ in 0..5 {
+        let _ = dux.login(lan("2001:db8:1:1::bbbb"), "guess").await;
+    }
+    assert!(
+        dux.config().contains("\"2001:db8:1:1::bbbb\""),
+        "{}",
+        dux.config()
+    );
+    // The owner's phone mistypes once.
+    let typo = dux.login(lan("2001:db8:1:1::aaaa"), "typo").await;
+    let config = dux.config();
+    assert!(
+        !config.contains("\"2001:db8:1:1::/64\""),
+        "one typo by the owner banned the whole LAN /64, the one dux's own \
+         address 2001:db8:1:1::10 is on ({}): {config}",
+        typo.body
+    );
+    let mut req = Req::new(Method::GET, "/api/v1/auth/status");
+    req.cookie = Some(cookie);
+    let laptop = dux.send(lan("2001:db8:1:1::cccc"), req).await;
+    assert_ne!(laptop.status, StatusCode::FORBIDDEN, "{}", laptop.body);
+}
+
+/// A /64 dux is not on still gets the range ban, on the same dux that keeps
+/// its own LAN out of it: rotating through it writes the /64 as one entry.
+#[tokio::test]
+async fn a_slash64_dux_is_not_on_still_gets_the_range_ban() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 3\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 30",
+    );
+    let outside = |peer: &str| Arrival {
+        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
+        local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
+    };
+    for n in 1..=3u32 {
+        let _ = dux
+            .login(outside(&format!("2001:db8:9:9::{n:x}")), "guess")
+            .await;
+    }
+    assert!(
+        dux.config().contains("\"2001:db8:9:9::/64\""),
+        "{}",
+        dux.config()
+    );
+    let fresh = dux.login(outside("2001:db8:9:9::abcd"), PASSWORD).await;
+    assert_eq!(fresh.error().as_deref(), Some("blocked"), "{}", fresh.body);
+}

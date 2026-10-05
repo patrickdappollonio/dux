@@ -2602,6 +2602,48 @@ impl EngineService {
         }
     }
 
+    /// Take on the file a raw save left on disk ahead of memory, exactly as a
+    /// reload does (decided, after review): judged by the serving surface's
+    /// own start check, and once applied, put in force through
+    /// [`Self::config_in_force`], so its `[server.auth]`, the pull-request
+    /// sync and the restart warning follow it as they follow every reload.
+    /// Kept ahead, with the reason, when the file cannot be taken on: applying
+    /// the command would save a memory that never saw the disk edits.
+    fn adopt_disk_config(&mut self, engine: &mut Engine) -> Result<(), String> {
+        let surface = engine.surface.start_surface();
+        let reloaded =
+            dux_core::config::load_config_for_reload(&engine.paths).map_err(|error| {
+                format!(
+                    "config.toml was changed outside dux and cannot be loaded, so this change \
+                 was not made and the running settings are unchanged. Fix the file, then try \
+                 again: {error}"
+                )
+            })?;
+        if let Some(refusal) = reloaded
+            .source_text
+            .as_str()
+            .and_then(|raw| dux_core::config::start_refusal(raw, surface))
+        {
+            return Err(format!(
+                "config.toml was changed outside dux, and this change was not made because \
+                 the running settings cannot take that file on: {refusal} The running \
+                 settings are unchanged. Fix the file, then try again."
+            ));
+        }
+        let before = engine.config.clone();
+        let github_was_enabled = engine.github_integration_enabled;
+        let applied = engine.apply_reloaded_config(reloaded);
+        // In force either way: the engine keeps the config even when its
+        // apply fails, as on a reload.
+        self.config_in_force(engine, &before, github_was_enabled);
+        if let Err(error) = applied {
+            let _ = self.status.send(WireStatus::from_update(
+                &dux_core::config_reload_status::adopted_but_apply_failed(&format!("{error:#}")),
+            ));
+        }
+        Ok(())
+    }
+
     /// Everything a reload owes the running server once `engine.config` is
     /// in force, compared with `before`, the config it replaced, the same
     /// pull-request sync the terminal UI's reload runs included.
@@ -2960,6 +3002,27 @@ impl EngineService {
                     let _ = reply.send(());
                     stopped = true;
                     break;
+                }
+                // A config-changing command over a file a raw save left ahead
+                // of memory takes the file on first, as a reload does, or is
+                // refused saying why.
+                EngineRequest::ApplyWire(cmd, reply, origin)
+                    if cmd.mutates_config_static() && self.config_disk_ahead =>
+                {
+                    match self.adopt_disk_config(engine) {
+                        Ok(()) => handle_request(
+                            engine,
+                            EngineRequest::ApplyWire(cmd, reply, origin),
+                            &mut self.status,
+                            &self.config_reload_tx,
+                            &mut self.config_disk_ahead,
+                            &self.pty_input_owners,
+                        ),
+                        Err(message) => {
+                            dux_core::logger::warn(&format!("[server] {message}"));
+                            let _ = reply.send(Err(message));
+                        }
+                    }
                 }
                 other => {
                     handle_request(
@@ -3693,48 +3756,9 @@ fn handle_apply_wire_request(
     config_disk_ahead: &mut bool,
 ) {
     let mutates_config = cmd.mutates_config_static();
-    if mutates_config && *config_disk_ahead {
-        // The same start check this engine's own reload judges a file by
-        // (decided, after review): taking the file on here is a reload in all
-        // but name, and must never adopt what the serving surface refuses.
-        let surface = engine.surface.start_surface();
-        let loaded = dux_core::config::load_config_for_reload(&engine.paths).map_err(|error| {
-            format!(
-                "config.toml was changed outside dux and cannot be loaded, so this change \
-                 was not made and the running settings are unchanged. Fix the file, then try \
-                 again: {error}"
-            )
-        });
-        let checked = loaded.and_then(|reloaded| {
-            match reloaded
-                .source_text
-                .as_str()
-                .and_then(|raw| dux_core::config::start_refusal(raw, surface))
-            {
-                Some(refusal) => Err(format!(
-                    "config.toml was changed outside dux, and this change was not made because \
-                     the running settings cannot take that file on: {refusal} The running \
-                     settings are unchanged. Fix the file, then try again."
-                )),
-                None => Ok(reloaded),
-            }
-        });
-        match checked {
-            Ok(reloaded) => {
-                let _ = engine.apply_reloaded_config(reloaded);
-                *config_disk_ahead = false;
-            }
-            // Kept ahead, and the command refused: applying it would save a
-            // memory that never saw the disk edits over them. The next
-            // config-mutating command tries again once the file is fixed.
-            Err(message) => {
-                dux_core::logger::warn(&format!("[server] {message}"));
-                let _ = reply.send(Err(message));
-                return;
-            }
-        }
-    }
-
+    // A file a raw save left ahead of memory is taken on before this runs,
+    // by the loop that owns the reload (`EngineService::adopt_disk_config`).
+    debug_assert!(!(mutates_config && *config_disk_ahead));
     engine.current_origin = origin;
     let result = engine.apply_wire(cmd).map_err(|e| e.to_string());
     engine.current_origin = StatusScope::All;
@@ -8207,6 +8231,49 @@ mod tests {
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
         assert!(after.contains("left_width_pct = 31"), "{after}");
         assert!(after.contains("API = \"k\""), "{after}");
+    }
+
+    /// a config-changing command that takes on a file saved in the
+    /// raw editor adopts it into the engine, so it must adopt its
+    /// `[server.auth]` into the auth layer too, as every reload path does.
+    #[tokio::test]
+    async fn a_command_adopting_the_disk_file_also_adopts_its_server_auth() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let opened = handle.read_raw_config().await.expect("read");
+        let live = handle.live_limits().auth();
+        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        let edited = if opened.content.contains("blocked_addresses = []") {
+            opened.content.replace(
+                "blocked_addresses = []",
+                "blocked_addresses = [\"203.0.113.7\"]",
+            )
+        } else {
+            format!(
+                "{}\n[server.auth]\nblocked_addresses = [\"203.0.113.7\"]\n",
+                opened.content
+            )
+        };
+        save_raw(&handle, edited)
+            .await
+            .expect("the raw save persists the file");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".to_string(), "k".to_string());
+        handle
+            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .await
+            .expect("the command adopts the file and applies");
+        let after = handle.read_raw_config().await.expect("read").content;
+        assert!(
+            after.contains("203.0.113.7"),
+            "the engine kept the edit: {after}"
+        );
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            ["203.0.113.7"],
+            "the engine took the file on, but the auth layer still runs the old [server.auth]"
+        );
     }
 
     /// A config-changing command over a file edited on disk first takes the
