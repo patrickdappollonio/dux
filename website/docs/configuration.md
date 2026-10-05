@@ -180,9 +180,10 @@ It is careful with your data:
 - Settings dux does not recognize are kept as they are, not quietly deleted, and are
   listed in the output.
 - A few sections dux genuinely no longer reads are removed, and the removal is reported.
-- The preview holds back the same values `get` does: an `[env]` value, a project's
-  values, a key binding dux cannot read and anything below a setting it does not
-  recognize show as their name and `(not shown)`, and comments inside `[env]` and
+- The preview holds back sensitive values: an `[env]` value, a project's values, the
+  web UI's `password_hash` and `blocked_addresses`, a key binding dux cannot read and
+  anything below a setting it does not recognize show as their name and
+  `(not shown)`, and comments inside `[env]` and
   `[projects]` (including one at the end of a header line) are hidden too. Add `--show`
   to see them. A plaintext web UI password is never shown, `--show` or not.
   `dux config regenerate` previews the same way, and when your file is not valid TOML

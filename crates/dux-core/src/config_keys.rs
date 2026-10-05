@@ -1246,6 +1246,28 @@ fn stored_path(key: &Key) -> Vec<String> {
 /// it does not name.
 pub const NOT_SHOWN: &str = "(not shown)";
 
+/// A `[server.auth]` setting a summary or a preview never prints without
+/// `--show`, though `get` prints it when asked for it by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SensitiveAuthSetting {
+    /// Not the password, but anyone holding it can guess the password
+    /// offline as fast as their hardware allows.
+    PasswordHash,
+    /// Other people's IP addresses.
+    BlockedAddresses,
+}
+
+/// Which [`SensitiveAuthSetting`] the key at `path` is, if any: the one
+/// answer `dux config diff` and both previews read.
+pub fn sensitive_auth_setting(path: &[String]) -> Option<SensitiveAuthSetting> {
+    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+    match segments.as_slice() {
+        ["server", "auth", "password_hash"] => Some(SensitiveAuthSetting::PasswordHash),
+        ["server", "auth", "blocked_addresses"] => Some(SensitiveAuthSetting::BlockedAddresses),
+        _ => None,
+    }
+}
+
 /// The user's config file `raw` as a printer may show it line by line (the
 /// previews of `dux config regenerate` and `restore-docs` diff it): every
 /// line dux can map to a key path goes through the same rules as the one
@@ -1253,7 +1275,8 @@ pub const NOT_SHOWN: &str = "(not shown)";
 /// finds, by its path and by its lines) is never shown, `show` or not;
 /// without `show`, a value whose path is hidden or sensitive (anything under
 /// an unknown key or a name that breaks its map's rule, an `[env]` value, a
-/// project's values, a binding `binding_understood` refuses) is its key, as
+/// project's values, a binding `binding_understood` refuses, a
+/// [`SensitiveAuthSetting`]) is its key, as
 /// the formatter prints it, and `(not shown)`, and a comment inside a hidden
 /// or sensitive table, a header's trailing one included, is a placeholder
 /// too, since a comment can hold a pasted token as well. Every other line is
@@ -1388,6 +1411,7 @@ pub fn shown_file_text(
         let keys = keys(path);
         crate::config::first_hidden_part_of(&parts(path))
             || matches!(keys.first().map(String::as_str), Some("env" | "projects"))
+            || sensitive_auth_setting(&keys).is_some()
     };
     // Whether a plaintext password sits at, below or above `path`.
     let plaintext = |path: &[Step]| {

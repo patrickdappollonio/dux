@@ -280,6 +280,7 @@ enum MissingStyle {
 
 /// The policy for the subtree at `path`.
 fn policy_for(path: &[String]) -> Policy {
+    use dux_core::config_keys::SensitiveAuthSetting;
     let segments: Vec<&str> = path.iter().map(String::as_str).collect();
     match segments.as_slice() {
         // Holds API tokens. The value must never reach the terminal, a log, or a
@@ -293,15 +294,15 @@ fn policy_for(path: &[String]) -> Policy {
         // A macro body is arbitrary user prose, frequently long and multi-line.
         // Counting them is what this command has always done.
         ["macros"] => Policy::Summarize(Summary::Count("macro", "macros")),
-        // Not the password, but anyone holding it can guess the password
-        // offline as fast as their hardware allows, so it never reaches a
-        // pasted bug report.
-        ["server", "auth", "password_hash"] => Policy::Summarize(Summary::Changed),
-        // Other people's IP addresses.
-        ["server", "auth", "blocked_addresses"] => {
-            Policy::Summarize(Summary::Count("address", "addresses"))
-        }
-        _ => Policy::Recurse,
+        // The auth settings no summary prints (the one list the previews
+        // read too): the hash only as changed, the addresses as a count.
+        _ => match dux_core::config_keys::sensitive_auth_setting(path) {
+            Some(SensitiveAuthSetting::PasswordHash) => Policy::Summarize(Summary::Changed),
+            Some(SensitiveAuthSetting::BlockedAddresses) => {
+                Policy::Summarize(Summary::Count("address", "addresses"))
+            }
+            None => Policy::Recurse,
+        },
     }
 }
 

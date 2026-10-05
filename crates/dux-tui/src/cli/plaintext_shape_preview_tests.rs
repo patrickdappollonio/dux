@@ -76,3 +76,58 @@ path = \"/tmp/x\"
     }
     assert!(leaks.is_empty(), "{}", leaks.join("\n----\n"));
 }
+
+/// The password hash and the blocked addresses are held back by both
+/// previews without `--show`, as `dux config diff` holds them back, in every
+/// way the file can write them; `--show` shows them.
+#[test]
+fn previews_hold_back_the_password_hash_and_blocked_addresses_without_show() {
+    crate::config::install_canonical_renderer();
+    let fresh = crate::config::render_default_config();
+    let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+        "correct horse battery staple veranda".to_string(),
+    ))
+    .expect("hash");
+    let address = "203.0.113.77";
+    let mut wrong = Vec::new();
+    for body in [
+        format!("[server.auth]\npassword_hash = \"{hash}\"\nblocked_addresses = [\"{address}\"]\n"),
+        format!(
+            "[server]\nauth = {{ password_hash = \"{hash}\", blocked_addresses = [\"{address}\"] }}\n"
+        ),
+        format!(
+            "server.auth.password_hash = \"{hash}\"\nserver.auth.blocked_addresses = [\n  \"{address}\",\n]\n"
+        ),
+    ] {
+        let mut hidden = vec![("regenerate", regenerate_preview(&body, &fresh, false))];
+        let mut shown = vec![("regenerate", regenerate_preview(&body, &fresh, true))];
+        if let Ok(restored) = crate::config::restore_documentation(&body) {
+            hidden.push((
+                "restore-docs",
+                restore_docs_preview(&body, &restored.text, false),
+            ));
+            shown.push((
+                "restore-docs",
+                restore_docs_preview(&body, &restored.text, true),
+            ));
+        }
+        for (preview, out) in hidden {
+            for secret in [hash.as_str(), address] {
+                if out.contains(secret) {
+                    wrong.push(format!(
+                        "{preview} without --show prints {secret} for {body:?}:\n{out}"
+                    ));
+                }
+            }
+        }
+        let (_, regenerate_shown) = &shown[0];
+        for secret in [hash.as_str(), address] {
+            if !regenerate_shown.contains(secret) {
+                wrong.push(format!(
+                    "regenerate --show leaves out {secret} for {body:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n----\n"));
+}
