@@ -658,12 +658,9 @@ async fn a_branch_an_agent_holds_is_listed_as_held_and_refused_if_posted() {
     let frame = status_frame(&mut ws, "Can't change the base branch").await;
     assert_eq!(
         frame["message"],
-        format!(
-            "Can't change the base branch of project \"repo\" to \"agent-one\": it is checked \
-             out in the worktree at {}, and git checks a branch out in one place at a time. \
-             Pick another branch, or remove that worktree first.",
-            holder.display()
-        )
+        "Can't change the base branch of project \"repo\" to \"agent-one\": it is checked out \
+         in the worktree of agent \"agent-one\", and git checks a branch out in one place at a \
+         time. Pick another branch, or delete agent \"agent-one\" first if you are done with it."
     );
     assert_eq!(frame["tone"], "error");
     assert_eq!(stored_base(&f, &project_id).as_deref(), Some("feature"));

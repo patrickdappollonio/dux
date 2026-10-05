@@ -1158,15 +1158,34 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
                 ": no local branch or branch on origin has that name any more. Open the \
                  branch list again and pick from what is there now."
             ]),
-            BaseBranchChangeFailure::Held { holder } => Final::error(status_text![
+            // A worktree is user data, so neither arm tells the user to remove
+            // one by hand: when an agent holds the branch the way out named is
+            // that agent's own delete, with its confirm.
+            BaseBranchChangeFailure::Held {
+                agent: Some(agent), ..
+            } => Final::error(status_text![
+                "Can't change the base branch of project ",
+                q(project_name),
+                " to ",
+                q(branch),
+                ": it is checked out in the worktree of agent ",
+                q(agent),
+                ", and git checks a branch out in one place at a time. Pick another branch, \
+                 or delete agent ",
+                q(agent),
+                " first if you are done with it."
+            ]),
+            BaseBranchChangeFailure::Held {
+                holder,
+                agent: None,
+            } => Final::error(status_text![
                 "Can't change the base branch of project ",
                 q(project_name),
                 " to ",
                 q(branch),
                 ": it is checked out in the worktree at ",
                 n(holder.display().to_string()),
-                ", and git checks a branch out in one place at a time. Pick another branch, \
-                 or remove that worktree first."
+                ", and git checks a branch out in one place at a time. Pick another branch."
             ]),
             BaseBranchChangeFailure::SwitchFailed(_) => Final::error(status_text![
                 "Couldn't check out ",
@@ -1290,8 +1309,8 @@ pub fn checkout_default_branch_confirm_prose(
 
 /// The body of the "change base branch?" confirmation both surfaces show
 /// before anything runs: the folder switches to `to`, and new worktrees branch
-/// from `to` afterwards instead of `from`, the base recorded today (`None`
-/// when the project has none yet). The project and both branches are chips.
+/// from `to` afterwards instead of `from`, the base recorded today (`None`,
+/// or empty, when the project has none yet). The project and both branches are chips.
 /// Pinned against the browser's `changeBaseBranchProse`
 /// (`lib/changeBaseBranch.ts`) by `tests/fixtures/prose_cross_language.json`.
 pub fn change_base_branch_confirm_prose(
@@ -1305,7 +1324,8 @@ pub fn change_base_branch_confirm_prose(
         .text(" to ")
         .quoted(to)
         .text(", moving HEAD in the shared repository.");
-    match from {
+    // An empty recorded base is no base, as the browser reads it.
+    match from.filter(|from| !from.is_empty()) {
         Some(from) if from == to => lead
             .text(" New worktrees already branch from ")
             .quoted(to)
@@ -10145,13 +10165,27 @@ mod tests {
             (
                 refused(BaseBranchChangeFailure::Held {
                     holder: PathBuf::from("/work/agent"),
+                    agent: None,
                 }),
                 StatusTone::Error,
                 false,
                 "Can't change the base branch of project \"app\" to \"develop\": it is checked \
                  out in the worktree at /work/agent, and git checks a branch out in one place at \
-                 a time. Pick another branch, or remove that worktree first.",
+                 a time. Pick another branch.",
                 vec!["app", "develop", "/work/agent"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/agent"),
+                    agent: Some("fix-login".to_string()),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": it is checked \
+                 out in the worktree of agent \"fix-login\", and git checks a branch out in one \
+                 place at a time. Pick another branch, or delete agent \"fix-login\" first if you \
+                 are done with it.",
+                vec!["app", "develop", "fix-login", "fix-login"],
             ),
             (
                 refused(BaseBranchChangeFailure::SwitchFailed(

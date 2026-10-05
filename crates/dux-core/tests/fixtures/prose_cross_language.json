@@ -254,6 +254,33 @@
       ]
     },
     {
+      "what": "changing the base branch of a project whose recorded base is empty",
+      "sentence": "change_base_branch_confirm",
+      "args": {
+        "project_name": "dux",
+        "from": "",
+        "to": "develop"
+      },
+      "segments": [
+        "This switches the source checkout for ",
+        {
+          "name": "dux",
+          "quoted": true
+        },
+        " to ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        ", moving HEAD in the shared repository. The project has no base branch recorded yet. After the switch, new worktrees branch from ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        "."
+      ]
+    },
+    {
       "what": "adding a project on a branch other than the remote's default",
       "sentence": "add_project_branch_warning",
       "args": {

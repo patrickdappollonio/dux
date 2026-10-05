@@ -125,6 +125,34 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The full ref HEAD points at (`refs/heads/<branch>`), or `Ok(None)` for a
+/// detached HEAD. Unlike [`current_branch_opt`]'s `--short` form, it is never
+/// abbreviated to `heads/<branch>` by a tag of the same name, so it is the one
+/// to compare against a branch.
+pub fn head_ref_opt(repo_path: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "symbolic-ref",
+            "--quiet",
+            "HEAD",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    // Exit code 1 is a detached HEAD, as in `current_branch_opt`.
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(git_failure("git symbolic-ref", repo_path, &output))
+}
+
 /// Like [`current_branch`], but tolerates a detached HEAD: `Ok(None)` when HEAD
 /// is not a symbolic ref (`symbolic-ref` exit code 1, `--quiet` suppressing the
 /// message), and `Err` for any real failure (exit 128 = not a repo, git
