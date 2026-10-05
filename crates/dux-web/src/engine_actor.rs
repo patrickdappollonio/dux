@@ -4260,8 +4260,14 @@ fn write_raw_config_checked(
     config_disk_ahead: &mut bool,
 ) -> Result<(), RawWriteError> {
     let refused = RawWriteError::Refused;
-    let parsed = dux_core::config::validate_config_str(content)
+    dux_core::config::validate_config_str(content)
         .map_err(|e| refused(format!("config.toml is not valid: {e}")))?;
+    // Every guard below judges the file as a start would load it, with the
+    // load migrations applied (decided, after review): a deprecated
+    // `[server] bind` becomes `host` on the next start, so judging the text
+    // as written would let it change the host past this guard.
+    let parsed = dux_core::config::effective_config_from_text(content)
+        .map_err(|e| refused(format!("config.toml is not valid: {}", e.reason())))?;
     // The web editor must not silently weaken the server perimeter, so both
     // halves of it stay a terminal-side edit. `host` binds once and needs a
     // restart; `allowed_hosts` is read live by the Host guard and a reload
@@ -8436,6 +8442,34 @@ mod tests {
             .expect("a save over what it read");
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
         assert!(after.contains("left_width_pct = 25") && after.contains("203.0.113.9"));
+    }
+
+    /// The raw editor's guards judge the file as a start would load it, after
+    /// the load migrations: a deprecated `[server] bind` that a start turns
+    /// into `host = "0.0.0.0"` is the host changing, and is refused.
+    #[tokio::test]
+    async fn a_raw_save_cannot_change_the_host_through_a_deprecated_bind() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nhost = \"127.0.0.1\"\nport = 3890\n",
+        )
+        .unwrap();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let before = std::fs::read_to_string(&paths.config_path).unwrap();
+        let saved = save_raw(&handle, "[server]\nbind = \"0.0.0.0:3890\"\n").await;
+        match saved {
+            Err(RawWriteError::Refused(reason)) => {
+                assert!(reason.contains("host"), "{reason}");
+            }
+            other => panic!("a host change through a deprecated bind was saved: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), before);
+        // The same bind naming the host already in force is no change, and saves.
+        save_raw(&handle, "[server]\nbind = \"127.0.0.1:3890\"\n")
+            .await
+            .expect("a bind equal to the running host and port is no host change");
     }
 
     /// A save that carries no proof of what it read is refused: the raw editor

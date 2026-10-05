@@ -44,6 +44,8 @@ struct Live {
     leases: u32,
     /// Used since the last write of its last-use time.
     dirty: bool,
+    /// Issued before the table was open: written by the load that opens it.
+    unstored: bool,
 }
 
 struct Inner {
@@ -95,38 +97,58 @@ impl Sessions {
     /// sessions live in memory for this run.
     pub(crate) async fn load(&self, db: PathBuf, generation: String, idle_ms: i64) {
         let cutoff = self.now().saturating_sub(idle_ms);
-        let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let inner = Arc::clone(&self.0);
+        let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let store = WebSessionStore::open(&db)?;
             store.delete_other_generations(&generation)?;
             store.delete_idle_since(cutoff)?;
             let rows = store.load()?;
-            Ok((store, rows))
+            // The table is put in place under its own lock, the one `issue`
+            // writes under, so a session issued while this ran is either
+            // written by `issue` itself or collected here: never neither.
+            let mut slot = inner
+                .store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let unstored: Vec<StoredSession> = {
+                let mut map = inner
+                    .map
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for StoredSession {
+                    digest,
+                    generation,
+                    last_seen_ms,
+                } in rows
+                {
+                    map.entry(digest).or_insert(Live {
+                        generation,
+                        last_seen_ms,
+                        leases: 0,
+                        dirty: false,
+                        unstored: false,
+                    });
+                }
+                map.iter_mut()
+                    .filter_map(|(digest, live)| {
+                        let unstored = std::mem::take(&mut live.unstored);
+                        (unstored && live.generation == generation).then(|| StoredSession {
+                            digest: *digest,
+                            generation: live.generation.clone(),
+                            last_seen_ms: live.last_seen_ms,
+                        })
+                    })
+                    .collect()
+            };
+            for row in &unstored {
+                store.upsert(row)?;
+            }
+            *slot = Some(store);
+            Ok(())
         })
         .await;
         match opened {
-            Ok(Ok((store, rows))) => {
-                {
-                    let mut map = self.map();
-                    for StoredSession {
-                        digest,
-                        generation,
-                        last_seen_ms,
-                    } in rows
-                    {
-                        map.entry(digest).or_insert(Live {
-                            generation,
-                            last_seen_ms,
-                            leases: 0,
-                            dirty: false,
-                        });
-                    }
-                }
-                *self
-                    .0
-                    .store
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(store);
-            }
+            Ok(Ok(())) => {}
             Ok(Err(error)) => dux_core::logger::warn(&format!(
                 "[server] could not open the web sessions in the session database ({error:#}); \
                  sign-ins last only until dux stops"
@@ -146,25 +168,64 @@ impl Sessions {
         let _ = loaded.wait_for(|loaded| *loaded).await;
     }
 
-    /// Issue a session under `generation` and store it before answering.
+    /// Issue a session under `generation` and store it before answering. One
+    /// issued before the table is open is never dropped (decided, after
+    /// review): it is marked, and the load that opens the table writes it.
     pub(crate) async fn issue(&self, generation: &str) -> anyhow::Result<NewToken> {
         let token = dux_core::web_sessions::new_token()?;
         let now = self.now();
-        self.map().insert(
-            token.digest,
-            Live {
-                generation: generation.to_string(),
-                last_seen_ms: now,
-                leases: 0,
-                dirty: false,
-            },
-        );
         let row = StoredSession {
             digest: token.digest,
             generation: generation.to_string(),
             last_seen_ms: now,
         };
-        self.with_store(move |store| store.upsert(&row)).await;
+        let inner = Arc::clone(&self.0);
+        let written = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // Under the table's lock, the same one the load puts it in place
+            // under, so the session is in the map before the load collects.
+            let mut slot = inner
+                .store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let loaded = *inner.loaded.borrow();
+            inner
+                .map
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    row.digest,
+                    Live {
+                        generation: row.generation.clone(),
+                        last_seen_ms: row.last_seen_ms,
+                        leases: 0,
+                        dirty: false,
+                        unstored: slot.is_none() && !loaded,
+                    },
+                );
+            match slot.as_mut() {
+                Some(store) => store.upsert(&row),
+                None if loaded => {
+                    // A run with no session table (it could not be opened,
+                    // which was said at the time, or none was asked for).
+                    dux_core::logger::debug(
+                        "[server] a web session was issued with no session table open; it \
+                         lasts until dux stops",
+                    );
+                    Ok(())
+                }
+                None => Ok(()),
+            }
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => dux_core::logger::warn(&format!(
+                "[server] could not write a web session to the session database: {error:#}"
+            )),
+            Err(error) => {
+                dux_core::logger::warn(&format!("[server] writing a web session stopped: {error}"))
+            }
+        }
         Ok(token)
     }
 
@@ -493,5 +554,23 @@ mod tests {
         sessions.ready().await;
         let token = sessions.issue("g").await.unwrap();
         assert!(sessions.check(&token.digest, "g", 60_000, true));
+    }
+
+    /// A session issued before the stored sessions finished loading is still
+    /// written: the load that opens the table writes it.
+    #[tokio::test]
+    async fn a_session_issued_before_the_load_finishes_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let (clock, _now) = clock_at(1_000_000);
+        let sessions = Sessions::new(Arc::clone(&clock));
+        let early = sessions.issue("g").await.unwrap();
+        sessions.load(db.clone(), "g".into(), 60_000).await;
+        assert!(sessions.check(&early.digest, "g", 60_000, false));
+        let stored = WebSessionStore::open(&db).unwrap().load().unwrap();
+        assert!(
+            stored.iter().any(|row| row.digest == early.digest),
+            "the session issued before the load was never written to the table"
+        );
     }
 }

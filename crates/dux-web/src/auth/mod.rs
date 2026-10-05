@@ -924,6 +924,10 @@ impl AuthState {
                 None
             }
         };
+        // The stored sessions are loaded first, as `assess` waits for them, so
+        // the new session is written to the table rather than issued before
+        // it is open.
+        self.sessions.ready().await;
         if let Some(refused) = refused(self) {
             return Ok(refused);
         }
