@@ -40,16 +40,15 @@ describe("editorDropToast", () => {
     )
   })
 
-  it("says what a renamed file is now called, and why", () => {
-    // The user has to be able to find the file, and "nothing was overwritten"
-    // is the whole reason the name changed.
+  it("says what a renamed file is now called", () => {
+    // The user has to be able to find the file under its new name.
     const toast = editorDropToast(
       [saved("notes.md", "notes-20260809-120000-1.md")],
       "docs",
     )
     expect(toast.tone).toBe("success")
     expect(toast.message).toBe(
-      "Saved notes.md to docs as notes-20260809-120000-1.md, so nothing was overwritten.",
+      "Saved notes.md to docs as notes-20260809-120000-1.md.",
     )
   })
 
@@ -60,7 +59,7 @@ describe("editorDropToast", () => {
     )
     expect(toast.tone).toBe("success")
     expect(toast.message).toBe(
-      "Saved 3 files to assets. b.png was saved as b-1.png, so nothing was overwritten.",
+      "Saved 3 files to assets. b.png was saved as b-1.png.",
     )
   })
 
@@ -257,7 +256,7 @@ describe("performTreeDrop", () => {
     )
     await performTreeDrop("", justFiles(f("notes.md")), deps)
     expect(finals[0].message).toBe(
-      "Saved notes.md to the worktree root as notes-20260809-1.md, so nothing was overwritten.",
+      "Saved notes.md to the worktree root as notes-20260809-1.md.",
     )
   })
 

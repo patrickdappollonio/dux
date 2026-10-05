@@ -74,7 +74,7 @@ function renameNote(
   )
   const rest = renamed.length - MAX_NAMED_FILES
   const tail = rest > 0 ? ` and ${rest} more` : ""
-  return prose` ${pairs}${tail}, so nothing was overwritten.`
+  return prose` ${pairs}${tail}.`
 }
 
 /// The one toast for a whole tree drop, chosen from the per-file outcomes. The
@@ -125,7 +125,7 @@ export function editorDropToast(
       "success",
       one.requestedName === one.savedName
         ? prose`Saved ${chip(one.savedName)} to ${where}.`
-        : prose`Saved ${chip(one.requestedName)} to ${where} as ${chip(one.savedName)}, so nothing was overwritten.`,
+        : prose`Saved ${chip(one.requestedName)} to ${where} as ${chip(one.savedName)}.`,
     )
   }
   return toast(

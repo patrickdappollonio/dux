@@ -437,7 +437,7 @@ function renameNote(saved: SavedFile[], ctx: DropContext): Prose {
     renamed.map((r) => prose`${chip(r.requestedName)} was saved as ${chip(r.savedName)}`),
     ", ",
   )
-  return prose` ${pairs}, so nothing was overwritten.`
+  return prose` ${pairs}.`
 }
 
 /// A rung's report: the sentence, and its plain spelling beside it.
@@ -573,7 +573,7 @@ function savedFilesToast(
     const named =
       one.requestedName === one.savedName
         ? prose`Saved ${chip(one.savedName)}${where} and ${deliveredOne(ctx)}.`
-        : prose`Saved ${chip(one.requestedName)}${where} as ${chip(one.savedName)}, so nothing was overwritten, and ${deliveredOne(ctx)}.`
+        : prose`Saved ${chip(one.requestedName)}${where} as ${chip(one.savedName)}, and ${deliveredOne(ctx)}.`
     return dropToast("success", false, named)
   }
   return dropToast(
