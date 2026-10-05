@@ -140,6 +140,8 @@ pub enum BranchRenameRejection {
     MalformedName,
     /// A branch rename is already in flight for this session.
     AlreadyInFlight,
+    /// The agent's worktree is being removed, so nothing new may start in it.
+    WorktreeBeingRemoved,
 }
 
 /// The parameters a surface needs to dispatch the git branch-rename worker and

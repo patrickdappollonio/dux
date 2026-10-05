@@ -1452,6 +1452,19 @@ mod tests {
     use super::super::test_support;
     use super::*;
 
+    /// The discard under test, cleared for any path: these tests are about
+    /// what the discard itself decides, and the clearance gate has its own.
+    fn discard_confirmed(
+        worktree_path: &Path,
+        file_path: &str,
+        is_untracked: bool,
+        confirmed: Option<ConfirmedEntry>,
+    ) -> Result<usize> {
+        super::discard_confirmed(worktree_path, file_path, is_untracked, confirmed, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
+
     /// A repository with one committed file, so HEAD exists and `src/` is a
     /// directory HEAD has.
     fn repo() -> tempfile::TempDir {
@@ -1548,7 +1561,7 @@ mod tests {
         }
         write(root, "notes.md", "hello\n");
 
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
 
         assert!(staged.is_empty());
         assert_eq!(
@@ -1570,7 +1583,7 @@ mod tests {
         write(root, "build/debug.log", "noise\n");
         write(root, "build/deep/more.log", "noise\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         let build = unstaged
             .iter()
@@ -1585,7 +1598,7 @@ mod tests {
         let root = repo.path();
         write(root, "src/new.rs", "fn new() {}\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&unstaged),
@@ -1604,7 +1617,7 @@ mod tests {
         git(&["init", "-q"]);
         write(&nested, "a.txt", "a\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&unstaged),
@@ -1640,7 +1653,7 @@ mod tests {
             write(&root.join(nested), "inside.txt", "i\n");
         }
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         assert_eq!(
             shape(&unstaged),
             vec![(
@@ -1706,7 +1719,7 @@ mod tests {
         write(&only, "own.txt", "own\n");
 
         stage_with_report(root, &["vendor".to_string()]).unwrap();
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(staged.len(), 1, "{staged:?}");
         let row = &staged[0];
@@ -1724,7 +1737,7 @@ mod tests {
         );
 
         write(root, "vendor/z.js", "z\n");
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         assert!(
             staged.iter().all(|f| f.path != "vendor"),
             "an untracked file inside opens it: {staged:?}"
@@ -1808,7 +1821,7 @@ mod tests {
         let root = repo.path();
         let in_bare = untracked_count(root, "d/bare.git") + untracked_count(root, "d/deep/b2.git");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         let d = unstaged
             .iter()
@@ -1920,7 +1933,7 @@ mod tests {
         git_in(root)(&["init", "-q", "--bare", "testdata/new.git"]);
 
         stage_with_report(root, &["testdata/fixture.git/config".to_string()]).unwrap();
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let asked = vec![
             "testdata/new.git/config".to_string(),
             "testdata/new.git/HEAD".to_string(),
@@ -1929,7 +1942,7 @@ mod tests {
         stage_with_report(root, &["testdata/new.git".to_string()]).unwrap();
 
         assert_eq!(answered.len(), 2, "{answered:?}");
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         assert!(
             staged
                 .iter()
@@ -1960,7 +1973,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "z", "z\n");
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let asked: Vec<String> = ["a/repo/z", "a/repo", "a/x"]
             .into_iter()
             .map(String::from)
@@ -2142,7 +2155,7 @@ mod tests {
         let repo = folder_with_repositories();
         let root = repo.path();
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let vendor = unstaged.iter().find(|f| f.path == "vendor").unwrap();
         let mut inside = vendor
             .folder_contents()
@@ -2153,7 +2166,7 @@ mod tests {
         assert_eq!(inside, ["vendor/lib", "vendor/wt"]);
 
         stage_with_report(root, &["vendor".to_string()]).unwrap();
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         let vendor = staged.iter().find(|f| f.path == "vendor").unwrap();
         let mut inside = vendor
             .folder_contents()
@@ -2199,7 +2212,7 @@ mod tests {
         write(root, "app/sub/b.rs", "1\n");
         git_in(root)(&["add", "--", "app"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         let row = staged.iter().find(|f| f.path == "app").unwrap();
         assert!(row.is_expandable());
         assert_eq!((row.additions, row.deletions), (3, 0));
@@ -2218,7 +2231,7 @@ mod tests {
         }
         git_in(root)(&["add", "--", "big"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         let row = staged.iter().find(|f| f.path == "big").unwrap();
         assert_eq!(row.additions, 0);
     }
@@ -2266,7 +2279,7 @@ mod tests {
             .to_string();
             assert!(refusal.contains(holds), "{refusal}");
         }
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -2315,7 +2328,7 @@ mod tests {
         let root = repo.path();
         git_in(root)(&["add", "--", "vendor"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         let row = staged
             .iter()
@@ -2345,7 +2358,7 @@ mod tests {
         write(&nested, "own.txt", "own\n");
         git_in(root)(&["worktree", "add", "-q", "-b", "side", "vendor/wt"]);
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         let row = unstaged.iter().find(|f| f.path == "vendor").unwrap();
         let contents = row.folder_contents().unwrap();
@@ -2372,8 +2385,8 @@ mod tests {
         write(root, "dist/a.js", "a\n");
         write(root, "dist/sub/b.js", "b\n");
 
-        let (_, first) = changed_files(root).unwrap();
-        let (_, again) = changed_files(root).unwrap();
+        let (_, first) = changed_files_for_display(root).unwrap();
+        let (_, again) = changed_files_for_display(root).unwrap();
         let before = fingerprint_of(&first, "dist");
         assert!(before.is_some(), "a small folder is fingerprinted");
         assert_eq!(
@@ -2383,7 +2396,7 @@ mod tests {
         );
 
         write(root, "dist/sub/b.js", "b\nand more\n");
-        let (_, edited) = changed_files(root).unwrap();
+        let (_, edited) = changed_files_for_display(root).unwrap();
         assert_ne!(before, fingerprint_of(&edited, "dist"));
 
         let children = changed_dir_children(root, "dist", ChangesSide::Unstaged).unwrap();
@@ -2402,7 +2415,7 @@ mod tests {
         write(root, "module/c.rs", "1\n2\n3\n");
         fs::write(root.join("module/blob.bin"), [0u8, 1, 2, 3]).unwrap();
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let row = unstaged.iter().find(|f| f.path == "module").unwrap();
         assert_eq!((row.additions, row.deletions), (6, 0));
 
@@ -2422,7 +2435,7 @@ mod tests {
         }
         write(root, "a.txt", "one\ntwo\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         let loose = unstaged.iter().find(|f| f.path == "a.txt").unwrap();
         assert_eq!(loose.additions, 2);
@@ -2438,7 +2451,7 @@ mod tests {
             write(root, &format!("big/f{index}.js"), "x\n");
         }
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let row = unstaged.iter().find(|f| f.path == "big").unwrap();
         assert_eq!(row.additions, 0);
     }
@@ -2455,7 +2468,7 @@ mod tests {
         }
         write(root, "small/a.js", "a\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(fingerprint_of(&unstaged, "big"), None);
         assert!(fingerprint_of(&unstaged, "small").is_some());
@@ -2488,7 +2501,7 @@ mod tests {
         write(root, "app/sub/b.rs", "b\n");
         git_in(root)(&["add", "--", "app"]);
         let fingerprint = |root: &Path| {
-            let (staged, _) = changed_files(root).unwrap();
+            let (staged, _) = changed_files_for_display(root).unwrap();
             fingerprint_of(&staged, "app").expect("a staged folder is fingerprinted")
         };
         let child = |root: &Path| {
@@ -2518,7 +2531,7 @@ mod tests {
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "a.txt", "a\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&unstaged),
@@ -2584,7 +2597,7 @@ mod tests {
         let git = git_in(root);
         git(&["add", "--", "node_modules", "src/lib.rs"]);
 
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
 
         assert!(unstaged.is_empty(), "{unstaged:?}");
         assert_eq!(
@@ -2631,7 +2644,7 @@ mod tests {
             vec!["axb/decoy.js".to_string(), "src/lib.rs".to_string()]
         );
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         let lib = staged.iter().find(|f| f.path == "src/lib.rs").unwrap();
         assert_eq!((lib.additions, lib.deletions), (2, 1));
     }
@@ -2647,7 +2660,7 @@ mod tests {
         write(root, "app/top.rs", "t\n");
         git_in(root)(&["add", "--", "app/feature/a.rs"]);
 
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2669,7 +2682,7 @@ mod tests {
         write(root, "node_modules/other/x.js", "x\n");
         git_in(root)(&["add", "--", "node_modules/big"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2693,7 +2706,7 @@ mod tests {
         git_in(root)(&["add", "--", "node_modules"]);
         git_in(root)(&["reset", "-q", "HEAD", "--", "node_modules/pkg0/f0.js"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2730,7 +2743,7 @@ mod tests {
         git_in(root)(&["add", "--", "app/a.rs"]);
         git_in(root)(&["add", "-N", "--", "app/b.rs"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2749,7 +2762,7 @@ mod tests {
         git_in(root)(&["add", "--", "app"]);
         write(root, "app/late.rs", "late\n");
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2773,7 +2786,7 @@ mod tests {
         git_in(root)(&["add", "--", "app"]);
         write(root, "app/a.rs", "a\nmore\n");
 
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2794,7 +2807,7 @@ mod tests {
         write(root, "src/top.rs", "t\n");
         git_in(root)(&["add", "--", "src"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2815,7 +2828,7 @@ mod tests {
         write(root, "moved/extra.rs", "e\n");
         git(&["add", "--", "moved"]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         let paths: Vec<_> = staged.iter().map(|f| f.path.as_str()).collect();
         assert!(
@@ -2835,7 +2848,7 @@ mod tests {
         write(root, "README", "r\n");
         git(&["add", "--", "."]);
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
 
         assert_eq!(
             shape(&staged),
@@ -2858,12 +2871,12 @@ mod tests {
         write(root, "app/sub/b.rs", "b\n");
         write(root, "README", "r\n");
         stage_files(root, &["app".to_string(), "README".to_string()]).unwrap();
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         assert!(staged.iter().any(|f| f.path == "app" && f.is_folder()));
 
         unstage_files(root, &["app".to_string()]).unwrap();
 
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
         assert_eq!(
             staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["README"]
@@ -2880,7 +2893,7 @@ mod tests {
         write(root, "ab/decoy.txt", "d\n");
         write(root, "aXb/decoy.txt", "d\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let dash = unstaged.iter().find(|f| f.path == "-rf").expect("dash row");
         assert_eq!(shape(std::slice::from_ref(dash))[0].2, folder(1));
         let glob = unstaged.iter().find(|f| f.path == "a*b").expect("glob row");
@@ -2930,7 +2943,7 @@ mod tests {
         }
 
         stage_file(root, "dist").unwrap();
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
         assert_eq!(
             shape(&staged),
             vec![("dist".to_string(), "A".to_string(), folder(5))]
@@ -2938,7 +2951,7 @@ mod tests {
         assert!(unstaged.is_empty());
 
         unstage_file(root, "dist").unwrap();
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
         assert!(staged.is_empty());
         assert_eq!(
             shape(&unstaged),
@@ -2952,7 +2965,7 @@ mod tests {
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
         assert!(staged.is_empty() && unstaged.is_empty());
         assert!(!root.join("dist").exists());
     }
@@ -3189,7 +3202,7 @@ mod tests {
             untracked_directory_kind(root, "inner-wt").unwrap(),
             UntrackedDirectoryKind::LinkedWorktree
         );
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         assert_eq!(
             shape(&unstaged),
             vec![(
@@ -3234,7 +3247,7 @@ mod tests {
         git_in(root)(&["worktree", "add", "-q", "-b", "other", "agent-wt/inner"]);
         let agent = root.join("agent-wt");
 
-        let (_, unstaged) = changed_files(&agent).unwrap();
+        let (_, unstaged) = changed_files_for_display(&agent).unwrap();
 
         assert_eq!(
             shape(&unstaged),
@@ -3264,7 +3277,7 @@ mod tests {
         write(root, "stale/secret.env", "SECRET=1\n");
         write(root, "stale/.git", "gitdir: /nonexistent/place\n");
 
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         for folder in ["empty", "stale"] {
             let row = unstaged.iter().find(|f| f.path == folder).expect(folder);
             assert!(row.is_expandable(), "{folder} lists as an ordinary folder");
@@ -3305,7 +3318,7 @@ mod tests {
         );
         assert!(stage_files(root, &["inner-wt".to_string()]).is_err());
 
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -3355,7 +3368,7 @@ mod tests {
     fn only_listed_changes_inside_a_folder_answer_on_either_side() {
         let repo = child_repo();
         let root = repo.path();
-        let (_, unstaged) = changed_files(root).unwrap();
+        let (_, unstaged) = changed_files_for_display(root).unwrap();
         let asked: Vec<String> = [
             "build/app.js",
             "build/sub",
@@ -3375,7 +3388,7 @@ mod tests {
         );
 
         git_in(root)(&["add", "--", "build/app.js", "build/sub"]);
-        let (staged, _) = changed_files(root).unwrap();
+        let (staged, _) = changed_files_for_display(root).unwrap();
         let asked: Vec<String> = ["build/app.js", "build/sub/b.js", "build/sub/none.js"]
             .iter()
             .map(|p| p.to_string())
@@ -3433,7 +3446,7 @@ mod tests {
             root.join("node_modules/pkg/a.js").exists(),
             "the folder survived"
         );
-        let (staged, unstaged) = changed_files(root).unwrap();
+        let (staged, unstaged) = changed_files_for_display(root).unwrap();
         assert!(staged.is_empty(), "nothing got staged: {staged:?}");
         assert_eq!(
             shape(&unstaged),
@@ -3444,7 +3457,7 @@ mod tests {
     #[test]
     fn a_path_that_climbs_out_of_a_folder_is_not_inside_it() {
         let repo = crafted_repo();
-        let (_, unstaged) = changed_files(repo.path()).unwrap();
+        let (_, unstaged) = changed_files_for_display(repo.path()).unwrap();
         for path in CRAFTED {
             assert!(
                 crate::model::listing_row_for(&unstaged, path).is_none(),

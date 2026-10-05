@@ -40,6 +40,9 @@ A handful of subcommands handle the file without you hunting for it:
   options after an upgrade.
 - `dux config restore-docs` puts the explanatory comments back into a config that lost
   them, keeping every value exactly as it is.
+- `dux config reset` removes the config and the log, and keeps your agents and worktrees.
+  `dux config reset --all` is the full factory reset: config, log, the session database and
+  every worktree dux made.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
 
@@ -136,6 +139,17 @@ change, a block after failed logins), never by dux saving its other settings.
 > `dux.lock`: a second line reading `reload-signal=usr1` under its PID. Without that
 > line, restart dux instead. `dux config set` checks this for you and never signals an
 > older dux.
+
+> [!WARNING]
+> A factory reset deletes every worktree dux made, uncommitted work included. First it stops
+> what dux itself started and left running in those worktrees (a startup command's dev
+> server, or a job a terminal left working in one, say), giving each the same grace period
+> as a delete before forcing it. A folder
+> where something still runs (one of those that would not stop, or anything a standalone
+> agent started) is kept, and so may one something else is still writing into. The reset
+> carries on with everything else, then lists each folder it had to leave behind and why.
+> Stop whatever is still using it and delete the folder yourself. A folder a standalone
+> agent runs in is never touched.
 
 ### What `dux config diff` shows, and what it holds back
 

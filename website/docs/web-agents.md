@@ -123,7 +123,23 @@ deletion (it is checked out somewhere else, say), the worktree still goes and du
 the branch survived and quotes git's reason.
 
 A worktree that already has an agent names that agent and offers no delete. Delete the agent
-instead.
+instead. A worktree whose agent you just deleted is listed under **Being removed** until its
+removal finishes, with no delete of its own: it is already going. The manager checks again
+at the moment you confirm, so a worktree an agent took in the meantime, or one an agent is
+being created on, is refused rather than removed, and a removal that finds work still
+running in the worktree waits for it the same way an agent delete does.
+
+A worktree something is still using, with no agent of its own on it, is listed under **In
+use** and says what: an agent being created there, a terminal open in it, the CLI of an agent
+you just deleted with its worktree kept, still stopping, or a standalone agent whose folder is
+the worktree or anywhere inside it. It cannot be deleted from the manager until that has gone.
+A standalone agent inside a worktree keeps that worktree for as long as the agent exists,
+because dux never removes a standalone agent's folder: delete that agent, or move its folder
+out, first. The same holds when you delete the worktree's own agent with the worktree box
+ticked: the worktree is kept and dux names the standalone agent. Once a removal of a folder
+has begun, nothing new starts in it or in any folder inside it: a new agent, a standalone
+agent, a relaunch, a terminal or a project added there is refused and says why. A worktree
+that holds a dux project's repository is never removed.
 
 > [!TIP]
 > This is where you remove the branch of a worktree that has no agent. A worktree that does
@@ -276,6 +292,55 @@ together.
 
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.
+
+### What a delete with the worktree waits for
+
+With the worktree box ticked, dux removes nothing until everything it started for that agent
+has stopped: every tab, every terminal you opened on it, a startup command that is still
+running, and anything any of them left running in the background, such as a dev server, a
+job started with `&`, or a `nohup`ed or disowned command. Each is asked to exit, given the
+same shutdown grace as a quit (`shutdown_timeout_seconds`), and killed if it is still there.
+The agent leaves the list at once; the removal finishes in the background and reports when it
+is done.
+
+It also waits for dux's own work in that worktree: a pull, a push, a commit, a branch rename,
+a recreate of the working copy or a save from the editor still running there is allowed to
+finish, and the status says what it is waiting for. A branch renamed while the
+delete waited is removed under its new name. From the moment you confirm, nothing new can
+start in that worktree: a save, a dropped file, a pull or a new agent there is refused, and
+says why. If the work still has not finished after `removal_wait_seconds` in your
+`config.toml` (120 seconds by default), dux keeps the worktree and tells you so, and you can
+remove it later from the worktree manager.
+
+> [!WARNING]
+> Ticking the box ends processes you may have started yourself in that agent's terminals,
+> background jobs included, because the folder they work in is about to be deleted. Closing
+> a terminal on its own still behaves like closing a terminal window: a disowned or
+> `nohup`ed job keeps running.
+
+If something refuses to stop even when killed, dux keeps the worktree untouched and names the
+processes, so you can stop them and remove the worktree from the worktree manager.
+
+A project or standalone terminal whose shell you `cd`'d into the worktree, or anything else
+dux started elsewhere that is standing in it, is never ended to make way. The worktree is kept
+and dux names the terminal: `cd` out of the folder or close the terminal, then remove the
+worktree from the worktree manager.
+
+> [!IMPORTANT]
+> dux follows what it started through the terminal session and the process tree it started
+> it in. A program that fully detaches itself from both, such as a `tmux new -d` session or
+> a daemon that double-forks, is not seen at all: dux neither stops it nor counts it as
+> using the worktree. Stop such a program yourself before you delete the worktree.
+
+Something dux did not start and cannot see, such as a server another program launched in
+that folder, can still write into it while git deletes it. git then removes the worktree from
+the repository but cannot delete the folder. dux does not finish the job by deleting the
+folder itself; it tells you what is left in it and that you can delete the folder once
+whatever is writing there has stopped.
+
+If you quit dux while a removal is still waiting, the quit finishes it before exiting. If dux
+is killed or crashes first, the next start finishes it in the background and says so. It
+never removes a folder that another agent has started using in the meantime.
 
 > [!IMPORTANT]
 > Worktrees are your data. Deleting an agent leaves its worktree on disk unless you explicitly

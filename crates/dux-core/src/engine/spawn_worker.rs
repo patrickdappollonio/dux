@@ -189,6 +189,36 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
+        self.spawn_status_op_with(op, work, false)
+    }
+
+    /// [`Self::spawn_status_op`] for work that changes a worktree's files:
+    /// its completion also has the surfaces read the changed-files listing
+    /// again, so the change shows the moment it is done.
+    pub fn spawn_changes_op<T, E, F>(
+        &mut self,
+        op: crate::engine::StatusOp<T, E>,
+        work: F,
+    ) -> EventReaction
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.spawn_status_op_with(op, work, true)
+    }
+
+    fn spawn_status_op_with<T, E, F>(
+        &mut self,
+        op: crate::engine::StatusOp<T, E>,
+        work: F,
+        reloads_changes: bool,
+    ) -> EventReaction
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
         // Stamp the command origin onto the pending busy and capture it for the
         // deferred final: `current_origin` is reset by the time the worker
         // completes, so the scope must travel on the `ResolvedFinal`.
@@ -202,26 +232,38 @@ impl Engine {
         // registry of their own, so liveness cannot come from enumerating them.
         self.register_status_key(&key_for_spawn_fail);
 
-        let spawn_result = thread::Builder::new()
-            .name("dux-status-op".into())
-            .spawn(move || {
-                let resolved = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    let result = work();
-                    op.resolve(&result)
-                })) {
-                    Ok(r) => r,
-                    Err(payload) => {
-                        let reason = format_panic_payload(payload);
-                        crate::logger::error(&format!("status-op worker panicked: {reason}"));
-                        crate::engine::ResolvedFinal::error(
-                            key_for_panic,
-                            format!("Worker panicked: {reason}"),
-                        )
+        #[cfg(any(test, feature = "test-support"))]
+        let injected = take_injected_spawn_failure();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let injected = false;
+        let spawn_result = if injected {
+            Err(std::io::Error::other("injected test failure"))
+        } else {
+            thread::Builder::new()
+                .name("dux-status-op".into())
+                .spawn(move || {
+                    let resolved = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        let result = work();
+                        op.resolve(&result)
+                    })) {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            let reason = format_panic_payload(payload);
+                            crate::logger::error(&format!("status-op worker panicked: {reason}"));
+                            crate::engine::ResolvedFinal::error(
+                                key_for_panic,
+                                format!("Worker panicked: {reason}"),
+                            )
+                        }
                     }
-                }
-                .with_scope(origin);
-                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-            });
+                    .with_scope(origin);
+                    let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+                    if reloads_changes {
+                        let _ = tx.send(WorkerEvent::WorktreeFilesChanged);
+                    }
+                })
+                .map(|_| ())
+        };
 
         match spawn_result {
             // Apply the pending Busy now; the worker will follow with its final.
@@ -314,8 +356,17 @@ impl Engine {
         // without exhausting the machine's process table to provoke a real one.
         // No completion event fires, so callers recover from this path
         // themselves and it has to be reachable from a test.
-        #[cfg(test)]
-        if std::mem::take(&mut self.force_worker_spawn_failure) {
+        #[cfg(any(test, feature = "test-support"))]
+        let injected = {
+            #[cfg(test)]
+            let field = std::mem::take(&mut self.force_worker_spawn_failure);
+            #[cfg(not(test))]
+            let field = false;
+            field || take_injected_spawn_failure()
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let injected = false;
+        if injected {
             if let Some(key) = &spec.in_flight_key {
                 self.clear_in_flight(key);
             }
@@ -430,11 +481,19 @@ impl Engine {
         // without exhausting the machine's process table to provoke a real one.
         // A caller holding a single-instance slot must release it on `false`,
         // so that recovery has to be reachable from a test.
-        #[cfg(test)]
-        if self
-            .force_loop_worker_spawn_failure
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
+        #[cfg(any(test, feature = "test-support"))]
+        let injected = {
+            #[cfg(test)]
+            let field = self
+                .force_loop_worker_spawn_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(not(test))]
+            let field = false;
+            field || take_injected_spawn_failure()
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let injected = false;
+        if injected {
             crate::logger::error(&format!(
                 "spawn_loop_worker[{label}] failed to spawn thread: injected test failure",
             ));
@@ -517,4 +576,23 @@ impl Engine {
         }
         true
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FAIL_NEXT_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test builds only: make the next worker spawn on THIS thread (a background
+/// worker, a loop worker or a status-op worker) fail the way a real
+/// `thread::Builder::spawn` failure does, without exhausting the machine's
+/// process table to provoke one. Consumed by that spawn.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fail_next_worker_spawn() {
+    FAIL_NEXT_SPAWN.with(|flag| flag.set(true));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn take_injected_spawn_failure() -> bool {
+    FAIL_NEXT_SPAWN.with(|flag| flag.replace(false))
 }

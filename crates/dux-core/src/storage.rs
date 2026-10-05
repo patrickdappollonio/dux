@@ -38,6 +38,66 @@ fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// A write transaction that takes the database's write lock when it begins.
+/// A deferred one starts as a read and is refused outright (SQLite's
+/// `SQLITE_BUSY_SNAPSHOT`, which no busy timeout waits out) when another
+/// connection, the process registry's writer among them, commits in between.
+fn immediate_tx(conn: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
+fn encode_identities(identities: &[crate::process_sessions::ProcessIdentity]) -> String {
+    identities
+        .iter()
+        .map(|identity| format!("{}:{}:{}", identity.pid, identity.start_time, identity.boot))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_identities(text: &str) -> Vec<crate::process_sessions::ProcessIdentity> {
+    text.split(',')
+        .filter_map(|entry| {
+            let mut fields = entry.split(':');
+            let pid = fields.next()?.parse().ok()?;
+            let start_time = fields.next()?.parse().ok()?;
+            // No boot recorded: void, as an identity from another boot is.
+            let boot = fields
+                .next()
+                .and_then(|boot| boot.parse().ok())
+                .unwrap_or(0);
+            Some(crate::process_sessions::ProcessIdentity {
+                pid,
+                start_time,
+                boot,
+            })
+        })
+        .collect()
+}
+
+/// A worktree removal the user asked for that dux has not finished yet, kept
+/// in the database so a quit or a crash in the middle of it does not leave a
+/// worktree and a branch behind that no agent owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingWorktreeRemoval {
+    pub session_id: String,
+    /// The agent's name at the time, for the status that reports it.
+    pub label: String,
+    pub project_path: String,
+    pub managed: crate::model::ManagedWorkspace,
+    /// The delete dialog's branch answer, `None` when nobody was asked.
+    pub delete_branch: Option<bool>,
+    /// The sessions the agent's processes ran in, so a later start can end
+    /// whatever of them outlived dux.
+    pub process_sessions: Vec<crate::process_sessions::ProcessSession>,
+    /// The registry slice of the folder, kept current while the removal waits:
+    /// every session registered in it with its owner's kind, and what was
+    /// recorded running in each. Rebuilt into a registry at the next start.
+    pub process_registry: crate::process_sessions::RegistrySnapshot,
+    /// What was running in them when the delete began, by identity: a later
+    /// start acts on a leaderless session only through these.
+    pub process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
+}
+
 impl SessionStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
@@ -200,7 +260,7 @@ impl SessionStore {
         // succeeds, so the success line can never claim a migration that a commit
         // failure actually rolled back.
         let frozen_titles = {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = immediate_tx(&self.conn)?;
             // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
             // that still lacks one. The WHERE clause is self-limiting, since new
             // rows always record a genuine `initial_branch` at creation, so this
@@ -434,6 +494,60 @@ impl SessionStore {
             );
             "#,
         )?;
+        // A worktree removal the user asked for and dux has not finished: the
+        // agent's record is already gone when the removal starts (it waits for
+        // the agent's processes), so a quit or a crash in between would
+        // otherwise leave a worktree and a branch that no agent owns and
+        // nothing remembers to remove. The next start finishes what is here.
+        // Additive: existing databases start with zero rows.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists pending_worktree_removals (
+                session_id text primary key,
+                label text not null,
+                project_id text not null,
+                project_path text not null,
+                worktree_path text not null,
+                source_branch text not null,
+                branch_name text not null,
+                initial_branch text not null,
+                branch_provenance text not null,
+                delete_branch integer,
+                process_sessions text not null default '',
+                process_snapshot text not null default '',
+                process_registry text not null default '',
+                created_at text not null
+            );
+            "#,
+        )?;
+        // What was running in those sessions when the delete began, by
+        // identity: the only evidence a later start may act on for a session
+        // whose leader is gone.
+        ensure_column(
+            &self.conn,
+            "pending_worktree_removals",
+            "process_snapshot",
+            "text not null default ''",
+        )?;
+        // The registry slice the removal depends on, owner kinds included (see
+        // `crate::process_sessions::RegistrySnapshot`).
+        ensure_column(
+            &self.conn,
+            "pending_worktree_removals",
+            "process_registry",
+            "text not null default ''",
+        )?;
+        // The process sessions dux started, kept across restarts (see
+        // `crate::process_sessions::AgentProcessRegistry::attach_store`): one
+        // row holding the whole registry, replaced atomically on every change.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists process_registry (
+                id integer primary key check (id = 1),
+                body text not null
+            );
+            "#,
+        )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
@@ -493,10 +607,7 @@ impl SessionStore {
             return Ok(());
         }
         let count = pending.len();
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start the slot tab migration")?;
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab migration")?;
         for (session_id, provider, created_at) in pending {
             let tab_id = uuid::Uuid::new_v4().to_string();
             // One below whatever the session's existing tabs start at, so the
@@ -559,10 +670,7 @@ impl SessionStore {
         if dangling.is_empty() {
             return Ok(());
         }
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start the slot tab repair")?;
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab repair")?;
         for (session_id, stale, provider, created_at) in dangling {
             let oldest: Option<(String, String)> = tx
                 .query_row(
@@ -670,6 +778,293 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Remember a worktree removal the user asked for, until it has finished.
+    /// Replaces an earlier row for the same agent.
+    pub fn insert_pending_worktree_removal(&self, row: &PendingWorktreeRemoval) -> Result<()> {
+        let managed = &row.managed;
+        let sessions = row
+            .process_sessions
+            .iter()
+            .map(|session| format!("{}:{}:{}", session.sid, session.started_at, session.boot))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.conn
+            .execute(
+                "insert or replace into pending_worktree_removals \
+                 (session_id, label, project_id, project_path, worktree_path, source_branch, \
+                  branch_name, initial_branch, branch_provenance, delete_branch, \
+                  process_sessions, process_snapshot, process_registry, created_at) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    row.session_id,
+                    row.label,
+                    managed.project_id,
+                    row.project_path,
+                    managed.worktree_path,
+                    managed.source_branch,
+                    managed.branch_name,
+                    managed.initial_branch,
+                    managed.branch_provenance.as_str(),
+                    row.delete_branch,
+                    sessions,
+                    encode_identities(&row.process_snapshot),
+                    serde_json::to_string(&row.process_registry)
+                        .context("failed to encode a pending removal's processes")?,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .context("failed to record a pending worktree removal")?;
+        Ok(())
+    }
+
+    /// Record what was running in a pending removal's sessions when its delete
+    /// began, by identity.
+    pub fn set_pending_removal_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &[crate::process_sessions::ProcessIdentity],
+    ) -> Result<()> {
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            // A union with what is already recorded: survivors written into the
+            // row before this snapshot landed must not be lost.
+            for mut row in self.load_pending_worktree_removals()? {
+                if row.session_id != session_id {
+                    continue;
+                }
+                for identity in snapshot {
+                    if !row.process_snapshot.contains(identity) {
+                        row.process_snapshot.push(*identity);
+                    }
+                }
+                self.update_pending_removal_evidence(&row)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Replace the saved process registry with `stored`.
+    pub fn replace_process_registry(
+        &self,
+        stored: &[crate::process_sessions::StoredSession],
+    ) -> Result<()> {
+        let body =
+            serde_json::to_string(stored).context("failed to encode the process registry")?;
+        self.conn
+            .execute(
+                "insert into process_registry (id, body) values (1, ?1) \
+                 on conflict(id) do update set body = excluded.body",
+                params![body],
+            )
+            .context("failed to save the process registry")?;
+        Ok(())
+    }
+
+    /// The saved process registry; empty when none was saved or it cannot
+    /// be read.
+    pub fn load_process_registry(&self) -> Result<Vec<crate::process_sessions::StoredSession>> {
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "select body from process_registry where id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(body
+            .and_then(|body| serde_json::from_str(&body).ok())
+            .unwrap_or_default())
+    }
+
+    /// Run `f` inside one `BEGIN IMMEDIATE` transaction: a read-modify-write
+    /// of a pending row that another connection (the snapshot thread, a
+    /// leader-exit hook) may be updating at the same moment.
+    fn immediate<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    /// Merge `snapshot` into the registry slice of pending removal `session_id`.
+    pub fn merge_pending_removal_registry(
+        &self,
+        session_id: &str,
+        snapshot: &crate::process_sessions::RegistrySnapshot,
+    ) -> Result<()> {
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            for row in self.load_pending_worktree_removals()? {
+                if row.session_id != session_id {
+                    continue;
+                }
+                let mut merged = row.process_registry.clone();
+                merged.merge(snapshot);
+                // The sessions to end follow the slice: every session in it that
+                // is not a standalone agent's, and never one that is.
+                let mut row = row;
+                for entry in &merged.entries {
+                    if entry.standalone {
+                        row.process_sessions
+                            .retain(|session| *session != entry.session);
+                    } else if !row.process_sessions.contains(&entry.session) {
+                        row.process_sessions.push(entry.session);
+                    }
+                }
+                // And so does what was recorded running in them.
+                for (session, identities) in &merged.survivors {
+                    let standalone = merged
+                        .entries
+                        .iter()
+                        .any(|entry| entry.session == *session && entry.standalone);
+                    if standalone {
+                        continue;
+                    }
+                    for identity in identities {
+                        if !row.process_snapshot.contains(identity) {
+                            row.process_snapshot.push(*identity);
+                        }
+                    }
+                }
+                self.update_pending_removal_evidence(&row)?;
+                self.conn
+                    .execute(
+                        "update pending_worktree_removals set process_registry = ?2 \
+                     where session_id = ?1",
+                        params![
+                            session_id,
+                            serde_json::to_string(&merged)
+                                .context("failed to encode a pending removal's processes")?
+                        ],
+                    )
+                    .context("failed to keep a pending removal current")?;
+            }
+            Ok(())
+        })
+    }
+
+    fn update_pending_removal_evidence(&self, row: &PendingWorktreeRemoval) -> Result<()> {
+        let sessions = row
+            .process_sessions
+            .iter()
+            .map(|session| format!("{}:{}:{}", session.sid, session.started_at, session.boot))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.conn
+            .execute(
+                "update pending_worktree_removals set process_sessions = ?2, \
+                 process_snapshot = ?3 where session_id = ?1",
+                params![
+                    row.session_id,
+                    sessions,
+                    encode_identities(&row.process_snapshot)
+                ],
+            )
+            .context("failed to record evidence into a pending removal")?;
+        Ok(())
+    }
+
+    /// Follow a branch rename into a pending removal, so the removal a later
+    /// start finishes deletes the branch by the name it has now.
+    pub fn rename_pending_removal_branch(
+        &self,
+        session_id: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
+        // One read-modify-write, in one transaction: the snapshot thread and
+        // a leader-exit hook can update the same row from their own
+        // connections at the same moment.
+        self.immediate(|_| {
+            self.conn
+                .execute(
+                    "update pending_worktree_removals set \
+                 branch_name = case when branch_name = ?2 then ?3 else branch_name end, \
+                 initial_branch = case when initial_branch = ?2 then ?3 else initial_branch end \
+                 where session_id = ?1",
+                    params![session_id, old, new],
+                )
+                .context("failed to follow a branch rename into a pending removal")?;
+            Ok(())
+        })
+    }
+
+    /// Forget a pending worktree removal, finished one way or the other.
+    pub fn delete_pending_worktree_removal(&self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from pending_worktree_removals where session_id = ?1",
+                params![session_id],
+            )
+            .context("failed to clear a pending worktree removal")?;
+        Ok(())
+    }
+
+    /// Every worktree removal still waiting to be finished, oldest first.
+    pub fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
+        let mut stmt = self.conn.prepare(
+            "select session_id, label, project_id, project_path, worktree_path, source_branch, \
+             branch_name, initial_branch, branch_provenance, delete_branch, process_sessions, \
+             process_snapshot, process_registry from pending_worktree_removals \
+             order by created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let sessions: String = row.get(10)?;
+            Ok(PendingWorktreeRemoval {
+                session_id: row.get(0)?,
+                label: row.get(1)?,
+                project_path: row.get(3)?,
+                managed: crate::model::ManagedWorkspace {
+                    project_id: row.get(2)?,
+                    project_path: None,
+                    worktree_path: row.get(4)?,
+                    source_branch: row.get(5)?,
+                    branch_name: row.get(6)?,
+                    initial_branch: row.get(7)?,
+                    branch_provenance: crate::model::BranchProvenance::from_str(
+                        &row.get::<_, String>(8)?,
+                    ),
+                },
+                delete_branch: row.get(9)?,
+                process_sessions: sessions
+                    .split(',')
+                    .filter_map(|entry| {
+                        let mut fields = entry.split(':');
+                        Some(crate::process_sessions::ProcessSession {
+                            sid: fields.next()?.parse().ok()?,
+                            started_at: fields.next()?.parse().ok()?,
+                            // A row written before boots were recorded names
+                            // no boot, and is void rather than trusted.
+                            boot: fields
+                                .next()
+                                .and_then(|boot| boot.parse().ok())
+                                .unwrap_or(0),
+                        })
+                    })
+                    .collect(),
+                process_snapshot: decode_identities(&row.get::<_, String>(11)?),
+                // An unreadable or empty slice is an empty one: what it would
+                // have protected or ended is then only what the other two
+                // columns say, which never includes a standalone agent's.
+                process_registry: serde_json::from_str(&row.get::<_, String>(12)?)
+                    .unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read pending worktree removals")
+    }
+
     /// Remove a single extra tab row (closing an extra tab).
     pub fn delete_agent_tab(&self, tab_id: &str) -> Result<()> {
         let affected = self
@@ -737,10 +1132,8 @@ impl SessionStore {
         provider: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start retargeting the agent's provider")?;
+        let tx =
+            immediate_tx(&self.conn).context("failed to start retargeting the agent's provider")?;
         tx.execute(
             "update agent_tabs set provider = ?2 where id = \
              (select slot_tab_id from agent_sessions where id = ?1)",
@@ -789,9 +1182,7 @@ impl SessionStore {
                  of agent {session_id}"
             );
         }
-        let tx = self
-            .conn
-            .unchecked_transaction()
+        let tx = immediate_tx(&self.conn)
             .context("failed to start promoting a tab into the agent's slot")?;
         let owner: Option<String> = tx
             .query_row(
@@ -1144,7 +1535,7 @@ impl SessionStore {
     /// standalone agent the user has. The kind column, not the project id, is
     /// what says who owns a row.
     pub fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed'")?;
             let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
@@ -1395,10 +1786,7 @@ impl SessionStore {
     /// Existing sessions keep going through [`Self::upsert_session`], which is
     /// the hot path status churn takes and which never touches `agent_tabs`.
     pub fn create_session(&self, session: &AgentSession) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start creating the agent")?;
+        let tx = immediate_tx(&self.conn).context("failed to start creating the agent")?;
         tx.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
              values (?1, ?2, ?3, 0, ?4)",
@@ -1613,7 +2001,7 @@ impl SessionStore {
     /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
     /// so would corrupt the "sort by most recently updated" semantics.
     pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare(
                 "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
@@ -1634,7 +2022,7 @@ impl SessionStore {
     /// validation that `ordered_ids` is the complete session set lives in the
     /// engine. `updated_at` is deliberately untouched (preserves recency sorting).
     pub fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
@@ -1650,7 +2038,7 @@ impl SessionStore {
     /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
     /// of known projects lives in `Engine::apply`, not here.
     pub fn reorder_projects(&self, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update projects set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
@@ -1710,7 +2098,7 @@ impl SessionStore {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
@@ -1835,6 +2223,17 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// Test builds only: make every later session delete fail, as a database
+    /// that refuses a write would.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_session_deletes_for_tests(&self) {
+        // The table a delete names is moved out of its way, so the delete
+        // fails whether or not the session has a row.
+        self.conn
+            .execute_batch("alter table agent_sessions rename to agent_sessions_refused_by_a_test")
+            .expect("move the sessions table aside");
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<()> {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
@@ -1842,7 +2241,7 @@ impl SessionStore {
         // not fire. Delete the rows explicitly. Wrapped in a transaction so a
         // mid-sequence failure leaves either all of the session's rows or none,
         // never a half-deleted session (e.g. tabs gone but the session surviving).
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         tx.execute("delete from session_prs where session_id = ?1", params![id])?;
         tx.execute(
             "delete from session_pr_overrides where session_id = ?1",
@@ -2015,6 +2414,71 @@ mod tests {
     use super::*;
     use crate::model::{AgentWorkspace, FolderWorkspace};
     use chrono::Duration;
+
+    #[test]
+    fn a_pending_worktree_removal_round_trips_until_it_is_cleared() {
+        let store = SessionStore::open(std::path::Path::new(":memory:")).expect("store");
+        let row = PendingWorktreeRemoval {
+            session_id: "a1".to_string(),
+            label: "feat".to_string(),
+            project_path: "/repo".to_string(),
+            managed: crate::model::ManagedWorkspace {
+                project_id: "p1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat-0".to_string(),
+                branch_provenance: crate::model::BranchProvenance::AttachedExisting,
+                worktree_path: "/wt/feat".to_string(),
+            },
+            delete_branch: None,
+            process_sessions: vec![
+                crate::process_sessions::ProcessSession {
+                    sid: 41,
+                    started_at: 1_700_000_000,
+                    boot: 7,
+                },
+                crate::process_sessions::ProcessSession {
+                    sid: 42,
+                    started_at: 1_700_000_001,
+                    boot: 7,
+                },
+            ],
+            process_snapshot: vec![crate::process_sessions::ProcessIdentity {
+                pid: 43,
+                start_time: 1_700_000_002,
+                boot: crate::process_sessions::current_boot(),
+            }],
+            process_registry: crate::process_sessions::RegistrySnapshot {
+                entries: vec![crate::process_sessions::RegistryEntry {
+                    session: crate::process_sessions::ProcessSession {
+                        sid: 44,
+                        started_at: 1_700_000_003,
+                        boot: 7,
+                    },
+                    folder: std::path::PathBuf::from("/wt/feat/frontend"),
+                    standalone: true,
+                }],
+                survivors: Vec::new(),
+            },
+        };
+        store.insert_pending_worktree_removal(&row).expect("insert");
+        assert_eq!(
+            store.load_pending_worktree_removals().unwrap(),
+            vec![row.clone()]
+        );
+        store
+            .rename_pending_removal_branch("a1", "feat", "feat-renamed")
+            .expect("rename");
+        let loaded = store.load_pending_worktree_removals().unwrap();
+        assert_eq!(loaded[0].managed.branch_name, "feat-renamed");
+        assert_eq!(
+            loaded[0].managed.initial_branch, "feat-0",
+            "only the renamed one moves"
+        );
+        store.delete_pending_worktree_removal("a1").expect("delete");
+        assert!(store.load_pending_worktree_removals().unwrap().is_empty());
+    }
 
     fn standalone_session(id: &str, folder: &str) -> AgentSession {
         let now = Utc::now();
@@ -4666,4 +5130,117 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -
 /// concurrent connection added it first).
 fn is_duplicate_column_error(err: &rusqlite::Error) -> bool {
     err.to_string().to_lowercase().contains("duplicate column")
+}
+
+/// The store's write transactions take the write lock when they begin.
+#[cfg(test)]
+mod immediate_transaction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// What every store write transaction does: begin, read, then write. The
+    /// `between` hook runs after the read and before the write, which is
+    /// where another connection's commit lands in the race.
+    fn read_then_write(
+        conn: &Connection,
+        begin: impl FnOnce(&Connection) -> rusqlite::Result<rusqlite::Transaction<'_>>,
+        between: impl FnOnce(),
+    ) -> rusqlite::Result<()> {
+        let tx = begin(conn)?;
+        let _rows: i64 = tx.query_row("select count(*) from t", [], |row| row.get(0))?;
+        between();
+        tx.execute("insert into t (who) values ('a')", [])?;
+        tx.commit()
+    }
+
+    /// Two connections to one WAL database, the way the engine's store and
+    /// the registry's writer thread share it.
+    fn two_connections() -> (tempfile::TempDir, Connection, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        drop(SessionStore::open(&db).unwrap());
+        let a = Connection::open(&db).unwrap();
+        a.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        a.execute_batch("create table t (who text not null)")
+            .unwrap();
+        (tmp, a, db)
+    }
+
+    /// The bug, on purpose: a DEFERRED transaction reads, another connection
+    /// commits, and the write is refused at once with SQLITE_BUSY_SNAPSHOT
+    /// (517), however long the busy timeout.
+    #[test]
+    fn a_deferred_transaction_is_refused_when_another_connection_commits_in_between() {
+        let (_tmp, a, db) = two_connections();
+        let refused = read_then_write(
+            &a,
+            |conn| {
+                rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)
+            },
+            || {
+                let b = Connection::open(&db).unwrap();
+                b.execute("insert into t (who) values ('b')", []).unwrap();
+            },
+        )
+        .expect_err("the deferred write is refused");
+        let rusqlite::Error::SqliteFailure(failure, _) = &refused else {
+            panic!("not a SQLite failure: {refused}");
+        };
+        assert_eq!(
+            failure.extended_code, 517,
+            "SQLITE_BUSY_SNAPSHOT: {refused}"
+        );
+    }
+
+    /// Set by the second connection's busy handler: it is waiting for the
+    /// write lock.
+    static B_IS_WAITING: AtomicBool = AtomicBool::new(false);
+
+    fn b_busy(_attempt: i32) -> bool {
+        B_IS_WAITING.store(true, Ordering::SeqCst);
+        std::thread::yield_now();
+        true
+    }
+
+    /// The fix: `immediate_tx` holds the write lock from its first statement,
+    /// so the other connection's write waits (its busy handler is seen
+    /// running) until this transaction commits, and both writes land, this
+    /// one first.
+    #[test]
+    fn an_immediate_transaction_makes_the_other_writer_wait_and_both_succeed() {
+        let (_tmp, a, db) = two_connections();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let b = std::cell::RefCell::new(None);
+        read_then_write(&a, immediate_tx, || {
+            let db = db.clone();
+            *b.borrow_mut() = Some(std::thread::spawn(move || {
+                let b = Connection::open(&db).unwrap();
+                b.busy_handler(Some(b_busy)).unwrap();
+                started_tx.send(()).unwrap();
+                b.execute("insert into t (who) values ('b')", [])
+            }));
+            started_rx.recv().unwrap();
+            // The other writer is blocked on this transaction's lock, and
+            // retrying, before this transaction writes.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !B_IS_WAITING.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the other writer never had to wait"
+                );
+                std::thread::yield_now();
+            }
+        })
+        .expect("the immediate transaction's write succeeds");
+        let other = b.into_inner().unwrap().join().unwrap();
+        assert_eq!(other.expect("the other writer succeeds once it may"), 1);
+        let order: Vec<String> = a
+            .prepare("select who from t order by rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(order, vec!["a".to_string(), "b".to_string()]);
+    }
 }

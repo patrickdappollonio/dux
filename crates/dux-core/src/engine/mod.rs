@@ -7,27 +7,83 @@
 pub mod command;
 mod companion;
 pub mod config_saver;
+#[doc(hidden)]
+pub mod destructive_guard;
 mod events;
 mod followup;
 mod in_flight;
 mod lifecycle;
+mod pending_removals;
 mod pr_sync_control;
 mod project_base;
+pub(crate) mod removal;
 mod resume_fallback;
 mod spawn_worker;
+#[cfg(any(test, feature = "test-support"))]
+pub use spawn_worker::fail_next_worker_spawn;
 pub mod status_op;
 
 #[cfg(test)]
+mod races_review2_tests;
+#[cfg(test)]
+mod races_review3_tests;
+#[cfg(test)]
+mod races_review4_tests;
+#[cfg(test)]
+mod races_review5_tests;
+#[cfg(test)]
+mod races_review6_tests;
+#[cfg(test)]
+mod removal_review_tests;
+#[cfg(test)]
+mod review10_tests;
+#[cfg(test)]
+mod review11_tests;
+#[cfg(test)]
+mod review12_tests;
+#[cfg(test)]
+mod review13_tests;
+#[cfg(test)]
+mod review14_tests;
+#[cfg(test)]
+mod review15_tests;
+#[cfg(test)]
+mod review17_tests;
+#[cfg(test)]
+mod review19_tests;
+#[cfg(test)]
+mod review20_tests;
+#[cfg(test)]
+mod review21_tests;
+#[cfg(test)]
+mod review22_tests;
+#[cfg(test)]
+mod review23_tests;
+#[cfg(test)]
+mod review24_tests;
+#[cfg(test)]
+mod review8_tests;
+#[cfg(test)]
+mod review_nested_folder_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod worktree_removal_race_tests;
 
-pub use command::Command;
+pub use crate::destructive::DestructiveCheck;
+pub use command::{COMMIT_EMPTY_MESSAGE, COMMIT_NOTHING_STAGED, Command};
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, BranchDeleteInputs, DeleteTerminalView,
-    DetachedSession, DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView,
-    EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
+    DetachedSession, DispatchAgentLaunchView, EventReaction, FinishDeleteSessionOutcome,
+    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, RemovedBranches,
+    StatusUpdate, WorktreeRemoval, survivors_kept_worktree_message,
+};
+pub(crate) use events::{
+    RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
+    perform_deferred_removal, remove_after_last_look, standalone_processes_keep,
+    wait_then_last_look,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
@@ -36,13 +92,23 @@ pub use in_flight::{
 };
 pub use lifecycle::{
     ClosedTabExit, DeferredWorktreeRemoval, DetachSessionOutcome, ForceDetachOutcome,
-    GroupWorktreeRemoval, PendingDetach, PrunedPty, PrunedPtyKind, RAPID_EXIT_WINDOW,
-    ReapedTerminations, ShutdownReport, TerminatingPty, agent_exit_with_companion_notice,
-    clean_exit_closes_tab_row, closed_tab_exit_notice, closed_terminal_notice, detach_busy_message,
-    detach_confirm_body, detach_confirm_prose, detach_final, detach_not_running_message,
-    detach_status_key, detached_agent_notice, format_shutdown_result, format_shutdown_start,
+    GroupWorktreeRemoval, PendingDetach, PrunedPty, PrunedPtyKind, PtyGone, PtyGoneNotice,
+    RAPID_EXIT_WINDOW, ReapedTerminations, RemovalProcesses, ShutdownReport, TerminatingOwner,
+    TerminatingPty, agent_exit_with_companion_notice, clean_exit_closes_tab_row,
+    closed_tab_exit_notice, closed_terminal_notice, detach_busy_message, detach_confirm_body,
+    detach_confirm_prose, detach_final, detach_not_running_message, detach_status_key,
+    detached_agent_notice, format_shutdown_result, format_shutdown_start,
+};
+pub use pending_removals::recorded_at_or_through_link;
+pub(crate) use pending_removals::{
+    OccupancyFacts, Occupant, StoppingProcesses, is_symlink, link_occupant_in, occupant_in,
+    stored_occupant,
 };
 pub use pr_sync_control::PrSyncControl;
+pub use removal::{
+    ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
+    removal_waiting_message,
+};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
@@ -341,6 +407,14 @@ pub struct Engine {
     /// `PtyClient::drop` hard-kills; `reap_terminating_ptys`, called each engine
     /// tick on both surfaces, drops them once they exit or their deadline passes.
     pub terminating_ptys: Vec<TerminatingPty>,
+    /// Every process session started for each agent (tab and terminal PTYs,
+    /// startup commands), so a worktree removal can end what they left
+    /// running. See [`crate::process_sessions::AgentProcessRegistry`].
+    pub process_registry: crate::process_sessions::AgentProcessRegistry,
+    /// The worktree-removal workers dispatched so far, so a quit can wait for
+    /// the ones still running instead of exiting under them. Finished handles
+    /// are dropped at each dispatch.
+    pub removal_workers: Vec<std::thread::JoinHandle<()>>,
     /// Deferred worktree removals from multi-tab deletes, each waiting for a
     /// whole session's tab PTYs to reap before firing (see
     /// [`GroupWorktreeRemoval`]). `reap_terminating_ptys` drains these as their
@@ -768,6 +842,11 @@ pub struct Engine {
     /// past [`CREATED_SESSION_TTL`] or whose session no longer exists, so a
     /// long-running server cannot accumulate stale entries.
     pub created_session_by_op: HashMap<String, (String, Instant)>,
+
+    /// Removal coordination: the per-worktree registry of operations in flight,
+    /// the removals announced on it, and the project-delete cascades waiting
+    /// on them. See [`removal`].
+    pub removal_coordination: RemovalCoordination,
 }
 
 /// Handler-computed outcome for a create-agent op (see
@@ -1869,6 +1948,11 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+        // A worktree held for this operation is released with its key, so
+        // every completion path that clears the key frees the path too.
+        self.removal_coordination
+            .ops
+            .release_owner(&crate::worktree_ops::HoldOwner::InFlight(key.clone()));
     }
 
     /// Record that the create op `op_id` produced session `session_id` (stamped
@@ -2387,7 +2471,9 @@ impl Engine {
         let db_path = self.paths.sessions_db_path.clone();
         let action_for_panic = action.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let action_if_unspawned = action.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "project-persistence".into(),
                 in_flight_key: None,
@@ -2465,6 +2551,19 @@ impl Engine {
                 });
             },
         );
+        // A worker that never started never answers: answer for it, so the
+        // save's busy gets its final.
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ = self
+                .worker_tx
+                .send(WorkerEvent::ProjectPersistenceCompleted {
+                    action: action_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to save the project".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     /// Validate a raw path string before registering it as a project. Checks
@@ -3474,6 +3573,7 @@ impl Engine {
     /// stale on arrival anyway.
     pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
         let queue = Arc::clone(&self.changed_files_refresh);
+        let worktree_if_unspawned = worktree.clone();
         if !lock_changed_files_queue(&queue).request(worktree) {
             // A worker is already reading; it will pick this request up next.
             return;
@@ -3494,7 +3594,8 @@ impl Engine {
                     // a request slipping through the gap.
                     return LoopControl::Break;
                 };
-                let outcome = crate::git::changed_files(&path).map_err(|e| e.to_string());
+                let outcome =
+                    crate::git::changed_files_for_display(&path).map_err(|e| e.to_string());
                 if tx
                     .send(WorkerEvent::ChangedFilesReady {
                         outcome,
@@ -3514,6 +3615,14 @@ impl Engine {
             // Release it or every later refresh silently waits on a worker that
             // does not exist.
             lock_changed_files_queue(&queue).abandon();
+            // And answer for it, so a refresh the surface is waiting on (and
+            // showing a busy for) gets its outcome.
+            let _ = self.worker_tx.send(WorkerEvent::ChangedFilesReady {
+                outcome: Err(
+                    "dux could not start a worker thread to read the changed files".to_string(),
+                ),
+                worktree: worktree_if_unspawned,
+            });
         }
     }
 
@@ -3562,7 +3671,7 @@ impl Engine {
                 let started = Instant::now();
                 let swept = path
                     .as_ref()
-                    .map(|worktree_path| crate::git::changed_files(worktree_path));
+                    .map(|worktree_path| crate::git::changed_files_for_display(worktree_path));
                 last_sweep = if swept.is_some() {
                     started.elapsed()
                 } else {
@@ -3630,7 +3739,9 @@ impl Engine {
         let sessions = self.sessions.clone();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let project_id_if_unspawned = project.id.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("project-worktrees:{}", project.id),
                 in_flight_key: None,
@@ -3655,6 +3766,16 @@ impl Engine {
                 });
             },
         );
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ =
+                self.worker_tx.send(WorkerEvent::ProjectWorktreesReady {
+                    project_id: project_id_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to list the worktrees".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     /// List the worktrees the MANAGER may act on for a project (managed, not
@@ -3671,9 +3792,13 @@ impl Engine {
     ) {
         let paths = self.paths.clone();
         let sessions = self.sessions.clone();
+        let ops = self.worktree_ops().clone();
+        let busy = self.busy_folders();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let project_id_if_unspawned = project.id.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("manageable-worktrees:{}", project.id),
                 in_flight_key: None,
@@ -3686,8 +3811,9 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let result =
-                    crate::worktree_manager::list_manageable_worktrees(&project, &paths, &sessions);
+                let result = crate::worktree_manager::list_manageable_worktrees_with_busy(
+                    &project, &paths, &sessions, &ops, &busy,
+                );
                 let _ = tx.send(WorkerEvent::ManageableWorktreesReady {
                     project_id: project.id,
                     result,
@@ -3695,6 +3821,16 @@ impl Engine {
                 });
             },
         );
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ =
+                self.worker_tx.send(WorkerEvent::ManageableWorktreesReady {
+                    project_id: project_id_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to list the worktrees".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     pub fn spawn_project_branch_status_checks(&mut self) {
@@ -4483,6 +4619,36 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
             return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
         }
+        // A worktree being removed (or deleted or moved) takes no rename:
+        // nothing new may start in a folder that is about to go. A branch
+        // rename holds its worktree until its completion lands, so a removal
+        // that begins meanwhile waits for it and then deletes the branch by
+        // its new name; the hold is taken here, checked and held in one step
+        // under the registry's lock, before anything changes, and a refusal
+        // is said out loud. A title-only rename starts nothing in the folder
+        // and holds nothing.
+        let managed = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.workspace.as_managed())
+            .cloned();
+        if let Some(managed) = &managed {
+            let renames_the_branch = rename_branch && name != managed.branch_name;
+            let refused = if renames_the_branch {
+                self.hold_path_for_in_flight(
+                    &InFlightKey::BranchRename(session_id.to_string()),
+                    &managed.worktree_path,
+                    crate::worktree_ops::WorktreeOpKind::BranchRename,
+                )
+                .is_err()
+            } else {
+                self.worktree_ops().is_being_removed(&managed.worktree_path)
+            };
+            if refused {
+                return BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved);
+            }
+        }
 
         // Capture the previous title before mutating, in case a failed branch
         // rename has to revert it.
@@ -4534,6 +4700,7 @@ impl Engine {
             };
         }
         let worktree_path = managed.worktree_path.clone();
+        // Held above, before the title was written.
 
         // Stash the expected branches so `BranchSyncReady` can distinguish our
         // own in-progress rename (silently skip) from an unrelated external
@@ -6015,6 +6182,12 @@ impl Engine {
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         // Transport-facing: two path segments arrive as bare strings, which is
         // exactly the pair a caller can swap unnoticed. Named here, at the door.
+        //
+        // Whose this tab is and which provider it runs, read BEFORE a promotion
+        // moves the slot pointer and before the row goes: the terminating
+        // entry carries it, so a delete or a relaunch moments later still finds
+        // this process to wait for.
+        let owner = self.terminating_owner_for_tab(session_id, TabIdRef::new(tab_id));
         let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
         {
             Some(
@@ -6045,8 +6218,7 @@ impl Engine {
             .find(|s| s.id == session_id)
             .map(|s| s.display_label())
             .unwrap_or_else(|| tab_id.to_string());
-        // No worktree removal is deferred on a tab close, so the return is None.
-        let _ = self.begin_close_provider(TabIdRef::new(tab_id), label, None);
+        self.begin_close_provider(TabIdRef::new(tab_id), label, Some(owner));
         self.clear_tab_runtime(TabIdRef::new(tab_id));
         self.agent_tabs.remove(TabIdRef::new(tab_id));
         // Closing this tab may have removed the agent's last live process (its
@@ -11644,6 +11816,7 @@ mod tab_ops_tests {
 
         engine.close_tab("s1", "s1-slot").expect("promotion");
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });
@@ -12191,6 +12364,7 @@ mod tab_ops_tests {
             },
         );
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });
@@ -12223,6 +12397,7 @@ mod tab_ops_tests {
             },
         );
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });

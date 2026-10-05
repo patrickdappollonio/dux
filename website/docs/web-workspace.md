@@ -162,6 +162,20 @@ clone that sat on the wrong branch.
 > This moves the project folder itself onto the branch. Uncommitted changes that do not
 > conflict come along with it, the same as with **Check out default branch…**.
 
+> [!CAUTION]
+> Switching the project folder, **Pull project** and an agent's **Pull** make git delete or
+> overwrite an ignored folder or file when the incoming branch tracks that same path: git
+> treats ignored files as disposable. dux refuses, and changes nothing, when that folder
+> holds, or that file sits inside, an agent's worktree, a standalone agent's folder, a
+> project's repository or a terminal working there, and says which. Any other ignored folder
+> or file git still replaces, so move it aside first if it matters. A folder the incoming
+> commit deletes every file of goes too, as does a link it deletes or replaces (tracked
+> or not), and dux refuses the same way when one of those lives or works there.
+
+> [!NOTE]
+> These pulls and switches never update submodules, even when your git config sets
+> `submodule.recurse`. Run `git submodule update` yourself when you want them to follow.
+
 Only one of **Pull project**, **Check out default branch…** and **Change base branch…**
 runs on a project at a time; starting another while one is running is refused and names
 the one in progress.

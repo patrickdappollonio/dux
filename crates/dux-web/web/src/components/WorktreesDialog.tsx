@@ -62,9 +62,12 @@ function rowTooltip(entry: ProjectWorktreeEntryView): ReactNode {
 function WorktreeRowBody({
   entry,
   heldBy,
+  inUse,
 }: {
   entry: ProjectWorktreeEntryView
   heldBy?: string
+  // The server's sentence for what is using a worktree no agent holds.
+  inUse?: string | null
 }) {
   return (
     <>
@@ -81,6 +84,9 @@ function WorktreeRowBody({
           <span className="truncate text-xs text-muted-foreground">
             Held by <InlineCode>{heldBy}</InlineCode>
           </span>
+        ) : null}
+        {inUse ? (
+          <span className="truncate text-xs text-muted-foreground">{inUse}</span>
         ) : null}
       </div>
       {entry.dirty ? (
@@ -239,7 +245,20 @@ function WorktreesBody({ projectId }: { projectId: string }) {
   const project = spine?.projects.find((p) => p.id === projectId)
   const projectName = project?.name ?? "project"
   const adoptable = attachWorktreeEntries.filter((e) => e.adoptable)
-  const attached = attachWorktreeEntries.filter((e) => !e.adoptable)
+  const attached = attachWorktreeEntries.filter(
+    (e) => !e.adoptable && !e.being_removed && e.agent_id !== null,
+  )
+  // A worktree no agent of its own holds, but something is using: an agent
+  // being created in it, a standalone agent living inside it, or the CLI of an
+  // agent deleted a moment ago (worktree kept) still stopping. Telling the
+  // user to delete the agent holding it would point at nobody, so it gets its
+  // own group, and the server's reason sits on the row itself.
+  const inUse = attachWorktreeEntries.filter(
+    (e) => !e.adoptable && !e.being_removed && e.agent_id === null,
+  )
+  // A worktree whose agent was just deleted: its removal is already under
+  // way, so it is neither free nor held, and it cannot be removed twice.
+  const beingRemoved = attachWorktreeEntries.filter((e) => e.being_removed)
 
   // Resolve the holding agent's display name from the spine, the one place the
   // web derives an agent's name (`title || branch_name`).
@@ -293,7 +312,10 @@ function WorktreesBody({ projectId }: { projectId: string }) {
           <div className="flex h-[40vh] items-center justify-center md:h-64">
             <GlyphSpinner className="text-lg text-muted-foreground" />
           </div>
-        ) : adoptable.length === 0 && attached.length === 0 ? (
+        ) : adoptable.length === 0 &&
+          attached.length === 0 &&
+          inUse.length === 0 &&
+          beingRemoved.length === 0 ? (
           <div className="flex h-[40vh] items-center justify-center px-6 text-center text-sm text-muted-foreground md:h-64">
             This project has no worktrees dux manages yet. Create an agent and
             one appears here.
@@ -366,6 +388,52 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                   >
                     <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
                       <WorktreeRowBody entry={entry} heldBy={agentName(entry)} />
+                    </div>
+                  </SimpleTooltip>
+                ))}
+              </>
+            ) : null}
+            {inUse.length > 0 ? (
+              <>
+                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
+                  In use
+                  <span className="block text-xs font-normal">
+                    Something is still using these. Each row says what; remove
+                    one once that has finished.
+                  </span>
+                </div>
+                {/* No actions: the server refuses a removal while the folder is
+                  * in use, so offering one would only end in that refusal. */}
+                {inUse.map((entry) => (
+                  <SimpleTooltip
+                    key={entry.worktree_path}
+                    content={rowTooltip(entry)}
+                  >
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
+                      <WorktreeRowBody entry={entry} inUse={entry.reason} />
+                    </div>
+                  </SimpleTooltip>
+                ))}
+              </>
+            ) : null}
+            {beingRemoved.length > 0 ? (
+              <>
+                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
+                  Being removed
+                  <span className="block text-xs font-normal">
+                    Their agents were just deleted. dux removes each one once
+                    that agent has stopped.
+                  </span>
+                </div>
+                {/* No actions: the removal is already running, and a second
+                  * one would only race it. */}
+                {beingRemoved.map((entry) => (
+                  <SimpleTooltip
+                    key={entry.worktree_path}
+                    content={rowTooltip(entry)}
+                  >
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
+                      <WorktreeRowBody entry={entry} />
                     </div>
                   </SimpleTooltip>
                 ))}

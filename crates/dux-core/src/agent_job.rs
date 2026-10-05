@@ -47,13 +47,92 @@ enum HeadMismatch {
 /// It takes a [`ManagedWorkspace`], not a session, so a standalone agent's folder
 /// cannot be handed to it: the user's folder must survive a failed create
 /// untouched, and a caller holding a folder workspace cannot name the argument.
-fn rollback_created_worktree(repo_path: &Path, managed: &ManagedWorkspace) {
-    let worktree_path = Path::new(&managed.worktree_path);
-    if managed.branch_provenance.dux_may_delete_branch() {
-        let _ = git::remove_worktree(repo_path, worktree_path, &managed.branch_name, None);
-    } else {
-        let _ = git::remove_worktree_keep_branch(repo_path, worktree_path);
+fn rollback_created_worktree(
+    repo_path: &Path,
+    managed: &ManagedWorkspace,
+    session_id: &str,
+    rollback: Option<&Rollback>,
+) {
+    let worktree = Path::new(&managed.worktree_path);
+    let Some(rollback) = rollback else {
+        // Nothing to run the removal pipeline with: the worktree is left for
+        // the user rather than removed without ending what runs in it.
+        logger::warn(&format!(
+            "a failed agent create kept its worktree at {}: nothing could end what runs in it \
+             first",
+            worktree.display()
+        ));
+        return;
+    };
+    let registry = &rollback.registries.processes;
+    let ops = &rollback.registries.worktrees;
+    // Everything the agent's create started (its startup command, and
+    // whatever that left running), and every other session started in the
+    // folder, ended first, exactly as an agent delete's removal ends them.
+    let mut sessions = registry.sessions_of(session_id);
+    sessions.extend(registry.sessions_in(worktree));
+    sessions.sort_by_key(|session| (session.sid, session.started_at));
+    sessions.dedup();
+    let snapshot = std::sync::OnceLock::new();
+    let _ = snapshot.set(crate::process_sessions::snapshot(&sessions));
+    let processes = crate::engine::RemovalProcesses {
+        sessions: sessions.clone(),
+        snapshot: std::sync::Arc::new(snapshot),
+        grace: rollback.grace,
+    };
+    // The same claim every removal takes, then the create's own hold on the
+    // folder is let go: the removal waits for every hold, and this one is the
+    // create's, which is ending here.
+    let claim = ops.announce_removal(worktree);
+    ops.release_owner(&crate::worktree_ops::HoldOwner::CreateOp(
+        rollback.create_key.clone(),
+    ));
+    // No answer from a dialog: the provenance decides, so only a branch this
+    // create minted goes with the worktree.
+    let result = crate::engine::perform_deferred_removal(
+        session_id,
+        &repo_path.to_string_lossy(),
+        managed,
+        None,
+        &processes,
+        crate::engine::RemovalCoordinationInputs {
+            claim,
+            wait: rollback.wait,
+            waiting_tx: None,
+            registry: registry.clone(),
+            live: registry.clone(),
+            db_path: rollback.db_path.clone(),
+        },
+    );
+    match result {
+        // Ended, and the folder is gone: nothing of the create's is left to
+        // follow.
+        Ok(_) => registry.unregister(&sessions),
+        Err(reason) => {
+            logger::warn(&format!(
+                "a failed agent create could not remove its worktree at {}: {reason}",
+                worktree.display()
+            ));
+            let _ = rollback.worker_tx.send(WorkerEvent::PollerStatus(
+                crate::engine::StatusUpdate::warning(crate::status_text![
+                    "The agent was not created, and its new worktree was kept: ",
+                    reason
+                ]),
+            ));
+        }
     }
+}
+
+/// What a failed create needs to take its worktree back through the one
+/// removal pipeline every other removal goes through.
+#[derive(Clone)]
+struct Rollback {
+    registries: CreateJobRegistries,
+    create_key: String,
+    grace: std::time::Duration,
+    wait: std::time::Duration,
+    worker_tx: Sender<WorkerEvent>,
+    db_path: PathBuf,
 }
 
 /// A copy of uncommitted changes planned by a per-request arm and executed in
@@ -184,9 +263,26 @@ struct CreatePlanContext<'a> {
     worker_tx: &'a Sender<WorkerEvent>,
     create_key: &'a str,
     creation_notes: &'a mut Vec<crate::status_text::StatusText>,
+    worktrees: &'a crate::worktree_ops::WorktreeOps,
+    moves: &'a crate::checkout_move::CheckoutMoveGuard,
 }
 
 impl CreatePlanContext<'_> {
+    /// Hold `path` for this create, from before `git worktree add` until the
+    /// create ends (released by the engine when its launch lands or fails).
+    /// Refused once a removal has claimed the path.
+    fn claim_worktree_path(&self, path: &Path) -> anyhow::Result<()> {
+        self.worktrees
+            .hold_as(
+                crate::worktree_ops::HoldOwner::CreateOp(self.create_key.to_string()),
+                path,
+                crate::worktree_ops::WorktreeOpKind::CreateAgent,
+            )
+            .map_err(|refused| {
+                anyhow::anyhow!(refused.sentence("create an agent there").to_string())
+            })
+    }
+
     fn plan(&mut self, request: CreateAgentRequest) -> Option<ManagedCreatePlan> {
         match request {
             CreateAgentRequest::Standalone { .. } => {
@@ -284,7 +380,7 @@ impl CreatePlanContext<'_> {
             q(project.name),
             " before creating the agent..."
         ]);
-        if let Err(err) = git::switch_branch_if_needed(repo_path, leading_branch) {
+        if let Err(err) = git::switch_branch_if_needed(repo_path, leading_branch, self.moves) {
             logger::error(&format!(
                 "pre-create branch switch failed for {}: {err}",
                 project.path
@@ -308,7 +404,7 @@ impl CreatePlanContext<'_> {
                 ));
             }
             Ok(true) => {
-                if let Err(err) = git::pull_branch(repo_path, leading_branch) {
+                if let Err(err) = git::pull_branch(repo_path, leading_branch, self.moves) {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -347,20 +443,23 @@ impl CreatePlanContext<'_> {
         resolved_name: &str,
         attach_existing: bool,
     ) -> Option<(String, PathBuf)> {
+        let claim = |path: &Path| self.claim_worktree_path(path);
         let result = if attach_existing {
-            git::create_worktree_existing_branch(
+            git::create_worktree_existing_branch_claimed(
                 repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 resolved_name,
+                &claim,
             )
         } else {
-            git::create_worktree_from_start_point(
+            git::create_worktree_from_start_point_claimed(
                 repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(leading_branch),
                 Some(resolved_name),
+                &claim,
             )
         };
         match result {
@@ -800,11 +899,13 @@ impl CreatePlanContext<'_> {
                 }
             }
 
-            let (branch_name, worktree_path) = match git::create_worktree_existing_branch(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_existing_branch_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 &resolved_name,
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -960,12 +1061,14 @@ impl CreatePlanContext<'_> {
                 }
             };
             let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(&source_head),
                 Some(&custom_name),
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1112,12 +1215,14 @@ impl CreatePlanContext<'_> {
                 }
             };
             let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+            let claim = |path: &Path| self.claim_worktree_path(path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
                 &repo_path,
                 &self.paths.worktrees_root,
                 &project.name,
                 Some(&source_head),
                 custom_name.as_deref(),
+                &claim,
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1195,9 +1300,14 @@ fn compare_copy_heads(source: &Path, destination: &Path) -> CopyHeadCheck {
     }
 }
 
-fn rollback_managed_create(repo_path: &Path, session: &AgentSession, owns_worktree: bool) {
+fn rollback_managed_create(
+    repo_path: &Path,
+    session: &AgentSession,
+    owns_worktree: bool,
+    rollback: &Rollback,
+) {
     if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-        rollback_created_worktree(repo_path, managed);
+        rollback_created_worktree(repo_path, managed, &session.id, Some(rollback));
     }
 }
 
@@ -1211,6 +1321,7 @@ fn handle_copy_mismatch(
     worker_tx: &Sender<WorkerEvent>,
     create_key: &str,
     creation_notes: &mut Vec<crate::status_text::StatusText>,
+    rollback: &Rollback,
 ) -> bool {
     match copy.on_head_mismatch {
         HeadMismatch::SkipWithNote { branch } => {
@@ -1230,7 +1341,7 @@ fn handle_copy_mismatch(
                     session.directory()
                 ));
             }
-            rollback_managed_create(repo_path, session, owns_worktree);
+            rollback_managed_create(repo_path, session, owns_worktree, rollback);
             let message = match check_error {
                 Some(error) => crate::status_text![
                     "Failed to copy uncommitted changes from ",
@@ -1290,6 +1401,7 @@ fn apply_pending_copy(
     worker_tx: &Sender<WorkerEvent>,
     create_key: &str,
     creation_notes: &mut Vec<crate::status_text::StatusText>,
+    rollback: &Rollback,
 ) -> bool {
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
         status_op_id: create_key.to_string(),
@@ -1320,7 +1432,7 @@ fn apply_pending_copy(
                     copy.source.display(),
                     session.directory()
                 ));
-                rollback_managed_create(repo_path, session, owns_worktree);
+                rollback_managed_create(repo_path, session, owns_worktree, rollback);
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                     status_op_id: create_key.to_string(),
                     message: crate::status_text![
@@ -1341,6 +1453,7 @@ fn apply_pending_copy(
             worker_tx,
             create_key,
             creation_notes,
+            rollback,
         ),
         CopyHeadCheck::Failed(error) => {
             logger::error(&format!(
@@ -1357,6 +1470,7 @@ fn apply_pending_copy(
                 worker_tx,
                 create_key,
                 creation_notes,
+                rollback,
             )
         }
     }
@@ -1375,6 +1489,7 @@ fn run_create_standalone_agent_job(
     term_size: (u16, u16),
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
+    gate: &crate::process_sessions::SpawnGate,
 ) {
     let folder_label = crate::home_path::shorten_home(&folder);
     if !folder.is_dir() {
@@ -1491,7 +1606,7 @@ fn run_create_standalone_agent_job(
         // whole point of the sentence and is nowhere on screen.
         status_quiet: crate::statusline::QuietSurfaces::LOUD,
     };
-    run_agent_launch_job(request, worker_tx);
+    run_agent_launch_job(request, worker_tx, gate);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1504,7 +1619,17 @@ fn launch_managed_create(
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
     mut creation_notes: Vec<crate::status_text::StatusText>,
+    registries: CreateJobRegistries,
 ) {
+    let registry = registries.processes.clone();
+    let rollback = Rollback {
+        registries,
+        create_key: create_key.clone(),
+        grace: crate::config::shutdown_grace(config.shutdown_timeout_seconds),
+        wait: std::time::Duration::from_secs(u64::from(config.removal_wait_seconds)),
+        worker_tx: worker_tx.clone(),
+        db_path: paths.sessions_db_path.clone(),
+    };
     let ManagedCreatePlan {
         project,
         provider,
@@ -1573,7 +1698,7 @@ fn launch_managed_create(
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-            rollback_created_worktree(&repo_path, managed);
+            rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key.clone(),
@@ -1593,6 +1718,7 @@ fn launch_managed_create(
             &worker_tx,
             &create_key,
             &mut creation_notes,
+            &rollback,
         )
     {
         return;
@@ -1635,7 +1761,7 @@ fn launch_managed_create(
             // branch dux made) would push the next attempt onto another name
             // for no visible reason.
             if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-                rollback_created_worktree(&repo_path, managed);
+                rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
             }
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key.clone(),
@@ -1672,6 +1798,7 @@ fn launch_managed_create(
                     terminal: config.startup_command_terminal.clone(),
                     env: env.clone(),
                 },
+                &registry,
             )
         });
     if let Some(result) = &startup_result {
@@ -1732,7 +1859,23 @@ fn launch_managed_create(
         wants_fullscreen: false,
         status_quiet,
     };
-    run_agent_launch_job(request, worker_tx);
+    let gate = crate::process_sessions::SpawnGate::new(
+        rollback.registries.processes.clone(),
+        rollback.registries.worktrees.clone(),
+    );
+    run_agent_launch_job_with(request, worker_tx, Some(&rollback), &gate);
+}
+
+/// The shared registries an agent create reports into: the process sessions
+/// its startup command runs in, and the per-worktree registry its folder is
+/// held in from before `git worktree add` until its launch lands.
+#[derive(Clone, Default)]
+pub struct CreateJobRegistries {
+    pub processes: crate::process_sessions::AgentProcessRegistry,
+    pub worktrees: crate::worktree_ops::WorktreeOps,
+    /// What the pull before the create asks before git moves the project's
+    /// checkout (see [`crate::checkout_move`]).
+    pub moves: crate::checkout_move::CheckoutMoveGuard,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1744,7 +1887,13 @@ pub fn run_create_agent_job(
     term_size: (u16, u16),
     status_op_id: String,
     identity: crate::term_identity::TerminalIdentity,
+    registries: CreateJobRegistries,
 ) {
+    let CreateJobRegistries {
+        processes: registry,
+        worktrees,
+        moves,
+    } = registries;
     // The opaque id of the shared create-agent `HandlerStatusOp` keys every
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
     // launch-ready/failed handler can resolve the op's final on the same id.
@@ -1760,8 +1909,10 @@ pub fn run_create_agent_job(
         provider,
     } = request
     {
+        let gate = crate::process_sessions::SpawnGate::new(registry.clone(), worktrees.clone());
         run_create_standalone_agent_job(
             folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
+            &gate,
         );
         return;
     }
@@ -1771,6 +1922,8 @@ pub fn run_create_agent_job(
             worker_tx: &worker_tx,
             create_key: &create_key,
             creation_notes: &mut creation_notes,
+            worktrees: &worktrees,
+            moves: &moves,
         };
         let Some(plan) = context.plan(request) else {
             return;
@@ -1786,9 +1939,29 @@ pub fn run_create_agent_job(
         create_key,
         identity,
         creation_notes,
+        CreateJobRegistries {
+            processes: registry,
+            worktrees,
+            moves,
+        },
     );
 }
-pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<WorkerEvent>) {
+pub fn run_agent_launch_job(
+    request: AgentLaunchRequest,
+    worker_tx: Sender<WorkerEvent>,
+    gate: &crate::process_sessions::SpawnGate,
+) {
+    run_agent_launch_job_with(request, worker_tx, None, gate);
+}
+
+/// [`run_agent_launch_job`], with what a create's launch needs to take its
+/// worktree back if the launch fails.
+fn run_agent_launch_job_with(
+    request: AgentLaunchRequest,
+    worker_tx: Sender<WorkerEvent>,
+    rollback: Option<&Rollback>,
+    gate: &crate::process_sessions::SpawnGate,
+) {
     let launch_args = request.provider_config.interactive_args(request.resume);
     let (rows, cols) = request.pty_size;
     logger::debug(&format!(
@@ -1814,7 +1987,7 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
             && *owns_worktree
             && let Some(managed) = request.session.workspace.as_managed()
         {
-            rollback_created_worktree(Path::new(repo_path), managed);
+            rollback_created_worktree(Path::new(repo_path), managed, &request.session.id, rollback);
         }
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
             AgentLaunchFailedData { request, message },
@@ -1822,6 +1995,34 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
         return;
     }
 
+    // Announced before the last check and kept until the engine registers the
+    // session, so a removal claiming the folder meanwhile either refuses this
+    // spawn here or waits to see its session.
+    let spawn_ticket = match gate.enter(Path::new(request.session.directory())) {
+        Ok(ticket) => ticket,
+        Err(refused) => {
+            let message = refused.sentence("start this agent there").to_string();
+            if let AgentLaunchKind::Create {
+                repo_path,
+                owns_worktree,
+                ..
+            } = &request.kind
+                && *owns_worktree
+                && let Some(managed) = request.session.workspace.as_managed()
+            {
+                rollback_created_worktree(
+                    Path::new(repo_path),
+                    managed,
+                    &request.session.id,
+                    rollback,
+                );
+            }
+            let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                AgentLaunchFailedData { request, message },
+            )));
+            return;
+        }
+    };
     let client = match crate::pty::PtyClient::spawn_with_env_opts(
         &request.provider_config.command,
         &launch_args,
@@ -1837,6 +2038,9 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
     ) {
         Ok(client) => client,
         Err(err) => {
+            // Nothing started, so nothing is left to register; the rollback
+            // below is a removal of this very folder and must not wait for it.
+            drop(spawn_ticket);
             logger::error(&format!(
                 "PTY spawn failed for {}: {err}",
                 request.session.id
@@ -1849,7 +2053,12 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
                 && *owns_worktree
                 && let Some(managed) = request.session.workspace.as_managed()
             {
-                rollback_created_worktree(Path::new(repo_path), managed);
+                rollback_created_worktree(
+                    Path::new(repo_path),
+                    managed,
+                    &request.session.id,
+                    rollback,
+                );
             }
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
                 format!("Failed to start {}: {err}", request.provider_config.command)
@@ -1864,7 +2073,11 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
     };
     logger::info(&format!("PTY session started for {}", request.session.id));
     let _ = worker_tx.send(WorkerEvent::AgentLaunchReady(Box::new(
-        AgentLaunchReadyData { request, client },
+        AgentLaunchReadyData {
+            request,
+            client,
+            spawn_ticket: Some(spawn_ticket),
+        },
     )));
 }
 
@@ -1945,6 +2158,16 @@ mod tests {
         request: CreateAgentRequest,
         setup: impl FnOnce(&DuxPaths),
     ) -> JobRun {
+        drive_create_job_run_with(repo, request, setup, Default::default())
+    }
+
+    /// Same, with the registries the engine would hand the job.
+    fn drive_create_job_run_with(
+        repo: &Path,
+        request: CreateAgentRequest,
+        setup: impl FnOnce(&DuxPaths),
+        registries: CreateJobRegistries,
+    ) -> JobRun {
         let paths_root = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             root: paths_root.path().to_path_buf(),
@@ -1966,6 +2189,7 @@ mod tests {
             (80, 24),
             "op-1".to_string(),
             crate::term_identity::TerminalIdentity::default(),
+            registries,
         );
         let mut run = JobRun {
             session: None,
@@ -2230,6 +2454,7 @@ mod tests {
             (80, 24),
             "op-standalone".to_string(),
             crate::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
         let mut run = StandaloneRun::default();
         while let Ok(event) = rx.try_recv() {
@@ -3242,6 +3467,22 @@ mod tests {
         engine: &mut crate::engine::Engine,
         request: CreateAgentRequest,
     ) -> Vec<crate::engine::EventReaction> {
+        // A surface only creates an agent in a project it lists, and a launch
+        // landing for a project the engine does not list is taken for one
+        // deleted mid-create and stopped.
+        let project = match &request {
+            CreateAgentRequest::NewProject { project, .. }
+            | CreateAgentRequest::PullRequest { project, .. }
+            | CreateAgentRequest::ForkSession { project, .. }
+            | CreateAgentRequest::ExistingManagedWorktree { project, .. }
+            | CreateAgentRequest::ForkExternalWorktree { project, .. } => Some(project.clone()),
+            CreateAgentRequest::Standalone { .. } => None,
+        };
+        if let Some(project) = project
+            && !engine.projects.iter().any(|known| known.id == project.id)
+        {
+            engine.projects.push(project);
+        }
         engine
             .apply(crate::engine::Command::DispatchCreateAgentRequest {
                 request: Box::new(request),
@@ -4086,6 +4327,100 @@ mod tests {
         );
     }
 
+    /// The pull before a create refuses to let git delete another project's
+    /// repository standing where the incoming commit tracks a file, and the
+    /// create still goes ahead, from the checkout as it was, saying so.
+    #[test]
+    fn a_refused_pre_create_pull_still_creates_from_the_current_head() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join(".gitignore"), "vendor/\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "ignore vendor"]);
+        let before = crate::git::head_commit(repo.path()).unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        git_in(bare.path(), &["init", "--bare", "-b", "main"]);
+        git_in(
+            repo.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git_in(repo.path(), &["push", "origin", "main"]);
+        let staging = tempfile::tempdir().unwrap();
+        git_in(
+            staging.path(),
+            &["clone", bare.path().to_str().unwrap(), "."],
+        );
+        git_in(staging.path(), &["config", "user.name", "test"]);
+        git_in(staging.path(), &["config", "user.email", "t@t"]);
+        std::fs::write(staging.path().join("vendor"), "a file now\n").unwrap();
+        git_in(staging.path(), &["add", "-f", "vendor"]);
+        git_in(staging.path(), &["commit", "-m", "vendor is a file"]);
+        git_in(staging.path(), &["push", "origin", "main"]);
+        // Another project's repository, with history, in the ignored folder.
+        let other = repo.path().join("vendor").join("lib");
+        std::fs::create_dir_all(&other).unwrap();
+        git_in(&other, &["init", "-q", "-b", "main"]);
+        std::fs::write(other.join("notes.txt"), "irreplaceable\n").unwrap();
+        git_in(&other, &["add", "-A"]);
+        git_in(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "mine",
+            ],
+        );
+        let db = tempfile::tempdir().unwrap();
+        let registries = CreateJobRegistries {
+            moves: crate::checkout_move::CheckoutMoveGuard::new(
+                Default::default(),
+                db.path().join("sessions.sqlite3"),
+                Default::default(),
+                Vec::new(),
+                vec![("other".to_string(), other.to_string_lossy().into_owned())],
+                Vec::new(),
+            ),
+            ..Default::default()
+        };
+
+        let run = drive_create_job_run_with(
+            repo.path(),
+            new_project_request(repo.path(), true, false),
+            |_| {},
+            registries,
+        );
+
+        assert!(
+            run.failure.is_none(),
+            "a refused pull must not fail the create: {:?}",
+            run.failure
+        );
+        assert!(
+            other.join(".git").exists(),
+            "the other project's repository is kept"
+        );
+        assert_eq!(
+            crate::git::head_commit(repo.path()).unwrap(),
+            before,
+            "the checkout did not move"
+        );
+        let worktree = PathBuf::from(run.session.unwrap().directory());
+        assert!(
+            !worktree.join("vendor").is_file(),
+            "the agent starts from the old HEAD"
+        );
+        let status = run.status_message.unwrap();
+        assert!(
+            status.contains("could not pull")
+                && status.contains("project \"other\"")
+                && status.contains("starts from the local branch state"),
+            "the create says the pull was refused, why, and where it started: {status}"
+        );
+    }
+
     /// A dirty checkout does not block the pull, and git itself fast-forwards
     /// when nothing conflicts.
     #[test]
@@ -4264,5 +4599,81 @@ mod tests {
             "no copy progress may be reported before the provider check: {:?}",
             run.progress
         );
+    }
+
+    /// Review 6: "Before a worktree is removed, every non-standalone process in
+    /// or under it is ended" and "one occupancy function decides every
+    /// removal". A create whose startup command left a job running (a dev
+    /// server) and whose provider then turns out not to be installed rolls the
+    /// worktree back with `git worktree remove --force` directly: nothing ends
+    /// the startup command's session first, so the folder is deleted from under
+    /// the job dux started there.
+    #[test]
+    fn review6_a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
+        let (mut engine, engine_dir) = crate::engine::test_support::test_engine();
+        let repo = init_test_repo();
+        let pidfile = engine_dir.path().join("job.pid");
+        let mut project = test_project(repo.path());
+        // A provider that is installed (an executable file) but cannot be
+        // exec'd (ENOEXEC: no shebang, not a binary), so the provider check
+        // passes and the PTY spawn, after the startup command, fails.
+        let broken = engine_dir.path().join("broken-provider");
+        std::fs::write(&broken, b"\x7fnot-an-elf\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        project.default_provider = ProviderKind::new(broken.to_str().unwrap());
+        project.startup_command = Some(format!(
+            "sleep 300 >/dev/null 2>&1 & echo $! > '{}'",
+            pidfile.display()
+        ));
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("doomed".to_string()),
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+        let reactions = drive_create_through_engine(&mut engine, request);
+        let failed = create_final(&reactions);
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("the startup command ran")
+            .trim()
+            .parse()
+            .unwrap();
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        if let Some(p) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
+        }
+        // The rollback went through the removal pipeline: the job was ended
+        // first, then the worktree went.
+        let worktree = engine_dir
+            .path()
+            .join("worktrees")
+            .join("repo")
+            .join("doomed");
+        assert!(cwd.is_none(), "the startup command's job was ended first");
+        assert!(
+            worktree.parent().unwrap().exists(),
+            "{}",
+            worktree.display()
+        );
+        assert!(
+            !worktree.exists(),
+            "the failed create's worktree was rolled back"
+        );
+        // Either the rollback ended the job before removing the worktree (it
+        // is gone), or it kept the worktree for it; what must never be seen
+        // is the job still running in a folder that was deleted.
+        if let Some(cwd) = cwd {
+            assert!(
+                !cwd.to_string_lossy().ends_with(" (deleted)"),
+                "the failed create removed its worktree from under the startup command's job \
+                 (pid {pid}, cwd now {}); create final: {}",
+                cwd.display(),
+                failed.message
+            );
+        }
     }
 }

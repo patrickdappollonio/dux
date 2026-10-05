@@ -203,6 +203,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: HashMap::new(),
+        removal_coordination: Default::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         launched_drop_paste: Default::default(),
@@ -212,6 +213,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
             .map(|t| (TabId::new(t.id.clone()), t))
             .collect(),
         terminating_ptys: Vec::new(),
+        process_registry: Default::default(),
+        removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         gh_status: GhStatus::Unknown,

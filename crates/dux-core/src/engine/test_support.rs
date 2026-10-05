@@ -22,7 +22,15 @@ use crate::storage::SessionStore;
 /// engine's workers may still be writing into it when the test ends.
 pub(crate) fn test_engine() -> (Engine, ScratchDir) {
     let tmp = ScratchDir::new();
-    let root = tmp.path().to_path_buf();
+    let engine = test_engine_at(tmp.path());
+    (engine, tmp)
+}
+
+/// An engine over the state under `root`, as [`test_engine`] builds one: a
+/// second call on the same root, once the first engine is dropped, is the
+/// next start of dux on the same config directory.
+pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
+    let root = root.to_path_buf();
     let paths = DuxPaths {
         config_path: root.join("config.toml"),
         sessions_db_path: root.join("sessions.sqlite3"),
@@ -71,6 +79,8 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         companion_terminals: HashMap::new(),
         agent_tabs: HashMap::new(),
         terminating_ptys: Vec::new(),
+        process_registry: Default::default(),
+        removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         gh_status: GhStatus::Unknown,
@@ -132,8 +142,13 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: HashMap::new(),
+        removal_coordination: Default::default(),
     };
-    (engine, tmp)
+    // As the real start does: the process registry saved in this database.
+    engine
+        .process_registry
+        .attach_store(&engine.paths.sessions_db_path);
+    engine
 }
 
 /// A Support-tab record (`agent_tabs` entry) owned by `session_id`.
@@ -265,4 +280,82 @@ pub(crate) fn recv_changed_files_ready(engine: &mut Engine) -> crate::worker::Wo
         engine.process_worker_event(event);
     }
     panic!("the changed-files refresh never reported");
+}
+
+/// What [`delete_through_pipeline`] reports: what happened to the worktree and
+/// its branches, and the record the delete vanished.
+pub(crate) struct PipelineDelete {
+    pub removal: crate::engine::WorktreeRemoval,
+    pub finish: crate::engine::FinishDeleteSessionOutcome,
+}
+
+/// Delete an agent the way both surfaces do, through the one pipeline:
+/// `begin_delete_session`, the record vanished at once, and for a
+/// worktree-removing delete the reaper and the removal worker driven until it
+/// reports. `Ok(None)` for an unknown agent; a refusal or a removal failure
+/// is an `Err` carrying the sentence the surfaces would show.
+pub(crate) fn delete_through_pipeline(
+    engine: &mut Engine,
+    session_id: &str,
+    delete_worktree: bool,
+    delete_branch: Option<bool>,
+) -> anyhow::Result<Option<PipelineDelete>> {
+    use crate::engine::BeginDeleteSessionOutcome;
+    match engine.begin_delete_session(session_id, delete_worktree, delete_branch) {
+        BeginDeleteSessionOutcome::NotFound => Ok(None),
+        BeginDeleteSessionOutcome::AlreadyInFlight => {
+            anyhow::bail!("a delete of this agent is already in progress")
+        }
+        BeginDeleteSessionOutcome::TabLaunching => {
+            anyhow::bail!("a tab of this agent is still launching")
+        }
+        BeginDeleteSessionOutcome::Refused { message } => anyhow::bail!("{message}"),
+        BeginDeleteSessionOutcome::Inline { removal } => {
+            let finish = engine
+                .finish_delete_session(session_id)?
+                .expect("the agent was there");
+            Ok(Some(PipelineDelete { removal, finish }))
+        }
+        BeginDeleteSessionOutcome::AsyncStarted { .. } => {
+            let finish = engine
+                .finish_delete_session(session_id)?
+                .expect("the agent was there");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                for removal in engine.reap_terminating_ptys().removals {
+                    let _ = engine.dispatch_deferred_worktree_removal(removal);
+                }
+                match engine
+                    .worker_rx
+                    .recv_timeout(std::time::Duration::from_millis(50))
+                {
+                    Ok(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                        session_id: done,
+                        result,
+                    }) if done == session_id => {
+                        engine.process_worker_event(
+                            crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                                session_id: done,
+                                result: result.clone(),
+                            },
+                        );
+                        return match result {
+                            Ok(branches) => Ok(Some(PipelineDelete {
+                                removal: crate::engine::WorktreeRemoval::Performed { branches },
+                                finish,
+                            })),
+                            Err(message) => Err(anyhow::anyhow!(message)),
+                        };
+                    }
+                    Ok(event) => {
+                        let _ = engine.process_worker_event(event);
+                    }
+                    Err(_) => assert!(
+                        std::time::Instant::now() < deadline,
+                        "the removal never reported"
+                    ),
+                }
+            }
+        }
+    }
 }

@@ -37,6 +37,10 @@ impl Engine {
         if let Some(reason) = self.missing_directory_reason(session_id) {
             anyhow::bail!("{reason}");
         }
+        // Nothing new may start in a folder a removal has claimed.
+        if let Some(refused) = self.worktree_ops().removal_refusal(session.directory()) {
+            anyhow::bail!("{}", refused.sentence("open a terminal there"));
+        }
 
         // A standalone agent belongs to no project, so a terminal opened on it
         // gets the global environment with no project overlay. Falling through
@@ -145,6 +149,14 @@ impl Engine {
         // pane matches it on the first frame, with no initial reflow of the
         // shell; a headless caller passes a default and relies on the client's
         // first resize.
+        //
+        // Announced before the check and kept until the session is registered
+        // below, so a removal claiming the folder meanwhile either refuses
+        // this spawn or waits to see its session.
+        let _spawning = self
+            .spawn_gate()
+            .enter(cwd)
+            .map_err(|refused| anyhow::anyhow!("{}", refused.sentence("open a terminal there")))?;
         let client = PtyClient::spawn_with_env_opts(
             &self.config.terminal.command,
             &self.config.terminal.args,
@@ -161,6 +173,55 @@ impl Engine {
             },
         )?;
 
+        // A terminal of an agent is remembered for the agent's whole life, so
+        // a worktree removal can end what was started in it even after it was
+        // closed. A project or standalone terminal belongs to no agent and is
+        // never purged; it is remembered so its session number is never
+        // mistaken for one a deleted agent used before.
+        if let Some(process) = client.process_session() {
+            let key = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => session_id,
+                crate::model::TerminalOwnerRef::Project(_)
+                | crate::model::TerminalOwnerRef::Standalone => {
+                    crate::process_sessions::UNOWNED_PTYS
+                }
+            };
+            let standalone_agent = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => self
+                    .session_by_id(session_id)
+                    .is_some_and(|session| session.workspace.as_managed().is_none()),
+                _ => false,
+            };
+            if standalone_agent {
+                self.process_registry.register_standalone(key, process, cwd);
+            } else {
+                self.process_registry.register(key, process, cwd);
+            }
+            client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
+            let registry = self.process_registry.clone();
+            client.set_recorded_members(Box::new(move || registry.survivors_of(&[process])));
+            let name = format!("Terminal {}", self.terminal_counter + 1);
+            let what = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => format!(
+                    "terminal \"{name}\" of agent \"{}\"",
+                    self.session_by_id(session_id)
+                        .map(|session| session.display_label())
+                        .unwrap_or_else(|| session_id.to_string())
+                ),
+                crate::model::TerminalOwnerRef::Project(project_id) => format!(
+                    "project terminal \"{name}\" of project \"{}\"",
+                    self.projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| project_id.to_string())
+                ),
+                crate::model::TerminalOwnerRef::Standalone => {
+                    format!("standalone terminal \"{name}\"")
+                }
+            };
+            self.process_registry.label(process, what);
+        }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);
         let label = format!("Terminal {}", self.terminal_counter);

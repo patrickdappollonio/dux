@@ -250,6 +250,11 @@ pub struct App {
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
     pub(crate) commit_input: TextInput,
+    /// A commit running on a worker: its status key, and the message it
+    /// committed. Its success final clears `commit_input` only while the box
+    /// still holds exactly that message, so a message typed for the next
+    /// commit meanwhile is never wiped.
+    pub(crate) pending_commit: Option<(String, String)>,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,
@@ -3077,7 +3082,15 @@ pub(crate) fn manage_worktree_visual_rows(
     let held = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| !entry.is_removable())
+        .filter(|(_, entry)| !entry.is_removable() && !entry.being_removed)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    // A worktree whose agent was just deleted: its removal is already under
+    // way, so it is neither free nor held, and it cannot be removed twice.
+    let being_removed = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.being_removed)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
@@ -3091,8 +3104,19 @@ pub(crate) fn manage_worktree_visual_rows(
         rows.extend(removable.into_iter().map(ManageWorktreeVisualRow::Entry));
     }
     if !held.is_empty() {
+        // A busy row (an agent being created in it, a deleted agent's CLI
+        // still stopping) sits here too: something is using the folder, and
+        // the row's own suffix says what.
         rows.push(ManageWorktreeVisualRow::Header("Held By An Agent"));
         rows.extend(held.into_iter().map(ManageWorktreeVisualRow::Entry));
+    }
+    if !being_removed.is_empty() {
+        rows.push(ManageWorktreeVisualRow::Header("Being Removed"));
+        rows.extend(
+            being_removed
+                .into_iter()
+                .map(ManageWorktreeVisualRow::Entry),
+        );
     }
     rows
 }
@@ -4227,6 +4251,8 @@ impl App {
                 .map(|t| (TabId::new(t.id.clone()), t))
                 .collect(),
             terminating_ptys: Vec::new(),
+            process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -4286,6 +4312,7 @@ impl App {
             live_status_keys,
             last_created_op_id: None,
             created_session_by_op: HashMap::new(),
+            removal_coordination: Default::default(),
         };
         Self::assemble(
             engine,
@@ -4346,6 +4373,7 @@ impl App {
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
+            pending_commit: None,
             left_collapsed: false,
             right_collapsed: false,
             right_hidden,
@@ -6784,6 +6812,13 @@ impl App {
                 );
                 return;
             }
+            BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved) => {
+                self.set_error(
+                    "This agent's worktree is being removed, so dux did not rename its branch. \
+                     Nothing new can start in a worktree while it is being removed.",
+                );
+                return;
+            }
             BranchRenamePlan::Noop => {
                 // The session vanished before the branch could be resolved; stay
                 // silent, but keep the list consistent with the optimistic write.
@@ -6895,6 +6930,11 @@ impl App {
             }
             dux_core::engine::BackgroundSpawn::SpawnFailed
             | dux_core::engine::BackgroundSpawn::AlreadyInFlight => {
+                // The busy was never shown, but its key was registered as a
+                // running operation: retire it, since no final will come.
+                if let Some(key) = pending.key.as_deref() {
+                    self.engine.retire_status_key(key);
+                }
                 self.engine
                     .revert_optimistic_rename(&sid, revert_previous_title);
                 self.rebuild_left_items();
@@ -7663,6 +7703,34 @@ pub(crate) fn runtime_project_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A changed-files read whose worker never starts still gets its keyed
+    /// busy a final: the engine answers for the worker.
+    #[test]
+    fn a_changed_files_read_that_never_starts_gives_its_busy_a_final() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let worktree = tempfile::tempdir().expect("worktree");
+        let path = worktree.path().to_path_buf();
+        *app.engine.watched_worktree.lock().unwrap() = Some(path.clone());
+        let key = "refresh-changes:test".to_string();
+        dux_core::engine::fail_next_worker_spawn();
+        app.begin_changed_files_refresh(
+            key.clone(),
+            "agent".to_string(),
+            path,
+            ChangedFilesReadVoice::Spoken,
+        );
+        app.drain_events();
+        let open: Vec<_> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key.as_str()) && status.tone == "busy")
+            .collect();
+        assert!(open.is_empty(), "the read's busy got a final: {open:?}");
+        assert!(app.pending_changed_files_refresh.is_none());
+        assert!(!app.engine.status_op_is_live(&key));
+    }
 
     /// Every command the palette lists must reach an arm of `execute_command`,
     /// never the catch-all that reports it as unknown. Each name runs on a

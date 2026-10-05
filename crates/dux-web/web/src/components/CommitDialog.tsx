@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Loader2 } from "lucide-react"
-import { notifyError } from "@/lib/notify"
+import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import { closeCommit, setCommitDraft, useDux } from "@/lib/store"
+import { closeCommit, getSnapshot, setCommitDraft, useDux } from "@/lib/store"
 
 export function CommitDialog() {
   const { commitTarget, commitDraft } = useDux()
@@ -21,10 +21,36 @@ export function CommitDialog() {
 
   async function handleCommit() {
     if (!commitTarget || !commitDraft.trim() || committing) return
+    // What this commit was sent from: the dialog's opening, its agent and the
+    // exact text in the box.
+    const sentFrom = {
+      target: commitTarget,
+      opening: getSnapshot().commitOpening,
+      draft: commitDraft,
+    }
     setCommitting(true)
     try {
-      await git.commit(commitTarget, commitDraft.trim())
-      closeCommit()
+      await git.commit(sentFrom.target, sentFrom.draft.trim())
+      // The answer closes the dialog only while it is still the one the
+      // commit was sent from, unchanged since: a dialog reopened (for this
+      // agent or another) or a message typed since is never wiped. The toast
+      // then says the commit landed instead.
+      const now = getSnapshot()
+      if (
+        now.commitTarget === sentFrom.target &&
+        now.commitOpening === sentFrom.opening &&
+        now.commitDraft === sentFrom.draft
+      ) {
+        closeCommit()
+      } else if (now.commitTarget === null) {
+        // The dialog was cancelled while the commit ran: there is no message
+        // being written to speak of.
+        notifySuccess("The commit landed.")
+      } else {
+        notifySuccess(
+          "The earlier commit landed. The message you are writing now was left as it is.",
+        )
+      }
     } catch (err) {
       notifyError(err instanceof Error ? err.message : "commit failed")
     } finally {

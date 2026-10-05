@@ -811,7 +811,7 @@ fn seed_uploads_gitignore(dir: &OwnedFd) {
 /// value IS the opaque `/proc/<pid>/cwd` handle path for a terminal, and handing
 /// it out would name a directory that stops existing the moment the process
 /// does. Elsewhere there is no way to ask a handle, and `opened_as` is always a
-/// real path (a worktree, a spawn directory, or `lsof`'s answer), so it is used.
+/// real path (a worktree, a spawn directory, or the kernel's answer), so it is used.
 ///
 /// Whichever path comes out is then held to [`check_reportable_dir_path`] AND
 /// checked to still name the pinned directory, so a folder that was removed
@@ -1056,7 +1056,7 @@ pub enum FileDropDestination {
 impl FileDropDestination {
     /// Pin the destination directory, creating the agent's upload directory if
     /// this is the first file to land in it. Blocking: this creates
-    /// directories, and for a terminal reads `/proc` (Linux) or runs `lsof`
+    /// directories, and for a terminal reads `/proc` (Linux) or asks the kernel
     /// (macOS), so it belongs on a blocking pool.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         match self {
@@ -1112,7 +1112,7 @@ pub fn saved_file_is_within(root: &Path, saved: &Path) -> bool {
 ///
 /// Built by [`crate::pty::PtyClient::working_directory`], which owns the policy;
 /// this carries it off the engine thread so the probing (a `/proc` read on
-/// Linux, an `lsof` process on macOS) happens on a blocking pool like every
+/// Linux, a `proc_pidinfo` call on macOS) happens on a blocking pool like every
 /// other filesystem call in the server.
 ///
 /// The order is deliberate: the FOREGROUND process group first, then the shell,
@@ -1160,7 +1160,7 @@ enum CwdProbe {
 /// (signal 0, which reports `ESRCH` for a process that is gone and `EPERM` for
 /// one that is alive but not ours). That is what tells a vanished process apart
 /// from a namespace or I/O problem on both platforms, including macOS, where
-/// `lsof` exits non-zero for both reasons and says nothing useful about which.
+/// the kernel's answer fails the same way for both reasons.
 fn probe_process_cwd(pid: u32) -> CwdProbe {
     match open_process_cwd(pid) {
         Ok(dir) => CwdProbe::Pinned(dir),
@@ -1226,10 +1226,9 @@ fn process_is_zombie(pid: u32) -> bool {
 
 /// The same question where there is no `/proc`.
 ///
-/// `state` is a POSIX `ps -o` keyword and macOS prints `Z` for a zombie. This
-/// adds no new kind of dependency: the non-Linux directory probe itself already
-/// runs `lsof`. Anything other than a leading `Z`, including `ps` failing to run
-/// at all, leaves the signal-0 answer standing.
+/// `state` is a POSIX `ps -o` keyword and macOS prints `Z` for a zombie.
+/// Anything other than a leading `Z`, including `ps` failing to run at all,
+/// leaves the signal-0 answer standing.
 ///
 /// Not exercised by dux's test suite, which runs on Linux.
 #[cfg(not(target_os = "linux"))]
@@ -1526,11 +1525,12 @@ fn shares_our_mount_namespace(pid: u32) -> Result<bool, DropDirError> {
 /// On Linux `/proc/<pid>/cwd` is the directory, so opening it with `O_DIRECTORY`
 /// yields the handle in one step, with nothing to swap in between.
 ///
-/// On macOS there is no such entry. `lsof` ships with the system and reports it,
-/// so it is asked, and the answer is then opened by path. **That reopen-by-path
-/// gap cannot be closed by this mechanism**, and is stated rather than glossed:
-/// on macOS the directory named by `lsof` could in principle be replaced before
-/// the open. Linux has no such gap.
+/// On macOS there is no such entry. The kernel reports the path
+/// (`proc_pidinfo` with `PROC_PIDVNODEPATHINFO`, the exact bytes), and the
+/// answer is then opened by path. **That reopen-by-path gap cannot be closed
+/// by this mechanism**, and is stated rather than glossed: on macOS the
+/// directory named could in principle be replaced before the open. Linux has
+/// no such gap.
 pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     #[cfg(target_os = "linux")]
     {
@@ -1546,52 +1546,88 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let output = std::process::Command::new("lsof")
-            .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
-            .output()
-            .map_err(DropDirError::Io)?;
-        if !output.status.success() {
-            return Err(DropDirError::Io(std::io::Error::other(format!(
-                "lsof could not report the working directory of process {pid}"
-            ))));
-        }
-        let cwd = lsof_cwd_path(&output.stdout).ok_or_else(|| {
+        let cwd = process_cwds(&[pid]).found.remove(&pid).ok_or_else(|| {
             DropDirError::Io(std::io::Error::other(format!(
-                "lsof reported no working directory for process {pid}"
+                "the working directory of process {pid} could not be read"
             )))
         })?;
         DropDir::open(&cwd)
     }
 }
 
-/// The working directory out of `lsof -Fn` output, as BYTES.
-///
-/// A Unix path is a byte string and is not required to be valid UTF-8, so this
-/// never decodes. A lossy decode substitutes a replacement character for every
-/// byte it cannot read, and the result is a DIFFERENT path: usually one that names
-/// nothing, occasionally one that names something else, which dux would then open,
-/// save into, and report as the folder the file landed in. The rule everywhere
-/// else in this module is that a path dux cannot name exactly is refused and never
-/// substituted, so the bytes are carried through unchanged and a path that
-/// genuinely cannot be reported as text is refused as [`UnreportablePath::NotUtf8`]
-/// at the moment it would be sent to a terminal.
-///
-/// `-Fn` prints one field per line, each prefixed by its field letter; `n` is the
-/// name field, which for the `cwd` descriptor is the path. A field is terminated
-/// by a newline, so a directory whose own name contains a newline is
-/// indistinguishable from two fields and comes back truncated. lsof offers a
-/// NUL-terminated mode for exactly this, deliberately not used here: this branch
-/// only ever runs on macOS and nobody has been able to measure that flag against
-/// the lsof macOS ships.
-#[cfg(any(not(target_os = "linux"), test))]
-fn lsof_cwd_path(stdout: &[u8]) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
+/// Where each of a set of processes is working, as far as dux could find
+/// out. A process that is gone is in neither list; one that is still there but
+/// whose folder could not be read is in `unknown`, and a caller deciding
+/// whether a folder is free must treat it as possibly standing there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CwdReport {
+    pub found: std::collections::HashMap<u32, PathBuf>,
+    pub unknown: Vec<u32>,
+    /// Why the unknown ones are unknown, in words, when there is one reason
+    /// for all of them.
+    pub failure: Option<String>,
+}
 
-    stdout
-        .split(|&b| b == b'\n')
-        .find_map(|line| line.strip_prefix(b"n"))
-        .filter(|path| !path.is_empty())
-        .map(|path| PathBuf::from(std::ffi::OsStr::from_bytes(path)))
+/// The current working directory of each of `pids`, as the exact path bytes
+/// the kernel reports: `/proc/<pid>/cwd` on Linux, `proc_pidinfo` with
+/// `PROC_PIDVNODEPATHINFO` on macOS (no external tool, so nothing escapes or
+/// re-encodes a name). Fails closed: a process that is still there and could
+/// not be asked is reported as unknown, never left out. Blocking.
+pub fn process_cwds(pids: &[u32]) -> CwdReport {
+    process_cwds_with(pids, read_process_cwd)
+}
+
+/// [`process_cwds`] with the per-process reader handed in, so a reader that
+/// fails can be tested.
+fn process_cwds_with(pids: &[u32], read: impl Fn(u32) -> Option<PathBuf>) -> CwdReport {
+    let mut report = CwdReport::default();
+    for pid in pids {
+        match read(*pid) {
+            Some(cwd) => {
+                report.found.insert(*pid, cwd);
+            }
+            // Still there and not readable (another user's process, an
+            // error): unknown. A process that is gone, or a zombie, is nowhere.
+            None if process_can_answer(*pid) => report.unknown.push(*pid),
+            None => {}
+        }
+    }
+    report
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>();
+    // SAFETY: zeroed is a valid value for this plain-data struct.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is exactly the struct the flavor fills, and its size
+    // is passed with it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast::<libc::c_void>(),
+            libc::c_int::try_from(size).ok()?,
+        )
+    };
+    if usize::try_from(written).ok()? != size {
+        return None;
+    }
+    let path = &info.pvi_cdir.vip_path;
+    // SAFETY: the path field is a fixed array of `c_char`, viewed as bytes.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), std::mem::size_of_val(path))
+    };
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    (end > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
 }
 
 #[cfg(test)]
@@ -1600,6 +1636,41 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    /// A reader that cannot answer fails closed: a live process is unknown,
+    /// and a gone one is simply not there.
+    #[test]
+    fn an_unreadable_working_directory_leaves_a_live_process_unknown() {
+        let me = std::process::id();
+        let gone = u32::MAX - 7;
+        let report = process_cwds_with(&[me, gone], |_| None);
+        assert_eq!(report.unknown, vec![me]);
+        assert!(report.found.is_empty());
+    }
+
+    /// dux runs no external tool to learn where a process works: `lsof`
+    /// escapes names outside ASCII when the locale is not UTF-8, which made a
+    /// process in `/Users/José/...` read as standing somewhere that does not
+    /// exist. The guard keeps it from coming back.
+    #[test]
+    fn no_external_tool_reads_a_working_directory() {
+        for (name, source) in [
+            ("file_drop.rs", include_str!("file_drop.rs")),
+            ("process_sessions.rs", include_str!("process_sessions.rs")),
+        ] {
+            let needle = concat!("Command::new(", "\"lsof\")");
+            assert!(!source.contains(needle), "{name} runs lsof");
+        }
+    }
+
+    #[test]
+    fn this_processs_own_folder_is_read() {
+        let found = process_cwds(&[std::process::id()]).found;
+        assert_eq!(
+            found.get(&std::process::id()),
+            Some(&std::env::current_dir().unwrap())
+        );
     }
 
     // ── Containment: did the file land in the tree git is watching? ──────────
@@ -3018,67 +3089,30 @@ mod tests {
         child
     }
 
-    // ── lsof's answer is bytes, and bytes are what a path is ─────────────────
-    //
-    // These run everywhere, including on Linux where the parser they cover is
-    // never called, because the branch that calls it is macOS-only and the only
-    // machines available here are Linux. A parser nobody can exercise is a
-    // parser nobody can check.
+    // ── A working directory is bytes, and bytes are what a path is ───────────
 
+    /// A directory whose name is not valid UTF-8 is read back with its exact
+    /// bytes: nothing decodes, escapes or replaces them on the way.
     #[test]
-    fn reads_the_working_directory_out_of_lsof_field_output() {
-        assert_eq!(
-            lsof_cwd_path(b"p4242\nn/home/patrick/notes\n"),
-            Some(PathBuf::from("/home/patrick/notes")),
-            "the `n` field of the `cwd` descriptor is the directory"
-        );
-    }
-
-    #[test]
-    fn a_directory_that_is_not_valid_utf8_survives_lsof_exactly() {
-        use std::os::unix::ffi::OsStrExt;
-
-        // The bug this pins: decoding lsof's answer lossily replaced the 0xFF
-        // with U+FFFD, so dux opened, wrote into and then NAMED a directory that
-        // is not the one the terminal is in. A path is a byte string; the bytes
-        // come through untouched, and a path that cannot be rendered as text is
-        // refused later (`UnreportablePath::NotUtf8`) rather than substituted
-        // here.
-        let raw: &[u8] = b"p9\nn/tmp/od\xffd\n";
-        let parsed = lsof_cwd_path(raw).expect("a non-UTF-8 directory still parses");
-        assert_eq!(
-            parsed.as_os_str().as_bytes(),
-            b"/tmp/od\xffd",
-            "the bytes must survive; got {parsed:?}"
-        );
-        assert!(
-            !parsed.to_string_lossy().contains('\u{fffd}') || parsed.to_str().is_none(),
-            "a replacement character must come from RENDERING it, never from parsing it"
-        );
-        assert!(
-            parsed.to_str().is_none(),
-            "and this path really is one that cannot be rendered, so the \
-             assertion above is not vacuous"
-        );
-    }
-
-    #[test]
-    fn lsof_saying_nothing_useful_is_not_a_directory() {
-        for empty in [
-            &b""[..],
-            // The process was gone by the time lsof looked: a process record and
-            // no name field at all.
-            &b"p4242\n"[..],
-            // A name field that is empty names nothing, and `Path::new("")` is a
-            // relative path that would resolve against dux's own directory.
-            &b"p4242\nn\n"[..],
-        ] {
-            assert_eq!(
-                lsof_cwd_path(empty),
-                None,
-                "must refuse rather than invent a directory from {empty:?}"
-            );
-        }
+    fn a_working_directory_that_is_not_valid_utf8_is_read_back_exactly() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"od\xffd".to_vec()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let report = process_cwds(&[child.id()]);
+        let _ = child.kill();
+        let _ = child.wait();
+        let found = report.found.get(&child.id()).expect("read");
+        assert_eq!(found.as_os_str().as_bytes(), dir.as_os_str().as_bytes());
+        assert!(found.to_str().is_none(), "the name really is not UTF-8");
     }
 }
 
@@ -3518,6 +3552,39 @@ mod tree_drop_dir {
             std::fs::read_to_string(wt.path().join("notes.md")).unwrap(),
             "mine\n",
             "not one byte of the existing file may change"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review15_lsof {
+    use super::*;
+
+    /// The macOS reader, fed what `lsof` prints when dux runs without a
+    /// UTF-8 locale (a launchd service, an ssh session with no LANG): every
+    /// byte outside ASCII comes back as a `\xNN` escape, so a process
+    /// standing in `/Users/José/...` is reported at a path that does not
+    /// exist and is judged to stand nowhere near the folder.
+    #[test]
+    fn review15_a_working_directory_with_a_non_ascii_name_is_read_back_exactly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("José");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // The reader dux uses, native on every platform now (no `lsof`).
+        let report = process_cwds(&[pid]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            report.found.get(&pid),
+            Some(&dir),
+            "the working directory was read back as something else: {report:?}"
         );
     }
 }

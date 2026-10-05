@@ -997,13 +997,18 @@ impl App {
             }
         };
         let worker_tx = self.engine.worker_tx.clone();
+        let guard = self.engine.checkout_move_guard();
         thread::spawn(move || {
             dux_core::project_browser::run_checkout_job_reporting_panics(
                 action,
                 target_branch,
                 worker_tx,
                 Some(status_op_id),
-                dux_core::project_browser::run_add_project_checkout_job,
+                |action, branch, tx, id| {
+                    dux_core::project_browser::run_add_project_checkout_job(
+                        action, branch, tx, id, &guard,
+                    )
+                },
             );
         });
     }
@@ -1953,6 +1958,9 @@ impl App {
         };
         let target = match &session.workspace {
             dux_core::model::AgentWorkspace::Managed(managed) => {
+                // Agents SHARING this worktree (identity, not occupancy): the
+                // dialog then offers no removal. Anything living inside it is
+                // found by the occupancy rule when the removal runs.
                 let worktree_shared = self.engine.sessions.iter().any(|s| {
                     s.id != session.id
                         && dux_core::project_browser::same_directory(
@@ -2055,15 +2063,10 @@ impl App {
         }
     }
 
-    /// Delete the agent session identified by `session_id`, blocking the calling
-    /// thread for any git work. A synchronous test entry point for the
-    /// `Command::DoDeleteSession` behavior; production deletes go through
-    /// [`begin_delete_session`] so git work runs off the UI thread.
-    ///
-    /// When `delete_worktree` is true and no other sessions share the worktree,
-    /// the git worktree and branch are removed first; a failed git removal
-    /// preserves the session record so the caller can retry. When it is false,
-    /// the worktree and branch are always preserved.
+    /// Delete an agent through the one real pipeline, as a test drives it:
+    /// `begin_delete_session`, then the reaper and the worker events until the
+    /// delete's removal (if any) has reported. A failure the status line
+    /// reports as an error comes back as `Err` with that sentence.
     #[cfg(test)]
     pub(crate) fn do_delete_session(
         &mut self,
@@ -2071,12 +2074,19 @@ impl App {
         delete_worktree: bool,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        let reaction = self.engine.apply(Command::DoDeleteSession {
-            session_id: session_id.to_string(),
-            delete_worktree,
-            delete_branch,
-        })?;
-        self.apply_reaction(reaction);
+        self.begin_delete_session(session_id, delete_worktree, delete_branch);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while self.pending_delete_ops.contains_key(session_id)
+            || self.engine.pending_deletions.contains(session_id)
+        {
+            assert!(Instant::now() < deadline, "the delete never finished");
+            self.apply_reaped_terminations();
+            self.drain_events();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if self.status.tone() == crate::statusline::StatusTone::Error {
+            anyhow::bail!("{}", self.status.text());
+        }
         Ok(())
     }
 
@@ -3036,6 +3046,19 @@ impl App {
             ));
             return Ok(());
         };
+        // One run per agent at a time, and a hold on the worktree so a removal
+        // waits for it; one sentence when either is refused.
+        let claim = match self.engine.claim_startup_rerun(
+            &session.id,
+            &session.display_label(),
+            &managed.worktree_path,
+        ) {
+            Ok(claim) => claim,
+            Err(refusal) => {
+                self.set_error(refusal.to_string());
+                return Ok(());
+            }
+        };
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
         let branch = managed.branch_name.clone();
@@ -3064,7 +3087,12 @@ impl App {
         });
         let pending = self.engine.begin_status_op(&op);
         std::thread::spawn(move || {
-            let result = crate::startup::run_startup_command(
+            let dux_core::engine::StartupRerunClaim {
+                run: run_claim,
+                hold,
+            } = claim;
+            let _hold = hold;
+            let result = crate::startup::run_claimed_startup_command(
                 &paths,
                 crate::startup::StartupCommandRun {
                     project,
@@ -3074,6 +3102,7 @@ impl App {
                     terminal,
                     env,
                 },
+                run_claim,
             );
             let resolved = op.resolve(&result.status);
             let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
@@ -3663,8 +3692,9 @@ impl App {
         // The whole delete (guards, the per-session cascade with worktree
         // removal, and the project record and config removal) is owned by the
         // core `Command::DeleteProject`, so the two surfaces cannot disagree on
-        // the sequencing. It is synchronous, running `git worktree remove`
-        // inline, so no async status op is needed.
+        // the sequencing. The records go at once; each worktree is removed on a
+        // worker once its agent has stopped, under one keyed busy the engine
+        // opens here and resolves when the last removal lands.
         logger::info(&format!("deleting project {}", project.path));
         let reaction = self.engine.apply(Command::DeleteProject {
             project_id: project.id.clone(),
@@ -3869,8 +3899,24 @@ impl App {
         let Some(pending) = self.pending_diff.as_ref() else {
             return;
         };
-        let Ok(answer) = pending.rx.try_recv() else {
-            return;
+        let answer = match pending.rx.try_recv() {
+            Ok(answer) => answer,
+            Err(mpsc::TryRecvError::Empty) => return,
+            // The worker is gone without an answer (it panicked): its busy
+            // gets a final rather than spinning forever.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_diff = None;
+                self.mark_frame_dirty();
+                self.status.set(
+                    Instant::now(),
+                    Some(DIFF_STATUS_KEY.to_string()),
+                    StatusTone::Error,
+                    "dux could not build the diff: the worker building it stopped before \
+                     answering. Open the file again to retry."
+                        .to_string(),
+                );
+                return;
+            }
         };
         let pending = self.pending_diff.take().expect("checked just above");
         self.mark_frame_dirty();
@@ -4675,6 +4721,8 @@ mod tests {
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
+            process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -4734,6 +4782,7 @@ mod tests {
             live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
+            removal_coordination: Default::default(),
         };
         let app_live_status_keys = engine.live_status_keys.clone();
         let mut app = App {
@@ -4750,6 +4799,7 @@ mod tests {
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
+            pending_commit: None,
             show_diff_line_numbers: false,
             left_width_pct: 20,
             right_width_pct: 23,
@@ -5018,6 +5068,8 @@ mod tests {
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
+            process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -5077,6 +5129,7 @@ mod tests {
             live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
+            removal_coordination: Default::default(),
         };
         (engine, tmp)
     }
@@ -7183,12 +7236,13 @@ mod tests {
         );
     }
 
-    /// If git fails to remove the worktree, the session record must remain.
-    /// Otherwise the user loses their agent with no way to retry. We force
-    /// the git call to fail by pointing the project path at a directory that
-    /// is not a git repository.
+    /// If git fails to remove the worktree, the folder is untouched and the
+    /// failure is said out loud, naming git and the worktree. (The agent's
+    /// record leaves the list at once, as every delete's does; the worktree
+    /// stays on disk for the worktree manager.) We force the git call to fail
+    /// by pointing the project path at a directory that is not a repository.
     #[test]
-    fn do_delete_session_preserves_session_when_git_fails() {
+    fn do_delete_session_reports_a_git_failure_and_keeps_the_folder() {
         let project_dir = tempdir().expect("project tempdir");
         // Intentionally NOT a git repo, so `git worktree remove` will exit
         // non-zero, which bubbles up as Err from git::remove_worktree.
@@ -7212,10 +7266,6 @@ mod tests {
             "error should mention git/worktree, got: {msg}",
         );
 
-        assert!(
-            app.engine.sessions.iter().any(|s| s.id == "s1"),
-            "session must be preserved when git fails so user can retry",
-        );
         assert!(
             worktree_dir.path().exists(),
             "worktree directory should be untouched on failure",
@@ -7411,6 +7461,125 @@ mod tests {
         );
     }
 
+    /// Every keyed busy still open for `key`.
+    fn open_busy(app: &App, key: &str) -> Vec<dux_core::statusline::KeyedWireStatus> {
+        app.status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key) && status.tone == "busy")
+            .collect()
+    }
+
+    /// A delete whose worktree went but whose session cleanup then failed
+    /// still retires its keyed busy and its live key; the failure is the line
+    /// that stays.
+    #[test]
+    fn a_delete_whose_cleanup_fails_retires_its_busy() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        let op = app.build_delete_status_op("s1", "Removing worktree\u{2026}".to_string());
+        let key = op.pending_status().key.expect("a keyed op");
+        let pending = app.engine.begin_status_op(&op);
+        app.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        app.pending_delete_ops.insert("s1".to_string(), op);
+        app.engine.pending_deletions.insert("s1".to_string());
+        // The cleanup's database write is refused.
+        app.engine.session_store.fail_session_deletes_for_tests();
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Ok(dux_core::engine::RemovedBranches::Deleted(
+                    dux_core::git::RemoveResult::default(),
+                )),
+            })
+            .expect("channel send");
+        app.drain_events();
+        assert!(
+            open_busy(&app, &key).is_empty(),
+            "the delete's busy is retired"
+        );
+        assert!(!app.engine.status_op_is_live(&key), "its key is retired");
+        assert!(
+            app.status.text().contains("session cleanup failed"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// A diff whose worker stops without answering gives its busy a final.
+    #[test]
+    fn a_diff_whose_worker_stops_gives_its_busy_a_final() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        app.pending_diff = Some(PendingDiff {
+            key: crate::diff::DiffRequestKey {
+                worktree_path: "/tmp/wt".to_string(),
+                rel_path: "a.rs".to_string(),
+                show_line_numbers: false,
+                tab_width: 4,
+                seq: 1,
+            },
+            rx,
+            label: "a.rs".to_string(),
+            scroll: 0,
+            announce_at: Some(Instant::now()),
+        });
+        app.announce_slow_diff(Instant::now());
+        assert_eq!(
+            open_busy(&app, DIFF_STATUS_KEY).len(),
+            1,
+            "the busy is showing"
+        );
+        app.drain_pending_diff();
+        assert!(
+            open_busy(&app, DIFF_STATUS_KEY).is_empty(),
+            "the busy got a final"
+        );
+        assert!(app.pending_diff.is_none());
+        assert!(!app.engine.status_op_is_live(DIFF_STATUS_KEY));
+    }
+
+    /// A branch rename whose worker never starts retires the key it
+    /// registered, and leaves no busy showing.
+    #[test]
+    fn a_branch_rename_that_never_starts_retires_its_key() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        let live_before = app.engine.live_status_keys.len();
+        dux_core::engine::fail_next_worker_spawn();
+        app.apply_rename_session("s1", "renamed-agent".to_string(), true);
+        assert_eq!(
+            app.engine.live_status_keys.len(),
+            live_before,
+            "the rename's key was retired"
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|status| status.tone != "busy"),
+            "no busy is left showing"
+        );
+    }
+
     /// If the session was removed by another code path while the async
     /// delete worker was running, the worker's completion event must still
     /// overwrite the Busy status line when the message matches.
@@ -7566,12 +7735,12 @@ mod tests {
         );
     }
 
-    /// Project deletion must be refused when any of the project's sessions
-    /// have an async worktree removal in-flight. Allowing it would race the
-    /// synchronous `do_delete_session` against the worker and could leave the
-    /// project half-deleted with an orphaned worktree.
+    /// A project delete goes ahead while one of its agents' worktree removals
+    /// is already running: the cascade no longer removes anything on the UI
+    /// thread, so there is nothing to race, and that removal is left to finish
+    /// and report on its own rather than run a second time.
     #[test]
-    fn delete_selected_project_blocked_when_pending() {
+    fn delete_selected_project_goes_ahead_past_a_pending_agent_delete() {
         let project_dir = tempdir().expect("project tempdir");
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
@@ -7600,19 +7769,17 @@ mod tests {
         // The engine's guard answers the confirmed delete.
         app.resolve_confirm_delete_project(true);
 
-        // Session must still be present, because deletion was refused.
         assert!(
-            app.engine.sessions.iter().any(|s| s.id == "s1"),
-            "session must not be removed when deletion is blocked",
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
+            "the agent's record goes with the project",
         );
         assert!(
-            app.engine.projects.iter().any(|p| p.id == "project-1"),
-            "project must not be removed when deletion is blocked",
+            app.engine.projects.iter().all(|p| p.id != "project-1"),
+            "the project is deleted",
         );
-        assert_eq!(
-            app.status.tone(),
-            crate::statusline::StatusTone::Error,
-            "should show an error explaining why deletion was blocked",
+        assert!(
+            app.engine.pending_deletions.contains("s1"),
+            "the removal already running is left to finish",
         );
     }
 
@@ -7703,6 +7870,89 @@ mod tests {
             msg.contains("not a git repository"),
             "error should include the git error, got: {msg}",
         );
+    }
+
+    /// The two finals a removal that something else was writing into can end
+    /// with reach the status line whole: the folder git could not finish (what
+    /// is left and how to finish) and the worktree kept because something dux
+    /// started would not die (which processes, and what to do).
+    #[test]
+    fn a_half_finished_or_refused_removal_says_how_to_finish_on_the_status_line() {
+        let leftover = dux_core::git::LeftoverWorktreeFolder {
+            path: std::path::PathBuf::from("/work/wt-feat"),
+            leftovers: vec![".astro/collections".to_string()],
+            more: 0,
+            git_error: "error: failed to delete '/work/wt-feat': Directory not empty".to_string(),
+            branches: vec![("feat".to_string(), dux_core::git::BranchDeletion::Deleted)],
+        }
+        .to_string();
+        let survivors = dux_core::engine::survivors_kept_worktree_message(
+            "/work/wt-feat",
+            &[dux_core::process_sessions::ProcRow {
+                pid: 4242,
+                ppid: Some(1),
+                sid: Some(4000),
+                start_time: 0,
+                name: "node".to_string(),
+                exited: false,
+            }],
+        );
+        for (message, needles) in [
+            (
+                leftover,
+                &[
+                    "/work/wt-feat",
+                    "kept writing into it",
+                    "possibly a dev server",
+                    "Still in it: .astro/collections",
+                    "Stop whatever is still running in that folder, then delete the folder",
+                    "Branch feat was deleted as asked.",
+                ][..],
+            ),
+            (
+                survivors,
+                &[
+                    "/work/wt-feat was kept, untouched",
+                    "node (pid 4242)",
+                    "would not stop, even after SIGKILL",
+                    "remove the worktree from the worktree manager",
+                ][..],
+            ),
+        ] {
+            let project_dir = tempdir().expect("project tempdir");
+            let worktree_dir = tempdir().expect("worktree tempdir");
+            let mut s1 = make_session("s1", "claude", &worktree_dir.path().to_string_lossy());
+            s1.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
+            let project =
+                make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+            let mut app = test_app_with_sessions(vec![s1], vec![project]);
+            let op = app.build_delete_status_op(
+                "s1",
+                "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
+            );
+            app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            app.pending_delete_ops.insert("s1".to_string(), op);
+            app.engine.pending_deletions.insert("s1".to_string());
+
+            app.engine
+                .worker_tx
+                .send(WorkerEvent::WorktreeRemoveCompleted {
+                    session_id: "s1".to_string(),
+                    result: Err(message),
+                })
+                .expect("channel send");
+            app.drain_events();
+
+            let line = app.status.text();
+            assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+            assert!(line.starts_with("Worktree delete failed for "), "{line}");
+            for needle in needles {
+                assert!(line.contains(needle), "missing {needle:?} in: {line}");
+            }
+        }
     }
 
     /// The async success path (session still present at completion) resolves the
@@ -8660,7 +8910,8 @@ mod tests {
             app.engine.session_store.load_projects().unwrap().is_empty(),
             "the project record is gone"
         );
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     #[test]
@@ -8732,7 +8983,8 @@ mod tests {
         };
         click(&mut app, confirm_button);
         assert!(app.engine.projects.is_empty(), "Delete runs the cascade");
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     /// A second real agent in the first project, created the way the palette
@@ -9665,7 +9917,8 @@ mod tests {
             .unwrap();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.engine.projects.is_empty(), "the project is gone");
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     /// Every row of a project's action list runs its own flow, and runs it for

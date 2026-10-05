@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::git::{self, BranchChoice, BranchLocation};
+use crate::git::{self, BranchChoice};
 
 /// How long the listing's `git fetch origin` may run before it is stopped and
 /// the list is built from the refs as last fetched. Long enough for an ordinary
@@ -110,6 +110,7 @@ pub enum BaseBranchChangeFailure {
 pub fn switch_to_base_branch(
     repo: &Path,
     branch: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<BaseBranchSwitched, BaseBranchChangeFailure> {
     if !repo.is_dir() {
         return Err(BaseBranchChangeFailure::FolderMissing);
@@ -131,11 +132,9 @@ pub fn switch_to_base_branch(
             folder_was_on_it: true,
         });
     }
-    if choice.location == BranchLocation::Remote {
-        git::create_tracking_branch(repo, branch)
-            .map_err(|error| BaseBranchChangeFailure::SwitchFailed(error.to_string()))?;
-    }
-    git::switch_branch(repo, branch)
+    // A branch only origin has is created by the switch itself, which also
+    // removes it again when the move check refuses the switch.
+    git::switch_branch(repo, branch, guard)
         .map_err(|error| BaseBranchChangeFailure::SwitchFailed(error.to_string()))?;
     Ok(BaseBranchSwitched {
         folder_was_on_it: false,

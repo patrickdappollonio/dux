@@ -598,8 +598,58 @@ pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     if resolves_into_git_dir(worktree, ancestor) {
         anyhow::bail!("refusing to create a directory inside the git directory: {rel_path}");
     }
-    std::fs::create_dir_all(&path)
-        .map_err(|e| anyhow::anyhow!("cannot create directory {rel_path}: {e}"))?;
+    create_dir_from_root(worktree, rel_path)
+}
+
+/// Create `rel_path`'s missing components one at a time, each relative to the
+/// directory handle of the one before it, starting from a handle on the ROOT
+/// opened without creating it.
+///
+/// `create_dir_all` on the joined path would happily recreate the root itself:
+/// a worktree removed while the request was in flight came back as an empty
+/// directory with no git registration behind it. Pinned this way, a root that
+/// is gone fails the open, and one removed after the open fails the first
+/// `mkdirat` (an unlinked directory takes no new entries), so the root is never
+/// recreated. Symlinked intermediate directories are still followed, exactly
+/// as before; containment was checked by the caller.
+fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let mut fd = rustix::fs::open(
+        worktree,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "cannot create directory {rel_path}: the folder it belongs in is gone ({e}). It may \
+             have been removed."
+        )
+    })?;
+    #[cfg(test)]
+    tests::run_before_create_hook();
+    let components: Vec<_> = Path::new(rel_path).components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let name = component.as_os_str();
+        let last = index + 1 == components.len();
+        // `mkdirat` applies the umask, as `create_dir_all` did.
+        match rustix::fs::mkdirat(&fd, name, Mode::from_bits_truncate(0o777)) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) if !last => {}
+            Err(rustix::io::Errno::EXIST) => {
+                anyhow::bail!("refusing to create directory, entry already exists: {rel_path}")
+            }
+            Err(e) => anyhow::bail!("cannot create directory {rel_path}: {e}"),
+        }
+        if !last {
+            fd = rustix::fs::openat(
+                &fd,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| anyhow::anyhow!("cannot create directory {rel_path}: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -618,7 +668,16 @@ pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 ///
 /// The DESTINATION keeps the following resolver, because a destination reached
 /// through a symlinked directory really would write outside the tree.
-pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
+///
+/// It moves only with a clearance for both ends (see [`crate::destructive`]):
+/// `clear` is asked once the move is otherwise valid, right before anything
+/// moves. A symbolic link is judged at its own path, never followed.
+pub fn rename_entry<'c>(
+    worktree: &Path,
+    from_rel: &str,
+    to_rel: &str,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared<'c>, crate::destructive::Refused>,
+) -> anyhow::Result<()> {
     let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
     src.symlink_metadata()
@@ -633,6 +692,11 @@ pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Re
     if resolves_into_git_dir(worktree, dst_parent) {
         anyhow::bail!("refusing to rename into the git directory: {to_rel}");
     }
+    // A link too: moving one leaves its target where it is, but an agent's
+    // folder or a project's repository can be the link itself.
+    let cleared = clear().map_err(anyhow::Error::new)?;
+    cleared.require(&src)?;
+    cleared.require(&dst)?;
     rename_no_replace(&src, &dst).map_err(|e| match e {
         RenameNoReplaceError::DestinationExists => {
             anyhow::anyhow!("refusing to rename, destination already exists: {to_rel}")
@@ -799,7 +863,16 @@ fn check_entry_parent_contained(
 /// Deleting a symlink removes the directory entry (the link), never its
 /// target, so an escaping-target symlink is a legitimate delete target: only
 /// the literal path and its PARENT's containment matter here.
-pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+///
+/// It goes only with a clearance for exactly that path (see
+/// [`crate::destructive`]): `clear` is asked once the delete is otherwise
+/// valid, right before anything is removed. A symbolic link is judged at its
+/// own path, never followed.
+pub fn delete_entry<'c>(
+    worktree: &Path,
+    rel_path: &str,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared<'c>, crate::destructive::Refused>,
+) -> anyhow::Result<()> {
     let path = entry_literal_path(worktree, rel_path)?;
     // No-follow stat on the literal path: existence and kind of the entry
     // ITSELF, never its symlink target.
@@ -815,6 +888,9 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     {
         anyhow::bail!("refusing to delete the worktree root");
     }
+    // A link too: deleting one leaves its target where it is, but an agent's
+    // folder or a project's repository can be the link itself.
+    clear().map_err(anyhow::Error::new)?.require(&path)?;
     if meta.file_type().is_symlink() || meta.is_file() {
         std::fs::remove_file(&path)
             .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
@@ -1079,6 +1155,20 @@ fn entry_git_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operations under test, cleared for any path: these tests are about
+    /// what the operations themselves decide.
+    fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
+        super::rename_entry(worktree, from_rel, to_rel, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
+
+    fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+        super::delete_entry(worktree, rel_path, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
 
     fn worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -1617,6 +1707,35 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
         assert!(create_dir(dir.path(), "escape/nested/dir").is_err());
         assert!(!outside.path().join("nested").exists());
+    }
+
+    thread_local! {
+        static BEFORE_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Runs, once, the hook a test armed for the moment between `create_dir`'s
+    /// checks and its creation: the window a worktree removal can land in.
+    pub(super) fn run_before_create_hook() {
+        if let Some(hook) = BEFORE_CREATE.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// The root passed every check and was then removed (the agent's worktree
+    /// went while the request was in flight). Creating `a/b` must fail rather
+    /// than bring the removed worktree back as an empty directory.
+    #[test]
+    fn create_dir_never_recreates_a_root_removed_after_its_checks() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("wt");
+        std::fs::create_dir(&root).unwrap();
+        let doomed = root.clone();
+        BEFORE_CREATE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || std::fs::remove_dir_all(&doomed).unwrap()));
+        });
+        assert!(create_dir(&root, "a/b").is_err());
+        assert!(!root.exists(), "the removed worktree must stay removed");
     }
 
     // --- rename_entry ---

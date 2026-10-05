@@ -341,6 +341,9 @@ impl AgentLaunchRequest {
 pub struct AgentLaunchReadyData {
     pub request: AgentLaunchRequest,
     pub client: PtyClient,
+    /// The spawn's ticket, kept until the engine has registered the new
+    /// session (see [`crate::process_sessions::SpawnGate`]).
+    pub spawn_ticket: Option<crate::process_sessions::SpawnTicket>,
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +491,9 @@ pub enum WorkerEvent {
     StatusOpCompleted {
         resolved: crate::engine::ResolvedFinal,
     },
+    /// A worker changed a worktree's files (a discard) and has sent its final:
+    /// the changed-files listing is read again.
+    WorktreeFilesChanged,
     PullCompleted {
         repo_path: String,
         target: PullTarget,
@@ -609,6 +615,17 @@ pub enum WorkerEvent {
     WorktreeRemoveCompleted {
         session_id: String,
         result: Result<crate::engine::RemovedBranches, String>,
+    },
+    /// A worktree removal found operations still running in the worktree and
+    /// is waiting for them. `waiting_for` names them ("a pull and a push").
+    WorktreeRemoveWaiting {
+        session_id: String,
+        waiting_for: String,
+    },
+    /// A project deletion that was waiting for an agent being created in the
+    /// project may go on: the create finished, or the wait ran out.
+    ProjectDeletionContinue {
+        project_id: String,
     },
     /// Background `git switch <target_branch>` run from a non-default branch
     /// warning modal has finished. On `Ok`, the main loop continues the

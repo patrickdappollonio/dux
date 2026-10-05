@@ -725,6 +725,48 @@ impl App {
             ));
             return;
         }
+        // Held for as long as the worker runs, like every other operation in a
+        // worktree: a removal of it waits for this, and one already under way
+        // refuses it.
+        let what = match op {
+            FolderOp::Stage => "stage the folder",
+            FolderOp::Unstage => "unstage the folder",
+            FolderOp::Delete => "delete the folder's files",
+        };
+        let hold = match self.engine.hold_for_git_change(&worktree, what) {
+            Ok(hold) => hold,
+            Err(refused) => {
+                self.set_error(refused.to_string());
+                return;
+            }
+        };
+        // A delete follows the one destructive protocol: the folder is
+        // claimed first, without waiting (a claim already held refuses it at
+        // once), the occupancy question is asked under the claim, and the
+        // worker clears it right before deleting. The claim comes BEFORE any
+        // status is shown for the delete, so a refusal is a plain error with
+        // no busy left open. This is the UI thread: it only claims (in
+        // memory) and asks the engine's own state.
+        let target = worktree.join(&folder.path);
+        let _ui_thread = dux_core::engine::destructive_guard::engine_thread();
+        let claim = if op == FolderOp::Delete {
+            match self.engine.worktree_ops().claim_for_destructive_as(
+                &target,
+                std::time::Duration::ZERO,
+                "a changes-pane delete",
+            ) {
+                Ok(claim) => Some(claim),
+                Err(reason) => {
+                    self.set_error(format!(
+                        "dux did not delete {}: {reason}.",
+                        dux_core::home_path::shorten_home(&target)
+                    ));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let busy = match op {
             FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
             FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
@@ -740,6 +782,10 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         let path = folder.path.clone();
+        // What lives there (a standalone agent, another agent's worktree, a
+        // project, something dux started) is asked of the engine's state
+        // here; the blocking part of the answer is read on the worker.
+        let destructive = self.engine.destructive_check(&target);
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
         // A folder carries the number of files the dialog said would go,
@@ -758,23 +804,25 @@ impl App {
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
-                let outcome =
-                    match op {
-                        FolderOp::Stage => {
-                            git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
-                                report,
-                                deleted_files: 0,
-                            })
-                        }
-                        FolderOp::Unstage => {
-                            git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
-                        }
-                        FolderOp::Delete => delete_untracked_folder(&worktree, &path, confirmed)
+                let _hold = hold;
+                let outcome = match op {
+                    FolderOp::Stage => {
+                        git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
+                            report,
+                            deleted_files: 0,
+                        })
+                    }
+                    FolderOp::Unstage => {
+                        git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
+                    }
+                    FolderOp::Delete => {
+                        delete_untracked_folder(&worktree, &path, confirmed, &destructive, claim)
                             .map(|deleted_files| FolderOpDone {
                                 deleted_files,
                                 ..FolderOpDone::default()
-                            }),
-                    };
+                            })
+                    }
+                };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
         self.changes_tree.pending_ops.push(PendingFolderOp {
@@ -917,13 +965,18 @@ fn delete_untracked_folder(
     worktree: &Path,
     path: &str,
     confirmed: git::ConfirmedEntry,
+    check: &dux_core::destructive::DestructiveCheck,
+    claim: Option<dux_core::worktree_ops::DestructiveClaim>,
 ) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
-    git::discard_confirmed(worktree, path, true, Some(confirmed))
+    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.iter().collect();
+    git::discard_confirmed(worktree, path, true, Some(confirmed), || {
+        check.clear(&claims, "delete")
+    })
 }
 
 /// What a stage left out, in words: "1 nested repository and 2 worktrees of
@@ -1019,7 +1072,7 @@ mod tests {
 
     /// Apply a fresh changed-files read the way the pane does when one lands.
     fn load_lists(app: &mut App, worktree: &Path) {
-        let (staged, unstaged) = git::changed_files(worktree).expect("changed files");
+        let (staged, unstaged) = git::changed_files_for_display(worktree).expect("changed files");
         app.engine.set_changed_files(staged, unstaged);
         app.changes_tree.lists_for = app.selected_session().map(|s| s.id.clone());
         app.reconcile_changes_tree();
@@ -1069,6 +1122,75 @@ mod tests {
                 ChangesRow::Failed { depth, .. } => format!("{}failed", "  ".repeat(depth)),
             })
             .collect()
+    }
+
+    /// A folder stage holds the worktree like every other operation in it:
+    /// refused with a sentence once the worktree's removal has begun, with no
+    /// worker started and nothing staged.
+    #[test]
+    fn a_folder_op_is_refused_in_a_worktree_being_removed() {
+        let (mut app, worktree) = repo_app();
+        let _claim = app.engine.worktree_ops().announce_removal(&worktree);
+        app.start_folder_op(FolderOp::Stage, &folder("node_modules/", "??", 13));
+        assert!(
+            app.changes_tree.pending_ops.is_empty(),
+            "no worker was started"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("dux is removing the worktree"),
+            "{}",
+            app.status.text()
+        );
+        let staged = std::process::Command::new("git")
+            .args([
+                "-C",
+                worktree.to_str().unwrap(),
+                "diff",
+                "--cached",
+                "--name-only",
+            ])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&staged.stdout).trim().is_empty());
+    }
+
+    /// Review 13: a changes-pane folder delete whose claim is refused leaves
+    /// its keyed busy open and its status key registered as live: no final
+    /// ever lands for it, so the "Deleting" spinner outlives the refusal.
+    #[test]
+    fn review13_a_refused_folder_delete_claim_retires_its_busy() {
+        let (mut app, worktree) = repo_app();
+        let target = worktree.join("node_modules");
+        let _other = app
+            .engine
+            .worktree_ops()
+            .claim_for_destructive(&target)
+            .expect("another delete holds the folder");
+        app.start_folder_op(FolderOp::Delete, &folder("node_modules/", "??", 13));
+        assert!(
+            app.changes_tree.pending_ops.is_empty(),
+            "refused: no worker"
+        );
+        let session_id = app.engine.sessions[0].id.clone();
+        let key = op_status_key(&session_id, "node_modules/");
+        let live = app.engine.status_op_is_live(&key);
+        let later = Instant::now() + Duration::from_secs(300);
+        app.status.tick(later, dux_core::statusline::BUSY_TIMEOUT);
+        let open_busy: Vec<_> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key.as_str()) && status.tone == "busy")
+            .collect();
+        assert!(
+            open_busy.is_empty(),
+            "five minutes after the refusal the delete's busy is still open: {open_busy:?}"
+        );
+        assert!(
+            !live,
+            "the refused delete left its status key {key} registered as a live operation"
+        );
     }
 
     fn render_text(app: &mut App, width: u16, height: u16) -> Vec<String> {
@@ -1807,6 +1929,13 @@ mod tests {
         std::fs::write(worktree.join("notes.md/a.txt"), "a\n").unwrap();
 
         app.resolve_confirm_discard_file(true);
+        // The discard runs on a worker; its final replaces the busy.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.status.tone() == StatusTone::Busy {
+            assert!(Instant::now() < deadline, "the discard never finished");
+            app.drain_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         assert_eq!(app.status.tone(), StatusTone::Error);
         assert!(
@@ -1896,7 +2025,7 @@ mod tests {
 
         // Only that file is staged, and it is its own row: the folder is not
         // staged whole, so no folder row may claim it.
-        let (staged, unstaged) = git::changed_files(&worktree).unwrap();
+        let (staged, unstaged) = git::changed_files_for_display(&worktree).unwrap();
         assert_eq!(staged.len(), 1, "{staged:?}");
         assert_eq!(staged[0].path, "node_modules/top.js");
         assert!(!staged[0].is_folder());

@@ -2752,6 +2752,9 @@ impl Engine {
                 )
             })?;
 
+        let claim = self
+            .claim_startup_rerun(session_id, &session.display_label(), &managed.worktree_path)
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
         let paths = self.paths.clone();
         let terminal = self.config.startup_command_terminal.clone();
         let env =
@@ -2791,7 +2794,12 @@ impl Engine {
             env,
         };
         let reaction = self.spawn_status_op(op, move || {
-            crate::startup::run_startup_command(&paths, run).status
+            let crate::engine::StartupRerunClaim {
+                run: run_claim,
+                hold,
+            } = claim;
+            let _hold = hold;
+            crate::startup::run_claimed_startup_command(&paths, run, run_claim).status
         });
         // `spawn_status_op` returns the pending Busy as an `EventReaction::Status`;
         // surface it as the wire outcome so the originating client shows the spinner
@@ -3063,6 +3071,7 @@ impl Engine {
         let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
+        let guard = self.checkout_move_guard();
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // Guarantee the op resolves even if the job panics; see the sibling
@@ -3077,6 +3086,7 @@ impl Engine {
                     default_branch,
                     worker_tx,
                     Some(op_id),
+                    &guard,
                 );
             }))
             .is_err()
@@ -3784,6 +3794,7 @@ impl Engine {
                 // `NonDefaultBranchCheckoutCompleted` resolves the right op.
                 let status_op_id = status_op_id.clone();
                 let worker_tx = self.worker_tx.clone();
+                let guard = self.checkout_move_guard();
                 // A panic in the switch still answers, or the repository's
                 // in-flight key and the keyed busy would never be released.
                 std::thread::spawn(move || {
@@ -3792,7 +3803,11 @@ impl Engine {
                         target_branch,
                         worker_tx,
                         status_op_id,
-                        crate::project_browser::run_add_project_checkout_job,
+                        |action, branch, tx, id| {
+                            crate::project_browser::run_add_project_checkout_job(
+                                action, branch, tx, id, &guard,
+                            )
+                        },
                     );
                 });
                 vec![]
@@ -3943,6 +3958,16 @@ impl Engine {
                     self.resolve_web_delete_op(session_id, &outcome)
                 }
             }
+            EventReaction::WorktreeRemoveWaiting {
+                session_id,
+                message,
+            } => match self.pending_delete_ops_web.get(session_id) {
+                // The delete's own toast says what the removal is waiting for.
+                Some(op) => wire_statuses_from_reaction(&EventReaction::Status(
+                    op.progress(message.clone()),
+                )),
+                None => vec![],
+            },
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,
@@ -4229,15 +4254,24 @@ impl Engine {
             },
             WireCommand::DiscardFile { session_id, path } => {
                 let worktree_path = self.changes_worktree(&session_id)?;
-                let is_untracked = crate::git::discard_classify(&worktree_path, &path)?;
+                // Refused here, with no git: a path that is not plain inside
+                // the worktree (`node_modules/..` is the whole worktree) never
+                // becomes a discard.
+                if !crate::model::is_lexically_normal_path(&path) {
+                    anyhow::bail!(
+                        "refusing to discard {path:?}: it is not a plain path inside the worktree"
+                    );
+                }
                 // The wire names no kind, so it is a file's discard: a plain
                 // file is deleted or restored as it always was, and a folder
                 // (which only the confirmed routes may delete) is refused.
-                Command::DiscardFile {
+                // Tracked or untracked is decided against live git status on
+                // the discard's worker, and its refusals ("unstage the file
+                // first", "nothing to discard") are the final, before anything
+                // is touched.
+                Command::DiscardFileLive {
                     worktree_path,
                     path,
-                    is_untracked,
-                    confirmed: crate::git::ConfirmedEntry::File,
                 }
             }
             WireCommand::CommitChanges {
@@ -5265,7 +5299,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &link.to_string_lossy()));
 
-        let outcome = match engine.do_delete_session("s1", true, None) {
+        let outcome = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            true,
+            None,
+        ) {
             Ok(Some(outcome)) => outcome,
             other => panic!("the delete must proceed, got {:?}", other.is_ok()),
         };
@@ -5292,7 +5331,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let outcome = match engine.do_delete_session("sa1", false, None) {
+        let outcome = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "sa1",
+            false,
+            None,
+        ) {
             Ok(Some(outcome)) => outcome,
             Ok(None) => panic!("the session existed"),
             Err(err) => panic!("delete must succeed: {err}"),
@@ -5306,14 +5350,19 @@ mod tests {
             message.contains("folder"),
             "the message must name what was left alone, got {message:?}"
         );
+        // The words are judged with the folder's own path taken out: the
+        // temporary directory may live anywhere, a path naming a worktree
+        // included.
+        let words = message
+            .to_string()
+            .replace(&folder_path, "")
+            .replace(&crate::home_path::shorten_home(folder.path()), "")
+            .to_lowercase();
         assert!(
-            !message.to_lowercase().contains("worktree"),
+            !words.contains("worktree"),
             "a standalone agent has no worktree to mention, got {message:?}"
         );
-        assert!(
-            !message.to_lowercase().contains("branch"),
-            "nor a branch, got {message:?}"
-        );
+        assert!(!words.contains("branch"), "nor a branch, got {message:?}");
         assert!(
             folder.path().exists(),
             "and the folder itself must still be there"
@@ -5333,7 +5382,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let message = match engine.do_delete_session("sa1", true, None) {
+        let message = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "sa1",
+            true,
+            None,
+        ) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a destructive request dux will not honour must be refused"),
         };
@@ -5639,32 +5693,56 @@ mod tests {
         s
     }
 
+    /// Drive a wire discard to its final: the command, the keyed busy it
+    /// answers with, and the final the worker sends.
+    fn wire_discard(engine: &mut Engine, path: &str) -> StatusUpdate {
+        let command = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: path.to_string(),
+            })
+            .expect("reconstruct");
+        assert!(matches!(command, Command::DiscardFileLive { .. }));
+        let busy = match engine.apply(command).expect("apply") {
+            crate::engine::EventReaction::Status(update) => update,
+            _ => panic!("expected a busy status"),
+        };
+        assert_eq!(busy.tone, crate::statusline::StatusTone::Busy);
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the discard reports");
+            let done = matches!(event, crate::worker::WorkerEvent::StatusOpCompleted { .. });
+            let reaction = engine.process_worker_event(event);
+            if done {
+                match reaction {
+                    crate::engine::EventReaction::Status(update) => return update,
+                    _ => panic!("expected the discard's final"),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn wire_to_command_discard_derives_untracked_for_untracked_file() {
+    fn wire_discard_deletes_an_untracked_file_classified_on_the_worker() {
         // init_repo leaves a.txt untracked (never committed).
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let cmd = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::DiscardFile {
-                worktree_path,
-                path,
-                is_untracked,
-                confirmed,
-            } => {
-                assert_eq!(confirmed, crate::git::ConfirmedEntry::File);
-                assert_eq!(worktree_path, repo.path());
-                assert_eq!(path, "a.txt");
-                assert!(is_untracked, "untracked file must be classified untracked");
-            }
-            _ => panic!("expected Command::DiscardFile variant"),
-        }
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(
+            done.tone,
+            crate::statusline::StatusTone::Info,
+            "{}",
+            done.message
+        );
+        assert!(
+            done.message.contains("Deleted untracked file"),
+            "{}",
+            done.message
+        );
+        assert!(!repo.path().join("a.txt").exists());
     }
 
     /// A path that climbs out of an untracked folder is not a file inside it,
@@ -5697,29 +5775,30 @@ mod tests {
     }
 
     #[test]
-    fn wire_to_command_discard_derives_tracked_for_modified_file() {
+    fn wire_discard_restores_a_modified_tracked_file() {
         // init_repo_with_commit commits a.txt; modify it so it has an unstaged
         // (tracked) change.
         let repo = init_repo_with_commit();
+        let committed = std::fs::read_to_string(repo.path().join("a.txt")).expect("read");
         std::fs::write(repo.path().join("a.txt"), "changed\n").expect("modify file");
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let cmd = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::DiscardFile { is_untracked, .. } => {
-                assert!(!is_untracked, "modified tracked file must not be untracked");
-            }
-            _ => panic!("expected Command::DiscardFile variant"),
-        }
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(
+            done.tone,
+            crate::statusline::StatusTone::Info,
+            "{}",
+            done.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+            committed,
+            "a modified tracked file is restored, never deleted"
+        );
     }
 
     #[test]
-    fn wire_to_command_discard_rejects_staged_file() {
+    fn wire_discard_refuses_a_staged_file_in_its_final() {
         // Commit a.txt, modify it, then STAGE the modification: it is now purely
         // staged with no remaining working-tree change. The TUI blocks this.
         let repo = init_repo_with_commit();
@@ -5733,38 +5812,36 @@ mod tests {
         assert!(ok, "git add failed");
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let err = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .map(|_| ())
-            .unwrap_err();
+        let done = wire_discard(&mut engine, "a.txt");
         // Mirrors the TUI's "Unstage the file first to discard changes." copy.
+        assert_eq!(done.tone, crate::statusline::StatusTone::Error);
         assert!(
-            err.to_string()
+            done.message
                 .contains("Unstage the file first to discard changes."),
-            "got: {err}"
+            "got: {}",
+            done.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+            "staged change\n",
+            "nothing was touched"
         );
     }
 
     #[test]
-    fn wire_to_command_discard_rejects_unchanged_file() {
+    fn wire_discard_refuses_an_unchanged_file_in_its_final() {
         // a.txt is committed and clean: nothing to discard.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        let err = engine
-            .wire_to_command(WireCommand::DiscardFile {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            })
-            .map(|_| ())
-            .unwrap_err();
+        let done = wire_discard(&mut engine, "a.txt");
+        assert_eq!(done.tone, crate::statusline::StatusTone::Error);
         assert!(
-            err.to_string().contains("No unstaged changes to discard"),
-            "got: {err}"
+            done.message.contains("No unstaged changes to discard"),
+            "got: {}",
+            done.message
         );
+        assert!(repo.path().join("a.txt").exists());
     }
 
     #[test]
@@ -5852,6 +5929,46 @@ mod tests {
             err.to_string().contains("does not have a startup command"),
             "err: {err}"
         );
+    }
+
+    /// A rerun while the previous run is still going is refused with a
+    /// sentence instead of running the same provisioning twice in one worktree,
+    /// and the claim is taken on the engine thread, so no second request can
+    /// slip in before the first run's worker starts.
+    #[test]
+    fn wire_rerun_startup_command_refuses_a_second_run_while_one_is_going() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut project = sample_project("p1", "/repo");
+        project.startup_command = Some("touch started; sleep 1".to_string());
+        engine.projects.push(project);
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+        let rerun = WireCommand::RerunStartupCommand {
+            session_id: "s1".to_string(),
+        };
+
+        engine
+            .apply_wire(rerun.clone())
+            .expect("the first run starts");
+        let err = engine
+            .apply_wire(rerun.clone())
+            .map(|_| ())
+            .expect_err("a second run is refused while the first is going");
+        assert!(err.to_string().contains("is still running"), "err: {err}");
+
+        // Once the first has finished, a rerun is accepted again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while engine.process_registry.startup_running("s1") {
+            assert!(std::time::Instant::now() < deadline, "the run never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        engine.apply_wire(rerun).expect("a later run starts");
     }
 
     #[test]
@@ -7435,13 +7552,21 @@ mod tests {
             forced.key, busy.key,
             "the forced final must retire the spinner the polite detach raised"
         );
-        assert!(engine.terminating_ptys.is_empty());
+        // The overtaken PTY was killed on the spot and is left for the reaper,
+        // due now: the reaper is the one place a terminating PTY leaves.
+        assert!(
+            engine
+                .terminating_ptys
+                .iter()
+                .all(|entry| entry.deadline <= std::time::Instant::now())
+        );
         assert!(engine.pending_detachments.is_empty());
         // No second outcome is owed: the barrier went with the spinner.
         assert!(
             engine.reap_terminating_ptys().detach_finals.is_empty(),
             "an overtaken detach must not also emit its own final"
         );
+        assert!(engine.terminating_ptys.is_empty(), "one reap takes it");
     }
 
     /// The whole round trip, spinner AND answer. Every other test here stops at

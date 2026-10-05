@@ -2740,6 +2740,41 @@ describe("the file tree follows what the agent writes", () => {
     expect(await screen.findByText("newdir/one.txt")).toBeTruthy()
   })
 
+  // A revisit can arrive the moment the tree's listing is on screen: the user
+  // comes back to the window as the root renders. The directories the tree
+  // has loaded must already be known then, or the revisit finds none to
+  // refetch and is dropped without a trace. Fired from a MutationObserver,
+  // which runs as soon as the listing is in the DOM and before any work React
+  // defers past the commit, so this is the exact moment rather than a timing
+  // a slow machine happens to hit.
+  it("a revisit the moment the listing renders still refetches it", async () => {
+    const { getSnapshot } = await import("@/lib/store")
+    mockState = {
+      ...getSnapshot(),
+      changes: changes([]),
+      editorTarget: { root: agentRoot(SESSION), initialPath: null },
+      editorTabs: tabsState([], null),
+    } as unknown as DuxState
+    let fired = false
+    const observer = new MutationObserver(() => {
+      if (fired || !document.body.textContent?.includes("notes.md")) return
+      fired = true
+      rootEntries = [entry("notes.md", false), entry("later.ts", false)]
+      fireEvent(window, new Event("focus"))
+    })
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    })
+    try {
+      render(<Overlay />)
+      expect(await screen.findByText("later.ts")).toBeTruthy()
+    } finally {
+      observer.disconnect()
+    }
+  })
+
   it("walks the search index once for a revisit, however many events it fires", async () => {
     await mountTree()
     expect(listMock.mock.calls.length).toBe(1)

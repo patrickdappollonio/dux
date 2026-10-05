@@ -18,6 +18,7 @@ pub mod bidi;
 pub mod bounded_command;
 pub mod browser;
 pub mod changes_status;
+pub mod checkout_move;
 pub mod config;
 pub mod config_auth;
 pub mod config_effective;
@@ -28,6 +29,7 @@ pub mod config_reload_status;
 pub mod config_sync;
 pub mod config_write;
 pub mod container;
+pub mod destructive;
 pub mod device_label;
 pub mod diff;
 pub mod editor;
@@ -50,6 +52,7 @@ pub mod model;
 pub mod palette;
 pub mod poller_status;
 pub mod pr_reference;
+pub mod process_sessions;
 pub mod project_browser;
 pub mod project_order;
 pub mod project_prose;
@@ -62,6 +65,8 @@ pub mod quiet_tail;
 pub mod release_notes;
 pub mod reload_signal;
 pub mod resource_stats;
+#[cfg(all(test, target_os = "linux"))]
+mod review27_tests;
 pub mod row_state;
 pub mod scroll_hint;
 pub mod scroll_margins;
@@ -97,6 +102,7 @@ pub mod working_copy;
 pub mod working_cue;
 pub mod worktree_file;
 pub mod worktree_manager;
+pub mod worktree_ops;
 
 /// Display version string ('vX.Y.Z' for release builds, 'development' otherwise), set by build.rs, mirroring the TUI's `DUX_DISPLAY_VERSION`.
 pub fn display_version() -> &'static str {

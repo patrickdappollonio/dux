@@ -46,6 +46,16 @@ pub enum SpineChange {
     Sessions,
 }
 
+/// What the worktree manager's listing needs from the engine for one project:
+/// the classification inputs, and every folder something dux started is still
+/// running in (so such a row is shown busy rather than removable).
+pub struct ProjectWorktreeInputs {
+    pub project: dux_core::model::Project,
+    pub paths: dux_core::config::DuxPaths,
+    pub sessions: Vec<dux_core::model::AgentSession>,
+    pub busy: Vec<(std::path::PathBuf, String)>,
+}
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
@@ -193,7 +203,7 @@ pub enum EngineRequest {
     /// Where a file dropped onto the pane showing this pty id should be saved.
     /// The pty id may be a terminal, an agent's first tab, or an extra tab; the
     /// engine resolves all three. A terminal answers with a PLAN rather
-    /// than a path, so the live-directory probe (a `/proc` read, or `lsof` on
+    /// than a path, so the live-directory probe (a `/proc` read, or a kernel query on
     /// macOS) happens on a blocking pool and never on this thread.
     FileDropDestination(
         String,
@@ -291,15 +301,23 @@ pub enum EngineRequest {
     /// project, the dux paths, and the current sessions. Instant clones, because the
     /// classification shells to git and runs off-thread in the server handler.
     /// `None` when the project id is unknown.
-    ProjectWorktreeInputs(
-        String,
-        oneshot::Sender<
-            Option<(
-                dux_core::model::Project,
-                dux_core::config::DuxPaths,
-                Vec<dux_core::model::AgentSession>,
-            )>,
-        >,
+    ProjectWorktreeInputs(String, oneshot::Sender<Option<ProjectWorktreeInputs>>),
+    /// Decide a worktree-manager removal against the engine's LIVE state and
+    /// announce it, `None` when the project id is unknown. The slow part (the
+    /// wait for operations in the worktree, then git) is the admitted ticket's,
+    /// run by the handler off-thread.
+    AdmitManagerRemoval {
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branch: bool,
+        reply: oneshot::Sender<Option<dux_core::worktree_manager::RemovalAdmission>>,
+    },
+    /// What stands in the way of deleting or moving `path` and everything
+    /// under it (see `Engine::destructive_check`); the caller evaluates the
+    /// blocking part off the engine loop.
+    DestructiveCheck(
+        std::path::PathBuf,
+        oneshot::Sender<dux_core::engine::DestructiveCheck>,
     ),
     /// Everything the pull-request reference resolver needs: the live project list
     /// and the GitHub host policy. Instant clones, because reading a project's
@@ -730,6 +748,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             paths: Arc::new(engine.paths.clone()),
             reload_surface: engine.surface.start_surface(),
             admission: process_admission(engine),
+            worktree_ops: engine.worktree_ops().clone(),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -796,6 +815,11 @@ struct PendingSubscribe {
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
+    /// The engine's per-worktree registry of operations in flight, shared by
+    /// handle: the editor, upload and git routes run off the engine thread and
+    /// still register the worktree they write into, so a removal waits for
+    /// them and refuses them once it has begun.
+    worktree_ops: dux_core::worktree_ops::WorktreeOps,
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
@@ -1621,6 +1645,11 @@ impl EngineHandle {
 
     /// The `[server]` limits a config reload can move without a restart. The
     /// router clones this into `AppState`; the actor stores each reload into it.
+    /// See the `worktree_ops` field.
+    pub fn worktree_ops(&self) -> &dux_core::worktree_ops::WorktreeOps {
+        &self.worktree_ops
+    }
+
     pub fn live_limits(&self) -> Arc<LiveServerLimits> {
         Arc::clone(&self.live_limits)
     }
@@ -1702,14 +1731,51 @@ impl EngineHandle {
     /// paths, sessions). Instant: the git classification runs off-thread in the
     /// caller. `None` when the project id is unknown.
     #[allow(clippy::type_complexity)]
+    /// See [`EngineRequest::AdmitManagerRemoval`].
+    pub async fn admit_manager_removal(
+        &self,
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branch: bool,
+    ) -> Option<dux_core::worktree_manager::RemovalAdmission> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::AdmitManagerRemoval {
+                project_id,
+                path,
+                delete_branch,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// See [`EngineRequest::DestructiveCheck`]. `None` when the engine is gone.
+    pub async fn destructive_check(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Option<dux_core::engine::DestructiveCheck> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::DestructiveCheck(path, reply))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
     pub async fn project_worktree_inputs(
         &self,
         project_id: String,
-    ) -> Option<(
-        dux_core::model::Project,
-        dux_core::config::DuxPaths,
-        Vec<dux_core::model::AgentSession>,
-    )> {
+    ) -> Option<ProjectWorktreeInputs> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2067,6 +2133,10 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::FileDropRefreshTarget(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
+        // Announces a removal in the worktree registry; no spine row changes
+        // until the removal finishes and the listing is asked again.
+        | EngineRequest::AdmitManagerRemoval { .. }
+        | EngineRequest::DestructiveCheck(..)
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
@@ -4157,13 +4227,29 @@ fn handle_request(
                 engine.pr_agent_command_available(),
             ));
         }
+        EngineRequest::DestructiveCheck(path, reply) => {
+            let _ = reply.send(engine.destructive_check(&path));
+        }
+        EngineRequest::AdmitManagerRemoval {
+            project_id,
+            path,
+            delete_branch,
+            reply,
+        } => {
+            let _ = reply.send(engine.admit_manager_removal(&project_id, &path, delete_branch));
+        }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine
                 .projects
                 .iter()
                 .find(|p| p.id == project_id)
                 .cloned()
-                .map(|project| (project, engine.paths.clone(), engine.sessions.clone()));
+                .map(|project| ProjectWorktreeInputs {
+                    project,
+                    paths: engine.paths.clone(),
+                    sessions: engine.sessions.clone(),
+                    busy: engine.busy_folders(),
+                });
             let _ = reply.send(inputs);
         }
         EngineRequest::SessionStartupLogContext(session_id, reply) => {
@@ -7991,6 +8077,21 @@ mod tests {
                 false,
             ),
             (
+                "AdmitManagerRemoval",
+                EngineRequest::AdmitManagerRemoval {
+                    project_id: "p1".into(),
+                    path: "/tmp/wt".into(),
+                    delete_branch: false,
+                    reply: dead_reply(),
+                },
+                false,
+            ),
+            (
+                "DestructiveCheck",
+                EngineRequest::DestructiveCheck("/tmp/wt".into(), dead_reply()),
+                false,
+            ),
+            (
                 "SessionStartupLogContext",
                 EngineRequest::SessionStartupLogContext("s1".into(), dead_reply()),
                 false,
@@ -8124,7 +8225,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            43,
+            45,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

@@ -191,6 +191,11 @@ struct ProjectWorktreeEntryView {
     /// the naming vocabulary stays in one place, and points the user at that
     /// agent instead of offering a second route to deleting the worktree.
     agent_id: Option<String>,
+    /// A removal of this worktree has already begun: the agent that owned it
+    /// was just deleted and its processes are still exiting, or git is removing
+    /// it now. Not adoptable, not removable a second time; the client labels it
+    /// "being removed".
+    being_removed: bool,
 }
 
 #[derive(Serialize)]
@@ -213,11 +218,10 @@ async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<St
     // not run on the engine loop or the async reactor (the browse precedent).
     match state.engine.project_worktree_inputs(id).await {
         None => (StatusCode::NOT_FOUND, "unknown project").into_response(),
-        Some((project, paths, sessions)) => {
-            match tokio::task::spawn_blocking(move || {
-                classify_managed_worktrees(&project, &paths, &sessions)
-            })
-            .await
+        Some(inputs) => {
+            let ops = state.engine.worktree_ops().clone();
+            match tokio::task::spawn_blocking(move || classify_managed_worktrees(&inputs, &ops))
+                .await
             {
                 Ok(Ok(entries)) => Json(WorktreesReply { entries }).into_response(),
                 Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -239,26 +243,36 @@ async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<St
 /// the reason string are decided here. Runs in `spawn_blocking`, since the listing
 /// shells to git, and returns a user-facing error string when that fails.
 fn classify_managed_worktrees(
-    project: &dux_core::model::Project,
-    paths: &dux_core::config::DuxPaths,
-    sessions: &[dux_core::model::AgentSession],
+    inputs: &crate::engine_actor::ProjectWorktreeInputs,
+    ops: &dux_core::worktree_ops::WorktreeOps,
 ) -> Result<Vec<ProjectWorktreeEntryView>, String> {
-    let entries = dux_core::worktree_manager::list_manageable_worktrees(project, paths, sessions)?
-        .into_iter()
-        .map(|entry| ProjectWorktreeEntryView {
-            adoptable: entry.is_removable(),
-            reason: if entry.is_removable() {
-                None
-            } else {
-                Some("Already has an agent.".to_string())
-            },
-            worktree_path: entry.path.to_string_lossy().to_string(),
-            branch_name: entry.label,
-            branch: entry.branch,
-            dirty: entry.dirty,
-            agent_id: entry.attached_session_id,
-        })
-        .collect();
+    let entries = dux_core::worktree_manager::list_manageable_worktrees_with_busy(
+        &inputs.project,
+        &inputs.paths,
+        &inputs.sessions,
+        ops,
+        &inputs.busy,
+    )?
+    .into_iter()
+    .map(|entry| ProjectWorktreeEntryView {
+        adoptable: entry.is_removable(),
+        reason: if entry.being_removed {
+            Some("Being removed: its agent was just deleted.".to_string())
+        } else if let Some(busy) = &entry.busy {
+            Some(format!("In use: {busy}."))
+        } else if entry.is_removable() {
+            None
+        } else {
+            Some("Already has an agent.".to_string())
+        },
+        being_removed: entry.being_removed,
+        worktree_path: entry.path.to_string_lossy().to_string(),
+        branch_name: entry.label,
+        branch: entry.branch,
+        dirty: entry.dirty,
+        agent_id: entry.attached_session_id,
+    })
+    .collect();
     Ok(entries)
 }
 
@@ -274,18 +288,19 @@ async fn list_worktree_counts(State(state): State<AppState>) -> Response {
     };
     let mut inputs = Vec::new();
     for project in spine.projects {
-        if let Some(triple) = state
+        if let Some(found) = state
             .engine
             .project_worktree_inputs(project.id.clone())
             .await
         {
-            inputs.push((project.id, triple));
+            inputs.push((project.id, found));
         }
     }
+    let ops = state.engine.worktree_ops().clone();
     match tokio::task::spawn_blocking(move || {
         let mut counts = BTreeMap::new();
-        for (id, (project, paths, sessions)) in inputs {
-            let n = classify_managed_worktrees(&project, &paths, &sessions)
+        for (id, found) in inputs {
+            let n = classify_managed_worktrees(&found, &ops)
                 .map(|entries| entries.len())
                 .unwrap_or(0);
             counts.insert(id, n);
@@ -377,27 +392,26 @@ async fn delete_worktree(
     if query.path.chars().count() > MAX_PATH_LEN {
         return (StatusCode::BAD_REQUEST, "path is too long").into_response();
     }
-    let Some((project, paths, sessions)) = state.engine.project_worktree_inputs(id).await else {
-        return (StatusCode::NOT_FOUND, "unknown project").into_response();
-    };
-
     let requested = PathBuf::from(&query.path);
     let delete_branch = query.delete_branch;
-    // Classify and remove in ONE off-thread hop, both because the classification
-    // shells to git and because the removal must be decided against a fresh
-    // listing rather than against whatever the client last saw. Both halves are
-    // core's, shared with the TUI's worktree manager; the route only maps the
-    // three answers onto statuses.
-    let result = tokio::task::spawn_blocking(move || {
-        dux_core::worktree_manager::remove_managed_worktree(
-            &project,
-            &paths,
-            &sessions,
-            &requested,
-            delete_branch,
-        )
-    })
-    .await;
+    // Admitted by the engine against its LIVE state at this moment (the agents
+    // now, an agent being created on the folder now, a removal of it already
+    // under way), never against the listing the client last saw, and announced
+    // before the answer comes back so nothing new starts in the folder. The wait
+    // for operations still running in it and the git work run off-thread.
+    // Both halves are core's, shared with the TUI's worktree manager; the route
+    // only maps the answers onto statuses.
+    let result = match state
+        .engine
+        .admit_manager_removal(id, requested, delete_branch)
+        .await
+    {
+        None => return (StatusCode::NOT_FOUND, "unknown project").into_response(),
+        Some(dux_core::worktree_manager::RemovalAdmission::Refused(outcome)) => Ok(Ok(outcome)),
+        Some(dux_core::worktree_manager::RemovalAdmission::Admitted(ticket)) => {
+            tokio::task::spawn_blocking(move || ticket.run()).await
+        }
+    };
 
     match result {
         // 404: dux will not remove a directory it was not asked about, and an
@@ -413,8 +427,27 @@ async fn delete_worktree(
         // session, and deleting the agent is the supported route.
         Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Attached)) => (
             StatusCode::CONFLICT,
-            "an agent is working in that directory; delete that agent first (deleting a \
-             standalone agent leaves its directory in place)",
+            "an agent is working in that directory, or one is being created on it; delete \
+             that agent first (deleting a standalone agent leaves its directory in place)",
+        )
+            .into_response(),
+        // 409: the agent that owned it was just deleted and its removal is
+        // already under way; a second one would run git twice.
+        // 409: something dux started still runs in the folder (a deleted
+        // agent's CLI still stopping, a terminal); removing it would pull the
+        // folder out from under that process.
+        Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Busy { reason })) => (
+            StatusCode::CONFLICT,
+            format!(
+                "nothing was removed: {reason}. Try again once it has stopped (closing that \
+                 terminal, or waiting for the deleted agent to finish stopping)"
+            ),
+        )
+            .into_response(),
+        Ok(Ok(dux_core::worktree_manager::RemovalOutcome::BeingRemoved)) => (
+            StatusCode::CONFLICT,
+            "that worktree is already being removed, because the agent that owned it was \
+             just deleted; it leaves the list once that removal finishes",
         )
             .into_response(),
         // 200 with a body rather than a bare 204: the client has to be

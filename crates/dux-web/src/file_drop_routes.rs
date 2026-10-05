@@ -300,12 +300,30 @@ async fn upload_dropped_file(
     // task as the write itself, rather than costing the response a second hop.
     let refresh_target = state.engine.file_drop_refresh_target(pty.clone()).await;
     let worktree = refresh_target.as_ref().map(|(_, w)| w.clone());
+    // A drop that lands in an agent's worktree holds it while it writes, so a
+    // removal of that worktree waits for it, and is refused once the removal
+    // has begun rather than creating the upload directory in a folder that is
+    // going.
+    let hold = match &worktree {
+        Some(worktree) => match crate::git_routes::hold_root_for_write(
+            &state,
+            worktree,
+            dux_core::worktree_ops::WorktreeOpKind::Upload,
+            "save the dropped file",
+        ) {
+            Ok(hold) => Some(hold),
+            Err(r) => return r.into_response(),
+        },
+        None => None,
+    };
 
     let filename = query.filename.clone();
+    let ops = state.engine.worktree_ops().clone();
     // Everything from here is filesystem work: pinning the directory (a /proc
-    // read, or an `lsof` process on macOS) and writing the file. Off the async
+    // read, or a kernel query on macOS) and writing the file. Off the async
     // reactor, exactly like the editor's file routes.
     let saved = tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         // A destination that cannot be used is a refusal in its OWN words: a
         // path that could not be sent to the terminal, or a process dux is not
         // allowed to read. Flattening those into "could not write the file"
@@ -313,6 +331,18 @@ async fn upload_dropped_file(
         let dir = destination
             .open()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // The folder the file actually lands in is held too, whatever pane the
+        // drop came from: a terminal's shell can stand inside an agent's
+        // worktree that is being removed, and the drop must neither land there
+        // nor bring the folder back.
+        let _target_hold = ops
+            .hold(dir.path(), dux_core::worktree_ops::WorktreeOpKind::Upload)
+            .map_err(|refused| {
+                std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    refused.sentence("save the dropped file").to_string(),
+                )
+            })?;
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -348,6 +378,11 @@ async fn upload_dropped_file(
         // A refusal (an unusable name, a symlink in the way, a destination that
         // cannot be written) is a client condition and names its reason, so the
         // browser can put that reason in the toast rather than a generic one.
+        // The folder it would land in is being removed: the same 409 the
+        // worktree hold above answers with.
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {
+            (StatusCode::CONFLICT, e.to_string()).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -642,6 +677,19 @@ mod tests {
         }
     }
 
+    /// A drop into an agent whose worktree is being removed is refused before
+    /// anything is written: the upload directory would otherwise be created
+    /// inside a folder that is going, or bring it back once it had gone.
+    #[tokio::test]
+    async fn a_drop_on_an_agent_whose_worktree_is_being_removed_is_refused() {
+        let world = drop_world().await;
+        let _removal = world.handle.worktree_ops().announce_removal(&world.wt);
+        let resp = world.drop_on("s1-slot", "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_text(resp).await.contains("removing the worktree"));
+        assert!(!world.wt.join(".dux").exists(), "nothing may be written");
+    }
+
     #[tokio::test]
     async fn dropping_on_an_agent_refreshes_that_agent_s_changed_files() {
         // The gap this closes: without it a dropped screenshot is invisible in
@@ -761,6 +809,27 @@ mod tests {
         let (generation_after, refreshes) = world.refreshes();
         assert_eq!(generation_after, generation);
         assert!(refreshes.is_empty(), "got {refreshes:?}");
+    }
+
+    /// A project terminal belongs to no agent, so the drop has no agent
+    /// worktree to hold; what keeps it out of a worktree being removed is the
+    /// hold on the folder the file would actually land in, which is wherever
+    /// the shell stands. Its shell has `cd`'d into an agent's worktree whose
+    /// removal has begun: the drop is refused with 409 and writes nothing.
+    #[tokio::test]
+    async fn a_drop_on_a_terminal_standing_inside_a_worktree_being_removed_is_refused() {
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/projects/p1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+        let _removal = world.handle.worktree_ops().announce_removal(&world.wt);
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_text(resp).await.contains("removing the worktree"));
+        assert!(
+            !world.wt.join("shot.png").exists(),
+            "nothing may be written into a folder being removed"
+        );
     }
 
     #[tokio::test]

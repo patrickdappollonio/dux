@@ -726,7 +726,18 @@ async fn write_file<R: EditorRoot>(
     // map them to 400. The one exception is a freshness conflict, which is a
     // 409 carrying the file's CURRENT stamp so the browser can offer a choice
     // (overwrite, reload, cancel) without another round trip.
+    let hold = match crate::git_routes::hold_targets_for_write(
+        &state,
+        root.path(),
+        &[&path],
+        dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+        "save the file",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     let stamp = match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         dux_core::worktree_file::write_file_checked(&wt, &path, &content, expected.as_ref())
     })
     .await
@@ -827,8 +838,21 @@ async fn create_file<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_file(&wt, &path))
-        .await
+    let hold = match crate::git_routes::hold_targets_for_write(
+        &state,
+        root.path(),
+        &[&path],
+        dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+        "create the file",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
+        dux_core::worktree_file::create_file(&wt, &path)
+    })
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -854,7 +878,21 @@ async fn create_dir<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_dir(&wt, &path)).await
+    let hold = match crate::git_routes::hold_targets_for_write(
+        &state,
+        root.path(),
+        &[&path],
+        dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+        "create the folder",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
+        dux_core::worktree_file::create_dir(&wt, &path)
+    })
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -881,20 +919,17 @@ async fn rename_entry<R: EditorRoot>(
     let wt = worktree.clone();
     let from = op.from;
     let to = op.to;
-    match tokio::task::spawn_blocking(move || {
-        dux_core::worktree_file::rename_entry(&wt, &from, &to)
-    })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("rename task failed: {e}"),
-            )
-                .into_response();
-        }
+    let targets = [from.clone(), to.clone()];
+    let outcome = destructive_editor_op(
+        &state,
+        root.path(),
+        &[&targets[0], &targets[1]],
+        "move",
+        move |clear| dux_core::worktree_file::rename_entry(&wt, &from, &to, clear),
+    )
+    .await;
+    if let Err(rejection) = outcome {
+        return rejection.into_response();
     }
     refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
@@ -910,21 +945,111 @@ async fn delete_entry<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    match tokio::task::spawn_blocking(move || dux_core::worktree_file::delete_entry(&wt, &path))
-        .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("delete task failed: {e}"),
-            )
-                .into_response();
-        }
+    let target = path.clone();
+    let outcome = destructive_editor_op(&state, root.path(), &[&target], "delete", move |clear| {
+        dux_core::worktree_file::delete_entry(&wt, &path, clear)
+    })
+    .await;
+    if let Err(rejection) = outcome {
+        return rejection.into_response();
     }
     refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
+}
+
+/// Run an editor delete or move of `targets` (relative to `root`) behind the
+/// one gate every destructive file operation passes. Removing or moving a
+/// folder removes or moves everything under it (an agent's worktree inside a
+/// terminal's root, a standalone agent's folder, a project's repository,
+/// something dux started there), so:
+///
+/// 1. every target that is a folder is CLAIMED, so nothing new can start
+///    inside it from here on;
+/// 2. the engine is asked the one occupancy question for every target;
+/// 3. the targets that are not folders are held;
+/// 4. the operation runs off the async runtime, and gets its clearance from
+///    the check right before it touches anything. A refusal is a 409 with
+///    the sentence, a request the operation itself rejects a 400.
+async fn destructive_editor_op(
+    state: &AppState,
+    root: &std::path::Path,
+    targets: &[&String],
+    what: &'static str,
+    op: impl for<'c> FnOnce(
+        &mut dyn FnMut()
+            -> Result<dux_core::destructive::Cleared<'c>, dux_core::destructive::Refused>,
+    ) -> anyhow::Result<()>
+    + Send
+    + 'static,
+) -> Result<(), crate::rest_common::RouteRejection> {
+    // Off the async runtime: a claim may wait (bounded) for a removal
+    // running inside the folder.
+    let guard = {
+        let state = state.clone();
+        let root = root.to_path_buf();
+        let relative: Vec<String> = targets.iter().map(|target| target.to_string()).collect();
+        tokio::task::spawn_blocking(move || {
+            let relative: Vec<&str> = relative.iter().map(String::as_str).collect();
+            crate::git_routes::guard_destructive_targets(
+                &state,
+                &root,
+                &relative,
+                &format!("{what} the entry"),
+            )
+        })
+        .await
+        .map_err(|e| {
+            crate::rest_common::RouteRejection::from(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{what} task failed: {e}"),
+                )
+                    .into_response(),
+            )
+        })??
+    };
+    let mut check: Option<dux_core::engine::DestructiveCheck> = None;
+    for target in targets {
+        let one = state
+            .engine
+            .destructive_check(root.join(target))
+            .await
+            .ok_or_else(|| {
+                crate::rest_common::RouteRejection::from(
+                    (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response(),
+                )
+            })?;
+        check = Some(match check {
+            Some(check) => check.and(one),
+            None => one,
+        });
+    }
+    let outcome = tokio::task::spawn_blocking(move || {
+        let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = guard.claims.iter().collect();
+        let mut clear = || match &check {
+            Some(check) => check.clear(&claims, what),
+            None => Err(dux_core::destructive::Refused(
+                "dux did not touch it: nothing was checked".to_string(),
+            )),
+        };
+        op(&mut clear)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
+            Err((StatusCode::CONFLICT, e.to_string()).into_response().into())
+        }
+        Ok(Err(e)) => Err((StatusCode::BAD_REQUEST, e.to_string())
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{what} task failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
 }
 
 /// Open a file in a locally-installed GUI editor, reusing the TUI's detection and
@@ -1312,6 +1437,86 @@ mod tests {
             let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
             let app = crate::server::router(handle);
             (tmp, wt, app)
+        }
+
+        /// Every editor write into a worktree whose removal has begun is
+        /// refused with a 409 that says so, and writes nothing: a save landing
+        /// after the folder went would otherwise bring it back.
+        #[tokio::test]
+        async fn editor_writes_are_refused_once_the_worktree_removal_has_begun() {
+            let (_tmp, wt, app, ops) = router_with_session_and_ops().await;
+            let _removal = ops.announce_removal(&wt);
+            for (route, body) in [
+                (
+                    "write",
+                    serde_json::json!({ "path": "new.txt", "content": "x" }),
+                ),
+                ("create-file", serde_json::json!({ "path": "made.txt" })),
+                ("create-dir", serde_json::json!({ "path": "a/b" })),
+                (
+                    "rename",
+                    serde_json::json!({ "from": "hello.txt", "to": "moved.txt" }),
+                ),
+                ("delete", serde_json::json!({ "path": "hello.txt" })),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(json_req(
+                        &format!("/api/v1/sessions/s1/files/{route}"),
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::CONFLICT, "{route}");
+                let text = String::from_utf8(
+                    axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                assert!(text.contains("removing the worktree"), "{route}: {text}");
+            }
+            assert!(!wt.join("new.txt").exists());
+            assert!(!wt.join("made.txt").exists());
+            assert!(!wt.join("a").exists());
+            assert!(wt.join("hello.txt").exists());
+        }
+
+        /// While an editor save is running it holds the worktree, so a removal
+        /// waits for it instead of racing it.
+        #[tokio::test]
+        async fn an_editor_write_is_released_once_it_has_finished() {
+            let (_tmp, wt, app, ops) = router_with_session_and_ops().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "new.txt", "content": "x" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(ops.holders(&wt).is_empty(), "the hold ends with the write");
+        }
+
+        async fn router_with_session_and_ops() -> (
+            tempfile::TempDir,
+            std::path::PathBuf,
+            axum::Router,
+            dux_core::worktree_ops::WorktreeOps,
+        ) {
+            let (tmp, wt, _) = router_with_session().await;
+            let paths = DuxPaths {
+                root: tmp.path().to_path_buf(),
+                config_path: tmp.path().join("config.toml"),
+                sessions_db_path: tmp.path().join("sessions.sqlite3"),
+                worktrees_root: tmp.path().join("worktrees"),
+                lock_path: tmp.path().join("dux2.lock"),
+            };
+            let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+            let ops = engine.worktree_ops().clone();
+            let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+            (tmp, wt, crate::server::router(handle), ops)
         }
 
         fn json_req(uri: &str, body: serde_json::Value) -> Request<axum::body::Body> {

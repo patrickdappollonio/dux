@@ -222,6 +222,116 @@ pub(crate) async fn resolve_mutation_worktree(
     resolve_git_directory(state, session_id, GitAsk::Mutate).await
 }
 
+/// Register a write into `root` for as long as the returned guard lives, so a
+/// removal of that worktree waits for it. Refused with a 409 that says why once
+/// the worktree's removal has begun: nothing new may start in a folder that is
+/// about to go, and nothing may bring it back.
+pub(crate) fn hold_root_for_write(
+    state: &AppState,
+    root: &Path,
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<dux_core::worktree_ops::WorktreeOpGuard, RouteRejection> {
+    state
+        .engine
+        .worktree_ops()
+        .hold(root, kind)
+        .map_err(|refused| {
+            (StatusCode::CONFLICT, refused.sentence(what).to_string())
+                .into_response()
+                .into()
+        })
+}
+
+/// Hold every path an editor operation TOUCHES, not the editor's root: the
+/// file written, the folder made, both ends of a move, the entry deleted. A
+/// terminal's editor is rooted where the terminal started (a home folder, a
+/// repository root), which can CONTAIN an agent's worktree, so holding the root
+/// says nothing about a write into that worktree. Each target is checked
+/// through the registry's one containment test, so a target in or under a
+/// folder being removed is refused, and a removal of a folder waits for every
+/// operation touching anything inside it. The targets are the root joined with
+/// the request's relative paths, as spelled; the containment and symlink
+/// checks of the operation itself still run after this.
+pub(crate) fn hold_targets_for_write(
+    state: &AppState,
+    root: &Path,
+    targets: &[&str],
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
+    let mut holds = vec![hold_root_for_write(state, root, kind, what)?];
+    for target in targets {
+        holds.push(hold_root_for_write(state, &root.join(target), kind, what)?);
+    }
+    Ok(holds)
+}
+
+/// What an editor delete or move holds while it runs (see
+/// [`guard_destructive_targets`]). Dropping it lets everything go.
+pub(crate) struct DestructiveGuard {
+    _root: dux_core::worktree_ops::WorktreeOpGuard,
+    pub(crate) claims: Vec<dux_core::worktree_ops::DestructiveClaim>,
+}
+
+/// The first step of an editor delete or move, the one destructive protocol
+/// every such operation follows: a hold on the editor's root, and a CLAIM on
+/// every target (both ends of a move). From the claim on, nothing new can
+/// start in or under a target, so nothing lands there between the occupancy
+/// check and the operation, and only a claim lets the operation be cleared.
+/// A target something is already running in is refused with what that is,
+/// one already being removed or moved is refused too, and one with a removal
+/// running inside it is waited for, bounded. Blocking: call it off the async
+/// runtime.
+pub(crate) fn guard_destructive_targets(
+    state: &AppState,
+    root: &Path,
+    targets: &[&str],
+    what: &str,
+) -> Result<DestructiveGuard, RouteRejection> {
+    let ops = state.engine.worktree_ops();
+    let mut guard = DestructiveGuard {
+        _root: hold_root_for_write(
+            state,
+            root,
+            dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+            what,
+        )?,
+        claims: Vec::new(),
+    };
+    let root_key = dux_core::worktree_ops::lexical_key(root);
+    for target in targets {
+        let path = root.join(target);
+        // The root itself is never deleted or moved (the operation refuses
+        // it), and it is already held above.
+        if dux_core::worktree_ops::spelled_same(
+            &dux_core::worktree_ops::lexical_key(&path),
+            &root_key,
+        ) {
+            continue;
+        }
+        match ops.claim_for_destructive_as(
+            &path,
+            dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+            "an editor delete or move",
+        ) {
+            Ok(claim) => guard.claims.push(claim),
+            Err(reason) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "dux did not {what} {}: {reason}.",
+                        dux_core::home_path::shorten_home(&path)
+                    ),
+                )
+                    .into_response()
+                    .into());
+            }
+        }
+    }
+    Ok(guard)
+}
+
 /// Which of the two engine predicates a resolution asks.
 #[derive(Clone, Copy)]
 enum GitAsk {
@@ -265,18 +375,20 @@ async fn resolve_git_directory(
 async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteRejection> {
     let wt = worktree.to_path_buf();
     let p = path.to_string();
-    let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
-        // A path inside a folded folder is answered for by the folder's row,
-        // once git confirms it is a change it lists there.
-        Ok((staged, unstaged)) => {
-            use dux_core::git::{ChangesSide, rows_answering};
-            let asked = [p.clone()];
-            let on = |files: &[dux_core::model::ChangedFile], side| {
-                rows_answering(&wt, files, side, &asked).is_ok_and(|set| set.contains(&p))
-            };
-            on(&staged, ChangesSide::Staged) || on(&unstaged, ChangesSide::Unstaged)
+    let ok = tokio::task::spawn_blocking(move || {
+        match dux_core::git::changed_files_for_decisions(&wt) {
+            // A path inside a folded folder is answered for by the folder's row,
+            // once git confirms it is a change it lists there.
+            Ok((staged, unstaged)) => {
+                use dux_core::git::{ChangesSide, rows_answering};
+                let asked = [p.clone()];
+                let on = |files: &[dux_core::model::ChangedFile], side| {
+                    rows_answering(&wt, files, side, &asked).is_ok_and(|set| set.contains(&p))
+                };
+                on(&staged, ChangesSide::Staged) || on(&unstaged, ChangesSide::Unstaged)
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
     })
     .await
     .unwrap_or(false);
@@ -308,13 +420,26 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
 ///
 /// The ordinary refusals do not come through here: `git::commit_preflight` catches
 /// the empty-message and nothing-staged cases and answers 400 in its own wording.
-async fn run_git<F, T>(action: &'static str, worktree: &Path, op: F) -> Result<T, RouteRejection>
+async fn run_git<F, T>(
+    action: &'static str,
+    worktree: &Path,
+    hold: dux_core::worktree_ops::WorktreeOpGuard,
+    op: F,
+) -> Result<T, RouteRejection>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
     let worktree = worktree.to_path_buf();
-    match tokio::task::spawn_blocking(op).await {
+    // The hold rides INTO the blocking task: a client that disconnects drops
+    // this future, and the git work it started must still keep its worktree
+    // registered until it has actually finished.
+    match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
+        op()
+    })
+    .await
+    {
         Ok(Ok(value)) => Ok(value),
         // A refusal is a sentence the user can act on (look again, act on a
         // row inside), not a git failure.
@@ -324,6 +449,11 @@ where
         )
             .into_response()
             .into()),
+        // Something lives where the operation would delete: a conflict with
+        // what is there, said in the sentence that names it.
+        Ok(Err(e)) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
+            Err((StatusCode::CONFLICT, e.to_string()).into_response().into())
+        }
         Ok(Err(e)) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
             let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
@@ -358,6 +488,15 @@ async fn stage(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     if let Err(r) = validate_changed_path(&worktree, &op.path).await {
         return r.into_response();
     }
@@ -368,7 +507,7 @@ async fn stage(
     // says how many it left out, so the browser can say so.
     let wt = worktree.clone();
     let paths = vec![op.path];
-    let report = match run_git(STAGE_ACTION, &worktree, move || {
+    let report = match run_git(STAGE_ACTION, &worktree, hold, move || {
         dux_core::git::stage_with_report(&wt, &paths)
     })
     .await
@@ -424,6 +563,15 @@ async fn discard(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     // Discard is destructive (deletes untracked files / restores tracked ones),
     // so the tracked-vs-untracked distinction is derived SERVER-SIDE from live
     // git status, never trusted from the client. This also rejects staged files
@@ -455,10 +603,69 @@ async fn discard(
     let wt = worktree.clone();
     let confirmed = op.confirmed();
     let path = op.path;
+    // A folder or a nested repository is deleted whole, so the discard
+    // follows the one destructive protocol: claim it (off the runtime, since
+    // a removal running inside it is waited for), ask the occupancy question
+    // under the claim, and clear it right before the delete. A refusal is a
+    // 409 naming what lives there.
+    let target = worktree.join(&path);
+    // A link at the path is removed whether it is untracked or stands where a
+    // tracked file was (the restore replaces it).
+    let deletes_a_link =
+        std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
+    let claim = match confirmed {
+        Some(dux_core::git::ConfirmedEntry::Folder { .. })
+        | Some(dux_core::git::ConfirmedEntry::Repository) => true,
+        _ => deletes_a_link,
+    };
+    let claim = match claim {
+        true => {
+            let ops = state.engine.worktree_ops().clone();
+            let claimed = target.clone();
+            match tokio::task::spawn_blocking(move || {
+                ops.claim_for_destructive_as(
+                    &claimed,
+                    dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+                    "a changes-pane delete",
+                )
+            })
+            .await
+            {
+                Ok(Ok(claim)) => Some(claim),
+                Ok(Err(reason)) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "dux did not delete {}: {reason}.",
+                            dux_core::home_path::shorten_home(&target)
+                        ),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("claim task failed: {e}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        false => None,
+    };
+    let Some(check) = state.engine.destructive_check(target.clone()).await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+    };
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
-    let files_deleted = match run_git("discard the file's changes", &worktree, move || {
-        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
+    let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
+        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed, || match &claim {
+            Some(claim) => check.clear(&[claim], "delete"),
+            None => Err(dux_core::destructive::Refused(format!(
+                "dux did not delete {}: nothing confirmed it as a folder",
+                dux_core::home_path::shorten_home(&target)
+            ))),
+        })
     })
     .await
     {
@@ -558,11 +765,20 @@ async fn files_op(
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
 
     let wt = worktree.clone();
     let requested = paths.clone();
     let partition = tokio::task::spawn_blocking(move || {
-        dux_core::git::changed_files(&wt).and_then(|(staged, unstaged)| {
+        dux_core::git::changed_files_for_decisions(&wt).and_then(|(staged, unstaged)| {
             let (live, side) = match section {
                 Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
                 Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
@@ -628,7 +844,7 @@ async fn files_op(
     // sentence, and the rest of the batch goes ahead.
     let wt = worktree.clone();
     let batch = done.clone();
-    let partition = match run_git(section.action(), &worktree, move || match section {
+    let partition = match run_git(section.action(), &worktree, hold, move || match section {
         Section::Staged => {
             dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
                 staged: batch,
@@ -691,11 +907,20 @@ where
         Ok(w) => w,
         Err(r) => return r.into_response(),
     };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::GitChange,
+        "change files in it",
+    ) {
+        Ok(hold) => hold,
+        Err(r) => return r.into_response(),
+    };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
         return r.into_response();
     }
     let wt = worktree.clone();
-    if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {
+    if let Err(r) = run_git(action, &worktree, hold, move || op(wt, path)).await {
         return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
@@ -724,6 +949,15 @@ async fn commit(
     let session_id = id.clone();
     let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    let hold = match hold_root_for_write(
+        &state,
+        &worktree,
+        dux_core::worktree_ops::WorktreeOpKind::Commit,
+        "commit in it",
+    ) {
+        Ok(hold) => hold,
         Err(r) => return r.into_response(),
     };
     // The empty-message and nothing-staged refusals are the shared core decision
@@ -756,7 +990,7 @@ async fn commit(
     }
     let wt = worktree.clone();
     let message = op.message;
-    if let Err(r) = run_git("commit the staged changes", &worktree, move || {
+    if let Err(r) = run_git("commit the staged changes", &worktree, hold, move || {
         dux_core::git::commit(&wt, &message).map(|_| ())
     })
     .await
@@ -1239,7 +1473,10 @@ mod tests {
         let worktree = PathBuf::from("/home/someone/.config/dux/worktrees/proj/agent");
         let stderr = "error: 'trailing-whitespace' hook failed; \
                       see /home/someone/.config/dux/worktrees/proj/agent/out.log";
-        let err = super::run_git("commit the staged changes", &worktree, move || {
+        let hold = dux_core::worktree_ops::WorktreeOps::new()
+            .hold(&worktree, dux_core::worktree_ops::WorktreeOpKind::Commit)
+            .unwrap();
+        let err = super::run_git("commit the staged changes", &worktree, hold, move || {
             Err::<(), _>(anyhow::anyhow!("git commit failed: {stderr}"))
         })
         .await
@@ -1320,7 +1557,7 @@ mod tests {
         );
 
         let staged = tokio::task::spawn_blocking(move || {
-            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
             let mut paths: Vec<String> = staged.into_iter().map(|f| f.path).collect();
             paths.sort();
             paths
@@ -1359,9 +1596,11 @@ mod tests {
             std::fs::write(dir.join(format!("f{index}.js")), "x\n").unwrap();
         }
         let lists = |worktree: PathBuf| async move {
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                dux_core::git::changed_files_for_display(&worktree).unwrap()
+            })
+            .await
+            .unwrap()
         };
         // A folder row of `count` files, whatever its fingerprint.
         let folder =
@@ -1511,10 +1750,11 @@ mod tests {
         );
         assert!(worktree.join(".git/HEAD").exists());
         assert!(worktree.join("node_modules/pkg/a.js").exists());
-        let (staged, unstaged) =
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap();
+        let (staged, unstaged) = tokio::task::spawn_blocking(move || {
+            dux_core::git::changed_files_for_display(&worktree).unwrap()
+        })
+        .await
+        .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
     }
@@ -1593,7 +1833,7 @@ mod tests {
             text.contains("nothing in \"only/\" to stage: it holds only repositories of their own"),
             "{text}"
         );
-        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -1644,7 +1884,7 @@ mod tests {
                 .is_some_and(|reason| reason.contains("it holds only repositories of their own")),
             "{json}"
         );
-        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
         assert_eq!(
             staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["plain.txt"]
@@ -1989,6 +2229,54 @@ mod tests {
         assert!(!worktree.join("out").exists());
     }
 
+    /// Review 14: the TRACKED file `f.txt` has been replaced in the working
+    /// tree by a folder of the same name holding a repository of its own (a
+    /// clone with its history). git lists only ` D f.txt`, so the browser
+    /// offers discard as restoring one file, and confirms it as a file. The
+    /// route runs `git checkout -- f.txt`, which removes the folder in the way
+    /// recursively: the nested repository is deleted with no claim, no
+    /// occupancy question, no clearance and no repository confirmation.
+    #[tokio::test]
+    async fn review14_a_tracked_file_discard_never_deletes_the_folder_that_took_its_place() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::remove_file(worktree.join("f.txt")).unwrap();
+        let nested = worktree.join("f.txt");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q"]);
+        std::fs::write(nested.join("own.txt"), "own\n").unwrap();
+        run_git(&nested, &["add", "own.txt"]);
+        run_git(
+            &nested,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "own",
+            ],
+        );
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"f.txt","kind":"file"}"#,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(
+            nested.join(".git").exists(),
+            "a discard confirmed as one file deleted the repository that took its place \
+             ({status}: {body})"
+        );
+    }
+
     /// A file row confirmed as a file, which a folder has since replaced, is
     /// refused and the folder is left alone; so is the same request from an
     /// older client that sends no kind at all.
@@ -2126,10 +2414,11 @@ mod tests {
                 "{route}"
             );
         }
-        let (staged, _) =
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
-                .await
-                .unwrap();
+        let (staged, _) = tokio::task::spawn_blocking(move || {
+            dux_core::git::changed_files_for_display(&worktree).unwrap()
+        })
+        .await
+        .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
     }
 
@@ -2206,7 +2495,7 @@ mod tests {
         assert_eq!(parsed["refused"], serde_json::json!([]));
 
         let staged = tokio::task::spawn_blocking(move || {
-            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            let (staged, _) = dux_core::git::changed_files_for_display(&worktree).unwrap();
             staged.into_iter().map(|f| f.path).collect::<Vec<_>>()
         })
         .await
@@ -2362,5 +2651,85 @@ mod tests {
             "none of the 3 selected files are in this worktree's unstaged changes any more \
              (starting with \"a.rs\"). Refresh the changes and try again."
         );
+    }
+
+    /// Review 6: "the same check also decides every destructive file
+    /// operation: the changes pane's folder discard, nested-repo discard". The
+    /// web changes pane's discard route deletes an untracked folder whole
+    /// without asking the one occupancy question, so a standalone agent whose
+    /// folder sits untracked inside the worktree loses its folder (dux "never
+    /// creates, moves or removes a standalone agent's folder").
+    #[tokio::test]
+    async fn review6_web_discard_does_not_delete_a_standalone_agents_folder() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        run_git(&wt, &["init", "-q"]);
+        run_git(&wt, &["config", "user.email", "t@example.com"]);
+        run_git(&wt, &["config", "user.name", "t"]);
+        std::fs::write(wt.join("f.txt"), "line1\n").unwrap();
+        run_git(&wt, &["add", "f.txt"]);
+        run_git(&wt, &["commit", "-q", "-m", "init"]);
+        let scratch = wt.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("notes.md"), "the standalone agent's work\n").unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&dux_core::config::ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            store
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .unwrap();
+            store
+                .create_session(&standalone_session(
+                    "s-alone",
+                    scratch.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::build_app(
+            handle,
+            Router::new(),
+            crate::server::RouterParams::plain_http(),
+        );
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"scratch","kind":"directory","files":1}"#,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = body_text(resp).await;
+        assert!(
+            scratch.join("notes.md").exists(),
+            "the web changes pane deleted standalone agent s-alone's folder {} \
+             (answered {status}: {text})",
+            scratch.display()
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
     }
 }

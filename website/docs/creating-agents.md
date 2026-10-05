@@ -121,9 +121,33 @@ Confirm and dux checks it out in the project folder (creating the local branch f
 switch, for example because uncommitted changes in the folder would be overwritten, dux
 says so in an error that stays up, and the base stays where it was.
 
+Whenever dux switches the project folder to a branch that only exists on a remote (here,
+when checking out the default branch, or before creating an agent), it creates the local
+branch from `origin` when `origin` has it, otherwise from the one remote that has it. Your
+`checkout.defaultRemote` setting is not consulted. When several remotes have the branch and
+none of them is `origin`, dux refuses the switch and asks you to create the local branch
+from the remote you want first.
+
 > [!NOTE]
 > Uncommitted changes that do not conflict with the new branch travel with the switch and
 > stay in the project folder, the same as with a checkout in your own terminal.
+
+> [!CAUTION]
+> When the branch you switch to (or pull in) tracks a path where an ignored folder or file
+> stands, git deletes or overwrites it to make room: it treats ignored files as disposable.
+> dux refuses the switch or pull, and changes nothing, when that folder holds, or that file
+> sits inside, something it knows about: an agent's worktree, a standalone agent's folder,
+> a project's repository, or a terminal working there. Any other ignored folder or file git
+> still replaces, as it would in your own terminal, so move it aside first if it matters.
+> Likewise, when the incoming commit deletes every file in a folder, git removes the folder
+> too, and when it deletes or replaces a link, even one the branch tracks, git removes the
+> link; dux refuses when one of those lives or works there. The same goes for an agent's
+> **Pull** and for **Pull project**.
+
+> [!NOTE]
+> dux's own pulls and branch switches never update submodules, even when your git config
+> sets `submodule.recurse`: the submodule pointer moves, the submodule's files stay where
+> they are. Run `git submodule update` yourself when you want them to follow.
 
 ### Pulling before create
 
@@ -137,7 +161,8 @@ pull_before_creating_agent_by_default = true
 
 The pull is best-effort. It is fast-forward only, never a merge or rebase, it is skipped
 for repos with no `origin` remote, and a failed pull does not block creation: the agent
-starts from the local branch state and the status message says so.
+starts from the local branch state and the status message says so. That includes a pull
+dux refused because it would have deleted a folder it knows about (see the caution above).
 
 ### Copying uncommitted changes
 
@@ -393,7 +418,9 @@ below them, each row naming its branch and saying whether there is uncommitted w
 ![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
 Worktrees a live agent is holding are listed but unselectable: removing one from under a
-running session leaves it broken. Delete the agent instead.
+running session leaves it broken. Delete the agent instead. A worktree whose agent was just
+deleted is listed under **Being removed** until it is gone, and cannot be removed a second
+time.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the
@@ -416,6 +443,15 @@ project's name, its folder, its base branch and the branch the folder is on righ
   **Environment…**
 - **Startup command logs for all agents…**
 - **Delete project…** and **Remove project…**
+
+**Delete project…** removes the project and every agent's record at once, then each agent's
+worktree in the background, the same way deleting one agent with its worktree does: each one
+waits for its agent to stop and for anything still running in it. One status follows the
+whole delete and, when it ends, names any worktree that could not be removed and why. If an
+agent is still being created in the project when you confirm, the delete waits for it to
+finish (up to `removal_wait_seconds`, 120 seconds by default) and takes it along; no new
+agent can be created in a project while it is being deleted. **Remove project…** forgets the
+project and its agents and leaves every worktree on disk.
 
 Anything you open from the list comes back to it when it closes, whether you cancel it,
 close it or save it: the questions, Project info, the settings editors, the worktree

@@ -72,7 +72,9 @@ ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 
 - It runs with its working directory set to the **agent's worktree**, not the source
   checkout.
-- dux waits for it to finish before launching the provider.
+- dux waits for it to finish before launching the provider. Finishing means the command
+  itself exits: a job it starts in the background (`npm run dev &`) does not hold the agent
+  back, even when that job keeps printing.
 - Every run writes a timestamped log under the dux config directory, at
   `startup-command-logs/<project-id>/<session-id>/`. Browse them from the command
   palette in the terminal UI or a row's actions menu on the web, for one agent or for
@@ -84,7 +86,7 @@ ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 > without its dependencies.
 
 Each log names the run, the command, the shell it ran through, how long it took, its exit
-code, and everything it printed. This is the terminal UI's viewer:
+code, and everything it printed before it exited. This is the terminal UI's viewer:
 
 ![The terminal UI startup command log viewer, listing one run beside its output: the command, exit code, and the lines it printed while preparing the worktree.](/screens/tui-startup-command-log.png)
 
@@ -102,7 +104,21 @@ You can edit both by hand, but you do not have to leave the app:
 
 *Rerun startup command* re-runs the command in one agent's worktree without recreating
 the agent. Reach for it after editing the command, or when a dependency install needs a
-redo.
+redo. One run per agent at a time: while a run is still going, another is refused and dux
+says so.
+
+> [!NOTE]
+> A job the command leaves running in the background keeps running in the agent's
+> worktree after the command exits, after the agent starts, and after dux quits. What it
+> prints once the command has finished is discarded: it is not in the startup log and is
+> not kept anywhere else. Send its output to a file of its own if you want to read it
+> later.
+
+Deleting an agent stops a startup command that is still running, along with what it has
+started so far, whether or not the worktree goes too. Deleting it with its worktree also
+stops whatever an earlier run left running in the background, before the worktree is
+removed. A run cut short that way keeps no log, because the agent's logs go with it, and if
+the command will not stop, dux says so.
 
 > [!NOTE]
 > Env and startup commands are project-scoped, so editing them from an agent changes the

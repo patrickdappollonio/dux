@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, GridCell, Scroll};
@@ -795,6 +795,10 @@ pub struct PtyClient {
     /// an engine map would have to be cleared on every teardown path, and the
     /// one that matters here is the teardown the prune itself performs).
     spawned_at: Instant,
+    /// The session the child leads (portable-pty calls `setsid`), recorded at
+    /// spawn so whatever the child leaves running in it can still be found
+    /// after the child itself is gone. `None` when the platform gave no pid.
+    process_session: Option<crate::process_sessions::ProcessSession>,
     exited: Arc<AtomicBool>,
     /// When the reader thread reached end of input, written once immediately
     /// BEFORE it sets `exited`, so anyone who observes `exited` (an `Acquire`
@@ -856,7 +860,27 @@ pub struct PtyClient {
     /// cannot grow it without bound; the oldest entries are dropped. Empty for
     /// companion terminals (signal tracking off).
     passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
+    /// Run once the child is gone, at the end of `Drop`: the engine records
+    /// what is still running in the child's session at that moment, the only
+    /// evidence it keeps that those processes are dux's once their leader has
+    /// exited. A mutex only so the client stays `Sync`.
+    leader_exit_hook: Mutex<Option<crate::process_sessions::LeaderExitHook>>,
+    /// The registry and session the hook records into, kept after the hook
+    /// has run, so a drop can tell whether the record has landed.
+    recording: Mutex<
+        Option<(
+            crate::process_sessions::AgentProcessRegistry,
+            crate::process_sessions::ProcessSession,
+        )>,
+    >,
+    /// What dux recorded still running in the child's session when the child
+    /// exited (see `leader_exit_hook`). Once the child is reaped, its group
+    /// is signalled only while one of these is alive in it.
+    recorded_members: Mutex<Option<RecordedMembers>>,
 }
+
+/// Where a client reads the members recorded for its child's session.
+pub type RecordedMembers = Box<dyn Fn() -> Vec<crate::process_sessions::ProcessIdentity> + Send>;
 
 /// Maximum number of captured passthrough sequences retained before the oldest is
 /// dropped. Small: the host is expected to drain every tick, so this only bounds a
@@ -1191,6 +1215,12 @@ impl PtyClient {
             track_agent_signals,
         };
         let reader_thread = thread::spawn(move || Self::reader_loop(reader, reader_state));
+        let process_session = child
+            .process_id()
+            .map(crate::process_sessions::ProcessSession::started_now);
+        if let Some(session) = process_session {
+            crate::process_sessions::note_spawned(session);
+        }
 
         Ok(Self {
             master: pair.master,
@@ -1201,6 +1231,7 @@ impl PtyClient {
             scrollback_capacity: scrollback_lines,
             reaped: None,
             spawned_at: Instant::now(),
+            process_session,
             exited,
             read_error,
             exited_at,
@@ -1215,7 +1246,116 @@ impl PtyClient {
             attention_notify,
             progress,
             passthrough,
+            leader_exit_hook: Mutex::new(None),
+            recording: Mutex::new(None),
+            recorded_members: Mutex::new(None),
         })
+    }
+
+    /// The group signal this client's drop must defer, or `None` when it is
+    /// decided now: the child is not reaped, its record has landed, or there
+    /// is no record to wait for (see [`reaped_group_plan`]).
+    fn deferred_group_signal(&self) -> Option<DeferredGroupSignal> {
+        self.reaped.as_ref()?;
+        let group = self.child.process_id()?;
+        let (registry, session) = self.recording.lock().ok()?.clone()?;
+        if reaped_group_plan(registry.recording_in_flight(session)) != GroupPlan::Deferred {
+            return None;
+        }
+        let members = self.recorded_members.lock().ok()?.take()?;
+        Some(DeferredGroupSignal {
+            registry,
+            session,
+            group,
+            members,
+        })
+    }
+
+    /// The pid to signal the child at, or `None` when there is none to
+    /// signal: no pid known, or the child already reaped (its pid is free and
+    /// may name an unrelated process by now).
+    fn child_to_signal(&self) -> Option<rustix::process::Pid> {
+        if self.reaped.is_some() {
+            return None;
+        }
+        rustix::process::Pid::from_raw(self.child.process_id()? as i32)
+    }
+
+    /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
+    /// its pid and session number stay allocated until `try_wait` or `wait`
+    /// reaps it. `block` waits for the exit. `None` when the question cannot
+    /// be asked (no pid, already reaped elsewhere, an error): the caller then
+    /// reaps as before.
+    fn child_exit_unreaped(&self, block: bool) -> Option<bool> {
+        let pid = rustix::process::Pid::from_raw(self.child.process_id()? as i32)?;
+        let mut options =
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
+        if !block {
+            options |= rustix::process::WaitIdOptions::NOHANG;
+        }
+        loop {
+            match rustix::process::waitid(rustix::process::WaitId::Pid(pid), options) {
+                Ok(Some(_)) => return Some(true),
+                Ok(None) => return Some(false),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Set where the members recorded for the child's session are read from
+    /// (see the field).
+    pub fn set_recorded_members(&self, source: RecordedMembers) {
+        if let Ok(mut slot) = self.recorded_members.lock() {
+            *slot = Some(source);
+        }
+    }
+
+    /// Whether the child's own process group may still be signalled: always
+    /// before the child is reaped (its pid, and so the group id, is held),
+    /// and after only while a member dux recorded is alive in the group (see
+    /// [`crate::process_sessions::group_reserved_by`]).
+    fn child_group_signallable(&self, group: u32) -> bool {
+        if self.reaped.is_none() {
+            return true;
+        }
+        let recorded = self
+            .recorded_members
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|source| source()))
+            .unwrap_or_default();
+        crate::process_sessions::group_reserved_by(
+            group,
+            &recorded,
+            &crate::process_sessions::member_state,
+        )
+    }
+
+    /// Set what runs once this client's child is gone (see the field).
+    pub fn set_leader_exit_hook(&self, hook: impl Into<crate::process_sessions::LeaderExitHook>) {
+        let hook = hook.into();
+        if let Ok(mut slot) = self.recording.lock() {
+            *slot = hook.recording();
+        }
+        if let Ok(mut slot) = self.leader_exit_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    /// Run the leader-exit hook now, once: the child is gone and what it left
+    /// running in its session is recorded without waiting for this client to
+    /// drop. A quit calls it after every child has stopped, because the
+    /// clients themselves may never drop before the process exits.
+    pub fn fire_leader_exit_hook(&self) {
+        if let Some(hook) = self
+            .leader_exit_hook
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            hook.run();
+        }
     }
 
     fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: ReaderLoopState) {
@@ -1673,7 +1813,19 @@ impl PtyClient {
         if let Some((status, _)) = &self.reaped {
             return Some(status.clone());
         }
+        // What the child left running is recorded from the moment it is seen
+        // to exit, BEFORE it is reaped: until then its session number still
+        // names its session, so a removal never looks in a window where the
+        // number proves nothing and nothing is recorded yet.
+        match self.child_exit_unreaped(false) {
+            Some(true) => self.fire_leader_exit_hook(),
+            Some(false) => return None,
+            None => {}
+        }
         let status = self.child.try_wait().ok().flatten()?;
+        if let Some(session) = self.process_session {
+            crate::process_sessions::note_reaped(session);
+        }
         self.reaped = Some((status.clone(), Instant::now()));
         Some(status)
     }
@@ -1793,20 +1945,29 @@ impl PtyClient {
     /// child pid and the extra signal is skipped. Returns the first error (ESRCH,
     /// "group already gone", is benign).
     fn signal_process_groups(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
-        let Some(child) = self.child_process_id() else {
-            return Ok(());
-        };
-        let Some(child_group) = rustix::process::Pid::from_raw(child as i32) else {
-            return Ok(());
-        };
-        let child_res = rustix::process::kill_process_group(child_group, sig);
-        let fg_res = match self.foreground_pgid() {
-            Some(fg) if fg != child => rustix::process::Pid::from_raw(fg as i32)
-                .map(|group| rustix::process::kill_process_group(group, sig))
-                .unwrap_or(Ok(())),
-            _ => Ok(()),
-        };
-        child_res.and(fg_res)
+        self.signal_targets().send(sig)
+    }
+
+    /// The process groups [`Self::terminate`] and [`Self::force_terminate`]
+    /// signal, read now (the foreground group is a `tcgetpgrp` on the master)
+    /// so the signal itself can be sent later, from another thread. A worktree
+    /// removal uses that to look at what is running in the PTY's session BEFORE
+    /// anything is asked to exit, because a process that called `setsid` is
+    /// tied to the agent only by its parent, and that link is cut the moment
+    /// the parent exits.
+    pub fn signal_targets(&self) -> SignalTargets {
+        // A reaped child's group id is signalled only while a recorded member
+        // still holds it; an empty group's id may name somebody else by now.
+        let child = self
+            .child_process_id()
+            .filter(|group| self.child_group_signallable(*group));
+        let foreground = self.foreground_pgid().filter(|fg| Some(*fg) != child);
+        SignalTargets { child, foreground }
+    }
+
+    /// The session this PTY's child leads, recorded at spawn.
+    pub fn process_session(&self) -> Option<crate::process_sessions::ProcessSession> {
+        self.process_session
     }
 
     /// The directory this PTY's child was spawned in. See the field docs: it is
@@ -2066,6 +2227,15 @@ impl Drop for PtyClient {
         // open; a misbehaving one that keeps the slave open could still stall
         // the join, though that has not been observed with the supported
         // providers.)
+        // A reaped child's group is signalled only while a member dux recorded
+        // holds it. When that record is still being written (the exit prune
+        // and the terminating reap drop the client in the same pass as the
+        // reap), the judgement is DEFERRED to the shared reaper rather than
+        // skipped, so a job that ignores HUP and TERM in the group still gets
+        // its SIGKILL; this thread never waits for it.
+        if let Some(job) = self.deferred_group_signal() {
+            hand_to_reaper(ReaperJob::GroupSignal(job));
+        }
         // SIGKILL the child's group AND the foreground group when a job-controlled
         // app owns a different one (see `signal_process_groups`). ESRCH just means
         // a group already exited (benign). Anything else (e.g. EPERM) means a kill
@@ -2078,24 +2248,228 @@ impl Drop for PtyClient {
                 "PtyClient::drop: kill_process_group failed: {err}"
             ));
         }
-        // Reap the direct child so it does not linger as a zombie. After the
-        // group kill the child is already dead, so this `kill` returns at once;
-        // it remains the fallback that actually signals the child when its PID
-        // was unavailable above (without it, `wait` could block on a child that
-        // nothing has asked to exit).
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // The order on every exit path: the child is signalled, seen to exit
+        // WITHOUT being reaped, what it left running is recorded, and only
+        // then is it reaped (see `try_wait` for why). portable-pty's
+        // `Child::kill` is never called while the pid is known: it reaps the
+        // child itself (its `kill` ends in a `try_wait`), which would put the
+        // reap before the record. The direct child is signalled here as well
+        // as its group, in case the group signal above did not reach it.
+        //
+        // A child already reaped (`try_wait` saw it exit) is never signalled
+        // or waited for again: its pid is free, and may name an unrelated
+        // process by now.
+        let reaped = self.reaped.is_some();
+        match self.child_to_signal() {
+            Some(pid) => {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                if self.child_exit_unreaped(true) == Some(true) {
+                    self.fire_leader_exit_hook();
+                }
+            }
+            None if reaped => {}
+            // No pid to signal or wait on: the library's own kill is the only
+            // way to ask the child to exit, and nothing is recorded for a
+            // child dux cannot name.
+            None => {
+                let _ = self.child.kill();
+            }
+        }
+        if !reaped
+            && self.child.wait().is_ok()
+            && let Some(session) = self.process_session
+        {
+            crate::process_sessions::note_reaped(session);
+        }
         // With the child group dead, the PTY slave is fully released (the slave
         // fd itself was dropped at spawn time; the child group held the last
         // references). The master read then returns EOF (on Linux, EIO, which
-        // portable-pty maps to Ok(0)) and the reader thread returns. Join it so
-        // the thread does not outlive this client; otherwise detached reader
-        // threads accumulate across a long session and across the test suite.
+        // portable-pty maps to Ok(0)) and the reader thread returns. It is
+        // joined so the thread does not outlive this client; otherwise detached
+        // reader threads accumulate across a long session and the test suite.
+        //
+        // Never here: the thread dropping a client is often the engine's (a
+        // reap, a close, a delete), and end of input needs EVERY holder of the
+        // PTY gone, which a background job outside both signalled groups is
+        // not. The join is handed to the one shared reaper thread, which waits
+        // a bounded time (see [`READER_JOIN_BOUND`]) and logs a reader it had
+        // to leave running.
         if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
+            hand_reader_to_reaper(handle, self.process_session.map(|session| session.sid));
         }
+        // The child is dead: record what it left running in its session.
+        self.fire_leader_exit_hook();
     }
 }
+
+/// The process groups a PTY's teardown signals: the child's own (it leads its
+/// session and group) and, when a job-controlled app owns the terminal, that
+/// app's foreground group. See [`PtyClient::signal_targets`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalTargets {
+    child: Option<u32>,
+    foreground: Option<u32>,
+}
+
+impl SignalTargets {
+    /// Send `sig` to every target group. Returns the first error; `ESRCH` (the
+    /// group already went) is benign.
+    pub fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
+        let signal_group = |pgid: u32| {
+            rustix::process::Pid::from_raw(pgid as i32)
+                .map(|group| rustix::process::kill_process_group(group, sig))
+                .unwrap_or(Ok(()))
+        };
+        let child_res = self.child.map(signal_group).unwrap_or(Ok(()));
+        let fg_res = self.foreground.map(signal_group).unwrap_or(Ok(()));
+        child_res.and(fg_res)
+    }
+
+    /// [`PtyClient::terminate`]'s polite pair, SIGTERM then SIGHUP, sent to
+    /// targets read earlier.
+    pub fn terminate(&self) {
+        let _ = self.send(rustix::process::Signal::TERM);
+        let _ = self.send(rustix::process::Signal::HUP);
+    }
+}
+
+/// A reader thread whose client was dropped, for the reaper to join.
+struct ReaderToJoin {
+    handle: thread::JoinHandle<()>,
+    sid: Option<u32>,
+}
+
+/// A reaped child's group signal, judged once its session's record lands.
+struct DeferredGroupSignal {
+    registry: crate::process_sessions::AgentProcessRegistry,
+    session: crate::process_sessions::ProcessSession,
+    group: u32,
+    members: RecordedMembers,
+}
+
+/// Work a dropped client leaves for the shared reaper.
+enum ReaperJob {
+    Reader(ReaderToJoin),
+    GroupSignal(DeferredGroupSignal),
+}
+
+/// How a reaped child's group signal is decided at the client's drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupPlan {
+    /// Its record has landed (or there is none to wait for): judge it now.
+    Now,
+    /// Its record is still being written: judge it once it lands.
+    Deferred,
+}
+
+/// Pure: a record still in flight defers the judgement; a landed one does not.
+fn reaped_group_plan(recording_in_flight: bool) -> GroupPlan {
+    if recording_in_flight {
+        GroupPlan::Deferred
+    } else {
+        GroupPlan::Now
+    }
+}
+
+/// Pure: whether a deferred group signal is sent, once its wait is over. A
+/// wait that timed out with the record still unwritten signals nothing,
+/// because nothing can vouch for the group id; otherwise the group is
+/// signalled only while a recorded member holds it.
+fn deferred_group_kill(landed: bool, reserved: impl FnOnce() -> bool) -> bool {
+    landed && reserved()
+}
+
+/// Run one deferred group signal (on the reaper): wait, bounded by
+/// [`crate::process_sessions::RECORDING_WAIT`], for the session's record,
+/// then SIGKILL the group only while a recorded member holds it.
+fn run_deferred_group_signal(job: DeferredGroupSignal) {
+    job.registry
+        .wait_for_recordings(&[job.session], crate::process_sessions::RECORDING_WAIT);
+    let landed = !job.registry.recording_in_flight(job.session);
+    if !landed {
+        logger::warn(&format!(
+            "the record of what session {} left running was still being written after {} \
+             seconds, so its process group was not signalled",
+            job.session.sid,
+            crate::process_sessions::RECORDING_WAIT.as_secs()
+        ));
+    }
+    let kill = deferred_group_kill(landed, || {
+        crate::process_sessions::group_reserved_by(
+            job.group,
+            &(job.members)(),
+            &crate::process_sessions::member_state,
+        )
+    });
+    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group as i32) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+/// The one reaper thread every dropped client's leftovers are handed to,
+/// started on first use.
+static READER_REAPER: std::sync::LazyLock<Option<std::sync::mpsc::Sender<ReaperJob>>> =
+    std::sync::LazyLock::new(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ReaperJob>();
+        thread::Builder::new()
+            .name("pty-reader-reaper".to_string())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        ReaperJob::Reader(reader) => join_reader_bounded(reader),
+                        ReaperJob::GroupSignal(signal) => run_deferred_group_signal(signal),
+                    }
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+
+/// Hand a dropped client's leftovers to the reaper. Returns at once.
+fn hand_to_reaper(job: ReaperJob) {
+    if let Some(tx) = READER_REAPER.as_ref() {
+        let _ = tx.send(job);
+    }
+}
+
+/// Hand a dropped client's reader thread to the reaper. Returns at once. If
+/// the reaper could not be started, the thread is left to finish on its own,
+/// which it does once the last holder of its terminal goes.
+fn hand_reader_to_reaper(handle: thread::JoinHandle<()>, sid: Option<u32>) {
+    hand_to_reaper(ReaperJob::Reader(ReaderToJoin { handle, sid }));
+}
+
+/// Join one reader, waiting at most [`READER_JOIN_BOUND`].
+fn join_reader_bounded(reader: ReaderToJoin) {
+    let deadline = Instant::now() + READER_JOIN_BOUND;
+    while !reader.handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if reader.handle.is_finished() {
+        let _ = reader.handle.join();
+    } else {
+        logger::info(&format!(
+            "something a closed terminal's child started still holds its terminal open \
+             (session {}), so its reader thread was left to finish on its own",
+            reader
+                .sid
+                .map(|sid| sid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ));
+    }
+}
+
+/// How long the reaper waits for a dropped [`PtyClient`]'s reader thread.
+///
+/// The reader ends at end of input, which arrives only once every process
+/// holding the PTY open has closed it. A background job the group kill cannot
+/// reach (a job-controlled job in a group of its own, a `nohup`ed or disowned
+/// command, a child that called `setsid`) keeps it open for as long as it
+/// runs, so an unbounded join hung whichever thread dropped the client: the
+/// engine actor or the terminal UI's loop. Past this bound the thread is
+/// detached and logged; it ends by itself when the last holder goes. Not a
+/// user setting: it bounds a wait that is normally microseconds.
+pub const READER_JOIN_BOUND: Duration = Duration::from_millis(250);
 
 /// Resolve a process name from its PID.
 ///
@@ -5775,6 +6149,268 @@ mod tests {
         );
     }
 
+    /// Review 25: a client dropped while its child still runs. The drop's
+    /// `child.kill()` (portable-pty's) already REAPS the child through its
+    /// own `try_wait`, so the WNOWAIT wait after it finds nothing and the
+    /// leader-exit hook only runs after the reap, the order the drop's own
+    /// comment ("Recorded before the reap") promises never happens.
+    #[test]
+    fn review25_a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let args = vec!["-c".to_string(), "exec sleep 300".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let pid = client.child_process_id().expect("a pid");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+        let record = std::sync::Arc::clone(&seen);
+        client.set_leader_exit_hook(Box::new(move || {
+            // An unreaped zombie still has its /proc entry; a reaped child has none.
+            let unreaped = std::path::Path::new(&format!("/proc/{pid}")).exists();
+            *record.lock().unwrap() = Some(unreaped);
+        }));
+        thread::sleep(std::time::Duration::from_millis(100));
+        drop(client);
+        let seen = *seen.lock().unwrap();
+        assert_eq!(
+            seen,
+            Some(true),
+            "the leader-exit hook ran after the leader {pid} was reaped (None: never ran)"
+        );
+    }
+
+    /// Before the reap the child's group is always signalled; after it, only
+    /// while a recorded member holds the group id.
+    #[test]
+    fn a_reaped_childs_group_is_signalled_only_while_a_recorded_member_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let group = client.child_process_id().expect("a pid");
+        assert_eq!(
+            client.signal_targets().child,
+            Some(group),
+            "before the reap"
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let job: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the job's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert_eq!(
+            client.signal_targets().child,
+            None,
+            "reaped, with nothing recorded: the group id is not signalled"
+        );
+        let recorded = crate::process_sessions::ProcessIdentity {
+            pid: job,
+            start_time: crate::process_sessions::process_start(job).expect("its start"),
+            boot: crate::process_sessions::current_boot(),
+        };
+        client.set_recorded_members(Box::new(move || vec![recorded]));
+        assert_eq!(
+            client.signal_targets().child,
+            Some(group),
+            "a recorded member alive in the group holds its id"
+        );
+        if let Some(pid) = rustix::process::Pid::from_raw(job as i32) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.signal_targets().child.is_some() {
+            assert!(Instant::now() < deadline, "the member never went");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(client);
+    }
+
+    /// The deferral decision: a record still in flight defers the group
+    /// signal, a landed one decides it now, and a wait that timed out signals
+    /// nothing whatever the group looks like.
+    #[test]
+    fn a_reaped_groups_signal_is_deferred_while_its_record_is_in_flight() {
+        assert_eq!(reaped_group_plan(true), GroupPlan::Deferred);
+        assert_eq!(reaped_group_plan(false), GroupPlan::Now);
+        assert!(
+            deferred_group_kill(true, || true),
+            "landed, held: signalled"
+        );
+        assert!(
+            !deferred_group_kill(true, || false),
+            "landed, nothing recorded holds it: not signalled"
+        );
+        let mut asked = false;
+        assert!(
+            !deferred_group_kill(false, || {
+                asked = true;
+                true
+            }),
+            "timed out: nothing is signalled"
+        );
+        assert!(!asked, "and the group is not even looked at");
+    }
+
+    /// A child already reaped is never signalled again: its pid is free and
+    /// may name an unrelated process by the time the client drops.
+    #[test]
+    fn a_reaped_child_is_never_signalled_again() {
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        let pid = client.child_process_id().expect("a pid");
+        assert_eq!(
+            client
+                .child_to_signal()
+                .map(rustix::process::Pid::as_raw_pid),
+            Some(pid as i32),
+            "an unreaped child is signalled at its pid"
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            client.child_to_signal(),
+            None,
+            "once reaped, its pid is never signalled"
+        );
+        drop(client);
+    }
+
+    /// A child that exits on its own has what it left running in its session
+    /// recorded as soon as it is seen to exit, before it is reaped, not only
+    /// when the client drops: in between, the session number proves nothing
+    /// and a removal must still find the job.
+    #[test]
+    fn a_child_seen_to_exit_has_its_survivors_recorded_before_the_client_drops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let session = client.process_session().expect("a session");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        client.set_leader_exit_hook(registry.leader_exit_hook(session));
+        struct Kill(std::path::PathBuf);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                if let Ok(text) = std::fs::read_to_string(&self.0)
+                    && let Some(pid) = text
+                        .trim()
+                        .parse::<i32>()
+                        .ok()
+                        .and_then(rustix::process::Pid::from_raw)
+                {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+        let _job = Kill(pidfile.clone());
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        registry.wait_for_all_recordings(std::time::Duration::from_secs(5));
+
+        let job: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the job's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(
+            registry
+                .survivors_of(&[session])
+                .iter()
+                .any(|identity| identity.pid == job),
+            "the job the shell left running is recorded while the client still stands"
+        );
+        drop(client);
+    }
+
+    /// Review 26: "before dux reaps a child that exited, it records what that
+    /// child left running". `try_wait` fires the leader-exit hook and then
+    /// reaps at once, but the hook only STARTS the record on a thread of its
+    /// own. Only a worktree removal waits for that thread; every other look
+    /// (a pull or switch's move check, an editor or changes-pane delete,
+    /// which all ask `cwd_occupant`) runs straight after the reap, finds the
+    /// leader gone (so the session number proves nothing) and nothing
+    /// recorded yet, and misses a job the shell left working in the folder.
+    #[test]
+    fn review26_a_look_right_after_the_reap_misses_the_job_the_leader_left() {
+        let mut misses = 0;
+        let attempts = 10;
+        for _ in 0..attempts {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(dir.path().join("build")).expect("build");
+            let pidfile = dir.path().join("job.pid");
+            let args = vec![
+                "-c".to_string(),
+                format!(
+                    "trap '' HUP; (cd build && exec sleep 300) & echo $! > '{}'; exit 0",
+                    pidfile.display()
+                ),
+            ];
+            let mut client =
+                PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+            let session = client.process_session().expect("a session");
+            let registry = crate::process_sessions::AgentProcessRegistry::default();
+            registry.register("a1", session, dir.path());
+            client.set_leader_exit_hook(registry.leader_exit_hook(session));
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while !pidfile.exists() {
+                assert!(Instant::now() < deadline, "the job never started");
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            while client.try_wait().is_none() {
+                assert!(Instant::now() < deadline, "the shell did not exit in time");
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // The leader is reaped now. A pull's or a delete's look at the
+            // folder the job works in:
+            let seen = registry.cwd_occupant(&dir.path().join("build"), &[]);
+            registry.wait_for_all_recordings(std::time::Duration::from_secs(5));
+            // Control: once the record has landed, the same look sees the job.
+            let seen_after = registry.cwd_occupant(&dir.path().join("build"), &[]);
+            let job = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+                .and_then(rustix::process::Pid::from_raw);
+            if let Some(job) = job {
+                let _ = rustix::process::kill_process(job, rustix::process::Signal::KILL);
+            }
+            drop(client);
+            assert!(seen_after.is_some(), "control: the recorded job is seen");
+            if seen.is_none() {
+                misses += 1;
+            }
+        }
+        assert_eq!(
+            misses, 0,
+            "in {misses} of {attempts} runs a look right after the leader was reaped found \
+             nothing working in the job's folder: the record lands after the reap"
+        );
+    }
+
     #[test]
     fn reaped_at_is_none_while_the_child_is_alive() {
         // `reaped_at` is the clock the prune's drain grace runs off, so it must
@@ -7373,6 +8009,62 @@ mod tests {
         assert!(
             matches!(rx2.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
             "rx2 should still be live (Empty), not disconnected"
+        );
+    }
+
+    /// A disowned background job of an interactive shell lives in a process
+    /// group of its own and keeps the terminal open after the shell exits. The
+    /// group kill in `Drop` cannot reach it, so dropping the client must not
+    /// wait for the reader thread to see end of input, or it waits for as long
+    /// as the job runs: the engine thread, frozen.
+    #[test]
+    fn dropping_a_pty_never_waits_on_a_disowned_job_holding_it_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let mut client = PtyClient::spawn_with_env(
+            "bash",
+            &[
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+            dir.path(),
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn bash");
+        client
+            .write_bytes(b"sleep 30 & echo $! > job.pid; disown; exit\n")
+            .expect("type into bash");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "bash never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let job: i32 = std::fs::read_to_string(&pidfile)
+            .expect("job pid")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let job_pid = rustix::process::Pid::from_raw(job).expect("pid");
+        assert!(
+            rustix::process::test_kill_process(job_pid).is_ok(),
+            "the disowned job outlives the shell"
+        );
+        assert!(!client.is_exited(), "and it holds the terminal open");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = tx.send(());
+        });
+        let dropped = rx.recv_timeout(Duration::from_secs(5));
+        let _ = rustix::process::kill_process(job_pid, rustix::process::Signal::KILL);
+        assert!(
+            dropped.is_ok(),
+            "dropping the client must not wait on the job that holds the terminal"
         );
     }
 }

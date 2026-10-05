@@ -2846,20 +2846,12 @@ impl App {
             return Ok(());
         };
         let message = self.commit_input.text.clone();
-        // Route the empty-message / nothing-staged decision through the shared core
-        // preflight so the TUI and the web agree, and so the nothing-staged check
-        // reads LIVE git status rather than the possibly-stale `staged_files`
-        // cache. Each surface still renders its own copy for the refusals.
-        match git::commit_preflight(&worktree, &message) {
-            git::CommitPreflight::EmptyMessage => {
-                self.set_error("Enter a commit message first.");
-                return Ok(());
-            }
-            git::CommitPreflight::NothingStaged => {
-                self.set_error("No staged changes to commit.");
-                return Ok(());
-            }
-            git::CommitPreflight::Ready => {}
+        // An empty message needs no git to refuse. Nothing staged is decided by
+        // the shared core preflight, against LIVE git status, on the commit's
+        // worker, and is its final; the UI thread never runs git for it.
+        if message.trim().is_empty() {
+            self.set_error(dux_core::engine::COMMIT_EMPTY_MESSAGE);
+            return Ok(());
         }
         // The push hint is only offered where pushing is possible. A standalone
         // agent has no branch, so `push_to_remote` refuses it, and advertising
@@ -2872,21 +2864,21 @@ impl App {
         let success_message = commit_success_message(push_key.as_deref());
         let reaction = self.engine.apply(Command::CommitChanges {
             worktree_path: worktree,
-            message,
+            message: message.clone(),
             success_message,
         })?;
-        let success = matches!(
-            &reaction,
-            EventReaction::Status(StatusUpdate {
-                tone: StatusTone::Info,
-                ..
-            })
-        );
-        self.apply_reaction(reaction);
-        if success {
-            self.commit_input.clear();
-            self.reload_changed_files();
+        // The typed message is cleared when the commit's final says it
+        // landed (see the status arm of `apply_reaction`); the changes list is
+        // read again when the worker finishes.
+        if let EventReaction::Status(StatusUpdate {
+            tone: StatusTone::Busy,
+            key: Some(key),
+            ..
+        }) = &reaction
+        {
+            self.pending_commit = Some((key.clone(), message));
         }
+        self.apply_reaction(reaction);
         Ok(())
     }
 
@@ -8391,34 +8383,22 @@ impl App {
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
         if confirm && let Some(worktree) = self.changes_worktree_for_selection() {
-            // Re-classify against LIVE git status at confirm time, then act on that
-            // fresh flag, so the delete-vs-restore decision and the destructive
-            // action agree with the worktree as it is NOW (not as it was when the
-            // prompt opened). This closes a data-loss window: a file that was
-            // untracked at prompt-open but became tracked before confirm would
-            // otherwise be deleted outright instead of restored from HEAD.
-            let is_untracked = match git::discard_classify(&worktree, &file_path) {
-                Ok(u) => u,
-                Err(e) => {
-                    // The live check refused (now staged, or nothing left to
-                    // discard). Surface it and leave the file untouched.
-                    self.set_error(format!("Discard failed: {e}"));
-                    return false;
-                }
-            };
-            // The prompt was a file's, and a file is what the discard may
-            // touch: a folder that has since taken the name is refused.
-            let reaction = self.engine.apply(Command::DiscardFile {
+            // Classified against LIVE git status on the discard's worker, right
+            // before it acts, so the delete-vs-restore decision and the
+            // destructive action agree with the worktree as it is THEN (not as
+            // it was when the prompt opened): a file that was untracked at
+            // prompt-open but became tracked before confirm is restored, never
+            // deleted. A refusal there (now staged, nothing left to discard)
+            // is the discard's final. The prompt was a file's, and a file is
+            // what the discard may touch: a folder that has since taken the
+            // name is refused.
+            // The listing is read again when the discard's worker finishes.
+            let reaction = self.engine.apply(Command::DiscardFileLive {
                 worktree_path: worktree,
                 path: file_path,
-                is_untracked,
-                confirmed: git::ConfirmedEntry::File,
             });
             match reaction {
-                Ok(reaction) => {
-                    self.apply_reaction(reaction);
-                    self.reload_changed_files();
-                }
+                Ok(reaction) => self.apply_reaction(reaction),
                 Err(e) => self.set_error(format!("Discard failed: {e}")),
             }
         }
@@ -17067,7 +17047,11 @@ not_a_real_action = ["x"]
         app.engine
             .worker_tx
             .send(WorkerEvent::AgentLaunchReady(Box::new(
-                crate::app::AgentLaunchReadyData { request, client },
+                crate::app::AgentLaunchReadyData {
+                    request,
+                    client,
+                    spawn_ticket: None,
+                },
             )))
             .unwrap();
         app.drain_events();
@@ -24425,6 +24409,8 @@ cyan = "#00ffff"
             branch: Some(name.to_string()),
             dirty: false,
             attached_session_id: agent.map(str::to_string),
+            being_removed: false,
+            busy: None,
         };
         let entries = vec![entry("free", None), entry("held", Some("session-1"))];
         let rows = crate::app::manage_worktree_visual_rows(&entries, false, None);
@@ -27214,6 +27200,10 @@ cyan = "#00ffff"
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 53, 10));
 
         assert!(matches!(app.prompt, PromptState::None));
+        // The discard runs on a worker; its final replaces the busy.
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
         let contents = std::fs::read_to_string(
             PathBuf::from(
                 &app.engine.sessions[0]
@@ -27285,7 +27275,16 @@ cyan = "#00ffff"
         git(&["commit", "-m", "track ghost"]);
 
         app.resolve_confirm_discard_file(true);
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
 
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "the live check refuses: {}",
+            app.status.text()
+        );
         assert!(
             worktree.join("ghost.txt").exists(),
             "a file that became tracked-and-clean between prompt-open and confirm must NOT be deleted by discard",
@@ -27354,6 +27353,11 @@ cyan = "#00ffff"
         app.commit_input.text = "a real message".to_string();
 
         app.execute_commit().expect("execute_commit");
+        // The live check runs on the commit's worker; its refusal is the final.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(
@@ -27361,6 +27365,96 @@ cyan = "#00ffff"
             "the live status check must refuse the commit despite the stale cache, got: {}",
             app.status.text(),
         );
+        assert_eq!(
+            app.commit_input.text, "a real message",
+            "a refused commit keeps the typed message"
+        );
+    }
+
+    /// Review 25: while a commit runs on its worker the box stays editable;
+    /// a message typed for the NEXT commit is wiped when the first one lands.
+    #[test]
+    fn review25_a_message_typed_while_a_commit_runs_survives_its_final() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(worktree.join("a.txt"), "seed\n").expect("seed");
+        git(&["add", "a.txt"]);
+        app.selected_left = 1;
+        app.commit_input.text = "the first commit".to_string();
+        app.execute_commit().expect("execute_commit");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        // The user starts writing the next message while the first commits.
+        app.commit_input.text = "the second commit, half typed".to_string();
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+        assert_eq!(
+            app.commit_input.text, "the second commit, half typed",
+            "the first commit's final wiped a message typed after it was sent"
+        );
+    }
+
+    /// A commit runs on a worker: the busy goes up at once, and the typed
+    /// message is cleared only when the final says the commit landed.
+    #[test]
+    fn execute_commit_clears_the_message_when_the_commit_lands() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(worktree.join("a.txt"), "seed\n").expect("seed");
+        git(&["add", "a.txt"]);
+        app.selected_left = 1;
+        app.commit_input.text = "the first commit".to_string();
+
+        app.execute_commit().expect("execute_commit");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(
+            app.commit_input.text, "the first commit",
+            "kept until the commit lands"
+        );
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Info,
+            "{}",
+            app.status.text()
+        );
+        assert!(app.commit_input.text.is_empty(), "cleared once it landed");
+        assert!(app.pending_commit.is_none());
     }
 
     #[test]

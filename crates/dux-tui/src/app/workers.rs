@@ -3,9 +3,8 @@ use std::sync::mpsc::Sender;
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
-    DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
-    closed_tab_exit_notice,
+    EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
+    PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval, closed_tab_exit_notice,
 };
 
 use super::*;
@@ -551,6 +550,19 @@ impl App {
                         return;
                     }
                 }
+                // A commit's final: a landed commit clears the typed message, a
+                // refused one leaves it for another try.
+                if tone != StatusTone::Busy
+                    && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
+                    && key == pending
+                {
+                    // Only the message that was committed is cleared: one typed
+                    // since, for the next commit, stays.
+                    if tone == StatusTone::Info && self.commit_input.text == *committed {
+                        self.commit_input.clear();
+                    }
+                    self.pending_commit = None;
+                }
                 // When a `StatusUpdate` carries a key (keyed operation), write it
                 // into the named slot so `most_recent_tui` can pick it up.
                 // Unkeyed updates (`key == None`) write the anonymous slot.
@@ -625,6 +637,16 @@ impl App {
                 message,
             } => {
                 self.apply_worktree_remove_failed(session_id, message);
+            }
+            EventReaction::WorktreeRemoveWaiting {
+                session_id,
+                message,
+            } => {
+                // The delete's own spinner says what the removal is waiting for.
+                if let Some(op) = self.pending_delete_ops.get(&session_id) {
+                    let progress = op.progress(message);
+                    self.apply_reaction(EventReaction::Status(progress));
+                }
             }
 
             EventReaction::ResourceStatsArrived(stats, was_baseline) => {
@@ -715,10 +737,6 @@ impl App {
 
             EventReaction::FinishDeleteSessionView(view) => {
                 self.apply_finish_delete_session_view(*view);
-            }
-
-            EventReaction::DoDeleteSessionView(view) => {
-                self.apply_do_delete_session_view(*view);
             }
 
             EventReaction::BeginDeleteSessionView(view) => {
@@ -1029,6 +1047,16 @@ impl App {
                 false,
             );
             if let Err(error) = cleanup {
+                // The delete's own busy is dismissed first, so it does not
+                // outlive the failure; the failure is the line that stays.
+                if let Some(op) = op {
+                    self.apply_reaction(
+                        op.resolve(&TuiDeleteOutcome::SucceededGone {
+                            our_busy_still_showing: false,
+                        })
+                        .into_reaction(),
+                    );
+                }
                 self.set_error(format!(
                     "Worktree removed but session cleanup failed: {error:#}"
                 ));
@@ -1110,15 +1138,6 @@ impl App {
             view.outcome,
             view.removal,
             view.update_status,
-        );
-    }
-
-    fn apply_do_delete_session_view(&mut self, view: DoDeleteSessionView) {
-        self.apply_finish_delete_session_outcome(
-            &view.session_id,
-            view.outcome.finish,
-            view.outcome.removal,
-            true,
         );
     }
 
@@ -3153,7 +3172,7 @@ mod tests {
             status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
-        dux_core::agent_job::run_agent_launch_job(request, worker_tx);
+        dux_core::agent_job::run_agent_launch_job(request, worker_tx, &Default::default());
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::AgentLaunchFailed(data) => {
@@ -3338,6 +3357,7 @@ mod tests {
             (80, 24),
             "op-test".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -3548,6 +3568,7 @@ mod tests {
             (80, 24),
             "op-create-1".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
 
         match worker_rx.recv().expect("worker event") {

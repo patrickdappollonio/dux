@@ -166,6 +166,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         companion_terminals: std::collections::HashMap::new(),
         agent_tabs: std::collections::HashMap::new(),
         terminating_ptys: Vec::new(),
+        process_registry: Default::default(),
+        removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         gh_status: crate::model::GhStatus::Unknown,
@@ -225,6 +227,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: std::collections::HashMap::new(),
+        removal_coordination: Default::default(),
     };
     let app_live_status_keys = engine.live_status_keys.clone();
     let mut app = App {
@@ -240,6 +243,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         commit_input: TextInput::new()
             .with_multiline(4)
             .with_placeholder("Type your commit message\u{2026}"),
+        pending_commit: None,
         show_diff_line_numbers: false,
         left_width_pct: 20,
         right_width_pct: 23,
