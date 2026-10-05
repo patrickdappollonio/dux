@@ -845,9 +845,20 @@ impl AuthState {
             )) => {
                 // The file holds it now, so the file is where it lives: the
                 // owner lifting it there (and reloading) lifts it here too.
+                // The same change the file got: the entry, with the single
+                // addresses a range covers folded into it.
                 let entry = ban.entry.clone();
                 self.live.update(
                     move |config| {
+                        if entry.contains('/')
+                            && let Ok(range) = dux_core::config::AddressBlock::parse(&entry)
+                        {
+                            config.blocked_addresses.retain(|existing| {
+                                existing
+                                    .parse::<IpAddr>()
+                                    .map_or(true, |single| !range.contains(single))
+                            });
+                        }
                         if !config.blocked_addresses.contains(&entry) {
                             config.blocked_addresses.push(entry.clone());
                         }

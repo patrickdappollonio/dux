@@ -75,8 +75,8 @@ enum TrackKey {
     /// ban is attributed to.
     Verified(IpAddr),
     /// The /64 of a verified IPv6 address on the network: it governs the
-    /// slow-down only (and, behind [`BAN_WHOLE_IPV6_PREFIX`], the ban of the
-    /// whole /64), never a ban of one address.
+    /// slow-down, and its combined count reaching `max_failed_logins` bans the
+    /// whole /64 as one range; it never bans one address on its own.
     Prefix(std::net::Ipv6Addr),
     /// An address an unverified request claimed: slowed, never banned.
     Claimed(IpAddr),
@@ -124,17 +124,15 @@ fn ipv6_prefix(ip: IpAddr) -> Option<std::net::Ipv6Addr> {
 /// and never an address in Tailscale's ranges, because every Tailscale node
 /// shares one /64 and grouping it made one tailnet device's guesses slow, and
 /// ban, another. IPv4 has no prefix.
+/// Never the all-zero /64 either, which holds loopback (`::1`) and is no
+/// host's own network: a range written for it would cover addresses dux never
+/// blocks.
 fn prefix_counted(c: &Classification, ip: IpAddr) -> Option<std::net::Ipv6Addr> {
     let network = Level::of(c) == Level::Network;
-    ipv6_prefix(ip).filter(|_| network && !super::provenance::is_tailscale(ip))
+    ipv6_prefix(ip).filter(|prefix| {
+        network && blockable(ip) && !prefix.is_unspecified() && !super::provenance::is_tailscale(ip)
+    })
 }
-
-/// Whether the /64's COMBINED count reaching `max_failed_logins` also writes
-/// the whole /64 to `blocked_addresses`. PENDING THE USER'S DECISION, and off
-/// until they answer: a guesser rotating through a /64 is then slowed by the
-/// /64 but never banned. A single address is banned only when that address
-/// alone reaches the limit, whatever this says.
-const BAN_WHOLE_IPV6_PREFIX: bool = false;
 
 /// What a ban writes and holds: the client's address, and the
 /// `blocked_addresses` entry that covers it.
@@ -142,8 +140,8 @@ const BAN_WHOLE_IPV6_PREFIX: bool = false;
 pub(crate) struct Ban {
     /// The address whose failure reached the limit.
     pub(crate) ip: IpAddr,
-    /// The entry written: the address itself, or its /64 when
-    /// [`BAN_WHOLE_IPV6_PREFIX`] is on and the /64 reached the limit.
+    /// The entry written: the address itself, or, when several addresses of
+    /// one network IPv6 /64 reached the limit together, that /64 as a range.
     pub(crate) entry: String,
 }
 
@@ -496,10 +494,14 @@ impl Admission {
                     inner.tracked.remove(&key);
                     strike = Strike::Block(Ban::of(ip));
                 }
-                TrackKey::Prefix(prefix)
-                    if BAN_WHOLE_IPV6_PREFIX && count == cfg.max_failed_logins =>
-                {
+                // The /64's combined count reached the limit with no single
+                // address of it there on its own (decided by the owner: one
+                // range rather than a long list of addresses): the whole /64
+                // is banned as one entry. One address that did reach it alone
+                // was banned just above, as itself, and that stands.
+                TrackKey::Prefix(prefix) if !matches!(strike, Strike::Block(_)) => {
                     if let Some(ip) = c.verified_ip {
+                        inner.tracked.remove(&key);
                         strike = Strike::Block(Ban::of_prefix(ip, prefix));
                     }
                 }
@@ -1094,5 +1096,54 @@ mod tests {
         let tailnet = |ip: &str| from(ClientClass::Network, ip);
         a.record_failure(&c, &tailnet("fd7a:115c:a1e0::1"), t0);
         assert_eq!(a.check(&c, &tailnet("fd7a:115c:a1e0::2"), t0), Ok(()));
+    }
+
+    /// Several addresses of one network /64 reaching the limit together ban
+    /// the /64 as one range; the tailnet's addresses and IPv4 never group.
+    #[test]
+    fn a_rotating_guesser_bans_its_slash64_but_never_the_tailnet_or_ipv4() {
+        let c = ServerAuthConfig {
+            failed_login_delay_seconds: 0,
+            max_failed_logins: 3,
+            ..cfg()
+        };
+        let t0 = Instant::now();
+        let a = Admission::default();
+        let mut last = Strike::Counted;
+        for n in 1..=3 {
+            last = a.record_failure(&c, &net(&format!("2001:db8:1:2::{n}")), t0);
+        }
+        assert_eq!(
+            last,
+            Strike::Block(Ban {
+                ip: "2001:db8:1:2::3".parse().unwrap(),
+                entry: "2001:db8:1:2::/64".into(),
+            })
+        );
+        for (what, ips) in [
+            (
+                "tailnet",
+                [
+                    "fd7a:115c:a1e0::1",
+                    "fd7a:115c:a1e0::2",
+                    "fd7a:115c:a1e0::3",
+                ],
+            ),
+            ("IPv4", ["198.51.100.1", "198.51.100.2", "198.51.100.3"]),
+        ] {
+            let a = Admission::default();
+            for ip in ips {
+                assert_eq!(
+                    a.record_failure(&c, &net(ip), t0),
+                    Strike::Counted,
+                    "{what}: {ip}"
+                );
+            }
+        }
+        let a = Admission::default();
+        for n in 1..=3 {
+            let tailnet = from(ClientClass::Tailnet, &format!("2001:db8:5:5::{n}"));
+            assert_eq!(a.record_failure(&c, &tailnet, t0), Strike::Counted);
+        }
     }
 }

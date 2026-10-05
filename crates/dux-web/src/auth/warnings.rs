@@ -184,7 +184,16 @@ fn weak_sentence() -> String {
 }
 
 fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> String {
-    let why = format!("dux blocked {entry} after {failures} failed sign-ins.");
+    // A range is the IPv6 /64 the failures came from, written whole rather
+    // than one address at a time.
+    let why = if entry.contains('/') {
+        format!(
+            "dux blocked {entry}, the IPv6 /64 they came from, as one range after {failures} \
+             failed sign-ins from addresses in it."
+        )
+    } else {
+        format!("dux blocked {entry} after {failures} failed sign-ins.")
+    };
     match kept {
         BanKept::InConfig => format!(
             "{why} It is in blocked_addresses in the [server.auth] section of {path}; if it was \
@@ -470,6 +479,17 @@ mod tests {
         let text = proxy_sentence();
         assert_eq!(text.matches("everywhere").count(), 1, "{text}");
         assert!(text.contains("proxy"), "{text}");
+    }
+
+    #[test]
+    fn a_range_block_says_it_is_the_slash64_as_one_range() {
+        let text = blocked_sentence("2001:db8:1:2::/64", 5, "/x/config.toml", &BanKept::InConfig);
+        assert!(text.contains("2001:db8:1:2::/64"), "{text}");
+        assert!(
+            text.contains("IPv6 /64") && text.contains("one range"),
+            "{text}"
+        );
+        assert!(!text.contains("  "), "{text}");
     }
 
     #[test]

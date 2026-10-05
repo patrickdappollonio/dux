@@ -2579,14 +2579,11 @@ fn v6(peer: &str) -> Arrival {
 }
 
 /// A single LAN device that owns an IPv6 /64 (every SLAAC host does) rotates
-/// the address it sends from. The /64 governs the slow-down, so the rotation
-/// gains it no quick guesses; a ban, though, is only ever attributed to an
-/// address that alone reached `max_failed_logins` (writing the whole /64 is
-/// pending the owner's decision and off), so the rotation is slowed but no
-/// one address is banned for its neighbours' failures. The owner on another
-/// network signs in.
+/// the address it sends from. The /64's combined failures reaching
+/// `max_failed_logins` write the whole /64 as one range, so a fresh address in
+/// it is refused too, while the owner on another network signs in.
 #[tokio::test]
-async fn rotating_ipv6_addresses_in_one_slash64_gains_nothing() {
+async fn rotating_ipv6_addresses_in_one_slash64_gets_the_slash64_blocked() {
     let dux = Dux::with_password(
         "max_failed_logins = 5\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 30",
     );
@@ -2597,20 +2594,13 @@ async fn rotating_ipv6_addresses_in_one_slash64_gains_nothing() {
                 "not the password at all",
             )
             .await;
-        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", answer.body);
+        assert!(answer.status.is_client_error(), "{}", answer.body);
     }
-    assert!(!dux.config().contains("2001:db8:1:1"), "{}", dux.config());
-    // One address that alone reaches the limit is banned, and only it.
-    for _ in 0..5 {
-        let _ = dux.login(v6("2001:db8:1:1::7"), "wrong again").await;
-    }
-    assert!(
-        dux.config().contains("\"2001:db8:1:1::7\""),
-        "{}",
-        dux.config()
-    );
-    let again = dux.login(v6("2001:db8:1:1::7"), "again").await;
-    assert_eq!(again.error().as_deref(), Some("blocked"), "{}", again.body);
+    let config = dux.config();
+    assert!(config.contains("\"2001:db8:1:1::/64\""), "{config}");
+    assert!(!config.contains("\"2001:db8:1:1::5\""), "{config}");
+    let fresh = dux.login(v6("2001:db8:1:1::abcd"), PASSWORD).await;
+    assert_eq!(fresh.error().as_deref(), Some("blocked"), "{}", fresh.body);
     // The owner, from another network, with the right password.
     let owner = dux.login(v6("2001:db8:2:2::5"), PASSWORD).await;
     assert_eq!(owner.status, StatusCode::NO_CONTENT, "{}", owner.body);

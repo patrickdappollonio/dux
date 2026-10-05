@@ -1492,9 +1492,10 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Failed logins one address may make within failed_login_window_seconds\n\
                  # before dux adds it to blocked_addresses below and says so in its log.\n\
-                 # Only an address that alone reaches the limit is added. An IPv6 client\n\
-                 # on your network is also slowed by its /64, since one device can send\n\
-                 # from any address in it (never your tailnet, whose devices share one).\n\
+                 # One device can send from any address in its IPv6 /64, so an IPv6\n\
+                 # client on your network is also counted by its /64: when its addresses\n\
+                 # together reach the limit, the whole /64 is added as one range (never\n\
+                 # your tailnet, whose devices share one, and never IPv4).\n\
                  # dux only adds an address it can verify: a client connected to it\n\
                  # directly, or one that came through your tailscale serve. Behind any\n\
                  # other proxy the address is only what the request claims, so dux\n\
@@ -1519,10 +1520,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # X-Forwarded-For, X-Real-IP and Forwarded headers, so an entry works\n\
                  # behind a proxy too. Loopback (127.0.0.1, ::1) never matches: it is\n\
                  # this machine, and tailscale serve relays your tailnet through it, so\n\
-                 # an entry covering it is accepted, warned about, and ignored. Yours\n\
-                 # to edit: add a scanner you keep seeing, or remove an address dux\n\
-                 # blocked after failed logins (yours, if you mistyped). An entry that\n\
-                 # does not parse makes this section invalid. Default empty.",
+                 # an entry covering it is accepted, warned about, and ignored. dux adds\n\
+                 # single addresses after failed logins, or an IPv6 /64 as one range\n\
+                 # (\"2001:db8:1:2::/64\"), which then replaces the addresses of that /64\n\
+                 # already listed; it adds nothing an entry already covers. Yours to\n\
+                 # edit: add a scanner you keep seeing, or remove an entry dux added\n\
+                 # (yours, if you mistyped). An entry that does not parse makes this\n\
+                 # section invalid. Default empty.",
             )),
             value_fn: |c| FieldValue::StrList(c.server.auth.blocked_addresses.clone()),
         },

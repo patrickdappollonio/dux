@@ -1190,7 +1190,8 @@ pub fn append_blocked_address(
 
 /// [`append_blocked_address`] writing `entry` (the address itself, or a
 /// range holding it) for `ip`. Nothing is written when an entry already
-/// covers `ip`.
+/// covers all of `entry`, and a range takes the place of the single-address
+/// entries inside it in the same save.
 pub fn append_blocked_entry(
     config_path: &Path,
     ip: std::net::IpAddr,
@@ -1199,6 +1200,8 @@ pub fn append_blocked_entry(
 ) -> Result<BanWrite> {
     let ip = crate::config_auth::canonical(ip);
     let new_entry = entry.to_string();
+    // The span the new entry covers: the address itself, or the whole range.
+    let (first, last) = entry_span(entry).unwrap_or((ip, ip));
     let blocked_path: Vec<String> = ["server", "auth", "blocked_addresses"]
         .iter()
         .map(|s| s.to_string())
@@ -1208,31 +1211,6 @@ pub fn append_blocked_entry(
         MissingConfig::CreateDocumented,
         &blocked_path,
         |doc| {
-            let entries: Vec<String> = doc
-                .get("server")
-                .and_then(|server| server.get("auth"))
-                .and_then(|auth| auth.get("blocked_addresses"))
-                .and_then(|item| item.as_array())
-                .map(|array| {
-                    array
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let covered = entries.iter().any(|entry| {
-                crate::config_auth::AddressBlock::parse(entry).is_ok_and(|block| block.contains(ip))
-            });
-            if covered {
-                return Err(anyhow::Error::new(BanNoop(BanWrite::AlreadyBlocked)));
-            }
-            if entries.len() >= max_entries as usize {
-                return Err(anyhow::Error::new(BanNoop(BanWrite::AtLimit)));
-            }
-            let path: Vec<String> = ["server", "auth", "blocked_addresses"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
             let mut array = doc
                 .get("server")
                 .and_then(|server| server.get("auth"))
@@ -1240,8 +1218,38 @@ pub fn append_blocked_entry(
                 .and_then(|item| item.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let entries: Vec<String> = array
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            // Nothing is written when an entry already covers all of it: the
+            // address, or both ends of the range (an entry is one contiguous
+            // range, so covering both ends covers everything between).
+            let covered = entries.iter().any(|entry| {
+                crate::config_auth::AddressBlock::parse(entry)
+                    .is_ok_and(|block| block.contains(first) && block.contains(last))
+            });
+            if covered {
+                return Err(anyhow::Error::new(BanNoop(BanWrite::AlreadyBlocked)));
+            }
+            // Folded on write: a range takes the place of the single-address
+            // entries inside it, in the same save, so the list gets shorter
+            // and nobody refused before is let in. Every other entry, and its
+            // comments, stays as it was.
+            let folds = |value: &toml_edit::Value| {
+                first != last
+                    && value
+                        .as_str()
+                        .and_then(single_address)
+                        .is_some_and(|single| in_span(single, first, last))
+            };
+            let folded = array.iter().filter(|value| folds(value)).count();
+            if entries.len() - folded >= max_entries as usize {
+                return Err(anyhow::Error::new(BanNoop(BanWrite::AtLimit)));
+            }
+            array.retain(|value| !folds(value));
             array.push(new_entry);
-            set_in_doc(doc, &path, Value::Array(array))
+            set_in_doc(doc, &blocked_path, Value::Array(array))
         },
     );
     match written {
@@ -1250,6 +1258,61 @@ pub fn append_blocked_entry(
             Some(BanNoop(outcome)) => Ok(*outcome),
             None => Err(error),
         },
+    }
+}
+
+/// The first and last address a `blocked_addresses` entry covers, when it
+/// reads as an address or a CIDR range.
+fn entry_span(entry: &str) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
+    use std::net::IpAddr;
+    let (addr, prefix) = match entry.split_once('/') {
+        Some((addr, prefix)) => (addr, Some(prefix.parse::<u32>().ok()?)),
+        None => (entry, None),
+    };
+    let ip = crate::config_auth::canonical(addr.parse::<IpAddr>().ok()?);
+    let bits = match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    let prefix = prefix.unwrap_or(bits).min(bits);
+    let host = if prefix == bits {
+        0
+    } else {
+        (1u128 << (bits - prefix)) - 1
+    };
+    Some(match ip {
+        IpAddr::V4(v4) => {
+            let n = u128::from(u32::from(v4));
+            let (lo, hi) = (n & !host, n | host);
+            (
+                IpAddr::V4(std::net::Ipv4Addr::from(lo as u32)),
+                IpAddr::V4(std::net::Ipv4Addr::from(hi as u32)),
+            )
+        }
+        IpAddr::V6(v6) => {
+            let n = u128::from(v6);
+            (
+                IpAddr::V6(std::net::Ipv6Addr::from(n & !host)),
+                IpAddr::V6(std::net::Ipv6Addr::from(n | host)),
+            )
+        }
+    })
+}
+
+/// An entry that names exactly one address, as that address.
+fn single_address(entry: &str) -> Option<std::net::IpAddr> {
+    entry_span(entry)
+        .filter(|(first, last)| first == last)
+        .map(|(first, _)| first)
+}
+
+/// Whether `ip` lies between `first` and `last`, of the same family.
+fn in_span(ip: std::net::IpAddr, first: std::net::IpAddr, last: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match (ip, first, last) {
+        (IpAddr::V4(ip), IpAddr::V4(first), IpAddr::V4(last)) => first <= ip && ip <= last,
+        (IpAddr::V6(ip), IpAddr::V6(first), IpAddr::V6(last)) => first <= ip && ip <= last,
+        _ => false,
     }
 }
 
@@ -3686,6 +3749,65 @@ port = 3890
             .unwrap_err();
         assert!(matches!(err, SetPasswordError::BelowMinimums(_)), "{err}");
         assert_eq!(hash_in(&path), "");
+    }
+
+    /// A /64 written as one range takes the place of the single addresses
+    /// inside it in the same save, leaving every other entry and comment as
+    /// it was; nothing is written for what an entry already covers.
+    #[test]
+    fn a_range_folds_the_addresses_inside_it_and_nothing_covered_is_written() {
+        let (_dir, path) = temp_config(
+            "[server.auth]\nblocked_addresses = [\n  # a scanner I keep seeing\n  \"203.0.113.7\",\n  \
+             \"2001:db8:1:2::5\",\n  \"2001:db8:1:2::9\",\n  \"198.51.100.0/24\", # the old office\n]\n",
+        );
+        let ip: std::net::IpAddr = "2001:db8:1:2::77".parse().unwrap();
+        assert_eq!(
+            append_blocked_entry(&path, ip, "2001:db8:1:2::/64", 10).unwrap(),
+            BanWrite::Written
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let auth = crate::config::auth_section_of(&raw).unwrap();
+        assert_eq!(
+            auth.blocked_addresses,
+            ["203.0.113.7", "198.51.100.0/24", "2001:db8:1:2::/64"],
+            "{raw}"
+        );
+        assert!(raw.contains("# a scanner I keep seeing"), "{raw}");
+        assert!(raw.contains("# the old office"), "{raw}");
+
+        // Covered already: the range, or an address inside it.
+        for (ip, entry) in [
+            ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+            ("2001:db8:1:2::3", "2001:db8:1:2::3"),
+            ("198.51.100.9", "198.51.100.9"),
+        ] {
+            assert_eq!(
+                append_blocked_entry(&path, ip.parse().unwrap(), entry, 10).unwrap(),
+                BanWrite::AlreadyBlocked,
+                "{entry}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            raw,
+            "nothing written"
+        );
+
+        // A range that would only fit once the addresses inside it are folded
+        // still fits.
+        let (_dir, path) = temp_config(
+            "[server.auth]\nblocked_addresses = [\"2001:db8:9:9::1\", \"2001:db8:9:9::2\"]\n",
+        );
+        assert_eq!(
+            append_blocked_entry(
+                &path,
+                "2001:db8:9:9::3".parse().unwrap(),
+                "2001:db8:9:9::/64",
+                2
+            )
+            .unwrap(),
+            BanWrite::Written
+        );
     }
 
     #[test]
