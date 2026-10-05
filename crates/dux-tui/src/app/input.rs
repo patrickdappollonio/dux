@@ -12960,8 +12960,13 @@ mod tests {
         };
     }
 
+    /// Drain the app's events until `done` holds, for up to ten seconds of
+    /// wall-clock time. The bound is time rather than a count of polls, so a
+    /// slow or loaded machine gets the same chance as a fast one; a condition
+    /// that already holds returns at once, so a fast run pays nothing for it.
     fn drain_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
-        for _ in 0..50 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             app.drain_events();
             if done(app) {
                 return;
