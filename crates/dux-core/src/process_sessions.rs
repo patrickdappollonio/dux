@@ -865,6 +865,36 @@ impl SpawnGate {
     }
 }
 
+/// What a PTY's client runs once its child is gone (see
+/// [`AgentProcessRegistry::leader_exit_hook`]), and, when it records into a
+/// registry, which registry and session, so the client can tell whether the
+/// record has landed.
+pub struct LeaderExitHook {
+    run: Box<dyn FnOnce() + Send>,
+    recording: Option<(AgentProcessRegistry, ProcessSession)>,
+}
+
+impl LeaderExitHook {
+    /// Run it.
+    pub fn run(self) {
+        (self.run)();
+    }
+
+    /// The registry and session it records into, if any.
+    pub fn recording(&self) -> Option<(AgentProcessRegistry, ProcessSession)> {
+        self.recording.clone()
+    }
+}
+
+impl<F: ?Sized + FnOnce() + Send + 'static> From<Box<F>> for LeaderExitHook {
+    fn from(run: Box<F>) -> Self {
+        Self {
+            run: Box::new(run),
+            recording: None,
+        }
+    }
+}
+
 /// How long an occupancy look waits for a record of what an exited leader
 /// left running to be written. Writing one is a look at the process table.
 pub const RECORDING_WAIT: Duration = Duration::from_secs(10);
@@ -1927,9 +1957,9 @@ impl AgentProcessRegistry {
     /// A callback for a PTY's client to run once its child is gone: it records
     /// what is still running in the session, on a thread of its own because
     /// that is a walk over the process table.
-    pub fn leader_exit_hook(&self, session: ProcessSession) -> Box<dyn FnOnce() + Send> {
+    pub fn leader_exit_hook(&self, session: ProcessSession) -> LeaderExitHook {
         let registry = self.clone();
-        Box::new(move || {
+        let mut hook = LeaderExitHook::from(Box::new(move || {
             // Noted before the thread starts, on the thread that saw the exit,
             // so a removal dispatched after this point waits for the record.
             registry.begin_recording(session);
@@ -1948,7 +1978,15 @@ impl AgentProcessRegistry {
                     session.sid
                 ));
             }
-        })
+        }));
+        hook.recording = Some((self.clone(), session));
+        hook
+    }
+
+    /// Whether a record of what `session`'s leader left running is still being
+    /// written.
+    pub fn recording_in_flight(&self, session: ProcessSession) -> bool {
+        self.lock().recording.contains_key(&session)
     }
 
     /// Every session remembered for `agent_id`.

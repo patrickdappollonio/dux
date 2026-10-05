@@ -60,6 +60,8 @@ pub mod qr;
 pub mod quiet_tail;
 pub mod release_notes;
 pub mod resource_stats;
+#[cfg(all(test, target_os = "linux"))]
+mod review27_tests;
 pub mod row_state;
 pub mod scroll_hint;
 pub mod scroll_margins;

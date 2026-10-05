@@ -864,7 +864,15 @@ pub struct PtyClient {
     /// what is still running in the child's session at that moment, the only
     /// evidence it keeps that those processes are dux's once their leader has
     /// exited. A mutex only so the client stays `Sync`.
-    leader_exit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    leader_exit_hook: Mutex<Option<crate::process_sessions::LeaderExitHook>>,
+    /// The registry and session the hook records into, kept after the hook
+    /// has run, so a drop can tell whether the record has landed.
+    recording: Mutex<
+        Option<(
+            crate::process_sessions::AgentProcessRegistry,
+            crate::process_sessions::ProcessSession,
+        )>,
+    >,
     /// What dux recorded still running in the child's session when the child
     /// exited (see `leader_exit_hook`). Once the child is reaped, its group
     /// is signalled only while one of these is alive in it.
@@ -1239,7 +1247,27 @@ impl PtyClient {
             progress,
             passthrough,
             leader_exit_hook: Mutex::new(None),
+            recording: Mutex::new(None),
             recorded_members: Mutex::new(None),
+        })
+    }
+
+    /// The group signal this client's drop must defer, or `None` when it is
+    /// decided now: the child is not reaped, its record has landed, or there
+    /// is no record to wait for (see [`reaped_group_plan`]).
+    fn deferred_group_signal(&self) -> Option<DeferredGroupSignal> {
+        self.reaped.as_ref()?;
+        let group = self.child.process_id()?;
+        let (registry, session) = self.recording.lock().ok()?.clone()?;
+        if reaped_group_plan(registry.recording_in_flight(session)) != GroupPlan::Deferred {
+            return None;
+        }
+        let members = self.recorded_members.lock().ok()?.take()?;
+        Some(DeferredGroupSignal {
+            registry,
+            session,
+            group,
+            members,
         })
     }
 
@@ -1305,7 +1333,11 @@ impl PtyClient {
     }
 
     /// Set what runs once this client's child is gone (see the field).
-    pub fn set_leader_exit_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+    pub fn set_leader_exit_hook(&self, hook: impl Into<crate::process_sessions::LeaderExitHook>) {
+        let hook = hook.into();
+        if let Ok(mut slot) = self.recording.lock() {
+            *slot = hook.recording();
+        }
         if let Ok(mut slot) = self.leader_exit_hook.lock() {
             *slot = Some(hook);
         }
@@ -1322,7 +1354,7 @@ impl PtyClient {
             .ok()
             .and_then(|mut slot| slot.take())
         {
-            hook();
+            hook.run();
         }
     }
 
@@ -2195,6 +2227,15 @@ impl Drop for PtyClient {
         // open; a misbehaving one that keeps the slave open could still stall
         // the join, though that has not been observed with the supported
         // providers.)
+        // A reaped child's group is signalled only while a member dux recorded
+        // holds it. When that record is still being written (the exit prune
+        // and the terminating reap drop the client in the same pass as the
+        // reap), the judgement is DEFERRED to the shared reaper rather than
+        // skipped, so a job that ignores HUP and TERM in the group still gets
+        // its SIGKILL; this thread never waits for it.
+        if let Some(job) = self.deferred_group_signal() {
+            hand_to_reaper(ReaperJob::GroupSignal(job));
+        }
         // SIGKILL the child's group AND the foreground group when a job-controlled
         // app owns a different one (see `signal_process_groups`). ESRCH just means
         // a group already exited (benign). Anything else (e.g. EPERM) means a kill
@@ -2298,29 +2339,104 @@ struct ReaderToJoin {
     sid: Option<u32>,
 }
 
-/// The one reaper thread every dropped client's reader is handed to, started
-/// on first use.
-static READER_REAPER: std::sync::LazyLock<Option<std::sync::mpsc::Sender<ReaderToJoin>>> =
+/// A reaped child's group signal, judged once its session's record lands.
+struct DeferredGroupSignal {
+    registry: crate::process_sessions::AgentProcessRegistry,
+    session: crate::process_sessions::ProcessSession,
+    group: u32,
+    members: RecordedMembers,
+}
+
+/// Work a dropped client leaves for the shared reaper.
+enum ReaperJob {
+    Reader(ReaderToJoin),
+    GroupSignal(DeferredGroupSignal),
+}
+
+/// How a reaped child's group signal is decided at the client's drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupPlan {
+    /// Its record has landed (or there is none to wait for): judge it now.
+    Now,
+    /// Its record is still being written: judge it once it lands.
+    Deferred,
+}
+
+/// Pure: a record still in flight defers the judgement; a landed one does not.
+fn reaped_group_plan(recording_in_flight: bool) -> GroupPlan {
+    if recording_in_flight {
+        GroupPlan::Deferred
+    } else {
+        GroupPlan::Now
+    }
+}
+
+/// Pure: whether a deferred group signal is sent, once its wait is over. A
+/// wait that timed out with the record still unwritten signals nothing,
+/// because nothing can vouch for the group id; otherwise the group is
+/// signalled only while a recorded member holds it.
+fn deferred_group_kill(landed: bool, reserved: impl FnOnce() -> bool) -> bool {
+    landed && reserved()
+}
+
+/// Run one deferred group signal (on the reaper): wait, bounded by
+/// [`crate::process_sessions::RECORDING_WAIT`], for the session's record,
+/// then SIGKILL the group only while a recorded member holds it.
+fn run_deferred_group_signal(job: DeferredGroupSignal) {
+    job.registry
+        .wait_for_recordings(&[job.session], crate::process_sessions::RECORDING_WAIT);
+    let landed = !job.registry.recording_in_flight(job.session);
+    if !landed {
+        logger::warn(&format!(
+            "the record of what session {} left running was still being written after {} \
+             seconds, so its process group was not signalled",
+            job.session.sid,
+            crate::process_sessions::RECORDING_WAIT.as_secs()
+        ));
+    }
+    let kill = deferred_group_kill(landed, || {
+        crate::process_sessions::group_reserved_by(
+            job.group,
+            &(job.members)(),
+            &crate::process_sessions::member_state,
+        )
+    });
+    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group as i32) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+/// The one reaper thread every dropped client's leftovers are handed to,
+/// started on first use.
+static READER_REAPER: std::sync::LazyLock<Option<std::sync::mpsc::Sender<ReaperJob>>> =
     std::sync::LazyLock::new(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<ReaderToJoin>();
+        let (tx, rx) = std::sync::mpsc::channel::<ReaperJob>();
         thread::Builder::new()
             .name("pty-reader-reaper".to_string())
             .spawn(move || {
-                while let Ok(reader) = rx.recv() {
-                    join_reader_bounded(reader);
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        ReaperJob::Reader(reader) => join_reader_bounded(reader),
+                        ReaperJob::GroupSignal(signal) => run_deferred_group_signal(signal),
+                    }
                 }
             })
             .ok()
             .map(|_| tx)
     });
 
+/// Hand a dropped client's leftovers to the reaper. Returns at once.
+fn hand_to_reaper(job: ReaperJob) {
+    if let Some(tx) = READER_REAPER.as_ref() {
+        let _ = tx.send(job);
+    }
+}
+
 /// Hand a dropped client's reader thread to the reaper. Returns at once. If
 /// the reaper could not be started, the thread is left to finish on its own,
 /// which it does once the last holder of its terminal goes.
 fn hand_reader_to_reaper(handle: thread::JoinHandle<()>, sid: Option<u32>) {
-    if let Some(tx) = READER_REAPER.as_ref() {
-        let _ = tx.send(ReaderToJoin { handle, sid });
-    }
+    hand_to_reaper(ReaperJob::Reader(ReaderToJoin { handle, sid }));
 }
 
 /// Join one reader, waiting at most [`READER_JOIN_BOUND`].
@@ -6117,6 +6233,32 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(5));
         }
         drop(client);
+    }
+
+    /// The deferral decision: a record still in flight defers the group
+    /// signal, a landed one decides it now, and a wait that timed out signals
+    /// nothing whatever the group looks like.
+    #[test]
+    fn a_reaped_groups_signal_is_deferred_while_its_record_is_in_flight() {
+        assert_eq!(reaped_group_plan(true), GroupPlan::Deferred);
+        assert_eq!(reaped_group_plan(false), GroupPlan::Now);
+        assert!(
+            deferred_group_kill(true, || true),
+            "landed, held: signalled"
+        );
+        assert!(
+            !deferred_group_kill(true, || false),
+            "landed, nothing recorded holds it: not signalled"
+        );
+        let mut asked = false;
+        assert!(
+            !deferred_group_kill(false, || {
+                asked = true;
+                true
+            }),
+            "timed out: nothing is signalled"
+        );
+        assert!(!asked, "and the group is not even looked at");
     }
 
     /// A child already reaped is never signalled again: its pid is free and
