@@ -121,7 +121,7 @@ const topology = `digraph server_mode {
           <div class="flex items-center gap-2">
             <span class="shrink-0 text-[color:var(--color-pink)]">✦</span>
             <strong class="text-sm text-[color:var(--color-text)]">
-              Two things any proxy in front must get right
+              Three things any proxy in front must get right
             </strong>
           </div>
           <p class="mt-2 text-sm text-[color:var(--color-muted)]">
@@ -133,7 +133,14 @@ const topology = `digraph server_mode {
             the allowlist answers <span class="mono">403</span>. Rewriting{" "}
             <span class="mono text-[color:var(--color-text)]">Host</span> to
             loopback is the sneaky one: it passes the allowlist and then fails
-            every upgrade and every write on the origin check.
+            every upgrade and every write on the origin check. And a proxy on
+            the same machine as dux has to send a forwarding header
+            (<span class="mono text-[color:var(--color-text)]">X-Forwarded-For</span>,{" "}
+            <span class="mono text-[color:var(--color-text)]">X-Real-IP</span> or{" "}
+            <span class="mono text-[color:var(--color-text)]">Forwarded</span>),
+            which nginx does not by default: without one, every visitor looks
+            like the machine itself and gets in without the password unless
+            dux is told to ask everyone.
           </p>
         </div>
       </div>

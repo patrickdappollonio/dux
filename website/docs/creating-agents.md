@@ -403,8 +403,9 @@ offers **Delete worktree…**. The terminal UI has the same manager as the
 `manage-worktrees` palette command. The project picker in front of it labels each project
 with how many worktrees it has.
 
-This is the terminal UI's manager: free worktrees on top, the ones a live agent is holding
-below them, each row naming its branch and saying whether there is uncommitted work in it.
+This is the terminal UI's manager: free worktrees on top, the ones an agent or something
+else is holding below them, each row naming its branch and saying whether there is
+uncommitted work in it.
 
 ![The terminal UI worktree manager listing one removable worktree and two held by an agent, each with its branch and an uncommitted-changes note.](/screens/tui-worktree-manager.png)
 
@@ -417,11 +418,13 @@ below them, each row naming its branch and saying whether there is uncommitted w
 
 ![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
-Worktrees a live agent is holding are listed but unselectable: removing one from under a
-running session leaves it broken. Delete the agent instead. A worktree something else is
-still using (an agent being created in it, a terminal open in it, the CLI of an agent you
-just deleted still stopping, a standalone agent working inside it) sits with them, and its
-row says `in use:` and what. A worktree whose agent was just deleted is listed under
+Worktrees an agent is holding are listed under **Held By An Agent** but unselectable:
+removing one from under a session leaves it broken. Delete the agent instead. A worktree
+something else is still using (an agent being created in it, a terminal open in it, the CLI
+of an agent you just deleted still stopping, a standalone agent working inside it) sits
+with them. Each of those rows says `in use:` and what holds it, an agent included, which
+reads like `in use: agent "fix-login" has its worktree at ~/…; delete that agent first`. A
+worktree whose agent was just deleted is listed under
 **Being removed** until it is gone, and cannot be removed a second time.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a

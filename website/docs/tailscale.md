@@ -477,7 +477,8 @@ does not pretend that is the same as your tailnet:
   this machine's MagicDNS name keeps working. See
   [Tailscale serve and Funnel](/docs/web-login#tailscale-serve-and-funnel).
 - **With no password**, dux serves anyway and says so as loudly as it can: a warning in
-  every serving mode (red in `dux server`'s output and the flip's log viewer), a red banner in every browser, and this machine's MagicDNS name
+  every serving mode (red in `dux server`'s output and the flip's log viewer), a red
+  banner in every browser unless its **Don't show again** turned it off, and this machine's MagicDNS name
   withdrawn while any Funnel is on, so a browser opening the Funnel's address gets a `403`.
   That last one is not a lock; a crafted request gets past it. Set a password before you
   Funnel dux.

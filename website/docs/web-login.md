@@ -151,9 +151,10 @@ on this machine too, whatever `require` says. That happens:
   dux's port.
 
 In all of these but a Funnel, your tailnet devices are asked for the password too, since
-dux cannot vouch for them either. A machine with no Tailscale at all (no `tailscale`
-command and nothing of Tailscale running) is an answer rather than a doubt: nothing there
-can publish dux, so `localhost` is this machine again.
+dux cannot vouch for them either. A machine where Tailscale is not installed, or is
+installed but not running (the `tailscale` command says its daemon is stopped, and nothing
+else of Tailscale is running), is an answer rather than a doubt: nothing there can publish
+dux, so `localhost` is this machine again.
 
 What dux announces, and where:
 
@@ -265,8 +266,10 @@ leaves the machine: this machine, a direct tailnet connection (Tailscale encrypt
 end), `tailscale serve`, and Tailscale Funnel, which always serves HTTPS. The first three
 count only while dux can tell who they are: while it
 [cannot](#when-dux-cannot-tell-it-asks), `localhost` (on `tailscale = "no"` too), your
-tailnet devices and `tailscale serve` visitors all see the warning, and their cookie is not
-marked Secure under `cookie_secure = "auto"`.
+tailnet devices and `tailscale serve` visitors all see the warning, and a `tailscale serve`
+HTTPS visitor's cookie is no longer marked Secure under `cookie_secure = "auto"`. (Under
+`"auto"`, a cookie on `localhost` or a direct tailnet connection is never marked Secure:
+those are plain HTTP, however private.)
 
 <!-- screenshot: login-plain-http -->
 
@@ -287,13 +290,17 @@ A wrong password costs time, and repeated wrong passwords cost the address:
   (30) in a minute, every visitor in that group is told to wait until the minute is over,
   including addresses that never failed, which stops a guesser that keeps changing
   address. The internet and proxies dux cannot vouch for share one count, and devices on
-  your network have another, so a flood from one never locks out the other. Your tailnet
-  devices and this machine are slowed one address at a time while dux can tell who they
-  are. While it [cannot](#when-dux-cannot-tell-it-asks), sign-ins on this machine share one
-  count of their own, and tailnet devices share the network's.
-- **A block.** After `max_failed_logins` failures (5) from one address within
-  `failed_login_window_seconds` (15 minutes), dux adds that address to `blocked_addresses`
-  in your `config.toml`. Its log, the terminal UI's status line and the browser all name the
+  your network have another, so a flood from one never locks out the other. A browser on
+  this machine that opens dux on one of the machine's own non-loopback addresses has a
+  count of its own. Your tailnet devices and this machine on `localhost` are slowed one
+  address at a time while dux can tell who they are. While it
+  [cannot](#when-dux-cannot-tell-it-asks), sign-ins on `localhost` share one count of their
+  own, direct tailnet devices share the network's, and `tailscale serve` visitors share the
+  internet's.
+- **A block.** After `max_failed_logins` failures (5) from one address, each within
+  `failed_login_window_seconds` (15 minutes) of the one before, dux adds that address to
+  `blocked_addresses` in your `config.toml`. The count starts over only once that long has
+  passed since the address's last failure. Its log, the terminal UI's status line and the browser all name the
   address and the file it was written to.
 
 A blocked address gets a page saying it is blocked and where the block lives, and nothing
@@ -371,9 +378,10 @@ only from a proxy on the same machine:
   `"tailnet"`. dux cannot tell the difference.
 
 > [!WARNING]
-> A proxy on this machine that sends no `X-Forwarded-For` lets every visitor in as this
-> machine, with no password under the default `require`. Set `require = "everywhere"`, or
-> make the proxy send the header (for nginx, the line above); better, do both.
+> A proxy on this machine that sends no forwarding header (`X-Forwarded-For`, `X-Real-IP`
+> or `Forwarded`) lets every visitor in as this machine, with no password under the
+> default `require`. Set `require = "everywhere"`, or make the proxy send one (for nginx,
+> the line above); better, do both.
 
 So behind a reverse proxy, use `"everywhere"`. dux warns once, on the first forwarded
 request it sees while `require` is anything else; a proxy that sends no forwarding header
@@ -425,7 +433,8 @@ warning, and their failed sign-ins are slowed down but never written to
 
 With no password, dux still serves, because what you publish is your call, and it is as
 loud about it as it can be: the warning in every serving mode, the red banner in every
-browser, and this machine's MagicDNS name withdrawn while any Funnel is on, so a browser
+browser (unless its **Don't show again** turned it off), and this machine's MagicDNS name
+withdrawn while any Funnel is on, so a browser
 opening the Funnel's address gets a `403`. That last one is not a lock: a request crafted to
 name another host gets through. Set a password before you Funnel dux.
 

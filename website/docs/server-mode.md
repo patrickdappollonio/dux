@@ -252,8 +252,11 @@ Three things decide who gets in:
 The safe shapes:
 
 - **Loopback only**, the default. Nothing leaves the machine.
-- **Your own tailnet.** Fine without a password when the tailnet is only you; set one,
-  with `require = "tailnet"`, when other people share it.
+- **Your own tailnet.** Fine without a password when the tailnet is only you, though dux
+  still raises its no-password warning (in the console, on the status line and as the
+  browser banner) for as long as the Tailscale listener is up, because that listener
+  reaches beyond this machine. When other people share the tailnet, set a password with
+  `require = "tailnet"`.
 - **A LAN or public address**, `--bind 0.0.0.0:3890` and friends, **with a password**.
   Over plain HTTP the password and the session can be read on the way, so prefer HTTPS:
   `tailscale serve`, or a reverse proxy of your own with `require = "everywhere"`.
@@ -263,7 +266,8 @@ The safe shapes:
 > **No password on anything wider than loopback is on you.** dux still serves it, and
 > warns as it starts (in red in `dux server`'s output and the flip's log viewer, in the
 > warning color on the terminal UI's status line for the background server) and with a
-> red banner in every browser. Anyone who can reach that address controls your agents and worktrees.
+> red banner in every browser, unless you turned that banner off with its **Don't show
+> again**. Anyone who can reach that address controls your agents and worktrees.
 
 > [!WARNING]
 > **In a container, dux cannot see a Tailscale outside it.** A Tailscale on the host or in
