@@ -865,7 +865,14 @@ pub struct PtyClient {
     /// evidence it keeps that those processes are dux's once their leader has
     /// exited. A mutex only so the client stays `Sync`.
     leader_exit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// What dux recorded still running in the child's session when the child
+    /// exited (see `leader_exit_hook`). Once the child is reaped, its group
+    /// is signalled only while one of these is alive in it.
+    recorded_members: Mutex<Option<RecordedMembers>>,
 }
+
+/// Where a client reads the members recorded for its child's session.
+pub type RecordedMembers = Box<dyn Fn() -> Vec<crate::process_sessions::ProcessIdentity> + Send>;
 
 /// Maximum number of captured passthrough sequences retained before the oldest is
 /// dropped. Small: the host is expected to drain every tick, so this only bounds a
@@ -1232,6 +1239,7 @@ impl PtyClient {
             progress,
             passthrough,
             leader_exit_hook: Mutex::new(None),
+            recorded_members: Mutex::new(None),
         })
     }
 
@@ -1265,6 +1273,35 @@ impl PtyClient {
                 Err(_) => return None,
             }
         }
+    }
+
+    /// Set where the members recorded for the child's session are read from
+    /// (see the field).
+    pub fn set_recorded_members(&self, source: RecordedMembers) {
+        if let Ok(mut slot) = self.recorded_members.lock() {
+            *slot = Some(source);
+        }
+    }
+
+    /// Whether the child's own process group may still be signalled: always
+    /// before the child is reaped (its pid, and so the group id, is held),
+    /// and after only while a member dux recorded is alive in the group (see
+    /// [`crate::process_sessions::group_reserved_by`]).
+    fn child_group_signallable(&self, group: u32) -> bool {
+        if self.reaped.is_none() {
+            return true;
+        }
+        let recorded = self
+            .recorded_members
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|source| source()))
+            .unwrap_or_default();
+        crate::process_sessions::group_reserved_by(
+            group,
+            &recorded,
+            &crate::process_sessions::member_state,
+        )
     }
 
     /// Set what runs once this client's child is gone (see the field).
@@ -1887,7 +1924,11 @@ impl PtyClient {
     /// tied to the agent only by its parent, and that link is cut the moment
     /// the parent exits.
     pub fn signal_targets(&self) -> SignalTargets {
-        let child = self.child_process_id();
+        // A reaped child's group id is signalled only while a recorded member
+        // still holds it; an empty group's id may name somebody else by now.
+        let child = self
+            .child_process_id()
+            .filter(|group| self.child_group_signallable(*group));
         let foreground = self.foreground_pgid().filter(|fg| Some(*fg) != child);
         SignalTargets { child, foreground }
     }
@@ -6018,6 +6059,64 @@ mod tests {
             Some(true),
             "the leader-exit hook ran after the leader {pid} was reaped (None: never ran)"
         );
+    }
+
+    /// Before the reap the child's group is always signalled; after it, only
+    /// while a recorded member holds the group id.
+    #[test]
+    fn a_reaped_childs_group_is_signalled_only_while_a_recorded_member_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let group = client.child_process_id().expect("a pid");
+        assert_eq!(
+            client.signal_targets().child,
+            Some(group),
+            "before the reap"
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let job: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the job's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert_eq!(
+            client.signal_targets().child,
+            None,
+            "reaped, with nothing recorded: the group id is not signalled"
+        );
+        let recorded = crate::process_sessions::ProcessIdentity {
+            pid: job,
+            start_time: crate::process_sessions::process_start(job).expect("its start"),
+            boot: crate::process_sessions::current_boot(),
+        };
+        client.set_recorded_members(Box::new(move || vec![recorded]));
+        assert_eq!(
+            client.signal_targets().child,
+            Some(group),
+            "a recorded member alive in the group holds its id"
+        );
+        if let Some(pid) = rustix::process::Pid::from_raw(job as i32) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.signal_targets().child.is_some() {
+            assert!(Instant::now() < deadline, "the member never went");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(client);
     }
 
     /// A child already reaped is never signalled again: its pid is free and

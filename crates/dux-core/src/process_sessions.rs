@@ -228,6 +228,66 @@ pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
     }
 }
 
+/// What a process is now, as far as a group signal needs: when it started,
+/// the process group it is in, and whether it has already exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemberState {
+    pub start_time: u64,
+    pub pgid: u32,
+    pub exited: bool,
+}
+
+/// [`MemberState`] for `pid`, read now. `None` when it is gone or cannot be
+/// read.
+pub fn member_state(pid: u32) -> Option<MemberState> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let close = stat.rfind(')')?;
+        let fields: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
+        let pgid: u32 = fields.get(2)?.parse().ok()?;
+        let row = parse_linux_stat(pid, &stat)?;
+        Some(MemberState {
+            start_time: row.start_time,
+            pgid,
+            exited: row.exited,
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let start_time = macos_start(pid)?;
+        // SAFETY: getpgid reads a value of the running system.
+        let pgid = unsafe { libc::getpgid(libc::pid_t::try_from(pid).ok()?) };
+        Some(MemberState {
+            start_time,
+            pgid: u32::try_from(pgid).ok()?,
+            exited: false,
+        })
+    }
+}
+
+/// Whether process group `group` is still reserved by a member dux recorded:
+/// one of `recorded` is alive, still the same process (its start time
+/// checked) and still in that group. While one is, the group id cannot be
+/// handed to anybody else, so signalling the group reaches only dux's own.
+/// With none, the group may be empty and its id reused, so nothing may be
+/// signalled at it. A recorded member whose start time was never known
+/// cannot be checked and does not count. Pure: `look` answers what a pid is
+/// now.
+pub fn group_reserved_by(
+    group: u32,
+    recorded: &[ProcessIdentity],
+    look: &dyn Fn(u32) -> Option<MemberState>,
+) -> bool {
+    recorded.iter().any(|identity| {
+        identity.boot == current_boot()
+            && identity.start_time != UNKNOWN_START
+            && look(identity.pid).is_some_and(|now| {
+                !now.exited && now.pgid == group && now.start_time == identity.start_time
+            })
+    })
+}
+
 /// A start time the platform would not give (another user's process on
 /// macOS). Every membership rule fails closed on it: such a process is a
 /// member when its session or its parent chain says so, because a start time
@@ -2380,6 +2440,67 @@ mod tests {
                 std::path::Path::new("/repo")
             ),
             CwdVerdict::Inside(&running[0])
+        );
+    }
+
+    /// After its leader is reaped, a group is signalled only while a member
+    /// dux recorded is alive in it, still the same process.
+    #[test]
+    fn a_reaped_leaders_group_is_reserved_only_by_a_live_recorded_member() {
+        let boot = current_boot();
+        let member = ProcessIdentity {
+            pid: 501,
+            start_time: 7_000,
+            boot,
+        };
+        let state = |pgid: u32, start_time: u64, exited: bool| {
+            move |pid: u32| {
+                (pid == 501).then_some(MemberState {
+                    start_time,
+                    pgid,
+                    exited,
+                })
+            }
+        };
+        assert!(
+            group_reserved_by(500, &[member], &state(500, 7_000, false)),
+            "a live recorded member in the group holds its id"
+        );
+        assert!(
+            !group_reserved_by(500, &[], &state(500, 7_000, false)),
+            "nothing recorded: nothing is signalled"
+        );
+        assert!(
+            !group_reserved_by(500, &[member], &|_| None),
+            "the member is gone: the group may be empty"
+        );
+        assert!(
+            !group_reserved_by(500, &[member], &state(500, 9_000, false)),
+            "its pid now names another process (a different start time)"
+        );
+        assert!(
+            !group_reserved_by(500, &[member], &state(777, 7_000, false)),
+            "it moved to another group"
+        );
+        assert!(
+            !group_reserved_by(500, &[member], &state(500, 7_000, true)),
+            "it has exited"
+        );
+        let unchecked = ProcessIdentity {
+            start_time: UNKNOWN_START,
+            ..member
+        };
+        assert!(
+            !group_reserved_by(500, &[unchecked], &state(500, UNKNOWN_START, false)),
+            "a member whose identity cannot be checked does not count"
+        );
+        let other_boot = ProcessIdentity {
+            boot: boot.wrapping_add(1),
+            ..member
+        };
+        assert!(
+            !group_reserved_by(500, &[other_boot], &state(500, 7_000, false)),
+            "a record from another boot names nothing"
         );
     }
 

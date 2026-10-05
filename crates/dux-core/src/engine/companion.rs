@@ -198,6 +198,8 @@ impl Engine {
                 self.process_registry.register(key, process, cwd);
             }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
+            let registry = self.process_registry.clone();
+            client.set_recorded_members(Box::new(move || registry.survivors_of(&[process])));
             let name = format!("Terminal {}", self.terminal_counter + 1);
             let what = match owner.as_ref() {
                 crate::model::TerminalOwnerRef::Session(session_id) => format!(

@@ -1601,6 +1601,8 @@ impl Engine {
                     .register(&session_id, process, client.spawn_dir());
             }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
+            let registry = self.process_registry.clone();
+            client.set_recorded_members(Box::new(move || registry.survivors_of(&[process])));
             if let Some(session) = self.session_by_id(&session_id) {
                 self.process_registry
                     .label(process, format!("agent \"{}\"", session.display_label()));
