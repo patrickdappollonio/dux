@@ -1580,6 +1580,10 @@ impl App {
                 startup_result_error: _,
             } => {
                 self.rebuild_left_items();
+                // The agent list scrolls to its cursor only while the cursor is
+                // in its section, so a create from the Terminals section would
+                // otherwise select a row that can sit below the fold.
+                self.left_section = LeftSection::Projects;
                 self.selected_left = self
                     .left_items()
                     .iter()
@@ -2838,6 +2842,69 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Center);
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    /// A fresh agent is the list's selection AND on screen, even when the
+    /// sidebar cursor was in the Terminals section and the agent lands at the
+    /// bottom of a list taller than the pane: the agent list scrolls only to
+    /// the selection of the section that has the cursor.
+    #[test]
+    fn create_committed_ready_scrolls_the_new_agent_into_view() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        let base = app.engine.sessions[0].clone();
+        app.engine.sessions.clear();
+        for index in 0..20 {
+            let mut session = base.clone();
+            session.id = format!("s{index:02}");
+            session.title = Some(format!("agent {index:02}"));
+            session.status = crate::model::SessionStatus::Active;
+            app.engine.sessions.push(session);
+        }
+        app.rebuild_left_items();
+        app.engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        app.selected_left = 0;
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+
+        let newest = app.engine.sessions[19].clone();
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: newest.id.clone(),
+            session: newest.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created agent.".to_string().into(),
+                startup_result_error: None,
+            },
+        });
+
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some(newest.id.as_str())
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert!(
+            app.mouse_layout
+                .left_row_to_item
+                .contains(&app.selected_left),
+            "the new agent's row must be on screen; visible items {:?}, selected {}",
+            app.mouse_layout.left_row_to_item,
+            app.selected_left
+        );
     }
 
     /// The engine-initiated resume-fallback relaunch is never

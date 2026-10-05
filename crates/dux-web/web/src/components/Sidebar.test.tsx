@@ -1798,6 +1798,56 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(buttons[1].hasAttribute("data-active")).toBe(true)
   })
 
+  // The rail scrolls on its own, so an agent selected below its fold is
+  // brought into view there too. jsdom lays nothing out: every s2 row is
+  // stubbed below a 0-200 scroller and everything else sits in view.
+  it("scrolls a newly selected agent's icon into view", () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: Element) {
+        const key = this.getAttribute("data-sidebar-row")
+        const [top, bottom] =
+          key === "agent:s2" ? [600, 640] : key === null ? [0, 200] : [0, 40]
+        return { top, bottom, left: 0, right: 40, width: 40, height: bottom - top } as DOMRect
+      },
+    )
+    try {
+      const base = {
+        spine: makeTwoProjectSpine(),
+        bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
+        createTabInFlight: [],
+      } as Partial<DuxState>
+      mockState = makeState(base)
+      const view = render(
+        <SidebarProvider defaultOpen={false}>
+          <AppSidebar />
+        </SidebarProvider>,
+      )
+      expect(scrollIntoView).not.toHaveBeenCalled()
+
+      mockState = makeState({
+        ...base,
+        selectedTarget: { kind: "agent", sessionId: "s2", tabId: "s2" },
+      })
+      view.rerender(
+        <SidebarProvider defaultOpen={false}>
+          <AppSidebar />
+        </SidebarProvider>,
+      )
+      const rail = screen.getByTestId("collapsed-agent-rail")
+      const inRail = scrollIntoView.mock.contexts.filter((el) =>
+        rail.contains(el as Element),
+      )
+      expect(inRail).toHaveLength(1)
+      expect((inRail[0] as Element).getAttribute("data-sidebar-row")).toBe("agent:s2")
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" })
+    } finally {
+      vi.restoreAllMocks()
+      delete (Element.prototype as Partial<Element>).scrollIntoView
+    }
+  })
+
   it("carries the agent name, project name, and status in the tooltip", () => {
     mockState = makeState({
       spine: makeTwoProjectSpine(),

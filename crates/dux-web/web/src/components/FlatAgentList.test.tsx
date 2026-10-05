@@ -1243,6 +1243,188 @@ describe("FlatAgentList Terminals divider", () => {
   })
 })
 
+// jsdom lays nothing out and has no scrollIntoView, so geometry is stubbed by
+// row key: the list's scroller spans 0-200, a row missing from the table sits
+// in view at the top, and a row given a far-down rect is below the fold.
+describe("FlatAgentList reveals the selected row", () => {
+  const scrollIntoView = vi.fn()
+  let rects: Record<string, { top: number; bottom: number }>
+
+  function rect(top: number, bottom: number): DOMRect {
+    return {
+      top,
+      bottom,
+      left: 0,
+      right: 100,
+      x: 0,
+      y: top,
+      width: 100,
+      height: bottom - top,
+      toJSON: () => ({}),
+    } as DOMRect
+  }
+
+  beforeEach(() => {
+    scrollIntoView.mockClear()
+    rects = {}
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: Element) {
+        const key = this.getAttribute("data-sidebar-row")
+        if (key === null) return rect(0, 200)
+        const r = rects[key] ?? { top: 0, bottom: 40 }
+        return rect(r.top, r.bottom)
+      },
+    )
+    Element.prototype.scrollIntoView = scrollIntoView
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    delete (Element.prototype as Partial<Element>).scrollIntoView
+  })
+
+  function scrolledRows(): (string | null)[] {
+    return scrollIntoView.mock.contexts.map((el) =>
+      (el as Element).getAttribute("data-sidebar-row"),
+    )
+  }
+
+  it("scrolls an off-screen row into view when it becomes the selection", () => {
+    rects["agent:mike"] = { top: 600, bottom: 640 }
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "mike", tabId: "mike" },
+    }
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(scrolledRows()).toEqual(["agent:mike"])
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" })
+  })
+
+  it("scrolls to a just-created terminal once its row appears", () => {
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    // Selected before the workspace push that carries its row.
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "terminal", terminalId: "t-new" },
+    } as DuxState
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+
+    rects["terminal:t-new"] = { top: 900, bottom: 940 }
+    mockState = {
+      ...mockState,
+      spine: {
+        ...mockState.spine!,
+        terminals: [
+          ...mockState.spine!.terminals,
+          makeTerminal({ id: "t-new", label: "fish", sort_order: 3 }),
+        ],
+      },
+    } as DuxState
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(scrolledRows()).toEqual(["terminal:t-new"])
+  })
+
+  it("scrolls to a just-created agent once its row appears", () => {
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "newbie", tabId: "newbie" },
+    }
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+
+    rects["agent:newbie"] = { top: 700, bottom: 740 }
+    mockState = {
+      ...mockState,
+      spine: {
+        ...mockState.spine!,
+        sessions: [
+          ...mockState.spine!.sessions,
+          makeSession({ id: "newbie", title: "Newbie" }),
+        ],
+      },
+    }
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(scrolledRows()).toEqual(["agent:newbie"])
+  })
+
+  it("leaves an already-visible selected row where it is", () => {
+    rects["agent:alpha"] = { top: 40, bottom: 80 }
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "alpha", tabId: "alpha" },
+    }
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it("does not scroll again on a workspace push that keeps the selection", () => {
+    rects["agent:mike"] = { top: 600, bottom: 640 }
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "mike", tabId: "mike" },
+    }
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+
+    // The user scrolls away, then pushes arrive: new session data, a new
+    // target object for the same agent (another tab of it), a new terminal.
+    for (let i = 0; i < 3; i += 1) {
+      mockState = {
+        ...mockState,
+        selectedTarget: { kind: "agent", sessionId: "mike", tabId: `tab-${i}` },
+        spine: {
+          ...mockState.spine!,
+          sessions: mockState.spine!.sessions.map((s) =>
+            s.id === "mike" ? { ...s, working: i % 2 === 0 } : s,
+          ),
+          terminals: [
+            ...mockState.spine!.terminals,
+            makeTerminal({ id: `t-push-${i}`, sort_order: 10 + i }),
+          ],
+        },
+      }
+      rerender(<FlatAgentList handlers={handlers} />)
+    }
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+
+  // "Gone" is exited, so its row waits inside the collapsed Inactive tail.
+  function selectHiddenQuietAgent() {
+    rects["agent:gone"] = { top: 800, bottom: 840 }
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "gone", tabId: "gone" },
+    }
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Gone")).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  }
+
+  // The tail opens without the list itself re-rendering, so the row is found
+  // by the mutation observer, whose callback runs as a microtask.
+  it("reveals a hidden selected row when the user opens its section", async () => {
+    selectHiddenQuietAgent()
+    fireEvent.click(screen.getByText("Inactive"))
+    await act(async () => {})
+    expect(scrolledRows()).toEqual(["agent:gone"])
+  })
+
+  it("never moves a list the user scrolled while the selected row was hidden", async () => {
+    selectHiddenQuietAgent()
+    const scroller = screen.getByText("Inactive").closest(".overflow-y-auto")!
+    fireEvent.scroll(scroller)
+    fireEvent.click(screen.getByText("Inactive"))
+    await act(async () => {})
+    expect(screen.getByText("Gone")).toBeTruthy()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+})
+
 // An empty workspace is exactly where the next click should be ON SCREEN, so
 // the empty state carries a real button rather than a sentence pointing at a
 // control somewhere else.

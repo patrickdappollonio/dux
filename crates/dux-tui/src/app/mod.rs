@@ -4931,6 +4931,7 @@ impl App {
             self.input_target = InputTarget::None;
             if return_to_list {
                 self.left_section = LeftSection::Terminals;
+                self.select_active_terminal_row();
                 self.clamp_terminal_cursor();
                 self.focus = FocusPane::Left;
             }
@@ -7205,6 +7206,24 @@ impl App {
     /// section would strand the cursor there.
     pub(crate) fn has_terminal_items(&self) -> bool {
         !self.terminal_items().is_empty()
+    }
+
+    /// Put the terminal cursor on the terminal that was just on screen, so the
+    /// list, which scrolls to its cursor, shows that row. Resolved when the list
+    /// is returned to rather than at launch, because a sort such as `active`
+    /// can reorder the terminals in between. A filter that hides the terminal
+    /// leaves the cursor where it was.
+    pub(crate) fn select_active_terminal_row(&mut self) {
+        let Some(active) = self.active_terminal_id.as_deref() else {
+            return;
+        };
+        if let Some(pos) = self
+            .terminal_items()
+            .iter()
+            .position(|(id, _)| id.as_str() == active)
+        {
+            self.selected_terminal_index = pos;
+        }
     }
 
     /// Keep the terminal cursor inside the VISIBLE list. It repairs two things:
