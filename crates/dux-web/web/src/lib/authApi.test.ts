@@ -216,6 +216,11 @@ describe("postLogin", () => {
     expect(await postLogin("x")).toEqual({ kind: "broken", detail: "bad" })
   })
 
+  it("reads a 503 with no detail (a visitor the server tells no reason) as no detail", async () => {
+    stubFetch(reply(503, { error: "auth_config_invalid" }))
+    expect(await postLogin("x")).toEqual({ kind: "broken", detail: "" })
+  })
+
   it("reads a network failure as unreachable", async () => {
     vi.stubGlobal(
       "fetch",

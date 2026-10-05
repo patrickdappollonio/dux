@@ -3472,3 +3472,51 @@ async fn a_slash64_dux_is_not_on_still_gets_the_range_ban() {
     let fresh = dux.login(outside("2001:db8:9:9::abcd"), PASSWORD).await;
     assert_eq!(fresh.error().as_deref(), Some("blocked"), "{}", fresh.body);
 }
+
+// ── What a blocked address and a misconfigured section are told ──────────
+
+/// A document navigation from a blocked address (a fresh page load) gets a
+/// small HTML page that says so, with status 403 and no asset to fetch; every
+/// other request from it keeps the JSON refusal the app reads.
+#[tokio::test]
+async fn a_blocked_page_load_gets_html_and_everything_else_json() {
+    let dux = Dux::start("blocked_addresses = [\"198.51.100.7\"]");
+    for (name, value) in [
+        ("accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
+        ("sec-fetch-mode", "navigate"),
+    ] {
+        let page = dux
+            .send(NETWORK, Req::new(Method::GET, "/").header(name, value))
+            .await;
+        assert_eq!(page.status, StatusCode::FORBIDDEN, "{name}");
+        let kind = page
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(kind.starts_with("text/html"), "{name}: {kind}");
+        assert!(
+            page.body.contains("This address is blocked"),
+            "{}",
+            page.body
+        );
+        assert!(page.body.contains("blocked_addresses"), "{}", page.body);
+        assert!(
+            !page.body.contains("src=") && !page.body.contains("href="),
+            "the page fetches nothing: {}",
+            page.body
+        );
+    }
+    let api = dux
+        .send(
+            NETWORK,
+            Req::new(Method::GET, "/api/v1/projects").header("accept", "application/json"),
+        )
+        .await;
+    assert_eq!(api.status, StatusCode::FORBIDDEN);
+    assert_eq!(api.error().as_deref(), Some("blocked"), "{}", api.body);
+    // An asset is refused as JSON too: a blocked address is refused everything.
+    let asset = dux.get(NETWORK, "/favicon.png").await;
+    assert_eq!(asset.error().as_deref(), Some("blocked"), "{}", asset.body);
+}
