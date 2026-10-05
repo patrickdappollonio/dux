@@ -42,6 +42,10 @@ export function CommitDialog() {
         now.commitDraft === sentFrom.draft
       ) {
         closeCommit()
+      } else if (now.commitTarget === null) {
+        // The dialog was cancelled while the commit ran: there is no message
+        // being written to speak of.
+        notifySuccess("The commit landed.")
       } else {
         notifySuccess(
           "The earlier commit landed. The message you are writing now was left as it is.",
