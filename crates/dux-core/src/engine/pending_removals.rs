@@ -431,32 +431,53 @@ impl Engine {
 
     /// Every folder something occupies, with why, from the same sources as
     /// [`Self::folder_occupant`] (as the manager sees them: stopping processes
-    /// occupy). The worktree manager's listing marks a row in use when one of
-    /// these is the row's folder or inside it; a row whose own agent holds it
-    /// is listed as held instead.
-    pub fn busy_folders(&self) -> Vec<(std::path::PathBuf, String)> {
-        let mut found: Vec<(std::path::PathBuf, String)> = self
+    /// occupy), each with the agent it belongs to when it is an agent's own:
+    /// its record, or one of its own tabs running there. The worktree
+    /// manager's listing marks a row in use when one of these is the row's
+    /// folder or inside it, except the agent that holds the row itself (see
+    /// [`crate::worktree_manager::in_use_by`]): that row is listed as held.
+    /// The removal guard does not read this; it asks the occupancy rule,
+    /// which counts the holding agent.
+    pub fn busy_folders(&self) -> Vec<crate::worktree_manager::BusyFolder> {
+        let mut found: Vec<crate::worktree_manager::BusyFolder> = self
             .sessions
             .iter()
-            .map(|agent| {
-                (
-                    std::path::PathBuf::from(agent.directory()),
-                    Occupant::Agent {
-                        id: agent.id.clone(),
-                        label: agent.display_label(),
-                        directory: agent.directory().to_string(),
-                        standalone: agent.workspace.as_managed().is_none(),
-                        exact: false,
-                    }
-                    .reason(),
-                )
+            .map(|agent| crate::worktree_manager::BusyFolder {
+                folder: std::path::PathBuf::from(agent.directory()),
+                reason: Occupant::Agent {
+                    id: agent.id.clone(),
+                    label: agent.display_label(),
+                    directory: agent.directory().to_string(),
+                    standalone: agent.workspace.as_managed().is_none(),
+                    exact: false,
+                }
+                .reason(),
+                agent_id: Some(agent.id.clone()),
             })
             .collect();
-        found.extend(
-            self.pty_occupants()
-                .into_iter()
-                .map(|(dir, _, what, _)| (dir, what.to_string())),
-        );
+        found.extend(self.providers.iter().map(|(tab, client)| {
+            crate::worktree_manager::BusyFolder {
+                folder: client.spawn_dir().to_path_buf(),
+                reason: "an agent running in it".to_string(),
+                agent_id: self.owning_session_for_tab(tab.as_str()),
+            }
+        }));
+        // A terminal (any agent's, its owner's included) and a process still
+        // stopping are something other than the holding agent.
+        found.extend(self.companion_terminals.values().map(|terminal| {
+            crate::worktree_manager::BusyFolder {
+                folder: terminal.client.spawn_dir().to_path_buf(),
+                reason: "a terminal open in it".to_string(),
+                agent_id: None,
+            }
+        }));
+        found.extend(self.terminating_ptys.iter().map(|entry| {
+            crate::worktree_manager::BusyFolder {
+                folder: entry.client.spawn_dir().to_path_buf(),
+                reason: "a process dux started there that is still stopping".to_string(),
+                agent_id: None,
+            }
+        }));
         found
     }
 }

@@ -66,7 +66,8 @@ function WorktreeRowBody({
 }: {
   entry: ProjectWorktreeEntryView
   heldBy?: string
-  // The server's sentence for what is using a worktree no agent holds.
+  // The server's sentence for what is using a worktree, other than the agent
+  // holding it.
   inUse?: string | null
 }) {
   return (
@@ -387,7 +388,11 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                     content={rowTooltip(entry)}
                   >
                     <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
-                      <WorktreeRowBody entry={entry} heldBy={agentName(entry)} />
+                      <WorktreeRowBody
+                        entry={entry}
+                        heldBy={agentName(entry)}
+                        inUse={entry.in_use}
+                      />
                     </div>
                   </SimpleTooltip>
                 ))}

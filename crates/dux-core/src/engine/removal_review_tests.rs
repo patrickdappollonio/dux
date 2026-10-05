@@ -486,3 +486,96 @@ fn nothing_new_starts_in_a_folder_being_removed() {
         "{refused}"
     );
 }
+
+/// A worktree its own agent holds is held, not "in use": the listing leaves
+/// `busy` for something other than the owner, and the removal still refuses
+/// it because the agent holds it.
+#[test]
+fn the_manager_lists_an_agent_held_worktree_as_held_and_still_refuses_it() {
+    let (mut engine, tmp) = test_engine();
+    let repo = repo(tmp.path());
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let worktree = agent_worktree(&mut engine, tmp.path(), &repo, "agent");
+    // Its own agent's tab running there is still only its owner.
+    let tab = engine.sessions[0].slot_tab_id().to_owned();
+    let client = crate::pty::PtyClient::spawn_with_env(
+        "sh",
+        &["-c".to_string(), "sleep 30".to_string()],
+        &worktree,
+        24,
+        80,
+        100,
+        &[],
+    )
+    .expect("spawn");
+    engine.providers.insert(tab, client);
+
+    let project = engine.projects[0].clone();
+    let listed = crate::worktree_manager::list_manageable_worktrees_with_busy(
+        &project,
+        &engine.paths,
+        &engine.sessions,
+        engine.worktree_ops(),
+        &engine.busy_folders(),
+    )
+    .unwrap();
+    let row = listed
+        .iter()
+        .find(|entry| entry.path.ends_with("agent"))
+        .expect("listed");
+    assert_eq!(row.attached_session_id.as_deref(), Some("s-agent"));
+    assert_eq!(
+        row.busy, None,
+        "its own agent is not something else using it"
+    );
+    assert!(!row.is_removable());
+    assert!(
+        matches!(
+            engine.admit_manager_removal("p1", &worktree, false),
+            Some(RemovalAdmission::Refused(
+                crate::worktree_manager::RemovalOutcome::Attached
+            ))
+        ),
+        "the removal still refuses a worktree an agent holds"
+    );
+    for (_, client) in std::mem::take(&mut engine.providers) {
+        client.force_terminate();
+    }
+}
+
+/// Held by its agent AND used by something else (a terminal): the row
+/// carries that other occupant.
+#[test]
+fn the_manager_lists_an_agent_held_worktree_a_terminal_uses_with_the_terminal() {
+    let (mut engine, tmp) = test_engine();
+    let repo = repo(tmp.path());
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let worktree = agent_worktree(&mut engine, tmp.path(), &repo, "agent");
+    let (terminal_id, _) = engine
+        .create_companion_terminal("s-agent", 24, 80)
+        .expect("a terminal");
+
+    let project = engine.projects[0].clone();
+    let listed = crate::worktree_manager::list_manageable_worktrees_with_busy(
+        &project,
+        &engine.paths,
+        &engine.sessions,
+        engine.worktree_ops(),
+        &engine.busy_folders(),
+    )
+    .unwrap();
+    let row = listed
+        .iter()
+        .find(|entry| entry.path.ends_with("agent"))
+        .expect("listed");
+    assert_eq!(row.attached_session_id.as_deref(), Some("s-agent"));
+    assert_eq!(row.busy.as_deref(), Some("a terminal open in it"));
+    assert!(worktree.exists());
+    if let Some(terminal) = engine.companion_terminals.remove(&terminal_id) {
+        terminal.client.force_terminate();
+    }
+}

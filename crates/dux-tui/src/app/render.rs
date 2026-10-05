@@ -6647,21 +6647,26 @@ impl App {
                             Style::default().fg(self.theme.warning_fg),
                         ));
                     }
+                    // Held by its agent, and in use by something other than
+                    // that agent, are two facts; a row can carry both.
                     if entry.being_removed {
                         suffix_spans.push(Span::styled(
                             "  being removed",
                             Style::default().fg(self.theme.hint_dim_desc_fg),
                         ));
-                    } else if let Some(busy) = &entry.busy {
-                        suffix_spans.push(Span::styled(
-                            format!("  in use: {busy}"),
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ));
-                    } else if !removable {
-                        suffix_spans.push(Span::styled(
-                            "  held by an agent",
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ));
+                    } else {
+                        if entry.attached_session_id.is_some() {
+                            suffix_spans.push(Span::styled(
+                                "  held by an agent",
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            ));
+                        }
+                        if let Some(busy) = &entry.busy {
+                            suffix_spans.push(Span::styled(
+                                format!("  in use: {busy}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            ));
+                        }
                     }
                     let name = ellipsize_middle(
                         entry
