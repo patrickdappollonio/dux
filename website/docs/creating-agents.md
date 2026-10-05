@@ -117,8 +117,10 @@ picked, and the row names who holds it: git will not check out one branch in two
 
 To free a branch an agent holds, delete that agent with its worktree, and untick the box
 that also deletes the branch. A worktree no agent holds any more is removed from the
-project's worktree manager, again with that box unticked. The error dux shows names the
-way out that applies.
+project's worktree manager, again with that box unticked. A worktree whose folder is gone
+still holds its branch as far as git is concerned; `git worktree remove` with its path,
+run in the project folder, makes git forget it and leaves the branch alone. The error dux
+shows names the way out that applies.
 
 > [!CAUTION]
 > The agent delete dialog ticks "also delete the branch" by default for a branch dux

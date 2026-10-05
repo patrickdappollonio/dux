@@ -164,13 +164,24 @@ pub enum BranchHolder {
     /// A managed agent's worktree; the text is the label its row shows.
     /// Deleting the agent together with its worktree, with the branch box
     /// unticked, frees the branch and keeps it.
+    /// Holds whether or not the folder is still there: deleting the agent
+    /// with its worktree forgets a registration whose folder is gone too.
     Agent(String),
+    /// A managed worktree several agents share; the labels in the order the
+    /// agents are listed. Only the LAST of them to be deleted is offered the
+    /// worktree box, so freeing the branch means deleting all of them.
+    SharedAgentWorktree(Vec<String>),
     /// A standalone agent's folder; the text is the label its row shows.
     /// Deleting the agent never removes its folder, so it frees nothing.
     StandaloneAgent(String),
     /// A worktree in dux's managed area that no agent holds: the project's
     /// worktree manager lists it and can remove it while keeping the branch.
     UnheldManagedWorktree,
+    /// A worktree whose folder is gone, which git still counts as holding the
+    /// branch. No agent's (an agent's own is [`Self::Agent`]), and the
+    /// worktree manager does not list it, since there is no folder to classify:
+    /// `git worktree remove` with that one path is what forgets it.
+    MissingWorktree,
     /// A worktree outside dux's managed area, which dux does not remove.
     OtherWorktree,
 }
@@ -194,27 +205,57 @@ pub struct HolderContext {
 }
 
 impl HolderContext {
-    /// Classify the worktree at `holder`. Canonicalizes, so it runs in the
-    /// worker, and another spelling of a directory still matches.
+    /// Classify the worktree at `holder`. Touches the filesystem, so it runs
+    /// in the worker.
+    ///
+    /// Paths are compared the way the worktree registry compares them
+    /// ([`crate::worktree_ops::folder_contains`]): resolved as far as they
+    /// exist and spelled on from there. A full canonicalization fails for a
+    /// folder that is gone, and would then read a missing managed worktree, or
+    /// one reached through a symlinked worktrees root, as somebody else's.
     pub fn classify(&self, holder: &Path) -> BranchHolder {
-        let held = holder.to_string_lossy();
-        if let Some(agent) = self
+        let agents: Vec<&AgentDirectory> = self
             .agents
             .iter()
-            .find(|agent| crate::project_browser::same_directory(&agent.directory, &held))
-        {
-            return if agent.standalone {
-                BranchHolder::StandaloneAgent(agent.label.clone())
-            } else {
-                BranchHolder::Agent(agent.label.clone())
-            };
+            .filter(|agent| same_folder(Path::new(&agent.directory), holder))
+            .collect();
+        let standalone = agents.iter().find(|agent| agent.standalone);
+        let mut managed: Vec<String> = agents
+            .iter()
+            .filter(|agent| !agent.standalone)
+            .map(|agent| agent.label.clone())
+            .collect();
+        // A managed agent's way out works whether or not its folder is there.
+        // A standalone agent in the same folder means deleting never removes
+        // it, so none of these applies then.
+        if standalone.is_none() {
+            match managed.len() {
+                0 => {}
+                1 => return BranchHolder::Agent(managed.remove(0)),
+                _ => return BranchHolder::SharedAgentWorktree(managed),
+            }
         }
-        if git::is_under(&self.managed_root, holder) {
+        // Every other way out needs the folder, so a gone one says so first.
+        if std::fs::symlink_metadata(holder).is_err() {
+            return BranchHolder::MissingWorktree;
+        }
+        if let Some(agent) = standalone {
+            return BranchHolder::StandaloneAgent(agent.label.clone());
+        }
+        let in_managed_area = crate::worktree_ops::folder_contains(&self.managed_root, holder)
+            && crate::worktree_ops::path_key(holder)
+                != crate::worktree_ops::path_key(&self.managed_root);
+        if in_managed_area {
             BranchHolder::UnheldManagedWorktree
         } else {
             BranchHolder::OtherWorktree
         }
     }
+}
+
+/// Whether two recorded paths name one folder, under every spelling of both.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    crate::worktree_ops::folder_contains(a, b) && crate::worktree_ops::folder_contains(b, a)
 }
 
 /// Switch the project folder at `repo` to `branch`, creating the local
@@ -242,12 +283,10 @@ pub fn switch_to_base_branch(
         let by = holders.classify(&holder);
         return Err(BaseBranchChangeFailure::Held { holder, by });
     }
-    // The full ref, not `--short`: with a tag of the same name the short form
-    // is `heads/<branch>` and would never match.
-    let folder_was_on_it = git::head_ref_opt(repo)
+    let folder_was_on_it = git::current_branch_opt(repo)
         .ok()
         .flatten()
-        .is_some_and(|head| head == format!("refs/heads/{branch}"));
+        .is_some_and(|current| current == branch);
     if folder_was_on_it {
         return Ok(BaseBranchSwitched {
             folder_was_on_it: true,
@@ -562,5 +601,180 @@ mod tests {
             "the real reason was replaced by the squeezed retry's timeout: {reason}"
         );
         assert!(reason.contains("Authentication failed"), "{reason}");
+    }
+
+    /// With a tag named like the base, the switch says the folder is already
+    /// on `develop`, and the project's branch-status poller must agree rather
+    /// than read `heads/develop` and call the project off its base.
+    #[test]
+    fn a_tag_named_like_the_base_leaves_the_status_poller_agreeing_with_the_switch() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        run_git(repo.path(), &["switch", "-q", "-c", "develop"]);
+        run_git(repo.path(), &["tag", "develop"]);
+        let switched = switch_to_base_branch(
+            repo.path(),
+            "develop",
+            &CheckoutMoveGuard::default(),
+            &HolderContext::default(),
+        )
+        .unwrap();
+        assert!(switched.folder_was_on_it);
+
+        let mut project =
+            crate::engine::test_support::sample_project("p1", repo.path().to_str().unwrap());
+        project.leading_branch = Some("develop".to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::project_browser::run_project_branch_status_job(project, tx);
+        let crate::worker::WorkerEvent::ProjectBranchStatusReady { result, .. } =
+            rx.recv().unwrap()
+        else {
+            panic!("unexpected event");
+        };
+        let (branch, status) = result.unwrap();
+        assert_eq!(
+            (branch.as_str(), status),
+            ("develop", crate::model::ProjectBranchStatus::Leading),
+            "the poller must agree that the folder is on its base"
+        );
+    }
+
+    /// A worktree in dux's managed area whose directory is gone still holds its
+    /// branch in git. It is not "a worktree dux does not manage" (whose way
+    /// out, switching it, cannot be done to a folder that is not there): it
+    /// gets its own verdict, and following that refusal's advice exactly,
+    /// `git worktree remove` with the path, frees the branch and keeps it.
+    #[test]
+    fn a_missing_managed_worktree_gets_its_own_refusal_and_its_advice_works() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let root = tempfile::tempdir().unwrap();
+        let managed_root = root.path().join("app");
+        std::fs::create_dir_all(&managed_root).unwrap();
+        let held = managed_root.join("fix-login");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix-login",
+                held.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(&held).unwrap();
+        let refusal = switch_to_base_branch(
+            repo.path(),
+            "fix-login",
+            &CheckoutMoveGuard::default(),
+            &HolderContext {
+                agents: Vec::new(),
+                managed_root: managed_root.clone(),
+            },
+        )
+        .unwrap_err();
+        let BaseBranchChangeFailure::Held { by, holder } = refusal else {
+            panic!("expected a held refusal: {refusal:?}");
+        };
+        assert_eq!(by, BranchHolder::MissingWorktree);
+
+        // The refusal's advice, exactly.
+        run_git(
+            repo.path(),
+            &["worktree", "remove", holder.to_str().unwrap()],
+        );
+        let switched = switch_to_base_branch(
+            repo.path(),
+            "fix-login",
+            &CheckoutMoveGuard::default(),
+            &HolderContext::default(),
+        )
+        .unwrap();
+        assert!(!switched.folder_was_on_it);
+        assert_eq!(
+            run_git(repo.path(), &["symbolic-ref", "HEAD"]),
+            "refs/heads/fix-login"
+        );
+    }
+
+    /// An agent whose worktree folder is gone, under a worktrees root reached
+    /// through a symlink: git reports the holder resolved, the agent's record
+    /// keeps the symlinked spelling, and the folder cannot be canonicalized.
+    /// The agent is still the one named, since deleting it with its worktree
+    /// forgets the registration whether or not the folder is there.
+    #[test]
+    fn an_agent_whose_worktree_folder_is_gone_behind_a_symlinked_root_is_still_named() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let real = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let linked_root = links.path().join("worktrees");
+        std::os::unix::fs::symlink(real.path(), &linked_root).unwrap();
+        let through_link = linked_root.join("app").join("fix-login");
+        std::fs::create_dir_all(linked_root.join("app")).unwrap();
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix-login",
+                through_link.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(real.path().join("app").join("fix-login")).unwrap();
+        let holders = HolderContext {
+            agents: vec![AgentDirectory {
+                directory: through_link.to_string_lossy().into_owned(),
+                label: "Fix the login".to_string(),
+                standalone: false,
+            }],
+            managed_root: linked_root.join("app"),
+        };
+
+        let refusal = switch_to_base_branch(
+            repo.path(),
+            "fix-login",
+            &CheckoutMoveGuard::default(),
+            &holders,
+        )
+        .unwrap_err();
+
+        let BaseBranchChangeFailure::Held { by, .. } = refusal else {
+            panic!("expected a held refusal: {refusal:?}");
+        };
+        assert_eq!(by, BranchHolder::Agent("Fix the login".to_string()));
+    }
+
+    /// Several agents in one worktree are all named, because only the last one
+    /// deleted is offered the worktree box; a standalone agent in the folder
+    /// wins, because deleting it never removes the folder.
+    #[test]
+    fn a_shared_worktree_names_every_agent_and_a_standalone_one_wins() {
+        let folder = tempfile::tempdir().unwrap();
+        let directory = folder.path().to_string_lossy().into_owned();
+        let agent = |label: &str, standalone| AgentDirectory {
+            directory: directory.clone(),
+            label: label.to_string(),
+            standalone,
+        };
+        let classify = |agents| {
+            HolderContext {
+                agents,
+                managed_root: PathBuf::from("/nowhere"),
+            }
+            .classify(folder.path())
+        };
+
+        assert_eq!(
+            classify(vec![agent("one", false), agent("two", false)]),
+            BranchHolder::SharedAgentWorktree(vec!["one".to_string(), "two".to_string()])
+        );
+        assert_eq!(
+            classify(vec![agent("one", false), agent("notes", true)]),
+            BranchHolder::StandaloneAgent("notes".to_string())
+        );
     }
 }

@@ -1115,6 +1115,21 @@ pub enum ChangeBaseOutcome {
     },
 }
 
+/// Push `names` as chips joined the way a sentence lists them: "a", "a and
+/// b", "a, b and c".
+fn push_quoted_list(text: &mut StatusText, names: &[String]) {
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            text.push(if index + 1 == names.len() {
+                " and "
+            } else {
+                ", "
+            });
+        }
+        text.push_quoted(name);
+    }
+}
+
 /// The final for a "Change base branch", for both surfaces.
 ///
 /// A failed switch and a failed save are STICKY: the folder or the database
@@ -1177,6 +1192,37 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
                     " together with its worktree but keep its branch: in the delete dialog, \
                      tick the box that deletes the worktree and untick the one that also \
                      deletes the branch."
+                ]),
+                BranchHolder::SharedAgentWorktree(agents) => {
+                    let mut text = status_text![
+                        "Can't change the base branch of project ",
+                        q(project_name),
+                        " to ",
+                        q(branch),
+                        ": the worktree agents "
+                    ];
+                    push_quoted_list(&mut text, agents);
+                    text.push(
+                        " share has it checked out, and git checks a branch out in one place at \
+                         a time. Pick another branch, or delete every one of those agents, the \
+                         last of them together with the worktree but keeping its branch: in that \
+                         last delete dialog, tick the box that deletes the worktree and untick \
+                         the one that also deletes the branch.",
+                    );
+                    Final::error(text)
+                }
+                BranchHolder::MissingWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": git still counts it as checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", whose folder is gone, and git checks a branch out in one place at a \
+                     time. Pick another branch, or make git forget that one worktree, keeping \
+                     the branch, by running ",
+                    n("git worktree remove"),
+                    " with that path in the project folder."
                 ]),
                 BranchHolder::UnheldManagedWorktree => Final::error(status_text![
                     "Can't change the base branch of project ",
@@ -10241,6 +10287,39 @@ mod tests {
                  a branch out in one place at a time. Pick another branch, or switch that \
                  worktree to another branch first.",
                 vec!["app", "develop", "/elsewhere/wt"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/gone"),
+                    by: BranchHolder::MissingWorktree,
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": git still counts \
+                 it as checked out in the worktree at /work/gone, whose folder is gone, and git \
+                 checks a branch out in one place at a time. Pick another branch, or make git \
+                 forget that one worktree, keeping the branch, by running git worktree remove \
+                 with that path in the project folder.",
+                vec!["app", "develop", "/work/gone", "git worktree remove"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/shared"),
+                    by: BranchHolder::SharedAgentWorktree(vec![
+                        "one".to_string(),
+                        "two".to_string(),
+                        "three".to_string(),
+                    ]),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": the worktree \
+                 agents \"one\", \"two\" and \"three\" share has it checked out, and git checks a \
+                 branch out in one place at a time. Pick another branch, or delete every one of \
+                 those agents, the last of them together with the worktree but keeping its \
+                 branch: in that last delete dialog, tick the box that deletes the worktree and \
+                 untick the one that also deletes the branch.",
+                vec!["app", "develop", "one", "two", "three"],
             ),
             (
                 refused(BaseBranchChangeFailure::SwitchFailed(

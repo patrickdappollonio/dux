@@ -103,34 +103,11 @@ const BINARY_SNIFF_BYTES: usize = 8000;
 /// as an empty file does, and stay out of the panel's totals.
 const UNTRACKED_STATS_MAX_FILES: usize = 2000;
 
-pub fn current_branch(repo_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
-        .output()
-        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git symbolic-ref failed for {}: {}",
-            repo_path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// The full ref HEAD points at (`refs/heads/<branch>`), or `Ok(None)` for a
-/// detached HEAD. Unlike [`current_branch_opt`]'s `--short` form, it is never
-/// abbreviated to `heads/<branch>` by a tag of the same name, so it is the one
-/// to compare against a branch.
-pub fn head_ref_opt(repo_path: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
+/// `git symbolic-ref --quiet HEAD`, the FULL ref. Never `--short`: with a tag
+/// of the same name the short form is `heads/<branch>`, which matches no
+/// branch, so every caller derives the name with [`branch_name_from_head_ref`].
+fn symbolic_head(repo_path: &Path) -> Result<std::process::Output> {
+    Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -140,17 +117,32 @@ pub fn head_ref_opt(repo_path: &Path) -> Result<Option<String>> {
         ])
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
-    if output.status.success() {
-        return Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        .with_context(|| format!("failed to inspect {}", repo_path.display()))
+}
+
+/// The branch name in the full ref `symbolic-ref` printed: `refs/heads/`
+/// stripped. A HEAD pointing anywhere else is returned whole, so it can never
+/// pass for a branch.
+fn branch_name_from_head_ref(stdout: &[u8]) -> String {
+    let full = String::from_utf8_lossy(stdout).trim().to_string();
+    match full.strip_prefix("refs/heads/") {
+        Some(name) => name.to_string(),
+        None => full,
+    }
+}
+
+/// The branch the checkout at `repo_path` is on; an `Err` for a detached HEAD
+/// as for any failure.
+pub fn current_branch(repo_path: &Path) -> Result<String> {
+    let output = symbolic_head(repo_path)?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git symbolic-ref failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
-    // Exit code 1 is a detached HEAD, as in `current_branch_opt`.
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-    Err(git_failure("git symbolic-ref", repo_path, &output))
+    Ok(branch_name_from_head_ref(&output.stdout))
 }
 
 /// Like [`current_branch`], but tolerates a detached HEAD: `Ok(None)` when HEAD
@@ -158,21 +150,9 @@ pub fn head_ref_opt(repo_path: &Path) -> Result<Option<String>> {
 /// message), and `Err` for any real failure (exit 128 = not a repo, git
 /// missing). For inspection sites that must not treat a detached HEAD as fatal.
 pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
-        .output()
-        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
+    let output = symbolic_head(repo_path)?;
     if output.status.success() {
-        return Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ));
+        return Ok(Some(branch_name_from_head_ref(&output.stdout)));
     }
     // Exit code 1 = "ref is not a symbolic ref" (detached HEAD). Anything else
     // (128 = not a repo / fatal) is a real error. `--quiet` silenced stderr for
@@ -13174,6 +13154,37 @@ mod tests {
     }
 
     // ── current_branch_opt tests ─────────────────────────────────
+
+    /// A tag with the branch's name makes `symbolic-ref --short` answer
+    /// `heads/develop`. Both helpers read the full ref instead, so they still
+    /// name the branch, and every caller agrees with every other.
+    #[test]
+    fn a_tag_named_like_the_branch_does_not_change_the_branch_name() {
+        let tmp = init_test_repo();
+        run_git(tmp.path(), &["switch", "-q", "-c", "develop"]);
+        run_git(tmp.path(), &["tag", "develop"]);
+
+        assert_eq!(current_branch(tmp.path()).unwrap(), "develop");
+        assert_eq!(
+            current_branch_opt(tmp.path()).unwrap(),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn a_branch_name_is_the_full_ref_with_refs_heads_stripped() {
+        assert_eq!(branch_name_from_head_ref(b"refs/heads/feat/x\n"), "feat/x");
+        assert_eq!(
+            branch_name_from_head_ref(b"refs/heads/heads/x\n"),
+            "heads/x",
+            "only the leading refs/heads/ goes"
+        );
+        assert_eq!(
+            branch_name_from_head_ref(b"refs/remotes/origin/x\n"),
+            "refs/remotes/origin/x",
+            "a HEAD outside refs/heads never passes for a branch"
+        );
+    }
 
     #[test]
     fn current_branch_opt_returns_branch_on_normal_head() {
