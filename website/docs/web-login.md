@@ -306,7 +306,7 @@ A wrong password costs time, and repeated wrong passwords cost the address:
 A blocked address gets a page saying it is blocked and where the block lives, and nothing
 else: no sign-in page, no app, with or without a password.
 
-![The page a blocked address gets when it opens dux: the heading This address is blocked, and a paragraph saying the block is an entry in blocked_addresses in the [server.auth] section of dux's config.toml, that whoever runs dux can remove it and reload, and that dux adds an address on its own after too many failed sign-ins.](/screens/blocked-page.png)
+![The page a blocked address gets when it opens dux: the dux duck over the heading This address is blocked, and a paragraph saying the block is an entry in blocked_addresses in the [server.auth] section of dux's config.toml, that whoever runs dux can remove it and reload, and that dux adds an address on its own after too many failed sign-ins.](/screens/blocked-page.png)
 
 Which address a block lands on depends on what dux can check for itself:
 

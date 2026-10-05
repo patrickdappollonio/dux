@@ -35,12 +35,20 @@ module.exports.expectText = [
   "New web UI password [",
   "Type it again:",
   "The web UI password is stored",
-  "Argon2id hash is in server.auth.password_hash in /home/you/.config/dux/config.toml",
+  "Argon2id hash is in server.auth.password_hash in",
+  // The path opens a row of its own, whole: the terminal is exactly as wide as
+  // the words before it, so the wrap lands on the space and never mid-path.
+  "\n/home/you/.config/dux/config.toml, and the password itself is stored nowhere.",
   "dux is not running",
 ]
 
 module.exports.file = "config-set-password.png"
-module.exports.cols = 200
+// The stored line's words before the path, "The web UI password is stored
+// (strength: excellent): its Argon2id hash is in server.auth.password_hash in ",
+// are 106 characters, trailing space included, so at 106 columns the path starts
+// the next row whole. Any wider and the path is cut mid-word; much wider and
+// the text is too small at docs width.
+module.exports.cols = 106
 module.exports.rows = 24
 module.exports.theme = "dux_dark"
 module.exports.crop = "content"
