@@ -55,55 +55,58 @@ function reveal(container: HTMLElement, rowKey: string): boolean {
  * The returned callback ref goes on the list's scroll container, and each row
  * carries `data-sidebar-row` set to its row key. When `rowKey` changes the row
  * is scrolled into view with `block: "nearest"`, so a row already on screen
- * does not move. A row that does not exist yet (an agent or terminal selected
- * before the workspace push that carries it) is revealed when it appears, and
- * one in a hidden list when that list is shown. After that the hook does
- * nothing until the selection changes again, so updates arriving while the
- * user scrolls the list never move it.
+ * does not move. A row that cannot be revealed yet (an agent or terminal
+ * selected before the workspace push that carries it, a row in a collapsed
+ * section or behind a search, a hidden list) waits and is revealed once it
+ * shows, but only until the user scrolls the list: their own scroll cancels
+ * the wait, so a list they have moved is never moved for them. Once revealed
+ * or cancelled the hook does nothing until the selection changes again.
  */
 export function useRevealSelectedRow(
   rowKey: string | null,
 ): (node: HTMLElement | null) => void {
   const [container, setContainer] = React.useState<HTMLElement | null>(null)
-  // The row still waiting to be revealed, or null once it has been.
-  const pending = React.useRef<string | null>(null)
+  // Tries the waiting row again, or null when nothing is waiting.
+  const retryWaiting = React.useRef<(() => void) | null>(null)
 
   React.useLayoutEffect(() => {
-    pending.current = rowKey
+    retryWaiting.current = null
     if (rowKey === null || container === null) return
-    if (reveal(container, rowKey)) {
-      pending.current = null
-      return
-    }
+    const list = container
+    const key = rowKey
+    if (reveal(list, key)) return
 
-    const retry = () => {
-      if (pending.current !== rowKey) return
-      if (reveal(container, rowKey)) {
-        pending.current = null
-        stop()
-      }
+    let waiting = true
+    function stop() {
+      if (!waiting) return
+      waiting = false
+      retryWaiting.current = null
+      mutations.disconnect()
+      resize?.disconnect()
+      list.removeEventListener("scroll", stop)
+    }
+    function retry() {
+      if (reveal(list, key)) stop()
     }
     // A section the list does not re-render for (a collapsed group opening)
     // adds the row without this component rendering at all.
     const mutations = new MutationObserver(retry)
-    mutations.observe(container, { childList: true, subtree: true })
+    mutations.observe(list, { childList: true, subtree: true })
     // The list going from hidden to shown changes its size and nothing else.
     const resize =
       typeof ResizeObserver === "function" ? new ResizeObserver(retry) : null
-    resize?.observe(container)
-    function stop() {
-      mutations.disconnect()
-      resize?.disconnect()
-    }
+    resize?.observe(list)
+    // Nothing here scrolls the list while the row waits, so a scroll in that
+    // time is the user's, and it ends the wait.
+    list.addEventListener("scroll", stop, { passive: true })
+    retryWaiting.current = retry
     return stop
   }, [container, rowKey])
 
   // The workspace push that carries a just-created row renders this list, so
   // the row is revealed in the same commit rather than a frame later.
   React.useLayoutEffect(() => {
-    const key = pending.current
-    if (key === null || container === null) return
-    if (reveal(container, key)) pending.current = null
+    retryWaiting.current?.()
   })
 
   return setContainer

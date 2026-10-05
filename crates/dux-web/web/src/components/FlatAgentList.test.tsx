@@ -1392,6 +1392,37 @@ describe("FlatAgentList reveals the selected row", () => {
     }
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
   })
+
+  // "Gone" is exited, so its row waits inside the collapsed Inactive tail.
+  function selectHiddenQuietAgent() {
+    rects["agent:gone"] = { top: 800, bottom: 840 }
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "gone", tabId: "gone" },
+    }
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Gone")).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  }
+
+  // The tail opens without the list itself re-rendering, so the row is found
+  // by the mutation observer, whose callback runs as a microtask.
+  it("reveals a hidden selected row when the user opens its section", async () => {
+    selectHiddenQuietAgent()
+    fireEvent.click(screen.getByText("Inactive"))
+    await act(async () => {})
+    expect(scrolledRows()).toEqual(["agent:gone"])
+  })
+
+  it("never moves a list the user scrolled while the selected row was hidden", async () => {
+    selectHiddenQuietAgent()
+    const scroller = screen.getByText("Inactive").closest(".overflow-y-auto")!
+    fireEvent.scroll(scroller)
+    fireEvent.click(screen.getByText("Inactive"))
+    await act(async () => {})
+    expect(screen.getByText("Gone")).toBeTruthy()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
 })
 
 // An empty workspace is exactly where the next click should be ON SCREEN, so

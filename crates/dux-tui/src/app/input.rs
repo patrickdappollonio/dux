@@ -11524,6 +11524,7 @@ impl App {
         self.loading_input_buf.clear();
         if return_to_terminal_list {
             self.left_section = LeftSection::Terminals;
+            self.select_active_terminal_row();
             self.clamp_terminal_cursor();
             self.focus = FocusPane::Left;
         } else if return_to_projects {
@@ -26957,6 +26958,69 @@ cyan = "#00ffff"
             "the new terminal's row must be on screen; visible items {:?}, selected {}",
             app.mouse_layout.terminal_row_to_item,
             app.selected_terminal_index
+        );
+    }
+
+    /// Under the `active` sort a terminal being typed into floats to the top
+    /// between its launch and its fullscreen closing, so the cursor is resolved
+    /// by id when the list is returned to, never by the launch-time index.
+    #[test]
+    fn new_terminal_cursor_survives_active_sort_reorder() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.engine.config.ui.agent_sort = "active".to_string();
+        for _ in 0..8 {
+            app.engine.create_standalone_terminal(24, 80).unwrap();
+        }
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+        app.execute_command("new-standalone-terminal".to_string())
+            .unwrap();
+        let new_id = app.active_terminal_id.clone().unwrap();
+        app.engine
+            .pty_input
+            .insert(new_id.clone(), std::time::Instant::now());
+        app.exit_interactive_mode();
+        let order: Vec<String> = app
+            .terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(
+            order.get(app.selected_terminal_index).map(String::as_str),
+            Some(new_id.as_str())
+        );
+    }
+
+    /// The overlay-dismiss route back to the list resolves the cursor the same
+    /// way as leaving interactive mode does.
+    #[test]
+    fn closing_a_new_terminals_overlay_lands_the_cursor_on_it() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.engine.config.ui.agent_sort = "active".to_string();
+        for _ in 0..8 {
+            app.engine.create_standalone_terminal(24, 80).unwrap();
+        }
+        app.left_section = LeftSection::Terminals;
+        // Away from the top, where the typed-into terminal sorts, so a cursor
+        // left alone cannot land on it by accident.
+        app.selected_terminal_index = 3;
+        app.execute_command("new-standalone-terminal".to_string())
+            .unwrap();
+        let new_id = app.active_terminal_id.clone().unwrap();
+        app.engine
+            .pty_input
+            .insert(new_id.clone(), std::time::Instant::now());
+        assert!(app.close_top_overlay());
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(
+            app.terminal_items()
+                .get(app.selected_terminal_index)
+                .map(|(id, _)| id.as_str()),
+            Some(new_id.as_str())
         );
     }
 
