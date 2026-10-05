@@ -31,6 +31,7 @@
 //! middleware changing.
 
 pub(crate) mod admission;
+pub(crate) mod blocked_page;
 pub(crate) mod cookie;
 pub(crate) mod gate;
 pub(crate) mod middleware;
@@ -410,11 +411,6 @@ pub(crate) enum Issued {
     /// The password changed while the check ran.
     Stale,
 }
-
-/// Where a blocked client is told the block lives. The full path of the file
-/// is in dux's own log line, never in an answer to the client it blocks.
-pub(crate) const BLOCKED_WHERE: &str =
-    "blocked_addresses in the [server.auth] section of dux's config.toml";
 
 impl AuthState {
     /// Build the state and start its background work: loading the stored

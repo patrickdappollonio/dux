@@ -259,8 +259,8 @@ async fn journey_02_signed_in_person_adds_a_project_and_talks_to_an_agent() {
 /// Result: any slow-down is a 429 carrying `Retry-After` and the same number
 /// as `retry_after_seconds` in its body; the client's address (the one dux sees:
 /// the Docker bridge gateway) is appended to `[server.auth] blocked_addresses`
-/// in config.toml; from then on even the right password gets 403 `blocked` with
-/// a `where` naming the config file and the setting, and so does the auth
+/// in config.toml; from then on even the right password gets 403 `blocked`
+/// (the code alone: the page names the setting itself), and so does the auth
 /// status, every other request, and the events socket (accepted, then closed
 /// with 4403); once the owner removes it, the right password signs in. From
 /// this machine the failures are slowed (429) but never blocked: loopback never
@@ -307,13 +307,11 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
             "a blocked address is refused even with the right password: {}",
             right.describe()
         );
-        let place = right.json()["where"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        assert!(
-            place.contains("config.toml") && place.contains("blocked_addresses"),
-            "the refusal says where to lift the block: {place:?}"
+        assert_eq!(
+            right.json(),
+            json!({ "error": "blocked" }),
+            "the refusal is the code alone, and no path reaches the blocked client: {}",
+            right.describe()
         );
         for path in ["/api/v1/projects", "/api/v1/auth/status"] {
             let other = client.get(path).await;

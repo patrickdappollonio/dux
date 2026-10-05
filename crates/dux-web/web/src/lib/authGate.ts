@@ -82,7 +82,7 @@ export type AuthPhase =
   /** `status` is null when the server answered without the document. */
   | { kind: "open"; status: AuthStatus | null }
   | { kind: "signed_out"; status: AuthStatus | null; reason: SignOutReason }
-  | { kind: "blocked"; where: string | null }
+  | { kind: "blocked" }
   | { kind: "broken"; detail: string }
   /** The first look got no answer at all. */
   | { kind: "unreachable"; timedOut: boolean }
@@ -205,7 +205,7 @@ function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin
       return
     }
     case "blocked":
-      setPhase({ kind: "blocked", where: answer.where }, fromProbe)
+      setPhase({ kind: "blocked" }, fromProbe)
       return
     case "broken":
       setPhase({ kind: "broken", detail: answer.detail }, fromProbe)
@@ -343,20 +343,18 @@ export function reportUnauthorized(): void {
   void probeAuth(reason, { origin: actInFlight() ? "probe" : "after_refusal" })
 }
 
-export function reportBlocked(where: string | null): void {
-  setPhase({ kind: "blocked", where })
+export function reportBlocked(): void {
+  setPhase({ kind: "blocked" })
 }
 
 export function reportBroken(detail: string): void {
   setPhase({ kind: "broken", detail })
 }
 
-/// A socket closed with an auth code. 4403 carries no `where`, so the status
-/// route is asked for it.
+/// A socket closed with an auth code.
 export function reportSocketAuthClose(code: number): void {
   if (code === AUTH_BLOCKED_CLOSE) {
-    if (phase.kind !== "blocked") setPhase({ kind: "blocked", where: null })
-    void probeAuth()
+    if (phase.kind !== "blocked") setPhase({ kind: "blocked" })
     return
   }
   if (code === AUTH_REQUIRED_CLOSE) reportUnauthorized()
@@ -392,7 +390,7 @@ export async function signIn(password: string): Promise<LoginAnswer> {
       return answer
     }
     case "blocked":
-      setPhase({ kind: "blocked", where: answer.where })
+      setPhase({ kind: "blocked" })
       return answer
     case "broken":
       setPhase({ kind: "broken", detail: answer.detail })

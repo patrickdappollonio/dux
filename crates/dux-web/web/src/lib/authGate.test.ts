@@ -145,11 +145,11 @@ describe("initAuthGate", () => {
   it("shows the blocked page for a blocked address", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => json(403, { error: "blocked", where: "config.toml" })),
+      vi.fn(async () => json(403, { error: "blocked" })),
     )
     const g = await load()
     await g.initAuthGate()
-    expect(g.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
+    expect(g.getAuthPhase()).toStrictEqual({ kind: "blocked" })
   })
 
   it("shows the broken page for an invalid auth config", async () => {
@@ -208,18 +208,15 @@ describe("socket close codes", () => {
     expect(g.getAuthPhase().kind).toBe("signed_out")
   })
 
-  it("4403 shows the blocked page and learns where from the status route", async () => {
+  it("4403 shows the blocked page at once, with nothing left to ask the status route", async () => {
     const g = await load()
     await g.initAuthGate()
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => json(403, { error: "blocked", where: "config.toml" })),
-    )
+    const fetchMock = vi.fn(async () => json(403, { error: "blocked" }))
+    vi.stubGlobal("fetch", fetchMock)
     g.reportSocketAuthClose(4403)
-    expect(g.getAuthPhase().kind).toBe("blocked")
-    await vi.waitFor(() => {
-      expect(g.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
-    })
+    expect(g.getAuthPhase()).toStrictEqual({ kind: "blocked" })
+    await Promise.resolve()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -247,11 +244,11 @@ describe("signIn", () => {
 
   it("moves to the blocked page when the login is refused as blocked", async () => {
     statusBody = SIGNED_OUT
-    loginReply = () => json(403, { error: "blocked", where: "config.toml" })
+    loginReply = () => json(403, { error: "blocked" })
     const g = await load()
     await g.initAuthGate()
     await g.signIn("x")
-    expect(g.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
+    expect(g.getAuthPhase()).toStrictEqual({ kind: "blocked" })
   })
 
   it("stays on the login page and says why when the browser did not keep the session", async () => {
@@ -537,9 +534,9 @@ describe("signing out where no password is needed", () => {
   it("goes to the blocked page when the logout is refused as blocked", async () => {
     const g = await load()
     await g.initAuthGate()
-    logoutReply = () => json(403, { error: "blocked", where: "config.toml" })
+    logoutReply = () => json(403, { error: "blocked" })
     expect(await g.signOut()).toEqual({ kind: "gate" })
-    expect(g.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
+    expect(g.getAuthPhase()).toStrictEqual({ kind: "blocked" })
   })
 })
 

@@ -68,7 +68,7 @@ function gatePage(phase: Exclude<AuthPhase, { kind: "open" }>): ReactNode {
     case "signed_out":
       return <LoginPage status={phase.status} reason={phase.reason} />
     case "blocked":
-      return <BlockedPage where={phase.where} />
+      return <BlockedPage />
     case "broken":
       return <BrokenPage detail={phase.detail} />
     case "unreachable":

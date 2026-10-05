@@ -703,15 +703,9 @@ async fn a_wrong_password_is_slowed_then_blocked_and_this_machine_never_is() {
         "{}",
         last.body
     );
-    let place = last.json()["where"].as_str().unwrap().to_string();
-    assert!(
-        place.contains("blocked_addresses") && place.contains("config.toml"),
-        "{place}"
-    );
-    assert!(
-        !place.contains('/'),
-        "no path reaches the blocked client: {place}"
-    );
+    // The refusal is the code alone: the page names the setting itself, and no
+    // path reaches the blocked client.
+    assert_eq!(last.json(), json!({ "error": "blocked" }), "{}", last.body);
     let config = dux.config();
     assert!(config.contains("\"198.51.100.7\""), "{config}");
     assert!(config.contains("# a comment that must survive"), "{config}");
@@ -3502,10 +3496,25 @@ async fn a_blocked_page_load_gets_html_and_everything_else_json() {
             page.body
         );
         assert!(page.body.contains("blocked_addresses"), "{}", page.body);
+        // The duck rides in the page as a data URI, because a blocked address
+        // is refused /favicon.png like everything else.
         assert!(
-            !page.body.contains("src=") && !page.body.contains("href="),
-            "the page fetches nothing: {}",
-            page.body
+            page.body.contains("<img src=\"data:image/png;base64,"),
+            "the page carries the logo inline: {}",
+            &page.body[..page.body.len().min(2000)]
+        );
+        let fetching: Vec<&str> = page
+            .body
+            .match_indices("src=")
+            .chain(page.body.match_indices("href="))
+            .chain(page.body.match_indices("url("))
+            .chain(page.body.match_indices("@import"))
+            .map(|(at, _)| &page.body[at..(at + 24).min(page.body.len())])
+            .filter(|attr| !attr.starts_with("src=\"data:image/"))
+            .collect();
+        assert!(
+            fetching.is_empty(),
+            "the page fetches nothing: {fetching:?}"
         );
     }
     let api = dux

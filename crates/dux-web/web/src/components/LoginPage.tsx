@@ -9,6 +9,9 @@ import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
 import { rateLimitLead } from "@/lib/authErrors"
 import { retryAuthGate, signIn, type SignOutReason } from "@/lib/authGate"
 import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
+// The same duck, carried in the bundle as a data URI, for the one page that
+// cannot fetch it.
+import inlineLogo from "../../public/favicon.png?inline"
 
 // The pages the sign-in gate shows instead of the app: the login form, the
 // blocked page and the broken-config page. In dux's own look (theme tokens and
@@ -19,19 +22,19 @@ import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
 
 function Shell({
   title,
-  logo = true,
+  logo = DEFAULT_FAVICON_HREF,
   children,
 }: {
   title: string
-  /// Whether to show dux's logo, which is a request to the server.
-  logo?: boolean
+  /// Where dux's logo comes from: the served file, or the bundle's own copy.
+  logo?: string
   children: ReactNode
 }) {
   return (
     <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10 text-foreground">
       <div className="flex w-full max-w-sm flex-col gap-5">
         <div className="flex flex-col items-center gap-3 text-center">
-          {logo ? <img src={DEFAULT_FAVICON_HREF} alt="" className="size-12" /> : null}
+          <img src={logo} alt="" className="size-12" />
           <h1 className="text-lg font-semibold">{title}</h1>
         </div>
         {children}
@@ -263,29 +266,20 @@ function RetryButton({ label }: { label: string }) {
   )
 }
 
-export function BlockedPage({ where }: { where: string | null }) {
+export function BlockedPage() {
   return (
-    // No logo: a blocked address is refused every request, the logo's
-    // included, so the blocked state asks the server for nothing. It matches
-    // the page the server itself sends a fresh load from a blocked address,
-    // which has none either.
-    <Shell title="This address is blocked" logo={false}>
+    // A blocked address is refused every request, the logo's URL included, so
+    // the logo is the bundle's own copy and the blocked state asks the server
+    // for nothing. The words are the ones the server's own blocked page uses
+    // for a fresh load (`blocked_page.html`), which the tests hold this to.
+    <Shell title="This address is blocked" logo={inlineLogo}>
       <p className="text-sm text-muted-foreground">
-        dux refuses every request from the address you are connecting from.{" "}
-        {/* The server's `where` is a whole location phrase that already names
-          * the setting and its section, so it is the sentence's object as it
-          * came, never slotted into a phrase of the page's own. */}
-        {where ? (
-          <>The block is an entry in {where}.</>
-        ) : (
-          <>
-            The block is an entry in <InlineCode>blocked_addresses</InlineCode>, in
-            the <InlineCode>[server.auth]</InlineCode> section of{" "}
-            <InlineCode>config.toml</InlineCode>.
-          </>
-        )}{" "}
-        Whoever runs dux can remove the address there and reload the config; dux
-        also adds an address on its own after too many failed sign-ins.
+        dux refuses every request from the address you are connecting from. The
+        block is an entry in <InlineCode>blocked_addresses</InlineCode> in the{" "}
+        <InlineCode>[server.auth]</InlineCode> section of dux's{" "}
+        <InlineCode>config.toml</InlineCode>. Whoever runs dux can remove the
+        address there and reload the config; dux also adds an address on its own
+        after too many failed sign-ins.
       </p>
       <RetryButton label="Try again" />
     </Shell>

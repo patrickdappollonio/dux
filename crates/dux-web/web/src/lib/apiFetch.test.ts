@@ -68,10 +68,10 @@ describe("apiFetch", () => {
   it("turns a blocked 403 into the blocked page", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()
-    routes = async () => json(403, { error: "blocked", where: "config.toml" })
+    routes = async () => json(403, { error: "blocked" })
     const err = await api.apiFetch("/api/v1/workspace").catch((e: unknown) => e)
     expect(api.isAuthInterruption(err)).toBe(true)
-    expect(gate.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
+    expect(gate.getAuthPhase()).toStrictEqual({ kind: "blocked" })
   })
 
   it("leaves any other 403 to its caller, its body still readable", async () => {

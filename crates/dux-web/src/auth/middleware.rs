@@ -2,8 +2,8 @@
 //!
 //! Every request, HTTP or WebSocket upgrade, is classified here, then:
 //!
-//! 1. A blocked client is refused (`403 {error:"blocked", where}`), on every
-//!    route, with or without a password.
+//! 1. A blocked client is refused (`403 {error:"blocked"}`, or a small HTML
+//!    page for a page load), on every route, with or without a password.
 //! 2. A request to a declared public route passes ([`is_public`]).
 //! 3. With no password set, everything else passes too.
 //! 4. A request that needs a session and has none is refused
@@ -24,8 +24,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use super::RequestAuth;
 use super::provenance::{Arrival, RequestFacts};
-use super::{BLOCKED_WHERE, RequestAuth};
 use crate::server::AppState;
 
 /// Files the browser needs before it can show the login page. Static UI assets
@@ -85,32 +85,17 @@ pub(crate) fn auth_required() -> Response {
 pub(crate) fn blocked() -> Response {
     (
         StatusCode::FORBIDDEN,
-        axum::Json(json!({ "error": "blocked", "where": BLOCKED_WHERE })),
+        axum::Json(json!({ "error": "blocked" })),
     )
         .into_response()
 }
 
-/// What a fresh page load from a blocked address gets instead of the JSON
-/// the app reads (decided: it has no app to read it yet). One self-contained
-/// page: inline styles in the web UI's own dark theme colours, no script and
-/// no asset, because a blocked address is refused every asset too. It says
-/// what the app's blocked page says, in the same words.
-const BLOCKED_PAGE: &str = r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>This address is blocked</title></head>
-<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:oklch(0.145 0 0);color:oklch(0.985 0 0);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;padding:40px 16px;box-sizing:border-box">
-<main style="width:100%;max-width:24rem;display:flex;flex-direction:column;gap:20px">
-<h1 style="margin:0;text-align:center;font-size:1.125rem;font-weight:600">This address is blocked</h1>
-<p style="margin:0;font-size:0.875rem;line-height:1.5;color:oklch(0.708 0 0)">dux refuses every request from the address you are connecting from. The block is an entry in <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">blocked_addresses</code> in the <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">[server.auth]</code> section of dux's <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">config.toml</code>. Whoever runs dux can remove the address there and reload the config; dux also adds an address on its own after too many failed sign-ins.</p>
-</main></body></html>
-"#;
-
+/// A fresh page load from a blocked address: see [`super::blocked_page`].
 fn blocked_page() -> Response {
     (
         StatusCode::FORBIDDEN,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        BLOCKED_PAGE,
+        super::blocked_page::BLOCKED_PAGE.as_str(),
     )
         .into_response()
 }

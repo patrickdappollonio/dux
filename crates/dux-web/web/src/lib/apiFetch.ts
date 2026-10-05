@@ -16,7 +16,7 @@
 // work while signed out, and their 401 means a wrong password.
 
 import { apiUrl } from "./apiBase"
-import { blockedWhere, brokenDetail, isAuthRequired, readErrorBody } from "./authErrors"
+import { brokenDetail, isAuthRequired, isBlocked, readErrorBody } from "./authErrors"
 import {
   authEpoch,
   authPaused,
@@ -76,10 +76,9 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
     if (current) reportUnauthorized()
     throw new AuthInterruptedError("refused", "signed_out")
   }
-  const where = blockedWhere(resp.status, body)
-  if (where !== undefined) {
+  if (isBlocked(resp.status, body)) {
     // About the address, not the session, so it holds whichever session asked.
-    reportBlocked(where)
+    reportBlocked()
     throw new AuthInterruptedError("refused", "blocked")
   }
   const detail = brokenDetail(resp.status, body)

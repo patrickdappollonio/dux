@@ -10,7 +10,7 @@
 
 import { apiUrl } from "./apiBase"
 import {
-  blockedWhere,
+  isBlocked,
   brokenDetail,
   count,
   limitedFrom,
@@ -82,7 +82,7 @@ export function normalizeAuthStatus(raw: unknown): AuthStatus {
 
 export type StatusAnswer =
   | { kind: "status"; status: AuthStatus }
-  | { kind: "blocked"; where: string | null }
+  | { kind: "blocked" }
   | { kind: "broken"; detail: string }
   /** The server answered, but not with the document (an older server). */
   | { kind: "unknown" }
@@ -104,8 +104,7 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
   }
   if (!resp.ok) {
     const body = await readErrorBody(resp)
-    const where = blockedWhere(resp.status, body)
-    if (where !== undefined) return { kind: "blocked", where }
+    if (isBlocked(resp.status, body)) return { kind: "blocked" }
     const detail = brokenDetail(resp.status, body)
     if (detail !== undefined) return { kind: "broken", detail }
     return { kind: "unknown" }
@@ -121,7 +120,7 @@ export type LoginAnswer =
   | { kind: "ok" }
   | { kind: "wrong" }
   | { kind: "rate_limited"; retryAfterSeconds: number | null; from: string | null }
-  | { kind: "blocked"; where: string | null }
+  | { kind: "blocked" }
   | { kind: "broken"; detail: string }
   | { kind: "unreachable"; timedOut: boolean }
   | { kind: "refused"; message: string }
@@ -155,8 +154,7 @@ export async function postLogin(password: string): Promise<LoginAnswer> {
       from: limitedFrom(body.json),
     }
   }
-  const where = blockedWhere(resp.status, body)
-  if (where !== undefined) return { kind: "blocked", where }
+  if (isBlocked(resp.status, body)) return { kind: "blocked" }
   const detail = brokenDetail(resp.status, body)
   if (detail !== undefined) return { kind: "broken", detail }
   return { kind: "refused", message: refusalSentence(resp.status, body, "sign in") }

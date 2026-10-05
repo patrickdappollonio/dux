@@ -52,9 +52,10 @@ export function isAuthRequired(status: number, body: ErrorBody): boolean {
   return error === null || error === "auth_required"
 }
 
-export function blockedWhere(status: number, body: ErrorBody): string | null | undefined {
-  if (status !== 403 || body.json.error !== "blocked") return undefined
-  return str(body.json.where)
+/// Whether a refusal is the contract's "this address is blocked". The answer
+/// carries nothing else: the blocked page names the setting itself.
+export function isBlocked(status: number, body: ErrorBody): boolean {
+  return status === 403 && body.json.error === "blocked"
 }
 
 export function brokenDetail(status: number, body: ErrorBody): string | undefined {

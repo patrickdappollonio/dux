@@ -118,12 +118,11 @@ describe("fetchAuthStatus", () => {
     expect(init.credentials).toBe("same-origin")
   })
 
-  it("answers blocked with where the block lives", async () => {
+  it("answers blocked, carrying nothing from the body", async () => {
+    // A field an older server still sends is not read: the page names the
+    // setting itself.
     stubFetch(reply(403, { error: "blocked", where: "/home/u/.config/dux/config.toml" }))
-    expect(await fetchAuthStatus()).toEqual({
-      kind: "blocked",
-      where: "/home/u/.config/dux/config.toml",
-    })
+    expect(await fetchAuthStatus()).toStrictEqual({ kind: "blocked" })
   })
 
   it("answers broken with the server's detail", async () => {
@@ -206,9 +205,9 @@ describe("postLogin", () => {
     expect(await postLogin("x")).toEqual({ kind: "rate_limited", retryAfterSeconds: 12, from: null })
   })
 
-  it("reads 403 as blocked, keeping where", async () => {
-    stubFetch(reply(403, { error: "blocked", where: "config.toml" }))
-    expect(await postLogin("x")).toEqual({ kind: "blocked", where: "config.toml" })
+  it("reads 403 as blocked", async () => {
+    stubFetch(reply(403, { error: "blocked" }))
+    expect(await postLogin("x")).toStrictEqual({ kind: "blocked" })
   })
 
   it("reads 503 as a broken auth config", async () => {

@@ -46,7 +46,7 @@ describe("refusalSentence", () => {
   })
 
   it("explains blocked, broken and signed-out refusals in words", () => {
-    expect(refusalSentence(403, body({ error: "blocked", where: "config.toml" }), "x")).toContain(
+    expect(refusalSentence(403, body({ error: "blocked" }), "x")).toContain(
       "blocked_addresses",
     )
     expect(

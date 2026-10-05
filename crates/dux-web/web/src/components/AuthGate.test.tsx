@@ -131,7 +131,7 @@ describe("AuthGate", () => {
   })
 
   it("renders the blocked page", () => {
-    phase = { kind: "blocked", where: "config.toml" }
+    phase = { kind: "blocked" }
     renderGate()
     expect(screen.getByRole("heading", { name: "This address is blocked" })).toBeTruthy()
   })

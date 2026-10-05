@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs"
+
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
@@ -180,39 +182,49 @@ describe("LoginPage", () => {
 })
 
 describe("BlockedPage", () => {
+  // The page the server sends a fresh load from a blocked address. The app's
+  // blocked page says the same thing in the same words, chips included.
+  const serverPage = new DOMParser().parseFromString(
+    readFileSync("../src/auth/blocked_page.html", "utf8"),
+    "text/html",
+  )
+  const squash = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim()
+  const chipsIn = (root: ParentNode, selector: string) =>
+    [...root.querySelectorAll(selector)].map((c) => c.textContent)
+
   it("names where the block lives and how to lift it", () => {
-    render(<BlockedPage where={null} />)
+    render(<BlockedPage />)
     expect(screen.getByRole("heading", { name: "This address is blocked" })).toBeTruthy()
-    const chips = [...document.querySelectorAll("[data-slot=inline-code]")].map(
-      (c) => c.textContent,
-    )
-    expect(chips).toEqual(["blocked_addresses", "[server.auth]", "config.toml"])
+    expect(chipsIn(document, "[data-slot=inline-code]")).toEqual([
+      "blocked_addresses",
+      "[server.auth]",
+      "config.toml",
+    ])
     expect(document.body.textContent).toContain("remove the address there and reload the config")
   })
 
-  it("uses the server's location as the whole phrase, never nested in a second one", () => {
-    // The server sends a full location phrase (`BLOCKED_WHERE`), which already
-    // names the setting and its section.
-    const where = "blocked_addresses in the [server.auth] section of dux's config.toml"
-    render(<BlockedPage where={where} />)
-    const text = (document.body.textContent ?? "").replace(/\s+/g, " ")
-    expect(text).toContain(`The block is an entry in ${where}.`)
-    expect(text.match(/section of/g)?.length).toBe(1)
+  it("says word for word what the server's own blocked page says, with the same chips", () => {
+    render(<BlockedPage />)
+    const ours = document.querySelector("main p")
+    const theirs = serverPage.querySelector("main p")
+    expect(theirs).not.toBeNull()
+    expect(squash(ours?.textContent)).toBe(squash(theirs?.textContent))
+    expect(chipsIn(ours!, "[data-slot=inline-code]")).toEqual(chipsIn(theirs!, "code"))
+    expect(squash(screen.getByRole("heading").textContent)).toBe(
+      squash(serverPage.querySelector("h1")?.textContent),
+    )
   })
 
-  it("still names the setting when the server gave no location", () => {
-    render(<BlockedPage where={null} />)
-    expect(document.body.textContent).toContain("blocked_addresses")
-    expect(document.body.textContent).toContain("config.toml")
-  })
-
-  it("asks the server for nothing, not even the logo, which a blocked address is refused", () => {
-    render(<BlockedPage where={null} />)
-    expect(document.querySelector("img")).toBeNull()
+  it("shows the duck from the bundle itself, because a blocked address is refused the logo's URL", () => {
+    render(<BlockedPage />)
+    const img = document.querySelector("img")
+    expect(img).not.toBeNull()
+    expect(img!.getAttribute("src")).toMatch(/^data:image\/png;base64,/)
+    expect(img!.className).toContain("size-12")
   })
 
   it("asks again on Try again", async () => {
-    render(<BlockedPage where={null} />)
+    render(<BlockedPage />)
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })))
     expect(retryAuthGate).toHaveBeenCalled()
   })
