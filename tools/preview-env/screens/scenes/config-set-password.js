@@ -35,12 +35,12 @@ module.exports.expectText = [
   "New web UI password [",
   "Type it again:",
   "The web UI password is stored",
-  "Argon2id hash is in server.auth.password_hash",
+  "Argon2id hash is in server.auth.password_hash in /home/you/.config/dux/config.toml",
   "dux is not running",
 ]
 
 module.exports.file = "config-set-password.png"
-module.exports.cols = 110
+module.exports.cols = 200
 module.exports.rows = 24
 module.exports.theme = "dux_dark"
 module.exports.crop = "content"

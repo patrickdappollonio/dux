@@ -1,10 +1,12 @@
-// The page a blocked address gets. The scene earns the block the way a guesser
+// The page a blocked address gets when it opens dux: the small self-contained
+// page dux serves to a fresh page load from a blocked address, which is what
+// most blocked visitors ever see. The scene earns the block the way a guesser
 // does: wrong passwords on the sign-in page, each one waiting out the slow-down
 // the last one bought, until dux writes the address the preview's browser
-// arrives from into blocked_addresses and the page turns into this one. The page
+// arrives from into blocked_addresses. Then it loads the page again. The page
 // never names the address, so the picture carries none.
-const { clearToasts, expectVisibleText, goto, sleep } = require("../lib.js")
-const { gateClip, requirePassword, resetAuth } = require("../auth.js")
+const { boxOf, clearToasts, expectVisibleText, goto, sleep, steadyBox } = require("../lib.js")
+const { requirePassword, resetAuth } = require("../auth.js")
 
 // The default `max_failed_logins` is five. An attempt that lands a moment
 // before the slow-down is over is answered "wait" and counts for nothing, so
@@ -44,9 +46,16 @@ module.exports = {
       await page.keyboard.press("Enter")
       await sleep(1500)
     }
+    if (!(await blocked())) {
+      throw new Error("blocked-page: the sign-in page never turned into the blocked page")
+    }
+    // A fresh load now, which dux answers with its own HTML page rather than the
+    // app (it refuses the app's every asset too).
+    await page.goto(page.url(), { waitUntil: "networkidle0", timeout: 45000 })
+    await sleep(800)
     await clearToasts(page)
-    await expectVisibleText(page, "This address is blocked")
-    await expectVisibleText(page, "Try again", { selector: "button" })
-    return gateClip(page)
+    await expectVisibleText(page, "This address is blocked", { selector: "h1" })
+    await expectVisibleText(page, "blocked_addresses", { selector: "code" })
+    return steadyBox(() => boxOf(page, ["main"], 56), { what: "the blocked page" })
   },
 }
