@@ -17,12 +17,21 @@ import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
 // None of them touches `location.hash`: the URL keeps naming where the user
 // was, and the app lands there once it opens.
 
-function Shell({ title, children }: { title: string; children: ReactNode }) {
+function Shell({
+  title,
+  logo = true,
+  children,
+}: {
+  title: string
+  /// Whether to show dux's logo, which is a request to the server.
+  logo?: boolean
+  children: ReactNode
+}) {
   return (
     <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10 text-foreground">
       <div className="flex w-full max-w-sm flex-col gap-5">
         <div className="flex flex-col items-center gap-3 text-center">
-          <img src={DEFAULT_FAVICON_HREF} alt="" className="size-12" />
+          {logo ? <img src={DEFAULT_FAVICON_HREF} alt="" className="size-12" /> : null}
           <h1 className="text-lg font-semibold">{title}</h1>
         </div>
         {children}
@@ -256,7 +265,11 @@ function RetryButton({ label }: { label: string }) {
 
 export function BlockedPage({ where }: { where: string | null }) {
   return (
-    <Shell title="This address is blocked">
+    // No logo: a blocked address is refused every request, the logo's
+    // included, so the blocked state asks the server for nothing. It matches
+    // the page the server itself sends a fresh load from a blocked address,
+    // which has none either.
+    <Shell title="This address is blocked" logo={false}>
       <p className="text-sm text-muted-foreground">
         dux refuses every request from the address you are connecting from.{" "}
         {/* The server's `where` is a whole location phrase that already names

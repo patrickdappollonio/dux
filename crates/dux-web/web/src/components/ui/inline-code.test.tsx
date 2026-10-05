@@ -30,6 +30,17 @@ describe("the inline code chip for a name in prose", () => {
     expect(code.className).toContain("wrap-anywhere")
   })
 
+  it("keeps a chip whole on one row, wrapping it to the next line rather than splitting it", () => {
+    // An inline block never breaks across lines, so `dux config set
+    // server.auth.password` moves to the next row whole; capped at the line's
+    // width, a chip longer than a whole row wraps inside itself instead of
+    // pushing a phone sideways.
+    render(<InlineCode>dux config set server.auth.password</InlineCode>)
+    const code = screen.getByText("dux config set server.auth.password")
+    expect(code.className).toContain("inline-block")
+    expect(code.className).toContain("max-w-full")
+  })
+
   it("keeps the spaces inside a value instead of collapsing them", () => {
     const { container } = render(<InlineCode>npm  run   dev</InlineCode>)
     const code = container.querySelector("code")

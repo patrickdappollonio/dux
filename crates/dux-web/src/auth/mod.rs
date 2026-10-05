@@ -652,9 +652,9 @@ impl AuthState {
             can_set_first_password: !password_set && trusted_reader,
             auth_broken: a.snapshot.broken.as_ref().map(|detail| {
                 if trusted_reader {
-                    detail.clone()
+                    routes::BrokenDoc::Reason(detail.clone())
                 } else {
-                    "The [server.auth] section of dux's config is invalid.".to_string()
+                    routes::BrokenDoc::Broken(true)
                 }
             }),
             minimum_password_length: config.minimum_password_length,
@@ -1124,6 +1124,59 @@ mod tests {
                 assert_eq!(required_by(require, class), want, "{require:?} {class:?}");
             }
         }
+    }
+
+    /// A misconfigured section's reason goes to this machine and the tailnet
+    /// only; anyone else is told the section is broken and nothing more, in
+    /// the status and in the refusal of a protected request alike.
+    #[tokio::test]
+    async fn only_this_machine_and_the_tailnet_are_told_why_the_section_is_broken() {
+        let broken = ServerAuthConfig {
+            session_idle_seconds: 0,
+            ..ServerAuthConfig::default()
+        };
+        let state = AuthState::start(AuthSetup {
+            live: Arc::new(LiveAuth::new(&broken)),
+            exposure: None,
+            bound_ips: Vec::new(),
+            tailscale_leg: None,
+            config_path: None,
+            sessions_db: None,
+            console: crate::console::Console::noop(),
+            engine: None,
+            reload: Arc::new(|| {}),
+            opening_hook: None,
+        });
+        let reason = state
+            .snapshot()
+            .broken
+            .clone()
+            .expect("the section is broken");
+        let status_of = |peer: &str, local: &str| {
+            let facts = RequestFacts::of(
+                Some(Arrival {
+                    peer: peer.parse().unwrap(),
+                    local: local.parse().unwrap(),
+                }),
+                &HeaderMap::new(),
+            );
+            let state = Arc::clone(&state);
+            async move {
+                let a = state.assess(facts, &HeaderMap::new()).await;
+                let body = middleware::broken_body(
+                    a.snapshot.broken.as_deref().unwrap_or_default(),
+                    &a.classification,
+                );
+                (serde_json::to_value(state.status(&a)).unwrap(), body)
+            }
+        };
+        let (mine, mine_refusal) = status_of("127.0.0.1:5000", "127.0.0.1:3890").await;
+        assert_eq!(mine["auth_broken"], serde_json::json!(reason));
+        assert_eq!(mine_refusal["detail"], serde_json::json!(reason));
+        let (theirs, theirs_refusal) = status_of("198.51.100.7:5000", "192.0.2.10:3890").await;
+        assert_eq!(theirs["auth_broken"], serde_json::json!(true));
+        assert!(theirs_refusal.get("detail").is_none(), "{theirs_refusal}");
+        assert_eq!(theirs_refusal["error"], "auth_config_invalid");
     }
 
     #[test]

@@ -90,10 +90,69 @@ pub(crate) fn blocked() -> Response {
         .into_response()
 }
 
-fn broken(detail: &str) -> Response {
+/// What a fresh page load from a blocked address gets instead of the JSON
+/// the app reads (decided: it has no app to read it yet). One self-contained
+/// page: inline styles in the web UI's own dark theme colours, no script and
+/// no asset, because a blocked address is refused every asset too. It says
+/// what the app's blocked page says, in the same words.
+const BLOCKED_PAGE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>This address is blocked</title></head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:oklch(0.145 0 0);color:oklch(0.985 0 0);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;padding:40px 16px;box-sizing:border-box">
+<main style="width:100%;max-width:24rem;display:flex;flex-direction:column;gap:20px">
+<h1 style="margin:0;text-align:center;font-size:1.125rem;font-weight:600">This address is blocked</h1>
+<p style="margin:0;font-size:0.875rem;line-height:1.5;color:oklch(0.708 0 0)">dux refuses every request from the address you are connecting from. The block is an entry in <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">blocked_addresses</code> in the <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">[server.auth]</code> section of dux's <code style="font-family:ui-monospace,monospace;font-size:0.85em;background:oklch(0.269 0 0);border-radius:4px;padding:2px 6px;white-space:nowrap">config.toml</code>. Whoever runs dux can remove the address there and reload the config; dux also adds an address on its own after too many failed sign-ins.</p>
+</main></body></html>
+"#;
+
+fn blocked_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        BLOCKED_PAGE,
+    )
+        .into_response()
+}
+
+/// Whether a request is the browser loading a page (a document
+/// navigation), which reads HTML rather than the app's JSON.
+fn is_document_navigation(request: &Request) -> bool {
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        return false;
+    }
+    let headers = request.headers();
+    let navigates = headers
+        .get("sec-fetch-mode")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"navigate"));
+    let wants_html = headers.get_all(axum::http::header::ACCEPT).iter().any(|v| {
+        v.as_bytes()
+            .windows(9)
+            .any(|w| w.eq_ignore_ascii_case(b"text/html"))
+    });
+    navigates || wants_html
+}
+
+/// The refusal of a protected request while `[server.auth]` cannot be used.
+/// The reason goes to this machine and the tailnet only (decided): anyone else
+/// gets the error and no detail, which the page reads as "no detail to show".
+pub(crate) fn broken_body(
+    detail: &str,
+    classification: &super::provenance::Classification,
+) -> serde_json::Value {
+    use super::provenance::ClientClass;
+    match classification.class {
+        ClientClass::ThisMachine | ClientClass::Tailnet => {
+            json!({ "error": "auth_config_invalid", "detail": detail })
+        }
+        ClientClass::Network | ClientClass::Internet => json!({ "error": "auth_config_invalid" }),
+    }
+}
+
+fn broken(detail: &str, classification: &super::provenance::Classification) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(json!({ "error": "auth_config_invalid", "detail": detail })),
+        axum::Json(broken_body(detail, classification)),
     )
         .into_response()
 }
@@ -150,6 +209,8 @@ pub(crate) async fn auth_layer(
     if assessment.blocked {
         return if upgrade {
             close_upgrade(request, super::socket::CLOSE_BLOCKED).await
+        } else if is_document_navigation(&request) {
+            blocked_page()
         } else {
             blocked()
         };
@@ -157,7 +218,7 @@ pub(crate) async fn auth_layer(
     state.auth.note_proxy(&assessment);
     if !is_public(request.method(), request.uri().path()) {
         if let Some(detail) = assessment.snapshot.broken.as_deref() {
-            return broken(detail);
+            return broken(detail, &assessment.classification);
         }
         if assessment.required && assessment.session.is_none() {
             return if upgrade {

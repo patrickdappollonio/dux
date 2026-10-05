@@ -33,6 +33,16 @@ pub(crate) fn routes() -> Router<AppState> {
         )
 }
 
+/// What the status says about a `[server.auth]` that cannot be used: the
+/// reason, to this machine and the tailnet, or only `true` to anyone else,
+/// whose page then shows no detail of its own (decided).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum BrokenDoc {
+    Reason(String),
+    Broken(bool),
+}
+
 /// `GET /api/v1/auth/status`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct StatusDoc {
@@ -44,7 +54,7 @@ pub(crate) struct StatusDoc {
     pub(crate) no_auth_warning: bool,
     pub(crate) weak_password: bool,
     pub(crate) can_set_first_password: bool,
-    pub(crate) auth_broken: Option<String>,
+    pub(crate) auth_broken: Option<BrokenDoc>,
     pub(crate) minimum_password_length: u32,
     pub(crate) minimum_password_score: u8,
     /// Why this device, which reached dux over loopback, is treated as the

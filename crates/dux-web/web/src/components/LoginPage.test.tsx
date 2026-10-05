@@ -206,6 +206,11 @@ describe("BlockedPage", () => {
     expect(document.body.textContent).toContain("config.toml")
   })
 
+  it("asks the server for nothing, not even the logo, which a blocked address is refused", () => {
+    render(<BlockedPage where={null} />)
+    expect(document.querySelector("img")).toBeNull()
+  })
+
   it("asks again on Try again", async () => {
     render(<BlockedPage where={null} />)
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })))
@@ -222,9 +227,17 @@ describe("BrokenPage", () => {
     )
   })
 
-  it("still explains itself without a detail", () => {
+  it("still explains itself without a detail, and shows no empty detail box", () => {
     render(<BrokenPage detail="" />)
     expect(document.body.textContent).toContain("[server.auth]")
+    expect(document.querySelector("pre")).toBeNull()
+  })
+
+  it("shows the detail box only when there is a detail", () => {
+    render(<BrokenPage detail="password_hash is not a valid Argon2 PHC string" />)
+    expect(document.querySelector("pre")?.textContent).toBe(
+      "password_hash is not a valid Argon2 PHC string",
+    )
   })
 
   it("asks again on Try again", async () => {
