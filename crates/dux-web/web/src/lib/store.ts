@@ -376,6 +376,9 @@ export interface DuxState {
   composeDrafts: Record<string, string>
   commitTarget: string | null
   commitDraft: string
+  // Bumped each time the commit dialog opens, so a commit's answer can tell
+  // whether the dialog on screen is still the one it was sent from.
+  commitOpening: number
   deleteTarget: string | null
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
@@ -961,6 +964,7 @@ let state: DuxState = {
   composeDrafts: {},
   commitTarget: null,
   commitDraft: "",
+  commitOpening: 0,
   deleteTarget: null,
   deleteTerminalTarget: null,
   closeTabTarget: null,
@@ -4006,7 +4010,11 @@ export function discardFile(sessionId: string, row: ChangedFileView): void {
 }
 
 export function openCommit(sessionId: string): void {
-  setState({ commitTarget: sessionId, commitDraft: "" })
+  setState({
+    commitTarget: sessionId,
+    commitDraft: "",
+    commitOpening: getSnapshot().commitOpening + 1,
+  })
 }
 
 export function closeCommit(): void {

@@ -251,12 +251,10 @@ impl CheckoutMoveGuard {
             .registry
             .sessions_matching(|started_in| around(started_in));
         if !sessions.is_empty() {
-            let running = crate::process_sessions::members(
-                &crate::process_sessions::read_process_table(),
-                &sessions,
-                &self.registry.survivors_of(&sessions),
-                std::process::id(),
-            );
+            let running = match self.registry.running_members(&sessions, &[]) {
+                Ok(running) => running,
+                Err(reason) => return Ok(Some(reason)),
+            };
             if !running.is_empty() {
                 return Ok(Some(format!(
                     "something dux started there is still running ({})",

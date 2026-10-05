@@ -854,12 +854,16 @@ pub(crate) fn standalone_processes_keep(
     if sessions.is_empty() {
         return None;
     }
-    let running = crate::process_sessions::members(
-        &crate::process_sessions::read_process_table(),
-        &sessions,
-        &registry.survivors_of(&sessions),
-        std::process::id(),
-    );
+    let running = match registry.running_members(&sessions, &[]) {
+        Ok(running) => running,
+        // A record still being written: fail closed, the folder is kept.
+        Err(reason) => {
+            return Some(format!(
+                "the worktree at {} was kept: {reason}.",
+                crate::home_path::shorten_home(std::path::Path::new(folder))
+            ));
+        }
+    };
     if running.is_empty() {
         return None;
     }
@@ -920,12 +924,10 @@ pub(crate) fn occupant_after_wait(
         .filter(|session| !processes.sessions.contains(session))
         .collect();
     if !unknown.is_empty() {
-        let alive = crate::process_sessions::members(
-            &crate::process_sessions::read_process_table(),
-            &unknown,
-            &registry.survivors_of(&unknown),
-            std::process::id(),
-        );
+        let alive = match registry.running_members(&unknown, &[]) {
+            Ok(alive) => alive,
+            Err(reason) => return Some(reason),
+        };
         if !alive.is_empty() {
             return Some(format!(
                 "something dux started there after the delete is running in it ({})",

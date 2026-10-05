@@ -1235,6 +1235,16 @@ impl PtyClient {
         })
     }
 
+    /// The pid to signal the child at, or `None` when there is none to
+    /// signal: no pid known, or the child already reaped (its pid is free and
+    /// may name an unrelated process by now).
+    fn child_to_signal(&self) -> Option<rustix::process::Pid> {
+        if self.reaped.is_some() {
+            return None;
+        }
+        rustix::process::Pid::from_raw(self.child.process_id()? as i32)
+    }
+
     /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
     /// its pid and session number stay allocated until `try_wait` or `wait`
     /// reaps it. `block` waits for the exit. `None` when the question cannot
@@ -2163,17 +2173,19 @@ impl Drop for PtyClient {
         // child itself (its `kill` ends in a `try_wait`), which would put the
         // reap before the record. The direct child is signalled here as well
         // as its group, in case the group signal above did not reach it.
-        match self
-            .child
-            .process_id()
-            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32))
-        {
+        //
+        // A child already reaped (`try_wait` saw it exit) is never signalled
+        // or waited for again: its pid is free, and may name an unrelated
+        // process by now.
+        let reaped = self.reaped.is_some();
+        match self.child_to_signal() {
             Some(pid) => {
                 let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
                 if self.child_exit_unreaped(true) == Some(true) {
                     self.fire_leader_exit_hook();
                 }
             }
+            None if reaped => {}
             // No pid to signal or wait on: the library's own kill is the only
             // way to ask the child to exit, and nothing is recorded for a
             // child dux cannot name.
@@ -2181,7 +2193,8 @@ impl Drop for PtyClient {
                 let _ = self.child.kill();
             }
         }
-        if self.child.wait().is_ok()
+        if !reaped
+            && self.child.wait().is_ok()
             && let Some(session) = self.process_session
         {
             crate::process_sessions::note_reaped(session);
@@ -6007,6 +6020,34 @@ mod tests {
         );
     }
 
+    /// A child already reaped is never signalled again: its pid is free and
+    /// may name an unrelated process by the time the client drops.
+    #[test]
+    fn a_reaped_child_is_never_signalled_again() {
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        let pid = client.child_process_id().expect("a pid");
+        assert_eq!(
+            client
+                .child_to_signal()
+                .map(rustix::process::Pid::as_raw_pid),
+            Some(pid as i32),
+            "an unreaped child is signalled at its pid"
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            client.child_to_signal(),
+            None,
+            "once reaped, its pid is never signalled"
+        );
+        drop(client);
+    }
+
     /// A child that exits on its own has what it left running in its session
     /// recorded as soon as it is seen to exit, before it is reaped, not only
     /// when the client drops: in between, the session number proves nothing
@@ -6063,6 +6104,70 @@ mod tests {
             "the job the shell left running is recorded while the client still stands"
         );
         drop(client);
+    }
+
+    /// Review 26: "before dux reaps a child that exited, it records what that
+    /// child left running". `try_wait` fires the leader-exit hook and then
+    /// reaps at once, but the hook only STARTS the record on a thread of its
+    /// own. Only a worktree removal waits for that thread; every other look
+    /// (a pull or switch's move check, an editor or changes-pane delete,
+    /// which all ask `cwd_occupant`) runs straight after the reap, finds the
+    /// leader gone (so the session number proves nothing) and nothing
+    /// recorded yet, and misses a job the shell left working in the folder.
+    #[test]
+    fn review26_a_look_right_after_the_reap_misses_the_job_the_leader_left() {
+        let mut misses = 0;
+        let attempts = 10;
+        for _ in 0..attempts {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(dir.path().join("build")).expect("build");
+            let pidfile = dir.path().join("job.pid");
+            let args = vec![
+                "-c".to_string(),
+                format!(
+                    "trap '' HUP; (cd build && exec sleep 300) & echo $! > '{}'; exit 0",
+                    pidfile.display()
+                ),
+            ];
+            let mut client =
+                PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+            let session = client.process_session().expect("a session");
+            let registry = crate::process_sessions::AgentProcessRegistry::default();
+            registry.register("a1", session, dir.path());
+            client.set_leader_exit_hook(registry.leader_exit_hook(session));
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while !pidfile.exists() {
+                assert!(Instant::now() < deadline, "the job never started");
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            while client.try_wait().is_none() {
+                assert!(Instant::now() < deadline, "the shell did not exit in time");
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // The leader is reaped now. A pull's or a delete's look at the
+            // folder the job works in:
+            let seen = registry.cwd_occupant(&dir.path().join("build"), &[]);
+            registry.wait_for_all_recordings(std::time::Duration::from_secs(5));
+            // Control: once the record has landed, the same look sees the job.
+            let seen_after = registry.cwd_occupant(&dir.path().join("build"), &[]);
+            let job = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+                .and_then(rustix::process::Pid::from_raw);
+            if let Some(job) = job {
+                let _ = rustix::process::kill_process(job, rustix::process::Signal::KILL);
+            }
+            drop(client);
+            assert!(seen_after.is_some(), "control: the recorded job is seen");
+            if seen.is_none() {
+                misses += 1;
+            }
+        }
+        assert_eq!(
+            misses, 0,
+            "in {misses} of {attempts} runs a look right after the leader was reaped found \
+             nothing working in the job's folder: the record lands after the reap"
+        );
     }
 
     #[test]

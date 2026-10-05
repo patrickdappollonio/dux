@@ -76,11 +76,11 @@ fn leader_unreaped(session: &ProcessSession) -> bool {
 enum CwdVerdict<'a> {
     /// Nothing of it stands in the folder.
     Clear,
-    /// This process stands in the folder (or, its own folder unreadable, the
-    /// nearest readable ancestor of it in its session does).
+    /// This process stands in the folder, its own working directory read.
     Inside(&'a ProcRow),
-    /// Where this process stands is unknown, nothing above it in its session
-    /// can say, and the session was started in the folder: possibly in it.
+    /// Where this process stands could not be read, and it is possibly in
+    /// the folder: the nearest readable process above it in its session
+    /// stands there, or, none readable, its session was started there.
     Unknown(&'a ProcRow),
 }
 
@@ -125,14 +125,16 @@ fn judge_cwds<'a>(
             }
             parent = ancestor.ppid.and_then(|ppid| by_pid.get(&ppid).copied());
         }
-        match stand_in {
-            Some(cwd) if inside(cwd) => return CwdVerdict::Inside(row),
-            Some(_) => {}
-            None => {
-                if inside(session_folder) && unknown.is_none() {
-                    unknown = Some(row);
-                }
-            }
+        // Its own folder is never known: at most POSSIBLY in the folder,
+        // when the nearest readable process above it stands there, or (none
+        // readable) its session was started there. Never `Inside`, which a
+        // factory reset acts on by signalling the process.
+        let possibly = match stand_in {
+            Some(cwd) => inside(cwd),
+            None => inside(session_folder),
+        };
+        if possibly && unknown.is_none() {
+            unknown = Some(row);
         }
     }
     unknown.map_or(CwdVerdict::Clear, CwdVerdict::Unknown)
@@ -803,6 +805,10 @@ impl SpawnGate {
     }
 }
 
+/// How long an occupancy look waits for a record of what an exited leader
+/// left running to be written. Writing one is a look at the process table.
+pub const RECORDING_WAIT: Duration = Duration::from_secs(10);
+
 /// How long a removal or a destructive operation waits for a spawn in its
 /// folder to register its session. A spawn takes milliseconds; one still
 /// unregistered after this is treated as something running there.
@@ -1292,6 +1298,10 @@ impl AgentProcessRegistry {
         touches: &dyn Fn(&std::path::Path) -> bool,
         except: &[ProcessSession],
     ) -> Option<String> {
+        // A leader reaped a moment ago may still have its record in flight.
+        if let Err(reason) = self.recordings_settled() {
+            return Some(reason);
+        }
         type Tracked = (
             ProcessSession,
             std::path::PathBuf,
@@ -1705,6 +1715,50 @@ impl AgentProcessRegistry {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Wait, bounded by [`RECORDING_WAIT`], for every record of what an exited
+    /// leader left running that is still being written. Every occupancy look
+    /// goes through this first: a leader is reaped right after its record
+    /// starts, and in between its session number proves nothing, so a look
+    /// taken before the record lands misses a job the leader left behind.
+    /// `Err` (a sentence) when it did not settle in time: the look must fail
+    /// closed rather than call the place clear.
+    pub fn recordings_settled(&self) -> Result<(), String> {
+        self.recordings_settled_within(RECORDING_WAIT)
+    }
+
+    fn recordings_settled_within(&self, timeout: Duration) -> Result<(), String> {
+        self.wait_for_all_recordings(timeout);
+        if self.lock().recording.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "dux could not confirm what its processes left running there: a record of them \
+                 was still being written after {} seconds; try again in a moment",
+                timeout.as_secs()
+            ))
+        }
+    }
+
+    /// The running members of `sessions` (and of `known`), once every record
+    /// in flight has landed ([`Self::recordings_settled`]), with what was
+    /// recorded for each session included. The one way an occupancy look asks
+    /// what runs in a set of sessions. Blocking: reads the process table.
+    pub fn running_members(
+        &self,
+        sessions: &[ProcessSession],
+        known: &[ProcessIdentity],
+    ) -> Result<Vec<ProcRow>, String> {
+        self.recordings_settled()?;
+        let mut known = known.to_vec();
+        known.extend(self.survivors_of(sessions));
+        Ok(members(
+            &read_process_table(),
+            sessions,
+            &known,
+            std::process::id(),
+        ))
     }
 
     /// [`Self::wait_for_recordings`] for every recording in flight.
@@ -2313,7 +2367,7 @@ mod tests {
             ),
             CwdVerdict::Clear
         );
-        // The shell stands in the worktree: so does what it ran.
+        // The shell stands in the worktree: it is in the way itself.
         report
             .found
             .insert(100, std::path::PathBuf::from("/work/wt/src"));
@@ -2326,6 +2380,58 @@ mod tests {
                 std::path::Path::new("/repo")
             ),
             CwdVerdict::Inside(&running[0])
+        );
+    }
+
+    /// A look waits for a record still being written and, when it does not
+    /// land in time, fails closed: it never calls the place clear.
+    #[test]
+    fn a_look_fails_closed_while_a_record_is_still_being_written() {
+        let registry = AgentProcessRegistry::default();
+        assert!(registry.recordings_settled_within(Duration::ZERO).is_ok());
+        let session = ProcessSession {
+            sid: 4242,
+            started_at: 1,
+            boot: current_boot(),
+        };
+        registry.begin_recording(session);
+        let refused = registry
+            .recordings_settled_within(Duration::from_millis(30))
+            .expect_err("still being written");
+        assert!(refused.contains("still being written"), "{refused}");
+        registry.end_recording(session);
+        assert!(registry.recordings_settled_within(Duration::ZERO).is_ok());
+    }
+
+    /// Review 26: a factory reset promises it "never kills a process whose
+    /// folder it can't read; it keeps that folder instead". It ends exactly
+    /// `session_processes_where(..).inside`, judged one process at a time,
+    /// and a process whose OWN folder cannot be read lands in `inside` (not
+    /// `unknown`) whenever its shell stands in the folder: so the reset
+    /// signals a process whose working directory it never read.
+    #[test]
+    fn review26_a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
+        let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
+        let shell = row(100, 1, 100);
+        let job = row(101, 100, 100);
+        let table = vec![shell.clone(), job.clone()];
+        let mut report = crate::file_drop::CwdReport::default();
+        report.unknown.push(101);
+        report
+            .found
+            .insert(100, std::path::PathBuf::from("/work/wt/src"));
+        // Exactly how `session_processes_where` asks: the job on its own.
+        let verdict = judge_cwds(
+            &|dir| crate::worktree_ops::folder_contains(&folder, dir),
+            &table[1..=1],
+            &table,
+            &report,
+            std::path::Path::new("/work/wt"),
+        );
+        assert!(
+            !matches!(verdict, CwdVerdict::Inside(_)),
+            "a process whose own folder could not be read is put among those a reset ends: \
+             {verdict:?}"
         );
     }
 

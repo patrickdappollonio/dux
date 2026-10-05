@@ -164,18 +164,18 @@ impl DestructiveCheck {
                     if target.sessions.is_empty() {
                         return None;
                     }
-                    let running = crate::process_sessions::members(
-                        &crate::process_sessions::read_process_table(),
-                        &target.sessions,
-                        &target.known,
-                        std::process::id(),
-                    );
-                    (!running.is_empty()).then(|| {
-                        format!(
-                            "something dux started there is still running ({})",
-                            crate::process_sessions::describe(&running)
-                        )
-                    })
+                    match self
+                        .registry
+                        .running_members(&target.sessions, &target.known)
+                    {
+                        Ok(running) => (!running.is_empty()).then(|| {
+                            format!(
+                                "something dux started there is still running ({})",
+                                crate::process_sessions::describe(&running)
+                            )
+                        }),
+                        Err(reason) => Some(reason),
+                    }
                 })
                 .or_else(|| {
                     // A link's removal leaves its target, and whoever works
