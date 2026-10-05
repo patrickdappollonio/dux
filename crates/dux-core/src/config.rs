@@ -3169,6 +3169,10 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// provider, a macro or a binding's action, a variable in a project's `env`
 /// inside the `[[projects]]` list) is just a name: a provider called `password_hash` is not a password hash,
 /// though a field inside it is a field of dux's schema like anywhere else.
+/// It is a name only when its value has the shape that map's entries have
+/// (a string for a variable, a table for a provider or a macro, a key or a
+/// list of keys for a binding): `password = "…"` under `[macros]`, where a
+/// line added at the end of a file ending in `[macros]` lands, is no macro.
 /// A key reached through an array is never such a name (the top-level
 /// `[[projects]]` list aside, whose entries are projects): a map of names
 /// written as an array (`[[env]]`, `[[providers]]`, `macros = [{…}]`) is no
@@ -3455,12 +3459,14 @@ fn misplaced_auth_settings(
                 // without a quoted dotted key: the key is the name the user
                 // chose, never a setting.
                 // A project's `env` holds names only inside the `[[projects]]`
-                // list: a `[projects]` table is no list of projects.
+                // list: a `[projects]` table is no list of projects. A value
+                // without the shape that map's entries have is no entry of
+                // it, whatever it is called.
                 let a_name = !walk.through_split
                     && !walk.through_other_array
                     && (walk.through_array
                         || walk.keys.first().map(String::as_str) != Some("projects"))
-                    && names_a_user_entry(&walk.keys);
+                    && names_a_user_entry(&walk.keys, child);
                 walk.shown.push(PathStep::Key(key.clone()));
                 walk.keys.push(key.clone());
                 if !a_name {
@@ -3519,16 +3525,21 @@ fn misplaced_auth_settings(
 }
 
 /// Whether a key directly under `parent` (a path of keys, array entries
-/// left out) is a name the user chose: an entry of a map of user-chosen
-/// names (`[env]`, `[providers]`, `[macros]`, `[keys]`) or of a project's
-/// `env`. `[[projects]]` is a list, so a key directly in a project is one of
-/// a project's fields, never a name.
-fn names_a_user_entry(parent: &[String]) -> bool {
-    match parent {
-        [section] => user_name_rule(section).is_some_and(|rule| rule != NameRule::Any),
-        [projects, env] => projects == "projects" && env == "env",
-        _ => false,
-    }
+/// left out) holding `value` is a name the user chose: an entry of a map of
+/// user-chosen names (`[env]`, `[providers]`, `[macros]`, `[keys]`) or of a
+/// project's `env`, with the shape that map's entries have (see
+/// [`NameRule::entry_fits`]). `[[projects]]` is a list, so a key directly in
+/// a project is one of a project's fields, never a name. A key whose value
+/// has another shape is no entry of the map at all (a string is never a
+/// macro), so it is judged like any other key: a password written at the
+/// end of a file whose last table is `[macros]` is a password.
+fn names_a_user_entry(parent: &[String], value: &toml::Value) -> bool {
+    let rule = match parent {
+        [section] => user_name_rule(section),
+        [projects, env] if projects == "projects" && env == "env" => Some(NameRule::Variable),
+        _ => None,
+    };
+    rule.is_some_and(|rule| rule.entry_fits(value))
 }
 
 /// [`misplaced_auth_problem_list`]'s sentences.
@@ -4099,6 +4110,23 @@ enum NameRule {
 }
 
 impl NameRule {
+    /// Whether `value` has the shape an entry of a map named by this rule
+    /// has: a variable's value is a string, a provider or a macro is a
+    /// table, a binding is a key or a list of keys, and a list has no named
+    /// entries.
+    fn entry_fits(self, value: &toml::Value) -> bool {
+        match self {
+            Self::Variable => value.is_str(),
+            Self::Plain => value.is_table(),
+            Self::Action => match value {
+                toml::Value::String(_) => true,
+                toml::Value::Array(items) => items.iter().all(toml::Value::is_str),
+                _ => false,
+            },
+            Self::Any => false,
+        }
+    }
+
     fn allows(self, name: &str) -> bool {
         let all = |ok: fn(char) -> bool| !name.is_empty() && name.chars().all(ok);
         match self {

@@ -59,6 +59,16 @@
 #   retired `[auth]` included: the user meant to protect the web UI, and
 #   7437238c started with no password at all. An `[env]` variable named
 #   `password` is still just a variable.
+# - A key in a map of user-chosen names is a name only when its value has
+#   the shape that map's entries have: a string in `[env]` and a project's
+#   `env`, a table in `[providers]` and `[macros]`, a key or a list of keys in
+#   `[keys]`. Anything else is no entry of the map, so an auth setting
+#   written there (a string `password_hash` or `password` under `[macros]` or
+#   `[providers]`, a table under `[env]`, a number under `[keys]`) is a
+#   misplaced setting and stops `dux server` too. dux's own documented file
+#   ended in `[macros]`, so a password line added at its end landed there,
+#   and 7437238c started with no password. A string or a list of strings
+#   under `[keys]` is a binding's shape and stays a name.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -541,6 +551,16 @@ start start "[env]\npassword = \"correct horse battery staple veranda\"\n"
 start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\npassword = \"correct horse battery staple veranda\"\n"
 refuse refuse(was:start) "[projects.env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
 refuse refuse(was:start) "[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n\n[projects.env]\nrequire = \"everywhere\"\n"
+refuse refuse(was:start) "[macros]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[macros]\npassword = \"correct horse battery staple veranda\"\n"
+refuse refuse(was:start) "[macros]\nreview = { text = \"x\", surface = \"agent\" }\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[providers]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[providers]\npassword = \"correct horse battery staple veranda\"\n"
+refuse refuse(was:start) "[env]\npassword_hash = { value = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }\n"
+refuse refuse(was:start) "[env.password]\nvalue = \"correct horse battery staple veranda\"\n"
+refuse start "[keys]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse start "[keys]\npassword = \"correct horse battery staple veranda\"\n"
+refuse refuse(was:start) "[keys]\npassword_hash = 5\n"
 
 # Every case above that is TOML with at least one table, written again twice:
 # once with each section as an inline table (`server = { port = 4000 }`,

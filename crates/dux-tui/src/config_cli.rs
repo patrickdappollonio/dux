@@ -2178,3 +2178,6 @@ mod plaintext_password_and_theme_tests;
 
 #[cfg(test)]
 mod plaintext_shape_get_tests;
+
+#[cfg(test)]
+mod appended_password_tests;

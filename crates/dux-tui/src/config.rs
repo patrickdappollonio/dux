@@ -441,6 +441,9 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Providers,
         ConfigEntry::Terminal,
         ConfigEntry::StartupCommandTerminal,
+        ConfigEntry::Keys,
+        ConfigEntry::Macros,
+        ConfigEntry::Blank,
         ConfigEntry::Section("logging"),
         ConfigEntry::Field {
             key: "level",
@@ -1613,10 +1616,10 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.max_blocked_addresses),
         },
-        ConfigEntry::Blank,
-        ConfigEntry::Keys,
-        ConfigEntry::Blank,
-        ConfigEntry::Macros,
+        // The file ends in `[server.auth]`, never in a map of names
+        // (`[keys]`, `[macros]`): a line added at the end lands in the last
+        // table, and in a map of names a setting would silently become an
+        // entry, while here a misplaced one stops the start and names itself.
     ]
 }
 

@@ -121,6 +121,21 @@ fn printed(body: &str) -> Vec<(String, String)> {
     said
 }
 
+/// dux's own documented file with `line` added where a user adds one: at
+/// its very end, and first inside `[macros]`, which it used to end in.
+/// (`[keys]` is left out: a string there is a binding's shape, so a key
+/// written there is a binding's name.)
+fn documented_positions(line: &str) -> Vec<String> {
+    crate::config::install_canonical_renderer();
+    let base = crate::config::render_default_config();
+    let header = "\n[macros]\n";
+    let at = base.find(header).expect("the documented file has [macros]") + header.len();
+    vec![
+        format!("{base}\n{line}\n"),
+        format!("{}{line}\n{}", &base[..at], &base[at..]),
+    ]
+}
+
 /// The previews of `dux config regenerate` and `dux config restore-docs`,
 /// with `show` as given, as each prints them.
 fn previews(body: &str, show: bool) -> Vec<(String, String)> {
@@ -276,7 +291,11 @@ fn a_plaintext_password_reaches_no_printer_even_with_show() {
         let fragment = &token[..12];
         let quoted = toml::Value::String(token.clone()).to_string();
         let bare = &quoted[1..quoted.len() - 1];
-        for position in PLAINTEXT_PASSWORD_POSITIONS {
+        let positions = PLAINTEXT_PASSWORD_POSITIONS
+            .iter()
+            .map(|position| (*position).to_string())
+            .chain(documented_positions("password = \"{V}\""));
+        for position in positions {
             let body = position.replace("{V}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             assert!(
