@@ -658,12 +658,11 @@ async fn a_branch_an_agent_holds_is_listed_as_held_and_refused_if_posted() {
     let frame = status_frame(&mut ws, "Can't change the base branch").await;
     assert_eq!(
         frame["message"],
-        format!(
-            "Can't change the base branch of project \"repo\" to \"agent-one\": it is checked \
-             out in the worktree at {}, and git checks a branch out in one place at a time. \
-             Pick another branch, or remove that worktree first.",
-            holder.display()
-        )
+        "Can't change the base branch of project \"repo\" to \"agent-one\": the worktree of \
+         agent \"agent-one\" has it checked out, and git checks a branch out in one place at a \
+         time. Pick another branch, or delete agent \"agent-one\" together with its worktree but \
+         keep its branch: in the delete dialog, tick the box that deletes the worktree and \
+         untick the one that also deletes the branch."
     );
     assert_eq!(frame["tone"], "error");
     assert_eq!(stored_base(&f, &project_id).as_deref(), Some("feature"));
@@ -738,4 +737,203 @@ async fn both_base_branch_routes_refuse_a_project_whose_folder_is_gone() {
         );
     }
     assert_eq!(stored_base(&f, &project_id).as_deref(), Some("feature"));
+}
+
+// ── Following the refusal's own advice ──────────────────────────────────────
+//
+// Each way out the held-branch refusal names must free the branch AND keep it,
+// because that branch is the one the user asked for as the base. These follow
+// the advice exactly, then retry.
+
+async fn sessions(f: &Fixture) -> serde_json::Value {
+    reqwest::get(format!("http://{}/api/v1/sessions", f.addr))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn delete_agent_and_wait(f: &Fixture, query: &str) {
+    let id = sessions(f).await[0]["id"].as_str().unwrap().to_string();
+    let resp = reqwest::Client::new()
+        .delete(format!("http://{}/api/v1/sessions/{id}{query}", f.addr))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "delete got {}", resp.status());
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !sessions(f).await.as_array().is_some_and(|l| l.is_empty()) {
+        assert!(std::time::Instant::now() < deadline, "agent never left");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn local_branch_exists(repo: &Path, branch: &str) -> bool {
+    dux_core::test_git::fixture_git()
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("refs/heads/{branch}"),
+        ])
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Retry the change and expect it to land: the folder on `branch`, the base
+/// saved, and the branch still there.
+async fn change_base_succeeds(f: &Fixture, project_id: &str, branch: &str) {
+    let mut ws = events_socket(f).await;
+    let resp = change_base(f, project_id, branch).await;
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let done = status_frame(&mut ws, "Checked out").await;
+    assert!(
+        done["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(&format!("\"{branch}\""))),
+        "{done}"
+    );
+    wait_for_base(f, project_id, branch).await;
+    assert_eq!(git(&f.repo, &["symbolic-ref", "--short", "HEAD"]), branch);
+    assert!(local_branch_exists(&f.repo, branch));
+}
+
+/// The agent's advice: delete it together with its worktree, branch box
+/// unticked. The retry then switches the folder to the branch, which is kept.
+#[tokio::test]
+async fn deleting_the_agent_with_its_worktree_but_not_its_branch_frees_and_keeps_it() {
+    let f = boot().await;
+    let project_id = add_project(&f, false).await;
+    let worktree = create_agent(&f, &project_id).await;
+
+    delete_agent_and_wait(&f, "?delete_worktree=true&delete_branch=false").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while worktree.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worktree was never removed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(local_branch_exists(&f.repo, "agent-one"));
+
+    change_base_succeeds(&f, &project_id, "agent-one").await;
+}
+
+/// The dialog's default keeps the worktree, so the branch stays held; the
+/// refusal then names no agent and points at the worktree manager instead.
+/// Following THAT advice (remove the worktree there, branch box unticked)
+/// frees the branch and keeps it.
+#[tokio::test]
+async fn a_worktree_no_agent_holds_points_at_the_worktree_manager_and_that_way_out_works() {
+    let f = boot().await;
+    let project_id = add_project(&f, false).await;
+    let worktree = create_agent(&f, &project_id).await;
+
+    // The delete dialog's default: worktree box unticked.
+    delete_agent_and_wait(&f, "").await;
+
+    let mut ws = events_socket(&f).await;
+    let resp = change_base(&f, &project_id, "agent-one").await;
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let frame = status_frame(&mut ws, "Can't change the base branch").await;
+    let holder = frame["segments"]
+        .as_array()
+        .and_then(|segments| {
+            segments
+                .iter()
+                .filter_map(|segment| segment["name"].as_str())
+                .find(|name| name.starts_with('/'))
+        })
+        .expect("the refusal names the worktree")
+        .to_string();
+    assert_eq!(
+        frame["message"],
+        format!(
+            "Can't change the base branch of project \"repo\" to \"agent-one\": it is checked \
+             out in the worktree at {holder}, which no agent holds, and git checks a branch out \
+             in one place at a time. Pick another branch, or remove that worktree in the \
+             project's worktree manager but keep its branch: untick the box that also deletes \
+             the branch."
+        )
+    );
+    assert_eq!(
+        PathBuf::from(&holder).canonicalize().unwrap(),
+        worktree.canonicalize().unwrap()
+    );
+
+    // The manager's removal, branch box unticked. A deleted agent's CLI may
+    // still be stopping, which the manager answers with a 409 until it has.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let resp = reqwest::Client::new()
+            .delete(format!(
+                "http://{}/api/v1/projects/{project_id}/worktrees",
+                f.addr
+            ))
+            .query(&[("path", holder.as_str()), ("delete_branch", "false")])
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        if status.is_success() {
+            break;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the manager never removed it: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!worktree.exists());
+    assert!(local_branch_exists(&f.repo, "agent-one"));
+
+    change_base_succeeds(&f, &project_id, "agent-one").await;
+}
+
+/// An agent's worktree folder can vanish (the agent deleted it from inside).
+/// git still counts the branch as checked out there, and the refusal still
+/// names the agent, because its advice works without the folder: deleting the
+/// agent with its worktree, branch box unticked, makes git forget the
+/// registration, and the retry then switches with the branch kept.
+#[tokio::test]
+async fn an_agent_whose_worktree_folder_is_gone_is_named_and_its_advice_frees_the_branch() {
+    let f = boot().await;
+    let project_id = add_project(&f, false).await;
+    let worktree = create_agent(&f, &project_id).await;
+    std::fs::remove_dir_all(&worktree).unwrap();
+
+    let mut ws = events_socket(&f).await;
+    let resp = change_base(&f, &project_id, "agent-one").await;
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let frame = status_frame(&mut ws, "Can't change the base branch").await;
+    assert!(
+        frame["message"]
+            .as_str()
+            .unwrap()
+            .contains("the worktree of agent \"agent-one\" has it checked out"),
+        "{frame}"
+    );
+
+    // Follow the advice exactly.
+    delete_agent_and_wait(&f, "?delete_worktree=true&delete_branch=false").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let gone = worktree.to_string_lossy().into_owned();
+    while git(&f.repo, &["worktree", "list", "--porcelain"]).contains(&gone) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git never forgot the vanished worktree"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(local_branch_exists(&f.repo, "agent-one"));
+
+    change_base_succeeds(&f, &project_id, "agent-one").await;
 }

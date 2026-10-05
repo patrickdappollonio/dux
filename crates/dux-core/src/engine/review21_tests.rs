@@ -144,7 +144,8 @@ fn review21_switch_git_refuses_leaves_the_branch_it_created() {
     let guard = engine.checkout_move_guard();
     let r = repo.clone();
     let result = std::thread::spawn(move || {
-        crate::base_branch::switch_to_base_branch(&r, "feat", &guard).map(|_| ())
+        crate::base_branch::switch_to_base_branch(&r, "feat", &guard, &Default::default())
+            .map(|_| ())
     })
     .join()
     .unwrap();

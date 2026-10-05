@@ -1115,6 +1115,21 @@ pub enum ChangeBaseOutcome {
     },
 }
 
+/// Push `names` as chips joined the way a sentence lists them: "a", "a and
+/// b", "a, b and c".
+fn push_quoted_list(text: &mut StatusText, names: &[String]) {
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            text.push(if index + 1 == names.len() {
+                " and "
+            } else {
+                ", "
+            });
+        }
+        text.push_quoted(name);
+    }
+}
+
 /// The final for a "Change base branch", for both surfaces.
 ///
 /// A failed switch and a failed save are STICKY: the folder or the database
@@ -1122,7 +1137,7 @@ pub enum ChangeBaseOutcome {
 /// refusals are plain errors, because picking again from a fresh list is the
 /// whole fix.
 pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Final {
-    use crate::base_branch::BaseBranchChangeFailure;
+    use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
     match outcome {
         ChangeBaseOutcome::Changed {
             branch,
@@ -1158,16 +1173,102 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
                 ": no local branch or branch on origin has that name any more. Open the \
                  branch list again and pick from what is there now."
             ]),
-            BaseBranchChangeFailure::Held { holder } => Final::error(status_text![
-                "Can't change the base branch of project ",
-                q(project_name),
-                " to ",
-                q(branch),
-                ": it is checked out in the worktree at ",
-                n(holder.display().to_string()),
-                ", and git checks a branch out in one place at a time. Pick another branch, \
-                 or remove that worktree first."
-            ]),
+            // Every way out offered here frees the branch AND keeps it: the
+            // user wants that branch as the base, and both delete dialogs tick
+            // their branch box by default for a branch dux made. Each holder
+            // gets the one way out that works for it, through dux's own
+            // confirmed dialogs, never a worktree removed by hand.
+            BaseBranchChangeFailure::Held { holder, by } => match by {
+                BranchHolder::Agent(agent) => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": the worktree of agent ",
+                    q(agent),
+                    " has it checked out, and git checks a branch out in one place at a time. \
+                     Pick another branch, or delete agent ",
+                    q(agent),
+                    " together with its worktree but keep its branch: in the delete dialog, \
+                     tick the box that deletes the worktree and untick the one that also \
+                     deletes the branch."
+                ]),
+                BranchHolder::SharedAgentWorktree(agents) => {
+                    let mut text = status_text![
+                        "Can't change the base branch of project ",
+                        q(project_name),
+                        " to ",
+                        q(branch),
+                        ": the worktree agents "
+                    ];
+                    push_quoted_list(&mut text, agents);
+                    text.push(
+                        " share has it checked out, and git checks a branch out in one place at \
+                         a time. Pick another branch, or delete every one of those agents, the \
+                         last of them together with the worktree but keeping its branch: in that \
+                         last delete dialog, tick the box that deletes the worktree and untick \
+                         the one that also deletes the branch.",
+                    );
+                    Final::error(text)
+                }
+                BranchHolder::MissingWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": git still counts it as checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", whose folder is gone, and git checks a branch out in one place at a \
+                     time. Pick another branch, or make git forget that one worktree, keeping \
+                     the branch, by running ",
+                    n("git worktree remove"),
+                    " with that path in the project folder."
+                ]),
+                BranchHolder::UnreadableWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": it is checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", and dux could not look at that folder to say whose it is. Pick another \
+                     branch, or fix access to that folder and try again."
+                ]),
+                BranchHolder::UnheldManagedWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": it is checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", which no agent holds, and git checks a branch out in one place at a \
+                     time. Pick another branch, or remove that worktree in the project's \
+                     worktree manager but keep its branch: untick the box that also deletes \
+                     the branch."
+                ]),
+                BranchHolder::StandaloneAgent(agent) => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": the folder of standalone agent ",
+                    q(agent),
+                    " has it checked out, and git checks a branch out in one place at a time. \
+                     Pick another branch, or switch that folder to another branch first: \
+                     deleting a standalone agent leaves its folder where it is."
+                ]),
+                BranchHolder::OtherWorktree => Final::error(status_text![
+                    "Can't change the base branch of project ",
+                    q(project_name),
+                    " to ",
+                    q(branch),
+                    ": it is checked out in the worktree at ",
+                    n(holder.display().to_string()),
+                    ", which dux does not manage, and git checks a branch out in one place \
+                     at a time. Pick another branch, or switch that worktree to another branch \
+                     first."
+                ]),
+            },
             BaseBranchChangeFailure::SwitchFailed(_) => Final::error(status_text![
                 "Couldn't check out ",
                 q(branch),
@@ -1290,8 +1391,8 @@ pub fn checkout_default_branch_confirm_prose(
 
 /// The body of the "change base branch?" confirmation both surfaces show
 /// before anything runs: the folder switches to `to`, and new worktrees branch
-/// from `to` afterwards instead of `from`, the base recorded today (`None`
-/// when the project has none yet). The project and both branches are chips.
+/// from `to` afterwards instead of `from`, the base recorded today (`None`,
+/// or empty, when the project has none yet). The project and both branches are chips.
 /// Pinned against the browser's `changeBaseBranchProse`
 /// (`lib/changeBaseBranch.ts`) by `tests/fixtures/prose_cross_language.json`.
 pub fn change_base_branch_confirm_prose(
@@ -1305,7 +1406,8 @@ pub fn change_base_branch_confirm_prose(
         .text(" to ")
         .quoted(to)
         .text(", moving HEAD in the shared repository.");
-    match from {
+    // An empty recorded base is no base, as the browser reads it.
+    match from.filter(|from| !from.is_empty()) {
         Some(from) if from == to => lead
             .text(" New worktrees already branch from ")
             .quoted(to)
@@ -10060,7 +10162,7 @@ mod tests {
     /// print, with its tone, its stickiness and the names it chips.
     #[test]
     fn every_change_base_final_says_what_happened_and_chips_its_names() {
-        use crate::base_branch::BaseBranchChangeFailure;
+        use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
         use crate::prose::ProseSegment;
         use crate::statusline::StatusTone;
         let changed = |folder_was_on_it, base| ChangeBaseOutcome::Changed {
@@ -10145,13 +10247,102 @@ mod tests {
             (
                 refused(BaseBranchChangeFailure::Held {
                     holder: PathBuf::from("/work/agent"),
+                    by: BranchHolder::Agent("fix-login".to_string()),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": the worktree of \
+                 agent \"fix-login\" has it checked out, and git checks a branch out in one place \
+                 at a time. Pick another branch, or delete agent \"fix-login\" together with its \
+                 worktree but keep its branch: in the delete dialog, tick the box that deletes \
+                 the worktree and untick the one that also deletes the branch.",
+                vec!["app", "develop", "fix-login", "fix-login"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/agent"),
+                    by: BranchHolder::UnheldManagedWorktree,
                 }),
                 StatusTone::Error,
                 false,
                 "Can't change the base branch of project \"app\" to \"develop\": it is checked \
-                 out in the worktree at /work/agent, and git checks a branch out in one place at \
-                 a time. Pick another branch, or remove that worktree first.",
+                 out in the worktree at /work/agent, which no agent holds, and git checks a \
+                 branch out in one place at a time. Pick another branch, or remove that worktree \
+                 in the project's worktree manager but keep its branch: untick the box that \
+                 also deletes the branch.",
                 vec!["app", "develop", "/work/agent"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/home/me/notes"),
+                    by: BranchHolder::StandaloneAgent("Notes".to_string()),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": the folder of \
+                 standalone agent \"Notes\" has it checked out, and git checks a branch out in \
+                 one place at a time. Pick another branch, or switch that folder to another \
+                 branch first: deleting a standalone agent leaves its folder where it is.",
+                vec!["app", "develop", "Notes"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/elsewhere/wt"),
+                    by: BranchHolder::OtherWorktree,
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": it is checked \
+                 out in the worktree at /elsewhere/wt, which dux does not manage, and git checks \
+                 a branch out in one place at a time. Pick another branch, or switch that \
+                 worktree to another branch first.",
+                vec!["app", "develop", "/elsewhere/wt"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/gone"),
+                    by: BranchHolder::MissingWorktree,
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": git still counts \
+                 it as checked out in the worktree at /work/gone, whose folder is gone, and git \
+                 checks a branch out in one place at a time. Pick another branch, or make git \
+                 forget that one worktree, keeping the branch, by running git worktree remove \
+                 with that path in the project folder.",
+                vec!["app", "develop", "/work/gone", "git worktree remove"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/locked"),
+                    by: BranchHolder::UnreadableWorktree,
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": it is checked \
+                 out in the worktree at /work/locked, and dux could not look at that folder to \
+                 say whose it is. Pick another branch, or fix access to that folder and try \
+                 again.",
+                vec!["app", "develop", "/work/locked"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/shared"),
+                    by: BranchHolder::SharedAgentWorktree(vec![
+                        "one".to_string(),
+                        "two".to_string(),
+                        "three".to_string(),
+                    ]),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": the worktree \
+                 agents \"one\", \"two\" and \"three\" share has it checked out, and git checks a \
+                 branch out in one place at a time. Pick another branch, or delete every one of \
+                 those agents, the last of them together with the worktree but keeping its \
+                 branch: in that last delete dialog, tick the box that deletes the worktree and \
+                 untick the one that also deletes the branch.",
+                vec!["app", "develop", "one", "two", "three"],
             ),
             (
                 refused(BaseBranchChangeFailure::SwitchFailed(

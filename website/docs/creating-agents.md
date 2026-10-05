@@ -108,12 +108,24 @@ branch…** in the project's `⋯` menu; in the terminal UI it is the
 `change-project-base-branch` palette command, or the same row in a project's action list
 (see [Managing a project](#managing-a-project)).
 
-dux fetches `origin` first (giving up after 15 seconds, in which case the list shows
-origin's branches as last fetched and says so), then lists every local branch and every
-branch that only exists on `origin`. The current base is marked, and the list is
-searchable. A branch another worktree has checked out, usually an agent's own branch, is
-listed but cannot be picked, and the row names who holds it: git will not check out one
-branch in two places.
+dux fetches `origin` first (trying once more if the fetch fails and there is time left,
+and giving up after 15 seconds in all, in which case the list shows origin's branches as
+last fetched and says why), then lists every local branch and every branch that only
+exists on `origin`. The current base is marked, and the list is searchable. A branch
+another worktree has checked out, usually an agent's own branch, is listed but cannot be
+picked, and the row names who holds it: git will not check out one branch in two places.
+
+To free a branch an agent holds, delete that agent with its worktree, and untick the box
+that also deletes the branch. A worktree no agent holds any more is removed from the
+project's worktree manager, again with that box unticked. A worktree whose folder is gone
+still holds its branch as far as git is concerned; `git worktree remove` with its path,
+run in the project folder, makes git forget it and leaves the branch alone. The error dux
+shows names the way out that applies.
+
+> [!CAUTION]
+> The agent delete dialog ticks "also delete the branch" by default for a branch dux
+> created, and the worktree manager ticks it by default for every branch. Leave it ticked
+> and the branch you wanted as the base is deleted along with the worktree.
 
 Pick a branch and dux asks first, because the project folder switches to that branch.
 Confirm and dux checks it out in the project folder (creating the local branch from

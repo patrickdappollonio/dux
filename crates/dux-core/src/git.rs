@@ -103,18 +103,38 @@ const BINARY_SNIFF_BYTES: usize = 8000;
 /// as an empty file does, and stay out of the panel's totals.
 const UNTRACKED_STATS_MAX_FILES: usize = 2000;
 
-pub fn current_branch(repo_path: &Path) -> Result<String> {
-    let output = Command::new("git")
+/// `git symbolic-ref --quiet HEAD`, the FULL ref. Never `--short`: with a tag
+/// of the same name the short form is `heads/<branch>`, which matches no
+/// branch, so every caller derives the name with [`branch_name_from_head_ref`].
+fn symbolic_head(repo_path: &Path) -> Result<std::process::Output> {
+    Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "symbolic-ref",
             "--quiet",
-            "--short",
             "HEAD",
         ])
+        .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
+        .with_context(|| format!("failed to inspect {}", repo_path.display()))
+}
+
+/// The branch name in the full ref `symbolic-ref` printed: `refs/heads/`
+/// stripped. A HEAD pointing anywhere else is returned whole, so it can never
+/// pass for a branch.
+fn branch_name_from_head_ref(stdout: &[u8]) -> String {
+    let full = String::from_utf8_lossy(stdout).trim().to_string();
+    match full.strip_prefix("refs/heads/") {
+        Some(name) => name.to_string(),
+        None => full,
+    }
+}
+
+/// The branch the checkout at `repo_path` is on; an `Err` for a detached HEAD
+/// as for any failure.
+pub fn current_branch(repo_path: &Path) -> Result<String> {
+    let output = symbolic_head(repo_path)?;
     if !output.status.success() {
         return Err(anyhow!(
             "git symbolic-ref failed for {}: {}",
@@ -122,7 +142,7 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(branch_name_from_head_ref(&output.stdout))
 }
 
 /// Like [`current_branch`], but tolerates a detached HEAD: `Ok(None)` when HEAD
@@ -130,21 +150,9 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
 /// message), and `Err` for any real failure (exit 128 = not a repo, git
 /// missing). For inspection sites that must not treat a detached HEAD as fatal.
 pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
-        .output()
-        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
+    let output = symbolic_head(repo_path)?;
     if output.status.success() {
-        return Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ));
+        return Ok(Some(branch_name_from_head_ref(&output.stdout)));
     }
     // Exit code 1 = "ref is not a symbolic ref" (detached HEAD). Anything else
     // (128 = not a repo / fatal) is a real error. `--quiet` silenced stderr for
@@ -1489,6 +1497,26 @@ fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// The error [`fetch_origin_bounded`] answers when the fetch ran into its
+/// bound and was stopped, typed so a caller can tell "out of time" apart from
+/// a reason git gave (`anyhow::Error::downcast_ref`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchTimedOut {
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Display for FetchTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "git fetch origin timed out after {}s and was stopped",
+            crate::duration_text::whole_seconds(self.timeout)
+        )
+    }
+}
+
+impl std::error::Error for FetchTimedOut {}
+
 /// Run one `git fetch origin` in `repo_path`, stopped at `timeout`.
 ///
 /// The fetch runs in a process group of its own and the whole group is killed
@@ -1547,10 +1575,7 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
             let _ = child.kill();
             let _ = child.wait();
             let _ = drain();
-            return Err(anyhow!(
-                "git fetch origin timed out after {}s and was stopped",
-                timeout.as_secs_f32()
-            ));
+            return Err(FetchTimedOut { timeout }.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
@@ -5485,7 +5510,7 @@ fn wait_child_or_kill(
             let _ = child.wait();
             return Err(anyhow!(
                 "{what} timed out after {}s and was terminated",
-                timeout.as_secs()
+                crate::duration_text::whole_seconds(timeout)
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8563,7 +8588,12 @@ mod tests {
         let started = std::time::Instant::now();
         let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_millis(300))
             .expect_err("the fetch outlives its bound");
-        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "git fetch origin timed out after 1s and was stopped",
+            "typed, and in whole seconds"
+        );
+        assert!(error.downcast_ref::<FetchTimedOut>().is_some(), "{error}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
             "the bound must stop the fetch, took {:?}",
@@ -13124,6 +13154,37 @@ mod tests {
     }
 
     // ── current_branch_opt tests ─────────────────────────────────
+
+    /// A tag with the branch's name makes `symbolic-ref --short` answer
+    /// `heads/develop`. Both helpers read the full ref instead, so they still
+    /// name the branch, and every caller agrees with every other.
+    #[test]
+    fn a_tag_named_like_the_branch_does_not_change_the_branch_name() {
+        let tmp = init_test_repo();
+        run_git(tmp.path(), &["switch", "-q", "-c", "develop"]);
+        run_git(tmp.path(), &["tag", "develop"]);
+
+        assert_eq!(current_branch(tmp.path()).unwrap(), "develop");
+        assert_eq!(
+            current_branch_opt(tmp.path()).unwrap(),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn a_branch_name_is_the_full_ref_with_refs_heads_stripped() {
+        assert_eq!(branch_name_from_head_ref(b"refs/heads/feat/x\n"), "feat/x");
+        assert_eq!(
+            branch_name_from_head_ref(b"refs/heads/heads/x\n"),
+            "heads/x",
+            "only the leading refs/heads/ goes"
+        );
+        assert_eq!(
+            branch_name_from_head_ref(b"refs/remotes/origin/x\n"),
+            "refs/remotes/origin/x",
+            "a HEAD outside refs/heads never passes for a branch"
+        );
+    }
 
     #[test]
     fn current_branch_opt_returns_branch_on_normal_head() {
