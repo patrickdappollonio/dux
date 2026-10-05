@@ -175,8 +175,9 @@ fn review8_registering_a_session_does_not_block_on_the_database() {
     let db = tmp.path().join("sessions.sqlite3");
     let _ = crate::storage::SessionStore::open(&db).unwrap();
     let registry = crate::process_sessions::AgentProcessRegistry::default();
-    registry.attach_store(&db);
-    std::thread::sleep(Duration::from_millis(200));
+    if let Some(prune) = registry.attach_store(&db) {
+        prune.join().expect("the prune finished");
+    }
 
     // Uncontended cost of one registration.
     let started = Instant::now();
@@ -397,7 +398,12 @@ fn the_writer_saves_every_change_and_flush_waits_for_it() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("sessions.sqlite3");
     let registry = crate::process_sessions::AgentProcessRegistry::default();
-    registry.attach_store(&db);
+    // The attach-time prune drops every session nothing runs in, and these
+    // sessions are made up: it must be finished before they are registered,
+    // or it drops whichever it saw (see the test below).
+    if let Some(prune) = registry.attach_store(&db) {
+        prune.join().expect("the prune finished");
+    }
     for n in 0..50u32 {
         registry.register(
             "agent",
@@ -414,5 +420,55 @@ fn the_writer_saves_every_change_and_flush_waits_for_it() {
         .unwrap()
         .load_process_registry()
         .unwrap();
-    assert!(stored.len() >= 50, "{}", stored.len());
+    let mut sids: Vec<u32> = stored.iter().map(|entry| entry.session.sid).collect();
+    sids.sort_unstable();
+    assert_eq!(
+        sids,
+        (0..50u32).map(|n| 4_300_000 + n).collect::<Vec<_>>(),
+        "every registered session is saved once flush says so"
+    );
+}
+
+/// What made the test above fail once on CI, made deterministic: the prune
+/// `attach_store` starts on a thread of its own judges every session
+/// registered before it reads the process table, and drops the ones nothing
+/// runs in. Five made-up sessions registered before it runs are dropped, the
+/// forty-five after it are not, and `flush` then reports exactly what the
+/// registry holds: the writer was never behind.
+#[test]
+fn the_attach_time_prune_drops_made_up_sessions_registered_before_it_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("sessions.sqlite3");
+    let registry = crate::process_sessions::AgentProcessRegistry::default();
+    if let Some(prune) = registry.attach_store(&db) {
+        prune.join().expect("the prune finished");
+    }
+    let made_up = |n: u32| crate::process_sessions::ProcessSession {
+        sid: 4_310_000 + n,
+        started_at: 1,
+        boot: crate::process_sessions::current_boot(),
+    };
+    for n in 0..5u32 {
+        registry.register("agent", made_up(n), tmp.path());
+    }
+    // The attach-time prune landing here, as it did on CI.
+    registry.prune_gone();
+    for n in 5..50u32 {
+        registry.register("agent", made_up(n), tmp.path());
+    }
+    assert!(registry.flush(Duration::from_secs(10)));
+    let stored = crate::storage::SessionStore::open(&db)
+        .unwrap()
+        .load_process_registry()
+        .unwrap();
+    assert_eq!(
+        stored.len(),
+        45,
+        "the five registered before the prune are gone"
+    );
+    assert_eq!(
+        registry.sessions_of("agent").len(),
+        45,
+        "and the database holds exactly what the registry does"
+    );
 }

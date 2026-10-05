@@ -145,9 +145,15 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         removal_coordination: Default::default(),
     };
     // As the real start does: the process registry saved in this database.
-    engine
+    // Its prune is waited for, so a test registering sessions nothing runs in
+    // (made-up sids) never has them dropped by a prune that read the process
+    // table after they were registered.
+    if let Some(prune) = engine
         .process_registry
-        .attach_store(&engine.paths.sessions_db_path);
+        .attach_store(&engine.paths.sessions_db_path)
+    {
+        let _ = prune.join();
+    }
     engine
 }
 

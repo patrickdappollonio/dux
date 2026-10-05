@@ -1633,8 +1633,11 @@ impl AgentProcessRegistry {
     /// started in this boot (a session from another boot is void, every pid
     /// having been handed out afresh since), write every change from now on,
     /// and drop, off the calling thread, every session nothing of which is
-    /// still running.
-    pub fn attach_store(&self, db_path: &std::path::Path) {
+    /// still running. Answers that prune's thread, for a caller that must
+    /// know it has finished (a test registering sessions nothing runs in,
+    /// which the prune would otherwise drop if it read the process table after
+    /// they were registered); dux itself never waits for it.
+    pub fn attach_store(&self, db_path: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
         let loaded = crate::storage::SessionStore::open(db_path)
             .and_then(|store| store.load_process_registry());
         {
@@ -1675,12 +1678,13 @@ impl AgentProcessRegistry {
             }
         }
         let registry = self.clone();
-        let spawned = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("process-registry-prune".to_string())
-            .spawn(move || registry.prune_gone());
-        if let Err(err) = spawned {
-            crate::logger::debug(&format!("could not prune the process registry: {err}"));
-        }
+            .spawn(move || registry.prune_gone())
+            .map_err(|err| {
+                crate::logger::debug(&format!("could not prune the process registry: {err}"));
+            })
+            .ok()
     }
 
     /// Drop every session nothing of which is still running, under the one
