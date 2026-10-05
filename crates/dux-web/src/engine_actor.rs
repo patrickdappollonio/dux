@@ -53,7 +53,7 @@ pub struct ProjectWorktreeInputs {
     pub project: dux_core::model::Project,
     pub paths: dux_core::config::DuxPaths,
     pub sessions: Vec<dux_core::model::AgentSession>,
-    pub busy: Vec<(std::path::PathBuf, String)>,
+    pub busy: Vec<dux_core::worktree_manager::BusyFolder>,
 }
 
 /// One unit of work for the engine thread.

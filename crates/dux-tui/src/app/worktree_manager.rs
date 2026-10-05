@@ -239,6 +239,87 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
 
+    /// The manager as a screen of text, with `entries` listed.
+    fn manager_screen(entries: Vec<ManagedWorktree>) -> String {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.prompt = PromptState::ManageWorktrees(ManageWorktreesPrompt {
+            return_to: None,
+            project,
+            entries,
+            loading: false,
+            selected: None,
+            error: None,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn held_row(name: &str, attached: Option<&str>, busy: Option<&str>) -> ManagedWorktree {
+        ManagedWorktree {
+            path: PathBuf::from(format!("/srv/worktrees/demo/{name}")),
+            label: format!("br-{name}"),
+            branch: Some(format!("br-{name}")),
+            dirty: false,
+            attached_session_id: attached.map(str::to_string),
+            being_removed: false,
+            busy: busy.map(str::to_string),
+        }
+    }
+
+    /// A worktree its own agent holds reads "held by an agent", under that
+    /// header, and no "in use" line: the agent that owns a worktree is not
+    /// something else using it.
+    #[test]
+    fn an_agent_held_row_reads_held_by_an_agent_and_not_in_use() {
+        let screen = manager_screen(vec![held_row("held", Some("s1"), None)]);
+        let line = screen
+            .lines()
+            .find(|line| line.contains("br-held"))
+            .expect("the row is listed");
+        assert!(line.contains("held by an agent"), "{line}");
+        assert!(!line.contains("in use"), "{line}");
+        assert!(screen.contains("Held By An Agent"), "{screen}");
+    }
+
+    /// Held by its agent AND used by something else: both are said.
+    #[test]
+    fn an_agent_held_row_something_else_uses_says_both() {
+        let screen = manager_screen(vec![held_row(
+            "both",
+            Some("s1"),
+            Some("a terminal open in it"),
+        )]);
+        let line = screen
+            .lines()
+            .find(|line| line.contains("br-both"))
+            .expect("the row is listed");
+        assert!(line.contains("held by an agent"), "{line}");
+        assert!(line.contains("in use: a terminal open in it"), "{line}");
+    }
+
+    /// No agent holds it, something uses it: "in use", as before.
+    #[test]
+    fn a_row_no_agent_holds_but_something_uses_reads_in_use() {
+        let screen = manager_screen(vec![held_row("busy", None, Some("a terminal open in it"))]);
+        let line = screen
+            .lines()
+            .find(|line| line.contains("br-busy"))
+            .expect("the row is listed");
+        assert!(line.contains("in use: a terminal open in it"), "{line}");
+        assert!(!line.contains("held by an agent"), "{line}");
+    }
+
     #[test]
     fn the_listing_spinner_survives_the_busy_timeout_and_is_retired_by_its_final() {
         // The TUI keeps several op registries of its own, in the App rather than

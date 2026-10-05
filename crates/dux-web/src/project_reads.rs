@@ -196,6 +196,11 @@ struct ProjectWorktreeEntryView {
     /// it now. Not adoptable, not removable a second time; the client labels it
     /// "being removed".
     being_removed: bool,
+    /// What, other than the agent holding it, is using the worktree, as a
+    /// sentence ("In use: a terminal open in it."), or `null`. Carried on its
+    /// own so a row its agent holds can say both: it stays under its agent,
+    /// with this beside it.
+    in_use: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -256,14 +261,16 @@ fn classify_managed_worktrees(
     .into_iter()
     .map(|entry| ProjectWorktreeEntryView {
         adoptable: entry.is_removable(),
+        in_use: entry.busy.as_ref().map(|busy| format!("In use: {busy}.")),
         reason: if entry.being_removed {
             Some("Being removed: its agent was just deleted.".to_string())
-        } else if let Some(busy) = &entry.busy {
-            Some(format!("In use: {busy}."))
-        } else if entry.is_removable() {
-            None
         } else {
-            Some("Already has an agent.".to_string())
+            match (&entry.attached_session_id, &entry.busy) {
+                (Some(_), Some(busy)) => Some(format!("Already has an agent. In use: {busy}.")),
+                (Some(_), None) => Some("Already has an agent.".to_string()),
+                (None, Some(busy)) => Some(format!("In use: {busy}.")),
+                (None, None) => None,
+            }
         },
         being_removed: entry.being_removed,
         worktree_path: entry.path.to_string_lossy().to_string(),

@@ -263,6 +263,10 @@ export interface ProjectWorktreeEntryView {
   // and is still exiting, or git is removing it now. Neither adoptable nor
   // removable a second time.
   being_removed: boolean
+  // What, other than the agent holding it, is using the worktree, as a
+  // sentence, or null. A row its agent holds keeps its place under that agent
+  // and shows this beside it.
+  in_use?: string | null
 }
 
 // The branch-warning classification for a candidate project path. `known` names

@@ -60,10 +60,12 @@ pub struct ManagedWorktree {
     /// removing it now. Listed, labelled "being removed", and not removable a
     /// second time.
     pub being_removed: bool,
-    /// Why the folder is in use though no listed agent holds it: an agent is
-    /// being created in it, or something dux started is still running there
-    /// (a deleted agent's CLI still stopping, a terminal). Listed, labelled
-    /// with this, and not removable until it has gone.
+    /// What, other than the agent that holds it, is using the folder: an
+    /// agent being created in it, something dux started still running there
+    /// (a deleted agent's CLI still stopping, a terminal), or a standalone
+    /// agent working in it. Listed, labelled with this, and not removable
+    /// until it has gone. The holding agent itself is never this (see
+    /// [`in_use_by`]).
     pub busy: Option<String>,
 }
 
@@ -115,6 +117,29 @@ pub fn list_manageable_worktrees(
     list_manageable_worktrees_with_busy(project, paths, sessions, ops, &[])
 }
 
+/// Something occupying a folder, as the manager's listing is told it (see
+/// [`crate::engine::Engine::busy_folders`]): where, why, and the agent it
+/// belongs to, when it is an agent's own (its record, or its own tab running
+/// there).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusyFolder {
+    pub folder: PathBuf,
+    pub reason: String,
+    pub agent_id: Option<String>,
+}
+
+/// What `entry` is in use by, other than the agent that holds it: the agent
+/// that owns a worktree is not something else using it (its row reads "held
+/// by an agent", and removing it is refused for that reason), so `busy` is
+/// kept for any other occupant, alongside the holding agent when there is
+/// one. Pure.
+pub fn in_use_by(entry_path: &Path, holder: Option<&str>, busy: &[BusyFolder]) -> Option<String> {
+    busy.iter()
+        .filter(|occupant| holder.is_none() || occupant.agent_id.as_deref() != holder)
+        .find(|occupant| crate::worktree_ops::folder_contains(entry_path, &occupant.folder))
+        .map(|occupant| occupant.reason.clone())
+}
+
 /// [`list_manageable_worktrees`], marking as busy each folder in `busy` (what
 /// dux still runs there, from [`crate::engine::Engine::busy_folders`]) and each
 /// folder an agent is being created in, so a row the manager would refuse to
@@ -124,7 +149,7 @@ pub fn list_manageable_worktrees_with_busy(
     paths: &DuxPaths,
     sessions: &[AgentSession],
     ops: &WorktreeOps,
-    busy: &[(PathBuf, String)],
+    busy: &[BusyFolder],
 ) -> Result<Vec<ManagedWorktree>, String> {
     let worktrees = git::list_worktrees(Path::new(&project.path)).map_err(|e| format!("{e:#}"))?;
     let classified =
@@ -142,9 +167,7 @@ pub fn list_manageable_worktrees_with_busy(
             {
                 Some("an agent is being created in it".to_string())
             } else {
-                busy.iter()
-                    .find(|(folder, _)| crate::worktree_ops::folder_contains(&entry.path, folder))
-                    .map(|(_, reason)| reason.clone())
+                in_use_by(&entry.path, entry.attached_session_id.as_deref(), busy)
             };
             entry.dirty = git::worktree_is_dirty(&entry.path).unwrap_or(false);
             entry

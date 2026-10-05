@@ -76,6 +76,7 @@ function entry(
     dirty: false,
     agent_id: null,
     being_removed: false,
+    in_use: null,
     ...overrides,
   }
 }
@@ -166,6 +167,43 @@ describe("WorktreesDialog", () => {
     // The agent after the "Held by" label is a name, so it is the shared chip.
     const held = screen.getByText("tidy-otter", { selector: "code" })
     expect(held.parentElement?.textContent).toBe("Held by tidy-otter")
+  })
+
+  it("files a worktree its own agent holds under its agent, with no in-use line", () => {
+    // The agent that owns a worktree is not something else using it.
+    seed([
+      entry({
+        branch_name: "held",
+        worktree_path: "/wt/held",
+        adoptable: false,
+        agent_id: "s1",
+        reason: "Already has an agent.",
+      }),
+    ])
+    render(<WorktreesDialog />)
+    expect(screen.getByText("Already has an agent")).toBeTruthy()
+    expect(screen.queryByText("In use")).toBeNull()
+    expect(screen.queryByText(/^In use:/)).toBeNull()
+  })
+
+  it("says what else is using a worktree its agent holds, still under its agent", () => {
+    seed([
+      entry({
+        branch_name: "held",
+        worktree_path: "/wt/held",
+        adoptable: false,
+        agent_id: "s1",
+        reason: "Already has an agent. In use: a terminal open in it.",
+        in_use: "In use: a terminal open in it.",
+      }),
+    ])
+    render(<WorktreesDialog />)
+    expect(screen.getByText("Already has an agent")).toBeTruthy()
+    // No section of its own: the agent holding it is the way to remove it.
+    expect(screen.queryByText("In use")).toBeNull()
+    const held = screen.getByText("tidy-otter", { selector: "code" })
+    expect(held.parentElement?.textContent).toBe("Held by tidy-otter")
+    expect(screen.getByText("In use: a terminal open in it.")).toBeTruthy()
   })
 
   it("labels a worktree whose agent was just deleted as being removed, with no delete", () => {
