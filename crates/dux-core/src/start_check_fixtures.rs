@@ -398,6 +398,10 @@ pub const PLAINTEXT_PASSWORD_POSITIONS: &[&str] = &[
     // names; a project's own field is no name either.
     "[projects.env]\npassword = \"{V}\"\n",
     "[[projects]]\npath = \"/tmp/p\"\npassword = \"{V}\"\n",
+    // `[keys]` names are dux's actions, and `password` is none, whatever
+    // shape its value has.
+    "[keys]\npassword = \"{V}\"\n",
+    "[keys]\npassword = [\"{V}\"]\n",
     // Quoted keys holding dots.
     "\"env.password\" = \"{V}\"\n",
     "[server]\n\"auth.password\" = \"{V}\"\n",

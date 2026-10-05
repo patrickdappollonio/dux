@@ -58,7 +58,11 @@ fn a_password_hash_added_to_the_documented_file_never_starts_dux_server_without_
     ))
     .expect("hash");
     let line = format!("password_hash = \"{hash}\"");
-    for body in [appended(&line), inside("macros", &line)] {
+    for body in [
+        appended(&line),
+        inside("macros", &line),
+        inside("keys", &line),
+    ] {
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = paths(tmp.path());
         std::fs::write(&p.config_path, &body).expect("seed");
@@ -81,12 +85,13 @@ fn a_plaintext_password_added_to_the_documented_file_is_found_and_never_printed(
     for (place, body) in [
         ("end", appended(&line)),
         ("macros", inside("macros", &line)),
+        ("keys", inside("keys", &line)),
     ] {
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = paths(tmp.path());
         std::fs::write(&p.config_path, &body).expect("seed");
         let mut said = String::new();
-        for table in ["macros", "server", "server.auth"] {
+        for table in ["macros", "keys", "server", "server.auth"] {
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let _ = run_get(&[table.to_string()], &p, &mut out, &mut err);
             said.push_str(&String::from_utf8_lossy(&out));
@@ -129,6 +134,7 @@ fn every_auth_setting_added_to_the_documented_file_is_read_or_stops_the_start() 
             for (place, body) in [
                 ("end", appended(&line)),
                 ("macros", inside("macros", &line)),
+                ("keys", inside("keys", &line)),
             ] {
                 let Ok(file) = toml::from_str::<toml::Table>(&body) else {
                     // A key written twice: not TOML, which stops the start.

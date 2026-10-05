@@ -122,18 +122,21 @@ fn printed(body: &str) -> Vec<(String, String)> {
 }
 
 /// dux's own documented file with `line` added where a user adds one: at
-/// its very end, and first inside `[macros]`, which it used to end in.
-/// (`[keys]` is left out: a string there is a binding's shape, so a key
-/// written there is a binding's name.)
+/// its very end, and first inside `[macros]` (which it used to end in) and
+/// `[keys]`, wherever those now sit.
 fn documented_positions(line: &str) -> Vec<String> {
     crate::config::install_canonical_renderer();
     let base = crate::config::render_default_config();
-    let header = "\n[macros]\n";
-    let at = base.find(header).expect("the documented file has [macros]") + header.len();
-    vec![
-        format!("{base}\n{line}\n"),
-        format!("{}{line}\n{}", &base[..at], &base[at..]),
-    ]
+    let mut positions = vec![format!("{base}\n{line}\n")];
+    for section in ["macros", "keys"] {
+        let header = format!("\n[{section}]\n");
+        let at = base
+            .find(&header)
+            .expect("the documented file has the section")
+            + header.len();
+        positions.push(format!("{}{line}\n{}", &base[..at], &base[at..]));
+    }
+    positions
 }
 
 /// The previews of `dux config regenerate` and `dux config restore-docs`,

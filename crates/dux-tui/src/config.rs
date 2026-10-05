@@ -1731,6 +1731,7 @@ pub fn install_canonical_renderer() {
         fold_legacy_key_actions(doc);
     });
     dux_core::config::install_terminal_ui_key_resolution(terminal_ui_keys);
+    dux_core::config::install_terminal_ui_key_actions(is_key_action);
     // `get` and `set` judge `[ui] theme` by the terminal UI's own loader.
     dux_core::config_effective::install_theme_resolver(|name, root| {
         let paths = DuxPaths {
@@ -1742,6 +1743,17 @@ pub fn install_canonical_renderer() {
         };
         crate::theme::load(name, &paths).is_ok()
     });
+}
+
+/// Whether `name` is an action `[keys]` may bind: one the binding parser
+/// knows (`BINDING_DEFS`, the list `validate_keys` checks), or a retired or
+/// folded name its load still takes.
+fn is_key_action(name: &str) -> bool {
+    keybindings::BINDING_DEFS
+        .iter()
+        .any(|def| def.action.config_name() == name)
+        || RETIRED_KEY_ACTIONS.contains(&name)
+        || FOLDED_KEY_ACTIONS.iter().any(|(legacy, _)| *legacy == name)
 }
 
 /// The `[keys]` the terminal UI runs with for a whole config file, by its

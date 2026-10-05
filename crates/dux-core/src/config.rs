@@ -3166,13 +3166,15 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// it is written, `[server.auth]` included, saying how to set one.
 ///
 /// Two places are exempt. A NAME the user chose (an `[env]` variable, a
-/// provider, a macro or a binding's action, a variable in a project's `env`
-/// inside the `[[projects]]` list) is just a name: a provider called `password_hash` is not a password hash,
-/// though a field inside it is a field of dux's schema like anywhere else.
-/// It is a name only when its value has the shape that map's entries have
-/// (a string for a variable, a table for a provider or a macro, a key or a
-/// list of keys for a binding): `password = "…"` under `[macros]`, where a
-/// line added at the end of a file ending in `[macros]` lands, is no macro.
+/// provider, a macro, a variable in a project's `env` inside the
+/// `[[projects]]` list) is just a name: a provider called `password_hash` is
+/// not a password hash, though a field inside it is a field of dux's schema
+/// like anywhere else. It is a name only when its value has the shape that
+/// map's entries have (a string for a variable, a table for a provider or a
+/// macro): `password = "…"` under `[macros]`, where a line added at the end
+/// of a file ending in `[macros]` lands, is no macro. A `[keys]` name is no
+/// name the user chose but one of dux's bindable actions, so only an action
+/// dux has, bound to a key or a list of keys, is exempt there.
 /// A key reached through an array is never such a name (the top-level
 /// `[[projects]]` list aside, whose entries are projects): a map of names
 /// written as an array (`[[env]]`, `[[providers]]`, `macros = [{…}]`) is no
@@ -3466,7 +3468,7 @@ fn misplaced_auth_settings(
                     && !walk.through_other_array
                     && (walk.through_array
                         || walk.keys.first().map(String::as_str) != Some("projects"))
-                    && names_a_user_entry(&walk.keys, child);
+                    && names_a_user_entry(&walk.keys, key, child);
                 walk.shown.push(PathStep::Key(key.clone()));
                 walk.keys.push(key.clone());
                 if !a_name {
@@ -3533,13 +3535,13 @@ fn misplaced_auth_settings(
 /// has another shape is no entry of the map at all (a string is never a
 /// macro), so it is judged like any other key: a password written at the
 /// end of a file whose last table is `[macros]` is a password.
-fn names_a_user_entry(parent: &[String], value: &toml::Value) -> bool {
+fn names_a_user_entry(parent: &[String], name: &str, value: &toml::Value) -> bool {
     let rule = match parent {
         [section] => user_name_rule(section),
         [projects, env] if projects == "projects" && env == "env" => Some(NameRule::Variable),
         _ => None,
     };
-    rule.is_some_and(|rule| rule.entry_fits(value))
+    rule.is_some_and(|rule| rule.entry_fits(name, value))
 }
 
 /// [`misplaced_auth_problem_list`]'s sentences.
@@ -3843,6 +3845,30 @@ pub fn install_terminal_ui_key_resolution(resolution: TerminalUiKeyResolution) {
     let _ = TERMINAL_UI_KEYS.set(resolution);
 }
 
+/// Whether a `[keys]` name is one of the terminal UI's bindable actions, by
+/// the list its binding parser reads (retired and folded names included,
+/// which its load still knows). Installed by the terminal UI, which alone
+/// knows its actions.
+pub type TerminalUiKeyActions = fn(&str) -> bool;
+
+static TERMINAL_UI_KEY_ACTIONS: std::sync::OnceLock<TerminalUiKeyActions> =
+    std::sync::OnceLock::new();
+
+/// Install the terminal UI's action list (see [`TerminalUiKeyActions`]); a
+/// second install is ignored.
+pub fn install_terminal_ui_key_actions(is_action: TerminalUiKeyActions) {
+    let _ = TERMINAL_UI_KEY_ACTIONS.set(is_action);
+}
+
+/// Whether `name` is an action `[keys]` binds. Without the terminal UI's
+/// list installed no name is one, so nothing under `[keys]` is exempt from
+/// the auth checks: an unknown answer never lets a password pass as a name.
+fn is_key_action(name: &str) -> bool {
+    TERMINAL_UI_KEY_ACTIONS
+        .get()
+        .is_some_and(|is_action| is_action(name))
+}
+
 /// The `[keys]` the terminal UI uses with the whole config file `raw`, by
 /// its own resolution, when installed.
 pub fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
@@ -4110,19 +4136,24 @@ enum NameRule {
 }
 
 impl NameRule {
-    /// Whether `value` has the shape an entry of a map named by this rule
-    /// has: a variable's value is a string, a provider or a macro is a
-    /// table, a binding is a key or a list of keys, and a list has no named
-    /// entries.
-    fn entry_fits(self, value: &toml::Value) -> bool {
+    /// Whether `name` holding `value` is an entry of a map named by this
+    /// rule: a variable's value is a string, a provider or a macro is a
+    /// table, and a list has no named entries. `[keys]` names are no names
+    /// the user chose but dux's own bindable actions, so a binding is an
+    /// action dux has (see [`is_key_action`]) bound to a key or a list of
+    /// keys.
+    fn entry_fits(self, name: &str, value: &toml::Value) -> bool {
         match self {
             Self::Variable => value.is_str(),
             Self::Plain => value.is_table(),
-            Self::Action => match value {
-                toml::Value::String(_) => true,
-                toml::Value::Array(items) => items.iter().all(toml::Value::is_str),
-                _ => false,
-            },
+            Self::Action => {
+                is_key_action(name)
+                    && match value {
+                        toml::Value::String(_) => true,
+                        toml::Value::Array(items) => items.iter().all(toml::Value::is_str),
+                        _ => false,
+                    }
+            }
             Self::Any => false,
         }
     }
@@ -6002,6 +6033,18 @@ mod tests {
                 .is_empty()
         );
         assert!(plaintext_passwords("[env]\npassword = \"s\"\n").is_empty());
+        // `[keys]` names are actions, and `password` is none, whatever shape
+        // its value has.
+        for raw in ["[keys]\npassword = \"s\"\n", "[keys]\npassword = [\"s\"]\n"] {
+            assert_eq!(
+                plaintext_passwords(raw)
+                    .into_iter()
+                    .map(|found| found.steps)
+                    .collect::<Vec<_>>(),
+                vec![vec![key("keys"), key("password")]],
+                "{raw:?}"
+            );
+        }
         assert!(plaintext_passwords("password = \"s\"\nbroken =\n").is_empty());
     }
 
@@ -8222,6 +8265,8 @@ max_websocket_connections = 16
             "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
             "[macros.greet]\ntext = \"x\"\nsurface = \"agent\"\npassword_hash = \"x\"\n",
             "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\npassword_hash = \"x\"\n",
+            // `[keys]` names are dux's actions, never the user's own.
+            "[keys]\npassword_hash = [\"x\"]\n",
         ] {
             let problems = misplaced_auth_problems(body);
             assert_eq!(problems.len(), 1, "{body}: {problems:?}");
@@ -8233,7 +8278,6 @@ max_websocket_connections = 16
             "[providers.password_hash]\ncommand = \"mytool\"\n",
             "[macros.password_hash]\ntext = \"x\"\n",
             "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword_hash = \"x\"\n",
-            "[keys]\npassword_hash = [\"x\"]\n",
         ] {
             assert_eq!(
                 misplaced_auth_problems(body),

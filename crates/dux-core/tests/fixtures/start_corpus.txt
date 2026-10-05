@@ -67,8 +67,11 @@
 #   `[providers]`, a table under `[env]`, a number under `[keys]`) is a
 #   misplaced setting and stops `dux server` too. dux's own documented file
 #   ended in `[macros]`, so a password line added at its end landed there,
-#   and 7437238c started with no password. A string or a list of strings
-#   under `[keys]` is a binding's shape and stays a name.
+#   and 7437238c started with no password. `[keys]` names are no names the
+#   user chose but dux's own bindable actions, so only an action dux has
+#   (with a binding's shape) is a name there: an auth setting under `[keys]`
+#   is misplaced whatever its value, and a `password` there is a plaintext
+#   password.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -558,8 +561,8 @@ refuse refuse(was:start) "[providers]\npassword_hash = \"$argon2id$v=19$m=19456,
 refuse refuse(was:start) "[providers]\npassword = \"correct horse battery staple veranda\"\n"
 refuse refuse(was:start) "[env]\npassword_hash = { value = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" }\n"
 refuse refuse(was:start) "[env.password]\nvalue = \"correct horse battery staple veranda\"\n"
-refuse start "[keys]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
-refuse start "[keys]\npassword = \"correct horse battery staple veranda\"\n"
+refuse refuse(was:start) "[keys]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse refuse(was:start) "[keys]\npassword = \"correct horse battery staple veranda\"\n"
 refuse refuse(was:start) "[keys]\npassword_hash = 5\n"
 
 # Every case above that is TOML with at least one table, written again twice:
