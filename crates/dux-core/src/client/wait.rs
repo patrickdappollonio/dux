@@ -77,6 +77,22 @@ pub struct OperationRecord {
     pub parts: Vec<RecordPart>,
 }
 
+/// A change the dux refused, with the operation it named as in the way, when
+/// the refusal named one.
+pub struct Refused {
+    pub error: CliError,
+    pub operation: Option<String>,
+}
+
+impl From<CliError> for Refused {
+    fn from(error: CliError) -> Self {
+        Self {
+            error,
+            operation: None,
+        }
+    }
+}
+
 impl Client {
     /// Send a change as an operation and return its record as the change
     /// answered it: already final when the change finished inside the call.
@@ -86,6 +102,17 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<OperationRecord, CliError> {
+        self.try_change(method, path, body)
+            .map_err(|refused| refused.error)
+    }
+
+    /// [`Self::change`], keeping the operation a refusal names.
+    pub fn try_change(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<OperationRecord, Refused> {
         let separator = if path.contains('?') { '&' } else { '?' };
         let reply = self.send(Request {
             method,
@@ -95,9 +122,15 @@ impl Client {
             timeout: None,
         })?;
         if reply.status != 202 {
-            return Err(self.refusal(&reply));
+            let operation = serde_json::from_slice::<serde_json::Value>(&reply.body)
+                .ok()
+                .and_then(|json| json.get("operation")?.as_str().map(str::to_string));
+            return Err(Refused {
+                error: self.refusal(&reply),
+                operation,
+            });
         }
-        self.parse(&reply)
+        Ok(self.parse(&reply)?)
     }
 
     /// The record `id` as it stands, without waiting.

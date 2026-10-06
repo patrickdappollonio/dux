@@ -204,6 +204,11 @@ pub struct InTheWay {
     pub kind: OperationKind,
 }
 
+/// The engine's refusal of a create while another create or fork is running.
+/// It names no operation: a client that waits for the other one reads its id
+/// from the route's answer instead.
+pub const CREATE_IN_FLIGHT_REFUSAL: &str = "An agent is already being created or forked.";
+
 /// How every [`InTheWay`] sentence starts, so a route can tell this refusal
 /// from the others an engine error carries (see [`is_in_the_way`]).
 const IN_THE_WAY_LEAD: &str = "Another change is still running here";
@@ -683,6 +688,18 @@ impl Operations {
                     id: id.clone(),
                     kind: record.kind,
                 })
+        })
+    }
+
+    /// The id of the earliest-started open record of `kind`, if there is one.
+    pub fn earliest_open_of(&self, kind: OperationKind) -> Option<String> {
+        self.with(|registry| {
+            registry
+                .records
+                .iter()
+                .filter(|(_, record)| record.end.is_none() && record.kind == kind)
+                .min_by_key(|(_, record)| record.started)
+                .map(|(id, _)| id.clone())
         })
     }
 
@@ -1704,6 +1721,35 @@ mod tests {
             let answer = ops.admit(None, std::slice::from_ref(&wanted), &[]);
             assert_eq!(answer.is_err(), refused, "{name}");
         }
+    }
+
+    #[test]
+    fn the_earliest_open_record_of_a_kind_is_found_until_it_finishes() {
+        let ops = Operations::default();
+        let t0 = Instant::now();
+        assert_eq!(ops.earliest_open_of(OperationKind::AgentCreate), None);
+        ops.open("op-stop", OperationKind::AgentStop, POLICY, t0);
+        ops.open(
+            "op-b",
+            OperationKind::AgentCreate,
+            POLICY,
+            t0 + std::time::Duration::from_secs(2),
+        );
+        ops.open(
+            "op-a",
+            OperationKind::AgentCreate,
+            POLICY,
+            t0 + std::time::Duration::from_secs(1),
+        );
+        assert_eq!(
+            ops.earliest_open_of(OperationKind::AgentCreate).as_deref(),
+            Some("op-a")
+        );
+        ops.finish("op-a", StatusTone::Info, "Done.", None, t0);
+        assert_eq!(
+            ops.earliest_open_of(OperationKind::AgentCreate).as_deref(),
+            Some("op-b")
+        );
     }
 
     #[test]

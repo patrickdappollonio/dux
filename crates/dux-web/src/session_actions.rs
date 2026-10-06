@@ -299,6 +299,26 @@ async fn dispatch_create(
     Ok(outcome)
 }
 
+/// A refused create answered to a client that follows its change. Refused for
+/// another create running, it also carries that create's operation id when one
+/// is open, so the client can wait for it; every other refusal, and every
+/// caller that did not ask to follow, gets the bare sentence.
+fn followed_refusal(state: &AppState, status: StatusCode, message: String) -> Response {
+    if message == dux_core::operations::CREATE_IN_FLIGHT_REFUSAL
+        && let Some(operation) = state
+            .engine
+            .operations()
+            .earliest_open_of(OperationKind::AgentCreate)
+    {
+        return (
+            status,
+            Json(serde_json::json!({ "message": message, "operation": operation })),
+        )
+            .into_response();
+    }
+    (status, message).into_response()
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Query(operation): Query<OperationQuery>,
@@ -341,7 +361,7 @@ async fn create_session(
                 )
                     .into_response(),
             },
-            Err(refusal) => refusal.into_response(),
+            Err((status, message)) => followed_refusal(&state, status, message),
         };
     }
 
@@ -1387,7 +1407,9 @@ mod tests {
     /// Boot a router whose engine has ONE project pointing at a real git repo
     /// that already has a branch named `existing_branch`. The project is declared
     /// in config.toml so the bootstrap reconciliation adopts it into the engine.
-    fn router_with_project_and_branch(existing_branch: &str) -> (TempDir, axum::Router, String) {
+    fn engine_with_project_and_branch(
+        existing_branch: &str,
+    ) -> (TempDir, dux_core::engine::Engine) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1415,16 +1437,29 @@ mod tests {
         )
         .unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+        (tmp, engine)
+    }
+
+    fn router_with_project_and_branch(existing_branch: &str) -> (TempDir, axum::Router, String) {
+        let (tmp, engine) = engine_with_project_and_branch(existing_branch);
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         (tmp, crate::server::router(handle), "p1".to_string())
     }
 
     async fn post_create(app: &axum::Router, body: serde_json::Value) -> axum::response::Response {
+        post_create_at(app, "/api/v1/sessions", body).await
+    }
+
+    async fn post_create_at(
+        app: &axum::Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions")
+                    .uri(uri)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(body.to_string()))
                     .unwrap(),
@@ -1486,6 +1521,51 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["existing_branch"]["name"], "feature-x");
         assert_eq!(json["existing_branch"]["location"], "local");
+    }
+
+    /// A create refused because another create is running keeps its sentence
+    /// and status for every caller; one that asked to follow the change as an
+    /// operation also learns which operation is in the way, when there is one.
+    #[tokio::test]
+    async fn a_create_refused_for_another_create_names_its_operation_only_when_following() {
+        let (_tmp, mut engine) = engine_with_project_and_branch("feature-x");
+        engine.mark_in_flight(dux_core::engine::InFlightKey::CreateAgent);
+        engine.open_operation("op-first", dux_core::operations::OperationKind::AgentCreate);
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+        let body = serde_json::json!({ "kind": "new", "project_id": "p1", "name": "fresh" });
+        let sentence = "An agent is already being created or forked.";
+
+        let plain = post_create_at(&app, "/api/v1/sessions", body.clone()).await;
+        assert_eq!(plain.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(plain.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&bytes), sentence);
+
+        let followed = post_create_at(&app, "/api/v1/sessions?operation=1", body).await;
+        assert_eq!(followed.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(followed.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["message"], sentence);
+        assert_eq!(json["operation"], "op-first");
+    }
+
+    /// With no open create record (a terminal UI started it), the followed
+    /// refusal is the bare sentence, naming no operation.
+    #[tokio::test]
+    async fn a_followed_create_refused_with_no_create_record_names_no_operation() {
+        let (_tmp, mut engine) = engine_with_project_and_branch("feature-x");
+        engine.mark_in_flight(dux_core::engine::InFlightKey::CreateAgent);
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+        let body = serde_json::json!({ "kind": "new", "project_id": "p1", "name": "fresh" });
+
+        let followed = post_create_at(&app, "/api/v1/sessions?operation=1", body).await;
+        assert_eq!(followed.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(followed.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "An agent is already being created or forked."
+        );
     }
 
     /// A create for a FRESH name (no matching branch) is not refused by the
