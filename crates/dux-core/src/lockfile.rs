@@ -471,12 +471,12 @@ mod tests {
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
-        let leftover = fs::symlink_metadata(&socket).unwrap().ino();
 
         let mut lock = SingleInstanceLock::acquire(&path).unwrap();
         lock.open_control_socket(&socket)
             .expect("a dead socket is replaced");
-        assert_ne!(fs::symlink_metadata(&socket).unwrap().ino(), leftover);
+        // The leftover refused every connection, so one that is accepted proves
+        // it was replaced (a filesystem may hand the new file the old inode).
         std::os::unix::net::UnixStream::connect(&socket).expect("the new socket accepts");
         drop(lock);
 
