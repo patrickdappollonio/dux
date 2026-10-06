@@ -235,6 +235,32 @@ impl Blocker {
     }
 }
 
+/// One connection as the listing shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionView {
+    /// The registry's id for it.
+    pub id: String,
+    pub surface: Surface,
+    pub device: Option<String>,
+    pub address: Option<String>,
+    /// Whether `address` is one the auth layer verified; otherwise it is the
+    /// peer's, which a proxy in between may be.
+    pub verified: bool,
+    /// When it connected, as RFC 3339 UTC to the second.
+    pub since: String,
+    /// Whether it drives any of what it is attached to.
+    pub driving: bool,
+    pub attachments: Vec<AttachmentView>,
+}
+
+/// One tab or terminal a listed connection is streaming.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentView {
+    #[serde(flatten)]
+    pub target: Target,
+    pub driving: bool,
+}
+
 /// How a connection or an attachment ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
@@ -254,6 +280,8 @@ pub struct Reserved;
 struct Connection {
     facts: ConnectionFacts,
     heard: Option<Heard>,
+    /// When it connected, by the wall clock, for the listing.
+    since: chrono::DateTime<chrono::Utc>,
 }
 
 struct Attachment {
@@ -330,9 +358,14 @@ impl Attachments {
     /// (the terminal UI).
     pub fn register(&self, id: &str, facts: ConnectionFacts, heard: Option<Heard>) {
         self.with(|state| {
-            state
-                .connections
-                .insert(id.to_string(), Connection { facts, heard });
+            state.connections.insert(
+                id.to_string(),
+                Connection {
+                    facts,
+                    heard,
+                    since: chrono::Utc::now(),
+                },
+            );
         });
     }
 
@@ -485,6 +518,13 @@ impl Attachments {
                 );
             }
         });
+    }
+
+    /// The connections that are up, oldest first, each with what it is
+    /// attached to. One that has gone quiet past [`QUIET_DEADLINE`] is not
+    /// listed, as it does not block either.
+    pub fn connections(&self, now: Instant) -> Vec<ConnectionView> {
+        self.with(|state| state.connections(now))
     }
 
     /// Who would be cut off by a change to `scope`, leaving out `exempt`.
@@ -677,6 +717,48 @@ impl State {
         blockers
     }
 
+    fn connections(&self, now: Instant) -> Vec<ConnectionView> {
+        let mut listed: Vec<(chrono::DateTime<chrono::Utc>, ConnectionView)> = self
+            .connections
+            .iter()
+            .filter(|(_, connection)| connection_live(connection, now))
+            .map(|(id, connection)| {
+                let mut attached: Vec<(&u64, &Attachment)> = self
+                    .attachments
+                    .iter()
+                    .filter(|(_, attachment)| {
+                        attachment.connection == *id
+                            && (attachment.viewed_at.is_some()
+                                || !attachment.heard.as_ref().is_some_and(|h| h.quiet(now)))
+                    })
+                    .collect();
+                attached.sort_by_key(|(token, _)| **token);
+                let attachments: Vec<AttachmentView> = attached
+                    .into_iter()
+                    .map(|(_, attachment)| AttachmentView {
+                        target: attachment.target.clone(),
+                        driving: self.drives(&connection.facts, attachment),
+                    })
+                    .collect();
+                let view = ConnectionView {
+                    id: id.clone(),
+                    surface: connection.facts.surface,
+                    device: connection.facts.device.clone(),
+                    address: connection.facts.address.map(|a| a.to_string()),
+                    verified: connection.facts.verified,
+                    since: connection
+                        .since
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    driving: attachments.iter().any(|a| a.driving),
+                    attachments,
+                };
+                (connection.since, view)
+            })
+            .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        listed.into_iter().map(|(_, view)| view).collect()
+    }
+
     fn drives(&self, facts: &ConnectionFacts, attachment: &Attachment) -> bool {
         match (attachment.pty_conn, &self.owners) {
             (Some(id), Some(owners)) => owners.current_owner(&attachment.target.id).0 == Some(id),
@@ -790,14 +872,25 @@ mod tests {
     }
 
     /// Driving is whatever the ownership record says about this attachment's
-    /// own id there.
+    /// own id there, for a blocker and for the connection listing alike; a
+    /// connection with nothing attached is listed too, with its address marked
+    /// verified or not.
     #[test]
-    fn a_blocker_drives_when_the_ownership_record_names_it() {
+    fn driving_is_read_from_the_ownership_record_for_blockers_and_connections() {
         let attachments = Attachments::default();
         let owners = Arc::new(PtySizeOwners::default());
         attachments.use_owners(Arc::clone(&owners));
         let now = Instant::now();
+        let before = chrono::Utc::now().timestamp();
         attachments.register("e1", browser("10.0.0.2", "Chrome"), None);
+        attachments.register(
+            "e2",
+            ConnectionFacts {
+                verified: true,
+                ..browser("10.0.0.3", "Safari")
+            },
+            None,
+        );
         attachments
             .attach("e1", tab("s1-slot", "s1"), None, Some(41))
             .unwrap();
@@ -806,6 +899,24 @@ mod tests {
         let blockers = attachments.blockers(&agent_scope("s1"), None, now);
         assert_eq!(blockers.len(), 1);
         assert!(blockers[0].driving);
+
+        let listed = attachments.connections(now);
+        assert_eq!(listed.len(), 2);
+        let first = listed.iter().find(|c| c.id == "e1").unwrap();
+        assert_eq!(first.surface, Surface::Browser);
+        assert_eq!(first.device.as_deref(), Some("Chrome"));
+        assert_eq!(first.address.as_deref(), Some("10.0.0.2"));
+        assert!(!first.verified);
+        assert!(first.driving);
+        assert_eq!(first.attachments.len(), 1);
+        assert_eq!(first.attachments[0].target, tab("s1-slot", "s1"));
+        assert!(first.attachments[0].driving);
+        let since = chrono::DateTime::parse_from_rfc3339(&first.since).unwrap();
+        assert!(since.timestamp() >= before && since.timestamp() <= chrono::Utc::now().timestamp());
+        let second = listed.iter().find(|c| c.id == "e2").unwrap();
+        assert!(second.verified);
+        assert!(!second.driving);
+        assert!(second.attachments.is_empty());
     }
 
     /// Only the asking connection is exempt: a second browser tab on the same

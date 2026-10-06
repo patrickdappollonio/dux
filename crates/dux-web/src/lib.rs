@@ -54,6 +54,7 @@ pub mod resource_routes;
 pub mod rest_common;
 pub mod serve_legs;
 pub mod server;
+pub mod server_inspect_routes;
 pub mod session_actions;
 pub mod startup_logs;
 pub mod tab_actions;

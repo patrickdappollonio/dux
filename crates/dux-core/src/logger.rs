@@ -290,15 +290,21 @@ struct RotatingLog {
     fail_reopen: AtomicBool,
 }
 
+/// `path` with a symbolic link at it resolved, which is how a log's writer
+/// names the file it really opens.
+fn resolve_link(path: PathBuf) -> PathBuf {
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(&path).unwrap_or(path),
+        _ => path,
+    }
+}
+
 impl RotatingLog {
     fn open(path: PathBuf, rotation: Arc<RotationCell>) -> std::io::Result<Self> {
         // Rotation renames the log, which for a symlinked `logging.path` would
         // move the LINK and orphan the file the user pointed it at, so the link
         // is resolved once here and the numbered copies land beside the target.
-        let path = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(&path).unwrap_or(path),
-            _ => path,
-        };
+        let path = resolve_link(path);
         let file = open_log_file(&path)?;
         // Seeded from the file on disk, so a log that grew past the limit under
         // an older dux rotates on the first line rather than after another
@@ -698,6 +704,13 @@ pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
 /// relative is from the config folder.
 pub fn resolve_server_log_path(config: &ServerConfig, paths: &DuxPaths) -> PathBuf {
     resolve_under_root(&config.log_path, paths, "server.log")
+}
+
+/// The file the server log is written to, as a serve that opens it names it:
+/// [`resolve_server_log_path`] with a link at that path resolved. For a reader
+/// with no running serve to ask; a running one reports the path it opened.
+pub fn server_log_file(config: &ServerConfig, paths: &DuxPaths) -> PathBuf {
+    resolve_link(resolve_server_log_path(config, paths))
 }
 
 fn resolve_under_root(configured: &str, paths: &DuxPaths, default_name: &str) -> PathBuf {
@@ -1592,6 +1605,23 @@ mod tests {
                 "the copy must land beside the target"
             );
             assert_eq!(fs::read_to_string(&target).unwrap(), "line two\n");
+            // A reader with no serve to ask names the same file the writer did.
+            let paths = crate::config::DuxPaths {
+                root: dir.path().to_path_buf(),
+                config_path: dir.path().join("config.toml"),
+                sessions_db_path: dir.path().join("sessions.sqlite3"),
+                worktrees_root: dir.path().join("worktrees"),
+                lock_path: dir.path().join("dux.lock"),
+                socket_path: dir.path().join("dux.sock"),
+            };
+            let server = crate::config::ServerConfig {
+                log_path: link.to_string_lossy().into_owned(),
+                ..Default::default()
+            };
+            assert_eq!(
+                server_log_file(&server, &paths),
+                fs::canonicalize(&target).unwrap()
+            );
         }
 
         /// A panic in one writer must not stop the log: the state it left behind

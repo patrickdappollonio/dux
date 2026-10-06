@@ -8,6 +8,7 @@
 //! semver-exempt transport API.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::ops::ControlFlow;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -108,6 +109,20 @@ impl std::fmt::Display for TransportError {
 /// The one interface the client reaches a dux through.
 pub trait Transport {
     fn send(&self, request: &Request) -> Result<Response, TransportError>;
+
+    /// Send `request` and hand its reply's body to `on_body` as it arrives,
+    /// each piece with the reply's status, until the reply ends or `on_body`
+    /// answers [`ControlFlow::Break`]. It is called once with an empty piece as
+    /// soon as the status is known, so a reply with no body still tells its
+    /// caller what it was. For a reply that has no end of its own
+    /// (a followed log), so once connected there is no deadline of any kind:
+    /// a quiet stream is not a dead one, and the caller ends it. A reply that
+    /// ends before its framing says it is whole is [`TransportError::Dropped`].
+    fn stream(
+        &self,
+        request: &Request,
+        on_body: &mut dyn FnMut(u16, &[u8]) -> ControlFlow<()>,
+    ) -> Result<(), TransportError>;
 }
 
 /// HTTP/1.1 over the control socket of the dux on this machine.
@@ -210,7 +225,70 @@ impl Transport for UnixTransport {
         stream.flush().map_err(dropped)?;
         read_response(BufReader::new(stream))
     }
+
+    fn stream(
+        &self,
+        request: &Request,
+        on_body: &mut dyn FnMut(u16, &[u8]) -> ControlFlow<()>,
+    ) -> Result<(), TransportError> {
+        let stream = connect_unix(&self.path, CONNECT_TIMEOUT).map_err(|error| {
+            TransportError::Unreachable(format!("{}: {error}", self.path.display()))
+        })?;
+        let dropped = |error: std::io::Error| TransportError::Dropped(error.to_string());
+        let mut stream = Deadline {
+            stream,
+            until: Instant::now() + NO_DEADLINE,
+        };
+        stream.write_all(&request_bytes(request)).map_err(dropped)?;
+        stream.flush().map_err(dropped)?;
+        let mut reader = BufReader::new(stream);
+        let (status, framing) = read_head(&mut reader)?;
+        let mut piece = |bytes: &[u8]| on_body(status, bytes);
+        if piece(&[]).is_break() {
+            return Ok(());
+        }
+        match framing {
+            Framing::Chunked => each_chunk_piece(&mut reader, &mut piece),
+            Framing::Length(length) => {
+                let mut left = length;
+                let mut buffer = [0u8; STREAM_PIECE];
+                while left > 0 {
+                    let want = left.min(STREAM_PIECE as u64) as usize;
+                    let read = reader
+                        .read(&mut buffer[..want])
+                        .map_err(|e| TransportError::Dropped(e.to_string()))?;
+                    if read == 0 {
+                        return Err(TransportError::Dropped(
+                            "the connection closed inside the reply's body".to_string(),
+                        ));
+                    }
+                    left -= read as u64;
+                    if piece(&buffer[..read]).is_break() {
+                        return Ok(());
+                    }
+                }
+                Ok(())
+            }
+            Framing::UntilClose => {
+                let mut buffer = [0u8; STREAM_PIECE];
+                loop {
+                    let read = reader
+                        .read(&mut buffer)
+                        .map_err(|e| TransportError::Dropped(e.to_string()))?;
+                    if read == 0 || piece(&buffer[..read]).is_break() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 }
+
+/// How long a stream's body may take as a whole: longer than any run of dux.
+const NO_DEADLINE: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+
+/// The most a streamed body hands over at once.
+const STREAM_PIECE: usize = 8 * 1024;
 
 /// `request` as HTTP/1.1 bytes, closing the connection after the reply.
 fn request_bytes(request: &Request) -> Vec<u8> {
@@ -239,12 +317,12 @@ enum Framing {
     UntilClose,
 }
 
-/// Read one HTTP/1.1 reply from `reader`. Anything short of a whole reply is
-/// [`TransportError::Dropped`].
-fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
+/// Read a reply's status line and headers: its status and how its body is
+/// delimited. Anything short of that is [`TransportError::Dropped`].
+fn read_head(reader: &mut impl BufRead) -> Result<(u16, Framing), TransportError> {
     let dropped = |why: &str| TransportError::Dropped(why.to_string());
     let status_line =
-        read_line(&mut reader)?.ok_or_else(|| dropped("the connection closed before a reply"))?;
+        read_line(reader)?.ok_or_else(|| dropped("the connection closed before a reply"))?;
     let status = status_line
         .split_whitespace()
         .nth(1)
@@ -254,7 +332,7 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
     let mut framing = Framing::UntilClose;
     let mut head = HeadBudget::default();
     loop {
-        let line = read_line(&mut reader)?
+        let line = read_line(reader)?
             .ok_or_else(|| dropped("the connection closed inside the reply's headers"))?;
         if line.is_empty() {
             break;
@@ -275,6 +353,14 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
             framing = Framing::Length(length);
         }
     }
+    Ok((status, framing))
+}
+
+/// Read one HTTP/1.1 reply from `reader`. Anything short of a whole reply is
+/// [`TransportError::Dropped`].
+fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
+    let dropped = |why: &str| TransportError::Dropped(why.to_string());
+    let (status, framing) = read_head(&mut reader)?;
     let body = match framing {
         Framing::Length(length) => {
             if length > BODY_LIMIT {
@@ -327,8 +413,32 @@ impl HeadBudget {
 }
 
 fn read_chunks(reader: &mut impl BufRead) -> Result<Vec<u8>, TransportError> {
-    let dropped = |why: &str| TransportError::Dropped(why.to_string());
     let mut body = Vec::new();
+    let mut too_large = false;
+    each_chunk_piece(reader, &mut |piece| {
+        if (body.len() as u64).saturating_add(piece.len() as u64) > BODY_LIMIT {
+            too_large = true;
+            return ControlFlow::Break(());
+        }
+        body.extend_from_slice(piece);
+        ControlFlow::Continue(())
+    })?;
+    if too_large {
+        return Err(TransportError::Dropped(
+            "the reply was larger than the client reads".to_string(),
+        ));
+    }
+    Ok(body)
+}
+
+/// Read a chunked body, handing each piece of a chunk over as it is read
+/// (never more than [`STREAM_PIECE`] at once, and a chunk is read whole before
+/// the one after it). Ends at the last chunk, or when `on_piece` breaks.
+fn each_chunk_piece(
+    reader: &mut impl BufRead,
+    on_piece: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+) -> Result<(), TransportError> {
+    let dropped = |why: &str| TransportError::Dropped(why.to_string());
     loop {
         let size_line = read_line(reader)?
             .ok_or_else(|| dropped("the connection closed inside a chunked reply"))?;
@@ -344,21 +454,22 @@ fn read_chunks(reader: &mut impl BufRead) -> Result<Vec<u8>, TransportError> {
                 }
                 trailers.take(&line)?;
             }
-            return Ok(body);
+            return Ok(());
         }
-        let within_limit = (body.len() as u64)
-            .checked_add(size)
-            .is_some_and(|total| total <= BODY_LIMIT);
-        if !within_limit {
-            return Err(dropped("the reply was larger than the client reads"));
-        }
-        let start = body.len();
-        reader
-            .take(size)
-            .read_to_end(&mut body)
-            .map_err(|e| TransportError::Dropped(e.to_string()))?;
-        if (body.len() - start) as u64 != size {
-            return Err(dropped("the connection closed inside a chunk"));
+        let mut left = size;
+        let mut buffer = [0u8; STREAM_PIECE];
+        while left > 0 {
+            let want = left.min(STREAM_PIECE as u64) as usize;
+            let read = reader
+                .read(&mut buffer[..want])
+                .map_err(|e| TransportError::Dropped(e.to_string()))?;
+            if read == 0 {
+                return Err(dropped("the connection closed inside a chunk"));
+            }
+            left -= read as u64;
+            if on_piece(&buffer[..read]).is_break() {
+                return Ok(());
+            }
         }
         match read_line(reader)? {
             Some(line) if line.is_empty() => {}
@@ -422,14 +533,17 @@ impl HttpTransport {
         }
     }
 
-    /// One attempt at `request`, against `base` (a URL with no trailing
-    /// slash), naming `host` in the `Host` header when it is given.
-    fn attempt(
+    /// Run `request` against `base` (a URL with no trailing slash), naming
+    /// `host` in the `Host` header when it is given, and answer once the reply
+    /// has begun. `whole` bounds the exchange as a whole; with `None` nothing
+    /// but connecting is bounded.
+    fn open(
         &self,
         request: &Request,
         base: &str,
         host: Option<&str>,
-    ) -> Result<Response, TransportError> {
+        whole: Option<Duration>,
+    ) -> Result<ureq::http::Response<ureq::Body>, TransportError> {
         let mut builder = ureq::http::Request::builder()
             .method(request.method.as_str())
             .uri(format!("{base}{}", request.path))
@@ -446,12 +560,12 @@ impl HttpTransport {
         let http_request = builder
             .body(request.body.clone().unwrap_or_default())
             .map_err(|error| TransportError::Unreachable(error.to_string()))?;
-        let http_request = self
+        let configured = self
             .agent
             .configure_request(http_request)
-            .timeout_global(Some(time_allowed(request)))
-            .build();
-        let mut response = self.agent.run(http_request).map_err(|error| match error {
+            .timeout_global(whole);
+        let http_request = configured.build();
+        self.agent.run(http_request).map_err(|error| match error {
             ureq::Error::ConnectionFailed
             | ureq::Error::HostNotFound
             | ureq::Error::BadUri(_)
@@ -460,7 +574,17 @@ impl HttpTransport {
                 TransportError::Unreachable(error.to_string())
             }
             other => TransportError::Dropped(other.to_string()),
-        })?;
+        })
+    }
+
+    /// One attempt at `request`: its whole reply.
+    fn attempt(
+        &self,
+        request: &Request,
+        base: &str,
+        host: Option<&str>,
+    ) -> Result<Response, TransportError> {
+        let mut response = self.open(request, base, host, Some(time_allowed(request)))?;
         let status = response.status().as_u16();
         let body = response
             .body_mut()
@@ -469,6 +593,61 @@ impl HttpTransport {
             .read_to_vec()
             .map_err(|error| TransportError::Dropped(error.to_string()))?;
         Ok(Response { status, body })
+    }
+
+    /// One attempt at `request`, its body handed to `on_body` as it arrives.
+    fn attempt_stream(
+        &self,
+        request: &Request,
+        base: &str,
+        host: Option<&str>,
+        on_body: &mut dyn FnMut(u16, &[u8]) -> ControlFlow<()>,
+    ) -> Result<(), TransportError> {
+        let mut response = self.open(request, base, host, None)?;
+        let status = response.status().as_u16();
+        if on_body(status, &[]).is_break() {
+            return Ok(());
+        }
+        let mut reader = response.body_mut().as_reader();
+        let mut buffer = [0u8; STREAM_PIECE];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| TransportError::Dropped(error.to_string()))?;
+            if read == 0 || on_body(status, &buffer[..read]).is_break() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Run `attempt` against where this remote is reached: as written, or at
+    /// each address its name must resolve to, trying the next only when one
+    /// is unreachable.
+    fn through_destinations<T>(
+        &self,
+        mut attempt: impl FnMut(&str, Option<&str>) -> Result<T, TransportError>,
+    ) -> Result<T, TransportError> {
+        let Some(url) = &self.url else {
+            return attempt(&self.base, None);
+        };
+        let resolve = |host: &str, port: u16| {
+            std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(Iterator::collect)
+        };
+        let Some(addrs) = destinations(url, self.insecure, resolve)? else {
+            return attempt(&self.base, None);
+        };
+        let host = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+            None => url.host_str().unwrap_or_default().to_string(),
+        };
+        let mut last = TransportError::Unreachable(format!("{host} has no address to reach"));
+        for addr in addrs {
+            match attempt(&format!("http://{addr}"), Some(&host)) {
+                Err(TransportError::Unreachable(why)) => last = TransportError::Unreachable(why),
+                other => return other,
+            }
+        }
+        Err(last)
     }
 }
 
@@ -539,27 +718,15 @@ pub(crate) fn destinations(
 
 impl Transport for HttpTransport {
     fn send(&self, request: &Request) -> Result<Response, TransportError> {
-        let Some(url) = &self.url else {
-            return self.attempt(request, &self.base, None);
-        };
-        let resolve = |host: &str, port: u16| {
-            std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(Iterator::collect)
-        };
-        let Some(addrs) = destinations(url, self.insecure, resolve)? else {
-            return self.attempt(request, &self.base, None);
-        };
-        let host = match url.port() {
-            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_string(),
-        };
-        let mut last = TransportError::Unreachable(format!("{host} has no address to reach"));
-        for addr in addrs {
-            match self.attempt(request, &format!("http://{addr}"), Some(&host)) {
-                Err(TransportError::Unreachable(why)) => last = TransportError::Unreachable(why),
-                other => return other,
-            }
-        }
-        Err(last)
+        self.through_destinations(|base, host| self.attempt(request, base, host))
+    }
+
+    fn stream(
+        &self,
+        request: &Request,
+        on_body: &mut dyn FnMut(u16, &[u8]) -> ControlFlow<()>,
+    ) -> Result<(), TransportError> {
+        self.through_destinations(|base, host| self.attempt_stream(request, base, host, on_body))
     }
 }
 
@@ -614,6 +781,18 @@ mod tests {
                 "HTTP/1.1 200 OK\r\n{}content-length: 0\r\n\r\n",
                 "x-filler: 1\r\n".repeat(500)
             )),
+            "/endless" => Reply::Slow(
+                std::iter::once("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_string())
+                    .chain(std::iter::repeat_n("6\r\nline\r\n\r\n".to_string(), 20))
+                    .collect(),
+                Duration::from_millis(700),
+            ),
+            "/no-body" => Reply::Raw(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string(),
+            ),
+            "/cut-short" => Reply::Raw(
+                "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n".to_string(),
+            ),
             "/trickle" => Reply::Slow(
                 std::iter::once("HTTP/1.1 200 OK\r\n".to_string())
                     .chain(std::iter::repeat_n("x-slow: 1\r\n".to_string(), 40))
@@ -643,6 +822,72 @@ mod tests {
                 "{path}"
             );
         }
+        // A body is handed over as it arrives and ends with the reply, whatever
+        // its framing, with the status it came with.
+        let mut got = Vec::new();
+        let ended = transport.stream(&Request::get("/chunked"), &mut |status, piece| {
+            got.push((status, piece.to_vec()));
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!(ended, Ok(()));
+        assert!(got.iter().all(|(status, _)| *status == 200), "{got:?}");
+        let joined: Vec<u8> = got.into_iter().flat_map(|(_, piece)| piece).collect();
+        assert_eq!(joined, b"hello, world");
+        let mut refused = Vec::new();
+        let ended = transport.stream(&Request::get("/other"), &mut |status, piece| {
+            refused.push((status, piece.to_vec()));
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!(ended, Ok(()));
+        assert_eq!(
+            refused.last(),
+            Some(&(404, b"unknown session".to_vec())),
+            "the body, with the status it came with"
+        );
+        // The status reaches the caller even when the body has nothing in it:
+        // a reply with no body is told apart from no reply.
+        let mut statuses = Vec::new();
+        let ended = transport.stream(&Request::get("/no-body"), &mut |status, piece| {
+            assert!(piece.is_empty());
+            statuses.push(status);
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!((ended, statuses), (Ok(()), vec![401]));
+        assert!(
+            matches!(
+                transport.stream(&Request::get("/cut-short"), &mut |_, _| {
+                    std::ops::ControlFlow::Continue(())
+                }),
+                Err(TransportError::Dropped(_))
+            ),
+            "a stream that ends without its last chunk was cut off"
+        );
+
+        // A stream that never ends is read as it comes: its first line arrives
+        // after the request's own time (300 ms) has passed, which a stream is
+        // not held to, and it stops when the caller says so, long before the
+        // server would have finished (fourteen seconds of lines).
+        let started = std::time::Instant::now();
+        let mut first = None;
+        let stopped = transport.stream(
+            &Request {
+                timeout: Some(Duration::from_millis(300)),
+                ..Request::get("/endless")
+            },
+            &mut |_, piece| {
+                if piece.is_empty() {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                first = Some((started.elapsed(), piece.to_vec()));
+                std::ops::ControlFlow::Break(())
+            },
+        );
+        assert_eq!(stopped, Ok(()));
+        let (at, piece) = first.expect("a piece arrived");
+        assert_eq!(piece, b"line\r\n");
+        assert!(at > Duration::from_millis(500), "{at:?}");
+        assert!(at < Duration::from_secs(3), "{at:?}");
+
         let started = std::time::Instant::now();
         let trickled = transport.send(&Request {
             timeout: Some(Duration::from_secs(1)),
@@ -793,7 +1038,20 @@ mod tests {
 
     #[test]
     fn the_http_transport_carries_the_same_request() {
-        let (fake, addr) = FakeDux::tcp(|_| Reply::json(200, r#"{"ok":true}"#));
+        let (fake, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
+            "/endless" => Reply::Slow(
+                std::iter::once(
+                    "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_string(),
+                )
+                .chain(std::iter::repeat_n("6\r\nline\r\n\r\n".to_string(), 20))
+                .collect(),
+                Duration::from_millis(700),
+            ),
+            "/no-body" => {
+                Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string())
+            }
+            _ => Reply::json(200, r#"{"ok":true}"#),
+        });
         let reply = HttpTransport::new(&format!("http://{addr}/"), false)
             .send(&Request {
                 method: Method::Delete,
@@ -820,5 +1078,37 @@ mod tests {
             Some(format!("localhost:{}", addr.port()).as_str()),
             "the request still names the host it was given"
         );
+
+        let mut statuses = Vec::new();
+        let ended = HttpTransport::new(&format!("http://{addr}"), false).stream(
+            &Request::get("/no-body"),
+            &mut |status, _| {
+                statuses.push(status);
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+        assert_eq!((ended, statuses), (Ok(()), vec![401]));
+
+        // Its body is handed over as it arrives too, past the request's own time.
+        let started = std::time::Instant::now();
+        let mut first = None;
+        let stopped = HttpTransport::new(&format!("http://{addr}"), false).stream(
+            &Request {
+                timeout: Some(Duration::from_millis(300)),
+                ..Request::get("/endless")
+            },
+            &mut |status, piece| {
+                if piece.is_empty() {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                first = Some((status, started.elapsed(), piece.to_vec()));
+                std::ops::ControlFlow::Break(())
+            },
+        );
+        assert_eq!(stopped, Ok(()));
+        let (status, at, piece) = first.expect("a piece arrived");
+        assert_eq!((status, piece.as_slice()), (200, &b"line\r\n"[..]));
+        assert!(at > Duration::from_millis(500), "{at:?}");
+        assert!(at < Duration::from_secs(3), "{at:?}");
     }
 }

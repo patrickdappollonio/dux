@@ -5,13 +5,13 @@ use dux_core::client::config_resources::{self as resources, Source, Writer};
 use dux_core::client::connect::{self, REMOTE_VARIABLE, Target};
 use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
-use dux_core::client::{CliError, Exit, sign_in, wait, workspace};
+use dux_core::client::{CliError, Exit, server_inspect, sign_in, wait, workspace};
 use dux_core::config::DuxPaths;
 
 use crate::commands::{
-    AddAgentArgs, AgentsSub, ChangeFlags, EnvSub, Format, GuardedChangeFlags, ListFlags,
-    ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSub, TabsSub,
-    TerminalsSub, WorktreesSub,
+    AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
+    ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSub,
+    TabsSub, TerminalsSub, WorktreesSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
@@ -624,4 +624,83 @@ pub fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String,
             })
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The server itself
+// ---------------------------------------------------------------------------
+
+/// `dux server connections ls`.
+pub fn server_connections(
+    command: ConnectionsSub,
+    selection: &Selection,
+) -> Result<String, CliError> {
+    let ConnectionsSub::Ls(list) = command;
+    let paths = discover()?;
+    let client = connect::connect(&selection.target(&paths)?, &paths.lock_path)?;
+    server_inspect::connections_ls(&client, shape(&list))
+}
+
+/// `dux server logs`: the last lines of the server log and, with `follow`,
+/// every line after, printed as they come. A dux on this machine that is not
+/// running has left the log in its file, which is read as it stands.
+pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<String, CliError> {
+    use std::io::Write;
+    use std::ops::ControlFlow;
+    let paths = discover()?;
+    // A closed pipe (`| head`) ends the command quietly.
+    let mut print = |line: &str| {
+        let mut out = std::io::stdout().lock();
+        match writeln!(out, "{line}").and_then(|()| out.flush()) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(_) => ControlFlow::Break(()),
+        }
+    };
+    let target = selection.target(&paths)?;
+    // This machine's dux that writes no log leaves its file to be read; a
+    // remote's file is not here, so its sentence is shown.
+    let this_machine = matches!(target, Target::Local).then_some(&paths);
+    let client = match target {
+        Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
+        target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
+    };
+    match client {
+        Some(client) if follow => {
+            server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?
+        }
+        Some(client) => {
+            let (tail, note) = server_inspect::tail_or_file(&client, this_machine, lines)?;
+            for line in tail {
+                if print(&line).is_break() {
+                    break;
+                }
+            }
+            if let Some(note) = note {
+                eprintln!("{note}");
+            }
+        }
+        None => {
+            let path = server_inspect::log_file(&paths)?;
+            if !path.exists() {
+                eprintln!(
+                    "There is no server log at {} yet: dux has not served from this machine.",
+                    path.display()
+                );
+            }
+            if follow {
+                server_inspect::file_follow(&path, lines, &mut print)?;
+            } else {
+                let (tail, note) = server_inspect::file_tail(&path, lines)?;
+                for line in tail {
+                    if print(&line).is_break() {
+                        break;
+                    }
+                }
+                if let Some(note) = note {
+                    eprintln!("{note}");
+                }
+            }
+        }
+    }
+    Ok(String::new())
 }
