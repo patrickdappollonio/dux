@@ -23,7 +23,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     closeForceStopAgent: () => closeForceStopAgent(),
-    killSessionPty: (s: string, force?: boolean) => killSessionPty(s, force),
+    killSessionPty: (...args: unknown[]) => killSessionPty(...args),
   }
 })
 
@@ -124,16 +124,36 @@ describe("ConfirmForceStopAgentDialog", () => {
     expect(body.textContent).not.toContain("wait up to")
   })
 
-  it("forces on confirm and closes itself", async () => {
+  // Refused while somebody else is attached, it stays open naming them and
+  // stops only through Force stop anyway, which goes ahead over them.
+  it("forces on confirm and closes itself, over who is attached only once they are named", async () => {
     seed({
       forceStopAgentTarget: "s1",
       spine: { sessions: [session({ id: "s1", title: "fix-auth" })] },
     } as Partial<DuxState>)
+    killSessionPty.mockResolvedValueOnce([{
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: false,
+        driving: true,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
+      }])
     render(<ConfirmForceStopAgentDialog />)
 
     fireEvent.click(await screen.findByText("Force stop"))
-    expect(killSessionPty).toHaveBeenCalledWith("s1", true)
-    expect(closeForceStopAgent).toHaveBeenCalled()
+    expect(killSessionPty).toHaveBeenCalledWith("s1", true, null)
+    const override = await screen.findByRole("button", {
+      name: "Force stop anyway",
+    })
+    expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
+    expect(closeForceStopAgent).not.toHaveBeenCalled()
+
+    killSessionPty.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(killSessionPty).toHaveBeenLastCalledWith("s1", true, ["k1"])
+    await vi.waitFor(() => expect(closeForceStopAgent).toHaveBeenCalled())
   })
 
   it("cancels without stopping, and Cancel is the default focus", async () => {

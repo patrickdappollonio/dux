@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -51,11 +56,18 @@ export function ConfirmCloseTabDialog() {
     tab !== undefined,
     closeCloseTab,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    closeTabTarget && `${closeTabTarget.sessionId}/${closeTabTarget.tabId}`,
+  )
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!closeTabTarget) return
-    closeTab(closeTabTarget.sessionId, closeTabTarget.tabId)
-    closeCloseTab()
+    const { sessionId, tabId } = closeTabTarget
+    const done = await confirm((accepted) =>
+      closeTab(sessionId, tabId, accepted),
+    )
+    if (done) closeCloseTab()
   }
 
   function handleOpenChange(open: boolean) {
@@ -92,17 +104,26 @@ export function ConfirmCloseTabDialog() {
             </a>
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           {/* Cancel is the default focus, matching the TUI. shadcn/radix buttons
               activate on Space/Enter natively. */}
-          <Button variant="outline" autoFocus onClick={closeCloseTab}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeCloseTab}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Close tab
-          </Button>
+          <GuardedConfirmButton
+            verb="Close tab"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

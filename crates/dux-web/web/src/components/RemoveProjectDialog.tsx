@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -19,6 +24,10 @@ export function RemoveProjectDialog() {
   // projects with no live project record, so a vanish guard would dismiss the
   // exact case it exists for.
   const isOpen = removeProjectTarget !== null
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    removeProjectTarget,
+  )
   const project = spine?.projects.find((p) => p.id === removeProjectTarget)
   // For an orphaned ("ghost") project there is no project record, so fall back
   // to the short-id name the sidebar shows for its group.
@@ -31,10 +40,11 @@ export function RemoveProjectDialog() {
       (s) => workspaceProjectId(s.workspace) === removeProjectTarget,
     ).length ?? 0
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!removeProjectTarget) return
-    removeProject(removeProjectTarget)
-    closeRemoveProject()
+    const target = removeProjectTarget
+    const done = await confirm((accepted) => removeProject(target, accepted))
+    if (done) closeRemoveProject()
   }
 
   function handleOpenChange(open: boolean) {
@@ -50,13 +60,24 @@ export function RemoveProjectDialog() {
             {renderProse(removeProjectProse(name, agentCount))}
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeRemoveProject}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeRemoveProject}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Remove
-          </Button>
+          <GuardedConfirmButton
+            verb="Remove"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -457,6 +457,125 @@
       "segments": [
         "This removes this project from dux. Worktrees on disk are kept."
       ]
+    },
+    {
+      "what": "the line that opens the list of who a change would cut off",
+      "sentence": "attached_lead",
+      "args": {},
+      "segments": [
+        "Someone else is using this right now. Going ahead cuts them off:"
+      ]
+    },
+    {
+      "what": "a browser typing in an agent's tab from a verified address",
+      "sentence": "attached_entry",
+      "args": {
+        "device": "Chrome on macOS",
+        "surface": "browser",
+        "address": "100.64.0.2",
+        "verified": true,
+        "driving": true,
+        "target_kind": "tab",
+        "target_label": "Claude",
+        "agent_label": "feat/login"
+      },
+      "segments": [
+        {
+          "name": "Chrome on macOS",
+          "quoted": false
+        },
+        " at 100.64.0.2, typing in tab ",
+        {
+          "name": "Claude",
+          "quoted": false
+        },
+        " of agent ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "an unrecognised browser watching a project terminal from an unverified address",
+      "sentence": "attached_entry",
+      "args": {
+        "device": null,
+        "surface": "browser",
+        "address": "192.0.2.7",
+        "verified": false,
+        "driving": false,
+        "target_kind": "terminal",
+        "target_label": "Terminal 2",
+        "agent_label": null
+      },
+      "segments": [
+        "a browser at 192.0.2.7 (unverified), watching terminal ",
+        {
+          "name": "Terminal 2",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the terminal UI typing in an agent's terminal, with no address",
+      "sentence": "attached_entry",
+      "args": {
+        "device": "the dux TUI",
+        "surface": "terminal_ui",
+        "address": null,
+        "verified": true,
+        "driving": true,
+        "target_kind": "terminal",
+        "target_label": "Terminal 1",
+        "agent_label": "feat/login"
+      },
+      "segments": [
+        {
+          "name": "the dux TUI",
+          "quoted": false
+        },
+        ", typing in terminal ",
+        {
+          "name": "Terminal 1",
+          "quoted": false
+        },
+        " of agent ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the terminal UI with no device label of its own, named by its fixed label",
+      "sentence": "attached_entry",
+      "args": {
+        "device": null,
+        "surface": "terminal_ui",
+        "address": null,
+        "verified": true,
+        "driving": false,
+        "target_kind": "tab",
+        "target_label": "Codex",
+        "agent_label": "feat/login"
+      },
+      "segments": [
+        {
+          "name": "the dux TUI",
+          "quoted": false
+        },
+        ", watching tab ",
+        {
+          "name": "Codex",
+          "quoted": false
+        },
+        " of agent ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        }
+      ]
     }
   ]
 }

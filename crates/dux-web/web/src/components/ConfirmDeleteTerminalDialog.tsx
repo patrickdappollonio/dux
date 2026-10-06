@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -37,16 +42,21 @@ export function ConfirmDeleteTerminalDialog() {
     terminal !== undefined,
     closeDeleteTerminal,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    deleteTerminalTarget,
+  )
   // The title names the STATIC label like the TUI's prompt does ("delete
   // Terminal 1?"); the running command appears in the warning body instead,
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
   const title = terminal?.label ?? ""
   const foreground = terminal ? terminalForeground(terminal) : null
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!deleteTerminalTarget) return
-    deleteTerminal(deleteTerminalTarget)
-    closeDeleteTerminal()
+    const target = deleteTerminalTarget
+    const done = await confirm((accepted) => deleteTerminal(target, accepted))
+    if (done) closeDeleteTerminal()
   }
 
   function handleOpenChange(open: boolean) {
@@ -70,17 +80,26 @@ export function ConfirmDeleteTerminalDialog() {
             terminal and will be killed.
           </p>
         ) : null}
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           {/* Cancel is the default focus, matching the TUI (Cancel highlighted).
               shadcn/radix buttons already activate on Space/Enter natively. */}
-          <Button variant="outline" autoFocus onClick={closeDeleteTerminal}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeDeleteTerminal}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Close terminal
-          </Button>
+          <GuardedConfirmButton
+            verb="Close terminal"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,4 +1,5 @@
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
+import { AttachedError, attachedBlockers } from "./attached"
 import { getConnectionId } from "./connection"
 
 type RequestErrorFactory = (
@@ -20,8 +21,21 @@ async function responseError(
   createError: RequestErrorFactory,
 ): Promise<Error> {
   const detail = (await response.text().catch(() => "")).trim()
+  // A refusal because somebody else is attached is the same answer from every
+  // guarded route, so it is read here once, as itself, rather than handed on as
+  // a raw JSON message for each client to toast.
+  const blockers = attachedBlockers(response.status, parseJson(detail))
+  if (blockers !== null) return new AttachedError(blockers)
   const message = detail || `request failed (${response.status})`
   return createError(message, response.status, detail)
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {

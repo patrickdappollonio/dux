@@ -373,22 +373,56 @@ pub(crate) fn delete_operation_response(
     }
 }
 
-/// `force_connected=true` on a change that would end terminals: go ahead
-/// even though somebody else is attached to them. Only that refusal is
-/// skipped; every other check still runs, and nobody can attach to what the
-/// change is ending until it has finished.
+/// `force_connected` on a change that would end terminals: go ahead even
+/// though somebody else is attached to them. `true` goes ahead over everybody
+/// (the command line's flag); a comma-separated list of blocker keys
+/// ([`dux_core::attachments::Blocker::key`]) goes ahead over exactly the
+/// blockers a dialog showed, and is refused again, naming everybody, when
+/// anybody else is in the way by then. Only that refusal is skipped; every
+/// other check still runs, and nobody can attach to what the change is ending
+/// until it has finished.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct ForceConnectedQuery {
     #[serde(default)]
-    force_connected: bool,
+    force_connected: Option<String>,
+}
+
+impl ForceConnectedQuery {
+    /// Whether to go ahead over somebody attached, and over whom (`None` for
+    /// everybody).
+    fn decision(&self) -> (bool, Option<std::collections::BTreeSet<String>>) {
+        match self.force_connected.as_deref().map(str::trim) {
+            None | Some("") | Some("false") => (false, None),
+            Some("true") => (true, None),
+            Some(keys) => (
+                true,
+                Some(
+                    keys.split(',')
+                        .map(str::trim)
+                        .filter(|key| !key.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            ),
+        }
+    }
 }
 
 /// The answer to a change refused because somebody else is attached to what
 /// it would end: `409 {"error":"attached","blockers":[...]}`, one entry per
 /// attachment in the way, each saying which surface, which device and from
 /// which address (and whether dux could verify it), whether it is typing in
-/// or watching, and which tab or terminal.
+/// or watching, which tab or terminal, and the key a dialog sends back to go ahead
+/// over exactly the blockers it showed.
 pub(crate) fn attached_refusal(blockers: &[dux_core::attachments::Blocker]) -> Response {
+    let blockers: Vec<serde_json::Value> = blockers
+        .iter()
+        .map(|blocker| {
+            let mut value = serde_json::to_value(blocker).unwrap_or_default();
+            value["key"] = serde_json::Value::String(blocker.key());
+            value
+        })
+        .collect();
     (
         StatusCode::CONFLICT,
         axum::Json(serde_json::json!({
@@ -435,7 +469,8 @@ pub(crate) async fn dispatch_guarded(
     let followed = crate::engine_actor::Followed {
         kind,
         answered: operation.asked(),
-        force_connected: force.force_connected,
+        force_connected: force.decision().0,
+        accepted_connected: force.decision().1,
         requester: exempt_requester(
             state.engine.attachments(),
             &scope,

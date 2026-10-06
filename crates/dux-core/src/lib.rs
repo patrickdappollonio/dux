@@ -10,6 +10,7 @@ pub mod add_project_prose;
 pub mod agent_job;
 pub mod agent_search;
 pub mod agent_tabs;
+pub mod attached_prose;
 pub mod attachments;
 pub mod attention;
 pub mod auth;

@@ -77,7 +77,20 @@ afterEach(() => {
 })
 
 describe("ConfirmStopTabDialog", () => {
-  it("names the tab and the agent as chips, keeps the tab, and Stop stops it", () => {
+  // Refused while somebody else is attached, it stays open naming them and
+  // stops only through Stop tab anyway, which goes ahead over them.
+  it("names the tab and the agent as chips, keeps the tab, and Stop stops it, over who is attached only once they are named", async () => {
+    stopTab.mockResolvedValueOnce([
+      {
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: false,
+        driving: true,
+        target: { kind: "tab", id: "b2", agent: "s1" },
+        key: "k1",
+      },
+    ])
     seed("b2", [
       tab({ id: "s1", provider: "claude" }),
       tab({ id: "b2", provider: "codex" }),
@@ -91,8 +104,16 @@ describe("ConfirmStopTabDialog", () => {
     expect(body).toContain("stays in the strip")
     expect(body).not.toContain("detaches")
     fireEvent.click(screen.getByRole("button", { name: "Stop tab" }))
-    expect(stopTab).toHaveBeenCalledWith("s1", "b2")
-    expect(closeStopTab).toHaveBeenCalled()
+    expect(stopTab).toHaveBeenCalledWith("s1", "b2", null)
+    const override = await screen.findByRole("button", { name: "Stop tab anyway" })
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
+    expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
+    expect(closeStopTab).not.toHaveBeenCalled()
+
+    stopTab.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(stopTab).toHaveBeenLastCalledWith("s1", "b2", ["k1"])
+    await vi.waitFor(() => expect(closeStopTab).toHaveBeenCalled())
   })
 
   it("warns the agent detaches when this is its last running tab", () => {

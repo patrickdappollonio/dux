@@ -311,6 +311,8 @@ const CHANGE_BASE_BRANCH_LABEL: &str = "Change base branch";
 struct ProjectConfirmDialog<'a> {
     title: &'static str,
     body: &'a dux_core::prose::Prose,
+    /// Who the guard named when it refused the confirm, listed under the body.
+    attached: &'a [dux_core::attachments::Blocker],
     confirm_label: &'a str,
     confirm_focused: bool,
     cancel_target: ButtonPressedTarget,
@@ -1339,13 +1341,23 @@ fn delete_agent_cancel_button(focus: DeleteAgentFocus) -> ConfirmButton<'static>
 
 /// The Delete Agent dialog's Delete button, shared by its managed and
 /// standalone layouts.
-fn delete_agent_delete_button(focus: DeleteAgentFocus) -> ConfirmButton<'static> {
+fn delete_agent_delete_button(focus: DeleteAgentFocus, label: &str) -> ConfirmButton<'_> {
     ConfirmButton::new(
-        "Delete",
+        label,
         ButtonKind::Danger,
         ButtonPressedTarget::ConfirmDeleteConfirm,
         focus == DeleteAgentFocus::Delete,
     )
+}
+
+/// A guarded dialog's confirm label: its own verb, or the override's once the
+/// guard has named somebody attached ("Delete" becomes "Delete anyway").
+fn guarded_confirm_label(verb: &str, attached: &[dux_core::attachments::Blocker]) -> String {
+    if attached.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} anyway")
+    }
 }
 
 /// The Cancel / act pair most Confirm dialogs carry: a `ConfirmFocus` decides
@@ -1380,6 +1392,7 @@ impl App {
         frame: &mut Frame,
         body_lines: Vec<Line<'static>>,
         focus: DeleteAgentFocus,
+        confirm_label: &str,
     ) {
         let layout = self.render_confirm_dialog(
             frame,
@@ -1388,7 +1401,7 @@ impl App {
                 body: body_lines,
                 controls_height: 0,
                 cancel: delete_agent_cancel_button(focus),
-                act: delete_agent_delete_button(focus),
+                act: delete_agent_delete_button(focus, confirm_label),
                 reserve_labels: &[],
             },
         );
@@ -1422,6 +1435,39 @@ impl App {
         lines
     }
 
+    /// Who a guarded dialog's confirm would cut off, once the guard has named
+    /// them: a blank row, the shared opening line in the warning tone, then
+    /// one indented line each, every name a chip. Nothing while nobody is
+    /// named.
+    ///
+    /// Wrapped here, to `inner_width`, so every row keeps its own indent: the
+    /// frame's own wrap would run a continuation back to the dialog's edge.
+    fn attached_section(
+        &self,
+        blockers: &[dux_core::attachments::Blocker],
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        if blockers.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from("")];
+        lines.extend(self.hanging_prose_lines(
+            &dux_core::attached_prose::attached_lead_prose(),
+            Style::default().fg(self.theme.warning_fg),
+            " ",
+            inner_width,
+        ));
+        for entry in self.engine.attached_entries(blockers) {
+            lines.extend(self.hanging_prose_lines(
+                &dux_core::attached_prose::attached_entry_prose(&entry),
+                Style::default(),
+                "   ",
+                inner_width,
+            ));
+        }
+        lines
+    }
+
     /// [`indented_body_lines`] for a sentence that names something: every row
     /// keeps the body's one-cell margin, continuation rows included, and every
     /// name is a chip.
@@ -1431,12 +1477,26 @@ impl App {
         style: Style,
         inner_width: u16,
     ) -> Vec<Line<'static>> {
+        self.hanging_prose_lines(prose, style, " ", inner_width)
+    }
+
+    /// `prose` wrapped to `inner_width` with `indent` in front of every row,
+    /// continuation rows included, and every name a chip.
+    fn hanging_prose_lines(
+        &self,
+        prose: &Prose,
+        style: Style,
+        indent: &str,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
         let sentence = prose_lines(prose, "", style, &self.theme);
-        let width = usize::from(inner_width).saturating_sub(1).max(1);
+        let width = usize::from(inner_width)
+            .saturating_sub(indent.chars().count())
+            .max(1);
         wrap_styled_lines(&sentence, width)
             .into_iter()
             .map(|row| {
-                let mut spans = vec![Span::styled(" ", style)];
+                let mut spans = vec![Span::styled(indent.to_string(), style)];
                 spans.extend(row.spans);
                 Line::from(spans)
             })
@@ -7645,11 +7705,16 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ];
+        let mut lines = lines;
+        lines.extend(
+            self.attached_section(&confirm_prompt.attached, confirm_inner_width(frame.area())),
+        );
+        let confirm_label = guarded_confirm_label("Kill", &confirm_prompt.attached);
         let (cancel, act) = confirm_focus_buttons(
             confirm_prompt.focus,
             ButtonPressedTarget::ConfirmKillCancel,
             (
-                "Kill",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmKillConfirm,
             ),
@@ -7938,6 +8003,7 @@ impl App {
             terminal_label,
             foreground_cmd,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -7961,11 +8027,13 @@ impl App {
                 Style::default().fg(self.theme.warning_fg),
             )));
         }
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
+        let confirm_label = guarded_confirm_label("Delete", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmDeleteTerminalCancel,
             (
-                "Delete",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
             ),
@@ -7994,6 +8062,7 @@ impl App {
             provider_label,
             promoted_label,
             focus,
+            attached,
         } = &self.prompt
         else {
             return;
@@ -8039,6 +8108,8 @@ impl App {
             Style::default().fg(self.theme.warning_fg),
             &self.theme,
         ));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
+        let confirm_label = guarded_confirm_label("Close", attached);
         // Sized to the wrapped prose by the shared frame: a fixed percentage
         // clipped the whole tail on an 80x24 terminal, which is exactly where
         // the promotion sentence has to be readable.
@@ -8046,7 +8117,7 @@ impl App {
             *focus,
             ButtonPressedTarget::ConfirmCloseTabCancel,
             (
-                "Close",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmCloseTabConfirm,
             ),
@@ -8078,6 +8149,7 @@ impl App {
             provider_label,
             last_running,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -8114,11 +8186,13 @@ impl App {
             Style::default().fg(self.theme.warning_fg),
             &self.theme,
         ));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
+        let confirm_label = guarded_confirm_label("Stop", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmStopTabCancel,
             (
-                "Stop",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmStopTabConfirm,
             ),
@@ -8152,6 +8226,7 @@ impl App {
             grace_seconds,
             live_tabs,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -8161,12 +8236,14 @@ impl App {
         // Sized to the wrapped prose by the shared frame: a fixed percentage
         // clips the tail on an 80x24 terminal, which is exactly where the "you
         // can resume it later" half has to be readable.
-        let lines = self.prose_body(&body);
+        let mut lines = self.prose_body(&body);
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
+        let confirm_label = guarded_confirm_label("Detach", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmDetachAgentCancel,
             (
-                "Detach",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDetachAgentConfirm,
             ),
@@ -8299,6 +8376,7 @@ impl App {
             project_name,
             agent_count,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -8307,12 +8385,14 @@ impl App {
         let body =
             dux_core::project_prose::delete_project_confirm_prose(Some(project_name), *agent_count);
         let confirm_focused = focus.is_confirm();
+        let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
             ProjectConfirmDialog {
                 title: "Delete Project",
                 body: &body,
-                confirm_label: "Delete",
+                attached: &attached,
+                confirm_label: &guarded_confirm_label("Delete", &attached),
                 confirm_focused,
                 cancel_target: ButtonPressedTarget::ConfirmDeleteProjectCancel,
                 confirm_target: ButtonPressedTarget::ConfirmDeleteProjectConfirm,
@@ -8334,6 +8414,7 @@ impl App {
             project_name,
             agent_count,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -8342,12 +8423,14 @@ impl App {
         let body =
             dux_core::project_prose::remove_project_confirm_prose(Some(project_name), *agent_count);
         let confirm_focused = focus.is_confirm();
+        let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
             ProjectConfirmDialog {
                 title: "Remove Project",
                 body: &body,
-                confirm_label: "Remove",
+                attached: &attached,
+                confirm_label: &guarded_confirm_label("Remove", &attached),
                 confirm_focused,
                 cancel_target: ButtonPressedTarget::ConfirmRemoveProjectCancel,
                 confirm_target: ButtonPressedTarget::ConfirmRemoveProjectConfirm,
@@ -8392,11 +8475,13 @@ impl App {
         frame: &mut Frame,
         dialog: ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
+        let mut body = self.prose_body(dialog.body);
+        body.extend(self.attached_section(dialog.attached, confirm_inner_width(frame.area())));
         let layout = self.render_confirm_dialog(
             frame,
             ConfirmDialog {
                 title: dialog.title,
-                body: self.prose_body(dialog.body),
+                body,
                 controls_height: 0,
                 cancel: ConfirmButton::new(
                     "Cancel",
@@ -8440,25 +8525,7 @@ impl App {
                 Span::raw(" if you quit."),
             ]));
         }
-        if !attached.is_empty() {
-            let mut who = vec![Span::raw(" Also connected to them right now: ")];
-            for (index, blocker) in attached.iter().enumerate() {
-                if index > 0 {
-                    who.push(Span::raw(", "));
-                }
-                let device = blocker
-                    .device
-                    .as_deref()
-                    .and_then(dux_core::device_label::short_device_label)
-                    .unwrap_or_else(|| "a browser".to_string());
-                who.push(name_chip(&device, &self.theme));
-                if let Some(address) = &blocker.address {
-                    who.push(Span::raw(format!(" at {address}")));
-                }
-            }
-            who.push(Span::raw("."));
-            lines.push(Line::from(who));
-        }
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(
@@ -8470,11 +8537,12 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ]);
+        let confirm_label = guarded_confirm_label("Quit", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmQuitCancel,
             (
-                "Quit",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmQuitConfirm,
             ),
@@ -10215,6 +10283,7 @@ impl App {
             delete_worktree,
             delete_branch,
             unpushed_commits,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -10335,6 +10404,8 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )));
         }
+        body_lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
+        let confirm_label = guarded_confirm_label("Delete", attached);
         let layout = self.render_confirm_dialog(
             frame,
             ConfirmDialog {
@@ -10342,7 +10413,7 @@ impl App {
                 body: body_lines,
                 controls_height: checkbox_height + branch_checkbox_height,
                 cancel: delete_agent_cancel_button(*focus),
-                act: delete_agent_delete_button(*focus),
+                act: delete_agent_delete_button(*focus, &confirm_label),
                 reserve_labels: &[],
             },
         );
@@ -10647,6 +10718,7 @@ impl App {
             agent_label,
             target: DeleteAgentTarget::Folder { folder_label },
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -10654,7 +10726,9 @@ impl App {
         };
         let (agent_label, folder_label, focus) =
             (agent_label.clone(), folder_label.clone(), *focus);
-        let body_lines = vec![
+        let confirm_label = guarded_confirm_label("Delete", attached);
+        let attached_lines = self.attached_section(attached, confirm_inner_width(frame.area()));
+        let mut body_lines = vec![
             Line::from(""),
             Line::from(vec![
                 Span::raw(" Are you sure you want to delete "),
@@ -10675,7 +10749,8 @@ impl App {
                 ),
             ]),
         ];
-        self.render_delete_agent_frame(frame, body_lines, focus);
+        body_lines.extend(attached_lines);
+        self.render_delete_agent_frame(frame, body_lines, focus, &confirm_label);
         true
     }
 
@@ -15526,6 +15601,7 @@ mod tests {
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.prompt = PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id,
             tab_id: slot_tab,
             provider_label: "Claude".to_string(),
@@ -19423,6 +19499,7 @@ mod tests {
         fn overlay_text(foreground_cmd: Option<String>) -> String {
             let mut app = test_app(default_bindings());
             app.prompt = PromptState::ConfirmDeleteTerminal {
+                attached: Vec::new(),
                 terminal_id: "term-1".to_string(),
                 terminal_label: "Terminal 1".to_string(),
                 focus: ConfirmFocus::Cancel,
@@ -24103,6 +24180,7 @@ mod tests {
     fn the_branch_box_names_every_branch_a_drifted_delete_removes() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             session_id: "s1".to_string(),
             agent_label: "feature-x".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
@@ -24290,6 +24368,7 @@ mod tests {
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             session_id: "s1".to_string(),
             agent_label: "b".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
@@ -24302,6 +24381,53 @@ mod tests {
             delete_worktree,
             delete_branch,
             unpushed_commits,
+        }
+    }
+
+    /// Who a refusal named wraps under its own text: the opening line keeps
+    /// the body's one-cell margin on every row, like the paragraphs above it,
+    /// and each blocker's rows keep its deeper indent, so a continuation never
+    /// runs back to the dialog's edge.
+    #[test]
+    fn who_is_attached_wraps_under_its_own_first_row() {
+        let app = test_app(default_bindings());
+        let blocker = dux_core::attachments::Blocker {
+            surface: dux_core::attachments::Surface::Browser,
+            device: Some("Firefox".to_string()),
+            address: Some("10.0.0.7".to_string()),
+            verified: false,
+            driving: false,
+            target: dux_core::attachments::Target {
+                kind: dux_core::attachments::TargetKind::Tab,
+                id: "s1-slot".to_string(),
+                agent: Some(app.engine.sessions[0].id.clone()),
+            },
+        };
+        let lines = app.attached_section(&[blocker], 30);
+        let rows: Vec<(String, String)> = lines
+            .iter()
+            .skip(1)
+            .map(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let first = line
+                    .spans
+                    .first()
+                    .map(|s| s.content.to_string())
+                    .unwrap_or_default();
+                (first, text)
+            })
+            .collect();
+        let lead_rows: Vec<_> = rows
+            .iter()
+            .take_while(|(_, t)| !t.contains("Firefox"))
+            .collect();
+        let entry_rows: Vec<_> = rows.iter().skip(lead_rows.len()).collect();
+        assert!(lead_rows.len() > 1 && entry_rows.len() > 1, "{rows:?}");
+        for (first, text) in lead_rows {
+            assert_eq!(first, " ", "a lead row keeps the body margin: {text:?}");
+        }
+        for (first, text) in entry_rows {
+            assert_eq!(first, "   ", "a blocker row keeps its indent: {text:?}");
         }
     }
 

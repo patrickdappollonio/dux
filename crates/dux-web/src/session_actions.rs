@@ -1275,6 +1275,15 @@ mod tests {
                 StatusCode::CONFLICT,
                 r#""error":"attached""#,
             ),
+            // Going ahead over only blockers somebody was shown: anybody else
+            // in the way refuses it again, each with the key to send back.
+            (
+                "DELETE",
+                "/api/v1/sessions/s2?force_connected=0123456789abcdef",
+                "",
+                StatusCode::CONFLICT,
+                r#""key":""#,
+            ),
             (
                 "DELETE",
                 "/api/v1/sessions/s2?force_connected=true",

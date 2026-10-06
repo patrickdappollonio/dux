@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -40,11 +45,16 @@ export function ConfirmStopTabDialog() {
     tab !== undefined,
     closeStopTab,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    stopTabTarget && `${stopTabTarget.sessionId}/${stopTabTarget.tabId}`,
+  )
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!stopTabTarget) return
-    stopTab(stopTabTarget.sessionId, stopTabTarget.tabId)
-    closeStopTab()
+    const { sessionId, tabId } = stopTabTarget
+    const done = await confirm((accepted) => stopTab(sessionId, tabId, accepted))
+    if (done) closeStopTab()
   }
 
   function handleOpenChange(open: boolean) {
@@ -66,15 +76,24 @@ export function ConfirmStopTabDialog() {
               : ""}
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeStopTab}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeStopTab}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Stop tab
-          </Button>
+          <GuardedConfirmButton
+            verb="Stop tab"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

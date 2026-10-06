@@ -83,12 +83,34 @@ describe("ConfirmForceReconnectDialog", () => {
     expect(reconnectSession).not.toHaveBeenCalled()
   })
 
-  it("force-reconnects (fresh) and closes only on confirm", () => {
-    seed("s1", [session])
+  // Refused while somebody else is attached, it stays open naming them and
+  // recreates only through Force recreate anyway, over exactly who it showed.
+  it("force-reconnects (fresh) and closes only on confirm, over who is attached only once they are named", async () => {
+    seed("s1", [{ ...session, tabs: [{ id: "s1-slot", provider: "claude" }] }])
+    reconnectSession.mockResolvedValueOnce([
+      {
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: false,
+        driving: true,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
+      },
+    ])
     render(<ConfirmForceReconnectDialog />)
     fireEvent.click(screen.getByText("Force recreate"))
-    expect(reconnectSession).toHaveBeenCalledWith("s1", true)
-    expect(closeForceReconnect).toHaveBeenCalled()
+    expect(reconnectSession).toHaveBeenCalledWith("s1", true, null)
+    const override = await screen.findByRole("button", {
+      name: "Force recreate anyway",
+    })
+    expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
+    expect(closeForceReconnect).not.toHaveBeenCalled()
+
+    reconnectSession.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(reconnectSession).toHaveBeenLastCalledWith("s1", true, ["k1"])
+    await vi.waitFor(() => expect(closeForceReconnect).toHaveBeenCalled())
   })
 
   it("cancel closes without reconnecting", () => {

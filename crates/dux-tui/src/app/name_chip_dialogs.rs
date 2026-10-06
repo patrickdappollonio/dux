@@ -162,6 +162,7 @@ fn the_detach_dialog_chips_the_agent() {
     let buf = open(
         &mut app,
         PromptState::ConfirmDetachAgent {
+            attached: Vec::new(),
             session_id: "s1".to_string(),
             label: "feat-detach".to_string(),
             grace_seconds: 30,
@@ -227,6 +228,7 @@ fn the_delete_project_dialog_chips_the_project_and_names_the_cascade() {
     let buf = open(
         &mut app,
         PromptState::ConfirmDeleteProject {
+            attached: Vec::new(),
             project_id,
             project_name: "proj-del".to_string(),
             agent_count: 2,
@@ -273,6 +275,7 @@ fn the_remove_project_dialog_chips_the_project_and_keeps_the_worktrees() {
     let buf = open(
         &mut app,
         PromptState::ConfirmRemoveProject {
+            attached: Vec::new(),
             project_id,
             project_name: "proj-rm".to_string(),
             agent_count: 1,
@@ -319,6 +322,7 @@ fn a_multi_word_name_is_never_split_across_rows() {
             continue;
         }
         app.prompt = PromptState::ConfirmDeleteTerminal {
+            attached: Vec::new(),
             terminal_id: "t1".to_string(),
             terminal_label: "My Cool Terminal".to_string(),
             foreground_cmd: Some("vim".to_string()),
@@ -335,6 +339,7 @@ fn the_delete_terminal_dialog_chips_the_terminal() {
     let buf = open(
         &mut app,
         PromptState::ConfirmDeleteTerminal {
+            attached: Vec::new(),
             terminal_id: "t1".to_string(),
             terminal_label: "term-dt".to_string(),
             foreground_cmd: Some("vim".to_string()),
@@ -350,6 +355,7 @@ fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor(
     let session_id = app.engine.sessions[0].id.clone();
     let agent = app.session_label(&app.engine.sessions[0]);
     let close = PromptState::ConfirmCloseTab {
+        attached: Vec::new(),
         session_id: session_id.clone(),
         tab_id: "no-such-tab".to_string(),
         provider_label: "Prov-ct".to_string(),
@@ -362,6 +368,7 @@ fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor(
         provider_label: "Prov-st".to_string(),
         last_running: false,
         focus: ConfirmFocus::Cancel,
+        attached: Vec::new(),
     };
     for (prompt, provider) in [(close, "Prov-ct"), (stop, "Prov-st")] {
         let buf = open(&mut app, prompt);
@@ -390,6 +397,7 @@ fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor(
 
 fn delete_agent_prompt(target: DeleteAgentTarget, delete_worktree: bool) -> PromptState {
     PromptState::ConfirmDeleteAgent {
+        attached: Vec::new(),
         session_id: "s1".to_string(),
         agent_label: "launch-at-login".to_string(),
         target,
@@ -401,6 +409,182 @@ fn delete_agent_prompt(target: DeleteAgentTarget, delete_worktree: bool) -> Prom
             has_remote_refs: true,
         }),
     }
+}
+
+/// Deleting an agent a browser is watching leaves the dialog open: it names
+/// who as chips (the device, the tab and the agent), its confirm becomes
+/// Delete anyway with Cancel focused, and the override deletes the agent.
+#[test]
+fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
+    let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].id.clone();
+    let tab = app.engine.sessions[0].slot_tab_id().to_string();
+    app.engine.attachments.register(
+        "browser-tab",
+        dux_core::attachments::ConnectionFacts {
+            surface: dux_core::attachments::Surface::Browser,
+            device: Some(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0"
+                    .to_string(),
+            ),
+            address: Some("10.0.0.7".parse().unwrap()),
+            verified: false,
+            events: true,
+        },
+        None,
+    );
+    app.engine
+        .attachments
+        .attach(
+            "browser-tab",
+            dux_core::attachments::Target {
+                kind: dux_core::attachments::TargetKind::Tab,
+                id: tab,
+                agent: Some(agent.clone()),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    app.confirm_delete_selected_session()
+        .expect("open the delete dialog");
+
+    app.resolve_confirm_delete_agent(true);
+
+    let PromptState::ConfirmDeleteAgent { focus, .. } = &app.prompt else {
+        panic!("the delete dialog stays open, got {:?}", app.prompt);
+    };
+    assert_eq!(*focus, DeleteAgentFocus::Cancel);
+    let buf = render(&mut app);
+    assert_chipped(&app, &buf, "Firefox on Linux");
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(
+        text.contains("at 10.0.0.7 (unverified), watching tab"),
+        "{text}"
+    );
+    assert!(text.contains("Delete anyway"), "{text}");
+    assert!(app.engine.sessions.iter().any(|s| s.id == agent));
+
+    // Somebody the dialog did not show attaches: the override is refused
+    // again, naming both, with focus back on Cancel.
+    app.engine.attachments.register(
+        "second-browser",
+        dux_core::attachments::ConnectionFacts {
+            surface: dux_core::attachments::Surface::Browser,
+            device: Some("Safari".to_string()),
+            address: Some("10.0.0.8".parse().unwrap()),
+            verified: false,
+            events: true,
+        },
+        None,
+    );
+    app.engine
+        .attachments
+        .attach(
+            "second-browser",
+            dux_core::attachments::Target {
+                kind: dux_core::attachments::TargetKind::Tab,
+                id: app.engine.sessions[0].slot_tab_id().to_string(),
+                agent: Some(agent.clone()),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
+        *focus = DeleteAgentFocus::Delete;
+    }
+    app.resolve_confirm_delete_agent(true);
+    let PromptState::ConfirmDeleteAgent {
+        focus, attached, ..
+    } = &app.prompt
+    else {
+        panic!("the override is refused again, got {:?}", app.prompt);
+    };
+    assert_eq!(attached.len(), 2);
+    assert_eq!(*focus, DeleteAgentFocus::Cancel);
+    assert!(app.engine.sessions.iter().any(|s| s.id == agent));
+
+    app.resolve_confirm_delete_agent(true);
+
+    assert!(matches!(app.prompt, PromptState::None));
+    assert!(
+        !app.engine.sessions.iter().any(|s| s.id == agent),
+        "the override deletes the agent"
+    );
+}
+
+/// A double click on Delete never goes ahead over who the refusal named: the
+/// second click arrives before the override has been drawn, so it lands on
+/// nothing. The override takes a fresh press on the button once it is on
+/// screen.
+#[test]
+fn a_double_click_on_a_refused_delete_never_presses_the_override() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].id.clone();
+    let tab = app.engine.sessions[0].slot_tab_id().to_string();
+    crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
+    app.confirm_delete_selected_session()
+        .expect("open the delete dialog");
+    let click = |app: &mut App, rect: ratatui::layout::Rect| {
+        let (column, row) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+        }
+    };
+    let delete_button = |app: &App| match app.overlay_layout.active {
+        OverlayMouseLayout::ConfirmDeleteAgent { delete_button, .. } => delete_button,
+        _ => panic!("the delete dialog publishes its buttons"),
+    };
+
+    render(&mut app);
+    let first = delete_button(&app);
+    // Both halves of the double click in one input batch, no frame between.
+    click(&mut app, first);
+    click(&mut app, first);
+
+    assert!(
+        app.engine.sessions.iter().any(|s| s.id == agent),
+        "the second click must not go ahead"
+    );
+    assert!(!app.prompt.attached().is_empty(), "{:?}", app.prompt);
+
+    render(&mut app);
+    let drawn = delete_button(&app);
+    click(&mut app, drawn);
+    assert!(
+        !app.engine.sessions.iter().any(|s| s.id == agent),
+        "a fresh press on the drawn override goes ahead"
+    );
+}
+
+/// Quitting with a browser attached names it as a chip, and the confirm says
+/// it quits anyway.
+#[test]
+fn the_quit_dialog_names_who_is_attached_and_offers_to_quit_anyway() {
+    let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].id.clone();
+    let tab = app.engine.sessions[0].slot_tab_id().to_string();
+    crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
+    assert!(!app.begin_quit(), "asks first");
+
+    let buf = render(&mut app);
+    assert_chipped(&app, &buf, "Firefox");
+    let text = dialog_text(&buf, "Quit dux");
+    assert!(
+        text.contains("Someone else is using this right now. Going ahead cuts them off:"),
+        "{text}"
+    );
+    assert!(text.contains("Quit anyway"), "{text}");
 }
 
 #[test]
@@ -1289,6 +1473,7 @@ fn dialog_body_text_is_the_themes_text_color_on_a_light_theme() {
     let buf = open(
         &mut app,
         PromptState::ConfirmDeleteProject {
+            attached: Vec::new(),
             project_id: project_id.clone(),
             project_name: "proj-light".to_string(),
             agent_count: 2,
@@ -1302,6 +1487,7 @@ fn dialog_body_text_is_the_themes_text_color_on_a_light_theme() {
     let buf = open(
         &mut app,
         PromptState::ConfirmRemoveProject {
+            attached: Vec::new(),
             project_id,
             project_name: "proj-light".to_string(),
             agent_count: 2,

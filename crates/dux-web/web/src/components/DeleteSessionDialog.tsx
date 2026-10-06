@@ -9,6 +9,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   folderWorkspace,
@@ -195,6 +200,11 @@ export function DeleteSessionDialog() {
     },
   )
 
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    deleteTarget,
+  )
+
   // Asked exactly when the branch offer is on screen, since the answer carries both
   // the names and the count; with the worktree kept there is nothing to render.
   const askUnpushed = isOpen && managed !== null && deleteWorktree
@@ -216,7 +226,7 @@ export function DeleteSessionDialog() {
     }
   }, [askUnpushed, deleteTarget])
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!deleteTarget) return
     // The server REFUSES a worktree-removing delete on a standalone agent, and this
     // component outlives an open, so a leftover tick would wedge it with no control.
@@ -224,7 +234,11 @@ export function DeleteSessionDialog() {
     // The branch answer is sent only when the box was on screen; otherwise `null`,
     // and the server keeps its own default.
     const branchAnswerToSend = removeWorktree ? deleteBranch : null
-    deleteSession(deleteTarget, removeWorktree, branchAnswerToSend)
+    const target = deleteTarget
+    const done = await confirm((accepted) =>
+      deleteSession(target, removeWorktree, branchAnswerToSend, accepted),
+    )
+    if (!done) return
     reset()
     closeDelete()
   }
@@ -289,14 +303,23 @@ export function DeleteSessionDialog() {
           // an ordinary control and the sentence under it says what is at stake.
           <p className="text-sm text-destructive">{renderProse(warning)}</p>
         )}
+        <AttachedSection blockers={blockers} />
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" onClick={handleCancel} autoFocus>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            onClick={handleCancel}
+            autoFocus
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Delete
-          </Button>
+          <GuardedConfirmButton
+            verb="Delete"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

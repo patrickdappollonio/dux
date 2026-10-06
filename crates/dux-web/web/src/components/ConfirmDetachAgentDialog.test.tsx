@@ -22,7 +22,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     closeStopAgent: () => closeStopAgent(),
-    killSessionPty: (s: string) => killSessionPty(s),
+    killSessionPty: (...args: unknown[]) => killSessionPty(...args),
   }
 })
 
@@ -154,16 +154,34 @@ describe("ConfirmDetachAgentDialog", () => {
     expect(body.textContent).toContain("All 2 running tabs stop together.")
   })
 
-  it("detaches on confirm and closes itself", async () => {
+  // Refused while somebody else is attached, it stays open naming them and
+  // detaches only through Detach anyway, which goes ahead over them.
+  it("detaches on confirm and closes itself, over who is attached only once they are named", async () => {
     seed({
       stopAgentTarget: "s1",
       spine: { sessions: [session({ id: "s1", title: "fix-auth" })] },
     } as Partial<DuxState>)
+    killSessionPty.mockResolvedValueOnce([{
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: false,
+        driving: true,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
+      }])
     render(<ConfirmDetachAgentDialog />)
 
     fireEvent.click(await screen.findByText("Detach"))
-    expect(killSessionPty).toHaveBeenCalledWith("s1")
-    expect(closeStopAgent).toHaveBeenCalled()
+    expect(killSessionPty).toHaveBeenCalledWith("s1", false, null)
+    const override = await screen.findByRole("button", { name: "Detach anyway" })
+    expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
+    expect(closeStopAgent).not.toHaveBeenCalled()
+
+    killSessionPty.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(killSessionPty).toHaveBeenLastCalledWith("s1", false, ["k1"])
+    await vi.waitFor(() => expect(closeStopAgent).toHaveBeenCalled())
   })
 
   it("cancels without detaching, and Cancel is the default focus", async () => {

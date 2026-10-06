@@ -15,7 +15,7 @@
 //! own attachments are then the exempt ones.
 
 use super::{Command, Engine};
-use crate::attachments::{Attachments, Blocker, Life, Policy, Scope};
+use crate::attachments::{Attachments, Blocker, Life, Policy, Scope, TargetKind};
 use crate::model::TerminalOwner;
 use crate::wire::WireCommand;
 
@@ -173,6 +173,7 @@ impl Engine {
         let policy = self.dispatch_policy.clone().unwrap_or_else(|| Policy {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
             force: false,
+            accepted: None,
         });
         let watch = self
             .operation_in_dispatch
@@ -272,6 +273,50 @@ impl Engine {
             .map_err(|blockers| Attached { blockers })
     }
 
+    /// `blockers` with every name a dialog shows resolved: the device's short
+    /// label, the tab's strip label or the terminal's label (its id when this
+    /// engine no longer has it), and the agent's name.
+    pub fn attached_entries(
+        &self,
+        blockers: &[Blocker],
+    ) -> Vec<crate::attached_prose::AttachedEntry> {
+        blockers
+            .iter()
+            .map(|blocker| {
+                let target = &blocker.target;
+                let agent = target
+                    .agent
+                    .as_deref()
+                    .and_then(|id| self.sessions.iter().find(|session| session.id == id));
+                let label = match target.kind {
+                    TargetKind::Tab => agent.and_then(|session| {
+                        self.tab_prose_label(
+                            crate::ids::SessionIdRef::new(&session.id),
+                            crate::ids::TabIdRef::new(&target.id),
+                        )
+                    }),
+                    TargetKind::Terminal => self
+                        .companion_terminals
+                        .get(&target.id)
+                        .map(|terminal| terminal.label.clone()),
+                };
+                crate::attached_prose::AttachedEntry {
+                    device: blocker
+                        .device
+                        .as_deref()
+                        .and_then(crate::device_label::short_device_label),
+                    surface: blocker.surface,
+                    address: blocker.address.clone(),
+                    verified: blocker.verified,
+                    driving: blocker.driving,
+                    target_kind: target.kind,
+                    target_label: label.unwrap_or_else(|| target.id.clone()),
+                    agent_label: agent.map(|session| session.display_label()),
+                }
+            })
+            .collect()
+    }
+
     fn workspace_scope(&self) -> Scope {
         let mut scope = Scope::default();
         for session in &self.sessions {
@@ -348,5 +393,44 @@ mod tests {
             assert!(refused.contains("192.168.1.5"), "{refused}");
         }
         assert!(engine.providers.contains_key(&TabId::new("s2-slot")));
+    }
+
+    /// A blocker as a dialog names it: the device by its short label, the tab
+    /// by the label its strip shows and the agent by its name; a terminal this
+    /// engine no longer has is named by its id rather than dropped.
+    #[test]
+    fn a_blocker_is_named_by_its_device_tab_and_agent_labels() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine
+            .sessions
+            .push(sample_session("s1", "p1", "feat/login"));
+        let blocker = |kind, id: &str, agent: Option<&str>| crate::attachments::Blocker {
+            surface: Surface::Browser,
+            device: Some(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                    .to_string(),
+            ),
+            address: Some("100.64.0.2".to_string()),
+            verified: true,
+            driving: false,
+            target: Target {
+                kind,
+                id: id.to_string(),
+                agent: agent.map(str::to_string),
+            },
+        };
+
+        let entries = engine.attached_entries(&[
+            blocker(TargetKind::Tab, "s1-slot", Some("s1")),
+            blocker(TargetKind::Terminal, "gone-terminal", None),
+        ]);
+
+        assert_eq!(entries[0].device.as_deref(), Some("Chrome on macOS"));
+        assert_eq!(entries[0].target_label, "Claude");
+        assert_eq!(entries[0].agent_label.as_deref(), Some("s1-title"));
+        assert_eq!(entries[1].target_label, "gone-terminal");
+        assert_eq!(entries[1].agent_label, None);
     }
 }

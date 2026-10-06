@@ -56,6 +56,11 @@ describe("terminalsApi", () => {
     expect(c.url).toBe("/api/v1/sessions/s%201/terminals/t%2F2")
     expect(c.method).toBe("DELETE")
     expect(c.headers["x-connection-id"]).toBe("conn-7")
+    // Every close carries the override's keys when it has them.
+    await terminalsApi.remove("s1", "t2", ["k1"])
+    expect(lastCall(fetchMock).url).toBe("/api/v1/sessions/s1/terminals/t2?force_connected=k1")
+    await terminalsApi.removeStandalone("t2", ["k1"])
+    expect(lastCall(fetchMock).url).toBe("/api/v1/terminals/t2?force_connected=k1")
   })
 
   it("createForProject POSTs the project-nested terminals endpoint", async () => {
@@ -70,9 +75,9 @@ describe("terminalsApi", () => {
 
   it("removeForProject DELETEs the project-nested terminal endpoint (encoding ids)", async () => {
     const fetchMock = stubOkFetch(204, null)
-    await terminalsApi.removeForProject("p 1", "t/2")
+    await terminalsApi.removeForProject("p 1", "t/2", ["k1"])
     const c = lastCall(fetchMock)
-    expect(c.url).toBe("/api/v1/projects/p%201/terminals/t%2F2")
+    expect(c.url).toBe("/api/v1/projects/p%201/terminals/t%2F2?force_connected=k1")
     expect(c.method).toBe("DELETE")
     expect(c.headers["x-connection-id"]).toBe("conn-7")
   })

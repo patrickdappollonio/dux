@@ -16,6 +16,7 @@ import {
   ProjectsApiError,
   type PatchProjectBody,
 } from "./projectsApi"
+import { type AttachedBlocker, AttachedError } from "./attached"
 import { existingBranchConflict, sessionsApi, SessionsApiError } from "./sessionsApi"
 
 import { ordersMatch, reorderById } from "./reorder"
@@ -3827,15 +3828,16 @@ export function findTerminalOwner(
 function terminalDeleteRequest(
   owner: TerminalOwnerRef,
   terminalId: string,
+  accepted: readonly string[] | null,
 ): Promise<void> {
   switch (owner.kind) {
     case "session":
-      return terminalsApi.remove(owner.sessionId, terminalId)
+      return terminalsApi.remove(owner.sessionId, terminalId, accepted)
     case "project":
-      return terminalsApi.removeForProject(owner.projectId, terminalId)
+      return terminalsApi.removeForProject(owner.projectId, terminalId, accepted)
     // Un-nested, because there is no owner to nest under.
     case "standalone":
-      return terminalsApi.removeStandalone(terminalId)
+      return terminalsApi.removeStandalone(terminalId, accepted)
     default:
       return assertNever(owner)
   }
@@ -3845,11 +3847,16 @@ function terminalDeleteRequest(
 // owner kind, since a session-only scan would make project terminals
 // undeletable, and a terminal that already vanished is a no-op. A focused
 // terminal's selection clears through the spine prune, not from here.
-export function deleteTerminal(terminalId: string): void {
+//
+// Resolves the blockers when somebody else is attached to the terminal, for the
+// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
+export function deleteTerminal(
+  terminalId: string,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
   const owner = findTerminalOwner(terminalId)
-  if (owner === undefined) return
-  const request = terminalDeleteRequest(owner, terminalId)
-  request.catch((e) =>
+  if (owner === undefined) return Promise.resolve(null)
+  return guardedChange(terminalDeleteRequest(owner, terminalId, accepted), (e) =>
     notifyError(
       e instanceof Error ? e.message : "Could not close the terminal.",
     ),
@@ -3909,12 +3916,16 @@ export function closeStopTab(): void {
 // dormant. The server raises the outcome as a status, so only a refused
 // request toasts here. Focus stays where it is: the pane shows the dormant
 // card the tab now is.
-export function stopTab(sessionId: string, tabId: string): void {
-  tabsApi
-    .stop(sessionId, tabId)
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not stop the tab."),
-    )
+// Resolves the blockers when somebody else is attached to the tab, for the
+// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
+export function stopTab(
+  sessionId: string,
+  tabId: string,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(tabsApi.stop(sessionId, tabId, accepted), (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not stop the tab."),
+  )
 }
 
 // Open the POLITE detach confirmation, from the agent's row menu.
@@ -3960,10 +3971,15 @@ export function closeForceStopAgent(): void {
 // Nothing is optimistic: focus and latches move only once the DELETE resolves,
 // or a failed request would leave the UI navigated away from a live tab with no
 // rollback. Focus must leave the closed tab, since subscribing relaunches it.
-export function closeTab(sessionId: string, tabId: string): void {
-  tabsApi
-    .remove(sessionId, tabId)
-    .then((closed) => {
+//
+// Resolves the blockers when somebody else is attached to the tab, for the
+// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
+export function closeTab(
+  sessionId: string,
+  tabId: string,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  const closing = tabsApi.remove(sessionId, tabId, accepted).then((closed) => {
       dropTabStarted(tabId)
       // Record the promotion before anything reads the slot: the spine is still
       // the pre-close one here, so `slotTabIdFor` would otherwise answer with
@@ -3993,9 +4009,9 @@ export function closeTab(sessionId: string, tabId: string): void {
       // spine, which can still name the tab we just deleted.
       selectTab(sessionId, slotTabIdFor(sessionId))
     })
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not close the tab."),
-    )
+  return guardedChange(closing, (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not close the tab."),
+  )
 }
 
 // Retarget a tab's provider (effective on its next launch). Validated up front
@@ -4368,14 +4384,17 @@ export function closeDelete(): void {
 // destructive removal of the git worktree on disk (default off in the UI).
 // `deleteBranch` is the dialog's branch answer, or `null` when it had no
 // checkbox to answer with.
+// Resolves the blockers when somebody else is attached to the agent, for the
+// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
 export function deleteSession(
   sessionId: string,
   deleteWorktree: boolean,
   deleteBranch: boolean | null = null,
-): void {
-  sessionsApi
-    .remove(sessionId, deleteWorktree, deleteBranch)
-    .catch((e) => {
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(
+    sessionsApi.remove(sessionId, deleteWorktree, deleteBranch, accepted),
+    (e) => {
       // A 409 is a refusal (a tab is still launching, or a delete is already in
       // flight). The server already surfaces that message over the `/ws/events`
       // status stream, so don't toast it a second time. Mirrors
@@ -4384,7 +4403,8 @@ export function deleteSession(
       notifyError(
         e instanceof Error ? e.message : "Could not delete the session.",
       )
-    })
+    },
+  )
 }
 
 // Open the rename dialog for a session, pre-filling the current custom title
@@ -4555,14 +4575,22 @@ export function toggleSessionAutoReopen(
 // the provider supports it. `terminalEpoch` is bumped so the pane remounts and
 // re-subscribes: the reconnect swaps in a new provider and the attached
 // forwarder is dead, so even an already-focused pane must re-issue `subscribe`.
-export function reconnectSession(sessionId: string, force: boolean): void {
-  sessionsApi
-    .reconnect(sessionId, force)
-    .catch((e) =>
+//
+// Resolves the blockers when somebody else is attached to what a forced one
+// would end, for the dialog to name them and offer the override (`accepted`,
+// their keys); `null` otherwise.
+export function reconnectSession(
+  sessionId: string,
+  force: boolean,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  const answer = guardedChange(
+    sessionsApi.reconnect(sessionId, force, accepted),
+    (e) =>
       notifyError(
         e instanceof Error ? e.message : "Could not reconnect the session.",
       ),
-    )
+  )
   // No latch: the reconnect dispatches a launch server-side, and dispatching is
   // what clears the tab's recorded failure, so the card cannot show for the
   // reconnect's own tab.
@@ -4587,6 +4615,7 @@ export function reconnectSession(sessionId: string, force: boolean): void {
   // too: a position the address bar does not name is a position Back cannot
   // return to.
   syncUrl()
+  return answer
 }
 
 export function openGlobalEnv(): void {
@@ -5055,12 +5084,16 @@ export function closeRemoveProject(): void {
   setState({ removeProjectTarget: null })
 }
 
-export function removeProject(projectId: string): void {
-  projectsApi
-    .remove(projectId)
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not remove the project."),
-    )
+// Resolves the blockers when somebody else is attached to a terminal the removal
+// ends, for the dialog to name them and offer the override (`accepted`, their keys); `null`
+// otherwise.
+export function removeProject(
+  projectId: string,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(projectsApi.remove(projectId, accepted), (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not remove the project."),
+  )
 }
 
 export function openDeleteProject(projectId: string): void {
@@ -5076,12 +5109,17 @@ export function closeDeleteProject(): void {
 // keep-worktrees variant is `removeProject`. Fire-and-forget like the other
 // project mutations; the keyed status stream reports the outcome, and a refusal
 // (e.g. a tab still launching) surfaces as an error toast.
-export function deleteProject(projectId: string): void {
-  projectsApi
-    .deleteWithWorktrees(projectId)
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not delete the project."),
-    )
+//
+// Resolves the blockers when somebody else is attached to a terminal the delete
+// ends, for the dialog to name them and offer the override (`accepted`, their keys); `null`
+// otherwise.
+export function deleteProject(
+  projectId: string,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(projectsApi.deleteWithWorktrees(projectId, accepted), (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not delete the project."),
+  )
 }
 
 // Update a project's settings (provider / auto-reopen / startup-command / env)
@@ -6571,14 +6609,47 @@ export function closeStopAll(): void {
 // shutdown grace per agent is the opposite of what they asked for. The polite
 // path is the agent row menu's Detach agent. Both dialogs say "immediately" so
 // the difference is stated, not implied.
-export function stopAllRunning(): void {
-  const sessions = state.spine?.sessions ?? []
-  for (const s of sessions) {
-    if (s.status === "active") killSessionPty(s.id, true)
-  }
+//
+// Nothing somebody else is attached to is stopped: the stops refused for that
+// come back, with everybody named, for the confirmation to show and offer to
+// go ahead over. `only` retries exactly those, with `accepted` the keys of the
+// blockers the confirmation showed; everything else already stopped.
+export async function stopAllRunning(
+  only: StopAllRefusal | null = null,
+  accepted: readonly string[] | null = null,
+): Promise<StopAllRefusal | null> {
+  const agents =
+    only?.agents ??
+    (state.spine?.sessions ?? [])
+      .filter((s) => s.status === "active")
+      .map((s) => s.id)
   // One flat collection, so every terminal of every owner is reached by one
   // loop and no owner kind can be missed.
-  for (const t of state.spine?.terminals ?? []) deleteTerminal(t.id)
+  const terminals = only?.terminals ?? (state.spine?.terminals ?? []).map((t) => t.id)
+  const [agentAnswers, terminalAnswers] = await Promise.all([
+    Promise.all(agents.map((id) => killSessionPty(id, true, accepted))),
+    Promise.all(terminals.map((id) => deleteTerminal(id, accepted))),
+  ])
+  const refusedAgents = agents.filter((_, i) => agentAnswers[i] !== null)
+  const refusedTerminals = terminals.filter((_, i) => terminalAnswers[i] !== null)
+  if (refusedAgents.length === 0 && refusedTerminals.length === 0) return null
+  const blockers = new Map<string, AttachedBlocker>()
+  for (const answer of [...agentAnswers, ...terminalAnswers]) {
+    for (const blocker of answer ?? []) blockers.set(blocker.key, blocker)
+  }
+  return {
+    agents: refusedAgents,
+    terminals: refusedTerminals,
+    blockers: [...blockers.values()],
+  }
+}
+
+/** The stops "Force stop everything" could not make because somebody else is
+ * attached, and who. */
+export interface StopAllRefusal {
+  agents: string[]
+  terminals: string[]
+  blockers: AttachedBlocker[]
 }
 
 // The Preferences dialog (the app menu's "Preferences…"). Open/close just flip the
@@ -6781,14 +6852,34 @@ export function recreateWorkingCopy(sessionId: string): void {
     )
 }
 
-export function killSessionPty(sessionId: string, force = false): void {
-  sessionsApi
-    .kill(sessionId, force)
-    .catch((e) =>
-      notifyError(
-        e instanceof Error ? e.message : "Could not kill the agent.",
-      ),
-    )
+// Resolves the blockers when somebody else is attached to the agent, for the
+// dialog to name them and offer the override (`accepted`, their keys); `null`
+// otherwise.
+export function killSessionPty(
+  sessionId: string,
+  force = false,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(sessionsApi.kill(sessionId, force, accepted), (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not kill the agent."),
+  )
+}
+
+// A guarded change's answer: the blockers when somebody else is attached to what
+// it would end, `null` when it went ahead or failed some other way, which
+// `onError` reports.
+function guardedChange(
+  request: Promise<unknown>,
+  onError: (e: unknown) => void,
+): Promise<AttachedBlocker[] | null> {
+  return request.then(
+    () => null,
+    (e) => {
+      if (e instanceof AttachedError) return e.blockers
+      onError(e)
+      return null
+    },
+  )
 }
 
 // The Monaco config.toml editor (the app menu's "Edit config file…"). Open fetches the raw

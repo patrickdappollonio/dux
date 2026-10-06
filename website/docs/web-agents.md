@@ -295,13 +295,25 @@ and why rather than reporting a deletion that did not happen.
 
 ### When somebody else is connected
 
-Deleting an agent, detaching it, force-stopping it, restarting it from scratch, closing a
-tab, closing a terminal, removing a project, and starting an agent that would stop another
+Deleting an agent, detaching it, force-stopping it, restarting it from scratch, stopping or
+closing a tab, closing a terminal, removing a project, and starting an agent that would stop another
 agent already working in the same folder all end terminals, and somebody else may be
 looking at one: another browser tab, a phone, or the terminal app. dux refuses the change
 while anybody else is connected to what it would end, and says who: the device, the address
 it connects from (marked unverified when dux cannot vouch for it), whether they are typing
 in it or watching, and which tab or terminal. Nothing is changed.
+
+The delete, detach, force stop, force recreate, stop tab, close tab, close terminal and
+project dialogs say it in place, on both the browser and the terminal app, and so do the
+browser's Force stop everything and the terminal app's Kill Running: the dialog stays open,
+lists everybody it would cut off, moves focus back to Cancel, and its button becomes **Delete
+anyway** (or **Detach anyway**, **Close tab anyway**, and so on). Pressing that goes ahead
+over exactly the people listed; Cancel or Escape changes nothing. If somebody new has
+connected by then, nothing happens and the dialog lists everybody again, so you never cut
+off someone you were not shown. In the terminal app the list also follows people connecting
+and leaving while the dialog is open. A double click on the first button never presses the
+one that replaces it: the override takes its own click. Quitting the terminal app while
+somebody else is connected to one of its terminals asks the same way, with **Quit anyway**.
 
 Only the connection asking is left out. The browser tab you are using is never in its own
 way, and neither is the terminal app deleting the agent it shows, but a second tab open on

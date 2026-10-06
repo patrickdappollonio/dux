@@ -2,6 +2,7 @@
 // connection id so server-side operation status is routed back to the
 // initiating client; failures surface as `SessionsApiError`.
 
+import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
 import type {
   AcceptedOperation,
@@ -154,11 +155,18 @@ export const sessionsApi = {
   // `deleteBranch` is the delete dialog's "also delete the branch" answer.
   // `null` means nobody was asked (a standalone agent, whose dialog has no
   // checkbox), and the server then keeps its provenance default.
-  remove: (id: string, deleteWorktree: boolean, deleteBranch: boolean | null) =>
+  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
+  remove: (
+    id: string,
+    deleteWorktree: boolean,
+    deleteBranch: boolean | null,
+    accepted: readonly string[] | null = null,
+  ) =>
     request<void>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
-        (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`),
+        (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`) +
+        forceConnectedQuery(accepted, false),
     ),
   // How much work ticking that box would destroy: the branches the delete removes and
   // how many of their commits no remote-tracking ref reaches. A `null` count means git
@@ -174,18 +182,27 @@ export const sessionsApi = {
       `/api/v1/sessions/${encodeURIComponent(id)}`,
       body,
     ),
-  reconnect: (id: string, force: boolean) =>
-    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/reconnect`, {
-      force,
-    }),
+  // `accepted` goes ahead over exactly those blockers (their keys), the ones a
+  // dialog showed.
+  reconnect: (id: string, force: boolean, accepted: readonly string[] | null = null) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/reconnect` +
+        forceConnectedQuery(accepted, true),
+      { force },
+    ),
   // Stop the agent's processes (it detaches; it is NOT deleted). `force` skips
   // the shutdown grace and ends them at once, for the Task Manager's "Stop
   // everything"; without it the agent is asked to shut down and given the
   // configured wait. A non-2xx throws.
-  kill: (id: string, force = false) =>
-    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`, {
-      force,
-    }),
+  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
+  kill: (id: string, force = false, accepted: readonly string[] | null = null) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/kill` +
+        forceConnectedQuery(accepted, true),
+      { force },
+    ),
   // Check the agent's branch out again at the path its working copy used to
   // occupy. Answers with a keyed busy on the status stream; a refusal is a 400
   // and throws.
