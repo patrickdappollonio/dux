@@ -95,7 +95,8 @@ Subcommands:
   dux config set <setting> <value>
                            Change one setting, keeping the file's comments,
                            and have a running dux reload, saying whether it
-                           worked (exit 1 if it refused or half applied). Lists are one
+                           worked (exit 1 if it refused or half applied,
+                           6 if it gave no answer in time). Lists are one
                            TOML array: '[\"a\", \"b\"]'
   dux config set server.auth.password
                            Set the web UI password: asked for twice without

@@ -340,12 +340,19 @@ pub(crate) fn run_set(
     Ok(())
 }
 
-/// Say how the running dux answered the request to reload. A reload it
-/// refused, or applied with a step failed, fails the command (exit 1): the
+/// Say how the running dux answered the request to reload. A reload with no
+/// answer in time ends the command with the unknown code (6), as everywhere
+/// else on the command line. A reload it refused, or applied with a step
+/// failed, fails the command (exit 1): the
 /// sentence says whether the change is in force, and why not or what failed,
 /// and goes out as the error so it reaches standard error.
 fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
     let sentence = reload_sentence(answer, problems_remain);
+    if matches!(answer, ReloadAnswer::Unknown(_)) {
+        return Err(
+            dux_core::client::CliError::new(dux_core::client::Exit::Unknown, sentence).into(),
+        );
+    }
     if matches!(
         answer,
         ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_)
@@ -668,7 +675,7 @@ fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
              the old web UI password and its signed-in sessions included.{then}"
         ),
         ReloadAnswer::Unknown(why) => format!(
-            "The change is saved, but the running dux has not said whether the reload worked: \
+            "The change is saved, but the running dux has not said whether the reload worked, so its outcome is unknown: \
              {why}. Until it has, it may still be on its current settings.{then}"
         ),
     }
@@ -1333,14 +1340,14 @@ port = 3890
     }
 
     /// A reload the running dux refused, or applied with a step failed, fails
-    /// the command; every other answer does not.
+    /// the command (exit 1); one with no answer in time ends it with the
+    /// unknown code (6); every other answer does not fail it.
     #[test]
     fn a_refused_or_half_applied_reload_fails_the_command_and_nothing_else_does() {
         for answer in [
             ReloadAnswer::Applied("ok".into()),
             ReloadAnswer::NotRunning,
             ReloadAnswer::NotReached("why".into()),
-            ReloadAnswer::Unknown("op-1".into()),
         ] {
             let mut out = Vec::new();
             say_reload(&answer, false, &mut out).expect("not a failure");
@@ -1352,6 +1359,22 @@ port = 3890
         assert!(
             error.to_string().contains("not in force"),
             "the failure carries the sentence: {error}"
+        );
+        let error = say_reload(
+            &ReloadAnswer::Unknown("operation op-1 ran out; see dux operations show op-1".into()),
+            false,
+            &mut out,
+        )
+        .expect_err("no answer in time ends the command");
+        let unknown = error
+            .downcast_ref::<dux_core::client::CliError>()
+            .expect("carries the CLI's own error");
+        assert_eq!(unknown.exit.code(), 6);
+        assert!(unknown.message.contains("is saved"), "{}", unknown.message);
+        assert!(
+            unknown.message.contains("dux operations show op-1"),
+            "{}",
+            unknown.message
         );
         let error = say_reload(
             &ReloadAnswer::PartlyApplied("one step failed: the database is locked".into()),

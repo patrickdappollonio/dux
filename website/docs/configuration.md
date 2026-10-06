@@ -145,8 +145,9 @@ for the answer. It then says which of these happened:
   current settings until you reload it from the app or restart it. It exits with status 0.
 - dux did not answer in time: `set` waits up to `[cli] wait_timeout_seconds` (10 minutes by
   default) for the reload's answer. If none comes it prints "The change is saved, but the
-  running dux has not said whether the reload worked:" followed by the operation it was
-  following, which keeps running and can be looked up later, and exits with status 0.
+  running dux has not said whether the reload worked, so its outcome is unknown:" followed by the operation it was
+  following, which keeps running and can be looked up later with `dux operations show`, and
+  exits with status 6, the command line's code for an outcome that is not known.
 
 The running dux also reports how the reload went in its status line, in the web UI's
 notifications and in `dux.log`; two `set`s in quick succession are both picked up. If dux

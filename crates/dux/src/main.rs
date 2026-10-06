@@ -36,7 +36,15 @@ fn main() -> Result<()> {
         if let Err(message) = commands::check_config_target(remote.as_deref(), selection.local) {
             usage_error(&message);
         }
-        return dux_tui::run_config(&config.args);
+        // A config command that ends with one of the command line's own codes
+        // (a reload whose outcome is unknown) exits with it.
+        if let Err(error) = dux_tui::run_config(&config.args) {
+            return match error.downcast::<dux_core::client::CliError>() {
+                Ok(cli) => client_commands::finish(Err(cli)),
+                Err(error) => Err(error),
+            };
+        }
+        return Ok(());
     }
     let cli = commands::Cli::parse();
     let selection = client_commands::Selection {
