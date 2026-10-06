@@ -9640,16 +9640,27 @@ mod tests {
             .expect("the removal is accepted and deferred")
             .operation_id
             .expect("an operation id");
-        let event = engine.worker_rx.recv().expect("the first reload completes");
-        let _ = engine.process_worker_event(event);
+        // Other workers (the project's save among them) answer on the same
+        // channel in no fixed order, so step to each reload's own completion.
+        let mut through_next_reload = |engine: &mut Engine| loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a reload completes");
+            let reload = matches!(event, crate::worker::WorkerEvent::ConfigReloadReady(_));
+            let _ = engine.process_worker_event(event);
+            if reload {
+                break;
+            }
+        };
+        through_next_reload(&mut engine);
         assert!(engine.reloading, "the follow-up reload is running");
         assert_eq!(
             engine.operations.view(&id, now()).unwrap().state,
             crate::operations::OperationState::Running,
             "a change held back again has not happened yet"
         );
-        let event = engine.worker_rx.recv().expect("the follow-up completes");
-        let _ = engine.process_worker_event(event);
+        through_next_reload(&mut engine);
         let record = engine.operations.view(&id, now()).unwrap();
         assert_eq!(record.state, crate::operations::OperationState::Succeeded);
         assert_eq!(record.removed, vec!["p10".to_string()]);
