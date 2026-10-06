@@ -16,6 +16,14 @@ use dux_core::text::count_of;
 // CLI dispatch
 // ---------------------------------------------------------------------------
 
+/// Whether the arguments after `dux config` ask for help: `-h` or `--help`
+/// anywhere, except after a literal `--`, where words are a value's.
+pub fn asks_for_help(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| a == "-h" || a == "--help")
+}
+
 pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
@@ -1332,6 +1340,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_help_flag_asks_for_help_until_a_literal_double_dash() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(asks_for_help(&args(&["get", "--help"])));
+        assert!(asks_for_help(&args(&["set", "k", "v", "-h"])));
+        assert!(!asks_for_help(&args(&["set", "k", "--", "--help"])));
+        assert!(!asks_for_help(&args(&["set", "k", "v"])));
+    }
     use crate::config::{self, Config};
     use crate::keybindings::RuntimeBindings;
     use crate::model::{AgentSession, ProviderKind, SessionStatus};

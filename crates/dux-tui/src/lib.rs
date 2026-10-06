@@ -66,6 +66,11 @@ pub enum TuiExit {
 /// every message and exit code here is the config code's own.
 pub fn run_config(config_args: &[String]) -> Result<()> {
     let paths = config::DuxPaths::discover()?;
+    // Help anywhere in a config command (before a literal `--`) prints the
+    // config help, before any lock is taken.
+    if cli::asks_for_help(config_args) {
+        return cli::run(&["--help".to_string()], &paths);
+    }
     let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
 
     // Acquire the single-instance lock only for subcommands that

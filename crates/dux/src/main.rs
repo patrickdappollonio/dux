@@ -11,6 +11,16 @@ fn main() -> Result<()> {
     // each serving mode reloads on it. A failure is reported where the mode
     // starts (both entry points install it again and say so).
     let _ = dux_core::reload_signal::install();
+    // `dux config` owns every word after it, `--` and flag-looking words
+    // included, so it is recognised before clap sees the line.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(config) = commands::split_config(&raw) {
+        if let Err(message) = commands::check_config_target(config.remote.as_deref(), config.local)
+        {
+            usage_error(&message);
+        }
+        return dux_tui::run_config(&config.args);
+    }
     let cli = commands::Cli::parse();
     match cli.command {
         None => run_tui_with_flip(),
@@ -18,17 +28,20 @@ fn main() -> Result<()> {
             if let Err(message) = commands::listener_flags_with_subcommand(&server) {
                 usage_error(&message);
             }
+            if server.command.is_none()
+                && let Err(message) =
+                    commands::check_server_start_target(cli.remote.as_deref(), cli.local)
+            {
+                usage_error(&message);
+            }
             match server.command {
                 None => run_server(server.into_overrides()),
                 Some(_) => not_built(),
             }
         }
-        Some(commands::Command::Config(config)) => {
-            if let Err(message) = commands::check_config_target(cli.remote.as_deref(), cli.local) {
-                usage_error(&message);
-            }
-            dux_tui::run_config(&config.args)
-        }
+        // Every well-formed `config` line was split off above; clap only
+        // reaches here for one that names both global flags, which it refuses.
+        Some(commands::Command::Config(_)) => not_built(),
         Some(_) => not_built(),
     }
 }

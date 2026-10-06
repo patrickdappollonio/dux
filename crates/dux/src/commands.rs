@@ -119,13 +119,64 @@ pub fn listener_flags_with_subcommand(server: &ServerCmd) -> Result<(), String> 
     Ok(())
 }
 
+/// Starting a server is always on this machine, so naming a target is a
+/// mistake.
+pub fn check_server_start_target(remote: Option<&str>, local: bool) -> Result<(), String> {
+    if remote.is_some() || local {
+        return Err("dux server starts a server on this machine; --remote and --local apply to its logs and connections subcommands".to_string());
+    }
+    Ok(())
+}
+
+/// What `dux [--remote x | --local] config <args>` carries: the global flags
+/// that came before the word, and everything after it, byte for byte.
+#[derive(Debug)]
+pub struct ConfigInvocation {
+    pub remote: Option<String>,
+    pub local: bool,
+    pub args: Vec<String>,
+}
+
+/// Recognises a command line whose command is `config`, looking only at the
+/// global flags that may precede it. Everything after the word is the config
+/// code's, `--` and flag-looking words included, so clap never sees it. A line
+/// that is not that shape (or names both global flags) is left to clap.
+pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
+    let mut remote = None;
+    let mut local = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "config" {
+            if remote.is_some() && local {
+                return None;
+            }
+            return Some(ConfigInvocation {
+                remote,
+                local,
+                args: args[i + 1..].to_vec(),
+            });
+        }
+        match arg {
+            "--local" => local = true,
+            "--remote" => {
+                i += 1;
+                remote = Some(args.get(i)?.clone());
+            }
+            _ => remote = Some(arg.strip_prefix("--remote=")?.to_string()),
+        }
+        i += 1;
+    }
+    None
+}
+
 /// `dux config` edits this machine's file, so it refuses when a remote is
 /// selected unless `--local` is given. Callers pass whatever selected the
 /// remote; today that is the `--remote` flag.
 pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), String> {
     if remote.is_some() && !local {
         return Err(
-            "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE"
+            "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE"
                 .to_string(),
         );
     }
@@ -691,7 +742,7 @@ mod tests {
 
     #[test]
     fn a_selected_remote_refuses_config_unless_local() {
-        let msg = "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE";
+        let msg = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE";
         assert_eq!(
             check_config_target(Some("box"), false),
             Err(msg.to_string())
@@ -711,6 +762,49 @@ mod tests {
         ] {
             assert!(parse(args).is_ok(), "{args:?}");
         }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn config_is_split_off_before_clap_sees_what_follows() {
+        let split = split_config(&strings(&["config", "--local", "--", "--remote=x"])).unwrap();
+        assert_eq!(split.remote, None);
+        assert!(!split.local);
+        assert_eq!(split.args, ["--local", "--", "--remote=x"]);
+
+        let split = split_config(&strings(&["--remote", "box", "config", "path"])).unwrap();
+        assert_eq!(split.remote.as_deref(), Some("box"));
+        assert_eq!(split.args, ["path"]);
+
+        let split = split_config(&strings(&["--remote=box", "config"])).unwrap();
+        assert_eq!(split.remote.as_deref(), Some("box"));
+        assert!(split.args.is_empty());
+
+        let split = split_config(&strings(&["--local", "config", "get", "a"])).unwrap();
+        assert!(split.local);
+    }
+
+    #[test]
+    fn only_a_leading_config_word_is_split_off() {
+        assert!(split_config(&strings(&["server", "config"])).is_none());
+        assert!(split_config(&strings(&["agents", "config"])).is_none());
+        assert!(split_config(&strings(&["--remote"])).is_none());
+        assert!(split_config(&strings(&[])).is_none());
+        assert!(split_config(&strings(&["--local", "--remote", "a", "config"])).is_none());
+    }
+
+    #[test]
+    fn a_server_start_refuses_a_selected_target() {
+        let msg = "dux server starts a server on this machine; --remote and --local apply to its logs and connections subcommands";
+        assert_eq!(
+            check_server_start_target(Some("x"), false),
+            Err(msg.to_string())
+        );
+        assert_eq!(check_server_start_target(None, true), Err(msg.to_string()));
+        assert_eq!(check_server_start_target(None, false), Ok(()));
     }
 
     #[test]

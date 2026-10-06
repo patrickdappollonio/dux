@@ -208,7 +208,7 @@ fn config_refuses_an_explicit_remote_and_touches_nothing() {
     assert_eq!(run.code(), 2);
     assert_eq!(
         run.stderr(),
-        "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE\n"
+        "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n"
     );
     assert_eq!(run.stdout(), "");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
@@ -241,4 +241,52 @@ fn macros_and_env_changes_are_declared_but_not_built_yet() {
         assert_eq!(run.code(), 2, "{args:?}: {}", run.stderr());
         assert_eq!(run.stderr(), "this command is not built yet\n", "{args:?}");
     }
+}
+
+#[test]
+fn config_arguments_that_look_like_dux_flags_reach_the_config_code_untouched() {
+    for (args, word) in [
+        (&["config", "--"][..], "--"),
+        (&["config", "--", "path"][..], "--"),
+        (&["config", "--local", "path"][..], "--local"),
+        (&["config", "--remote=x", "path"][..], "--remote=x"),
+    ] {
+        let run = dux("config-raw", args);
+        assert_eq!(run.code(), 1, "{args:?}");
+        assert_eq!(
+            run.stderr(),
+            format!(
+                "Error: unknown config subcommand: {word}\nRun `dux config --help` for usage.\n"
+            ),
+            "{args:?}"
+        );
+        assert_eq!(run.stdout(), "", "{args:?}");
+    }
+}
+
+#[test]
+fn a_help_flag_inside_a_config_command_prints_the_config_help() {
+    for args in [
+        &["config", "get", "--help"][..],
+        &["config", "set", "x", "y", "--help"][..],
+        &["config", "diff", "--raw", "--help"][..],
+        &["config", "set", "k", "v", "-h"][..],
+    ] {
+        let run = dux("config-inner-help", args);
+        assert_eq!(run.code(), 0, "{args:?}: {}", run.stderr());
+        assert!(
+            run.stdout()
+                .starts_with("dux config: manage the dux configuration file"),
+            "{args:?}: {}",
+            run.stdout()
+        );
+    }
+}
+
+#[test]
+fn global_flags_before_config_still_apply_to_it() {
+    let run = dux("config-global-before", &["--local", "config", "path"]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let run = dux("config-global-before", &["--remote=box", "config", "path"]);
+    assert_eq!(run.code(), 2);
 }
