@@ -61,58 +61,52 @@ pub enum TuiExit {
     },
 }
 
-/// Run dux (TUI mode or a `config` subcommand). Called by the `dux` binary
-/// crate.
+/// Run `dux config <args>`: the arguments after the word `config`, exactly as
+/// the user typed them. The binary's command tree hands them over untouched, so
+/// every message and exit code here is the config code's own.
+pub fn run_config(config_args: &[String]) -> Result<()> {
+    let paths = config::DuxPaths::discover()?;
+    let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
+
+    // Acquire the single-instance lock only for subcommands that
+    // mutate shared on-disk state. Read-only operations (path, diff,
+    // regenerate preview) skip the lock entirely.
+    let _lock = match sub {
+        // reset mutates state when root exists. When root is absent,
+        // run_reset's fast-path reports "nothing to reset" and exits,
+        // so we avoid creating the directory just to take a lock.
+        "reset" if paths.root.exists() => Some(acquire_lock_or_exit(&paths.lock_path)),
+
+        // regenerate --yes creates directories and writes config.
+        // Create root (so the lockfile can be opened) and lock before
+        // any writes, preventing a concurrent TUI from starting
+        // between directory creation and the config write.
+        "regenerate" if config_args.iter().any(|a| a == "--yes") => {
+            std::fs::create_dir_all(&paths.root)?;
+            Some(acquire_lock_or_exit(&paths.lock_path))
+        }
+
+        // `set` deliberately runs beside a live dux: its write takes the
+        // config file's own lock (never this one, which the running dux
+        // holds for its whole life), and it then signals that dux to
+        // reload. Everything else is read-only or prints help, so there
+        // is no shared state to protect.
+        _ => None,
+    };
+
+    cli::run(config_args, &paths)
+}
+
+/// Run the terminal UI. Called by the `dux` binary crate when no command was
+/// given.
 ///
 /// `companion` is the background web server this TUI may serve through. It is a
 /// `dux-core` trait object because this crate never sees `dux-web`: the binary
-/// implements it and is the only place the two surfaces meet. A `config`
-/// subcommand drops it unused.
+/// implements it and is the only place the two surfaces meet.
 pub fn run(
     companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
 ) -> Result<TuiExit> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help();
-        return Ok(TuiExit::Done);
-    }
-
     let paths = config::DuxPaths::discover()?;
-
-    if args.first().map(|s| s.as_str()) == Some("config") {
-        let config_args = &args[1..];
-        let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
-
-        // Acquire the single-instance lock only for subcommands that
-        // mutate shared on-disk state. Read-only operations (path, diff,
-        // regenerate preview) skip the lock entirely.
-        let _lock = match sub {
-            // reset mutates state when root exists. When root is absent,
-            // run_reset's fast-path reports "nothing to reset" and exits,
-            // so we avoid creating the directory just to take a lock.
-            "reset" if paths.root.exists() => Some(acquire_lock_or_exit(&paths.lock_path)),
-
-            // regenerate --yes creates directories and writes config.
-            // Create root (so the lockfile can be opened) and lock before
-            // any writes, preventing a concurrent TUI from starting
-            // between directory creation and the config write.
-            "regenerate" if config_args.iter().any(|a| a == "--yes") => {
-                std::fs::create_dir_all(&paths.root)?;
-                Some(acquire_lock_or_exit(&paths.lock_path))
-            }
-
-            // `set` deliberately runs beside a live dux: its write takes the
-            // config file's own lock (never this one, which the running dux
-            // holds for its whole life), and it then signals that dux to
-            // reload. Everything else is read-only or prints help, so there
-            // is no shared state to protect.
-            _ => None,
-        };
-
-        cli::run(config_args, &paths)?;
-        return Ok(TuiExit::Done);
-    }
 
     // The SIGUSR1 (reload config) handler goes in BEFORE the lock: `dux
     // config set` signals whoever holds the lock, and the signal's default
@@ -189,124 +183,12 @@ fn run_app(
     }
 }
 
-pub fn print_help() {
-    println!("{}", help_text());
-}
-
-/// The `dux --help` body. Split out of [`print_help`] so the text is a value
-/// the tests can assert on; a `println!` straight to stdout is not checkable.
-pub fn help_text() -> &'static str {
-    "dux\n\n\
-         Terminal and web UI for AI worktree sessions.\n\n\
-         Usage:\n\
-          dux              Launch the TUI\n\
-          dux server       Serve the web UI over the headless engine\n\
-          dux config       Manage the configuration file\n\n\
-         Server subcommand:\n\
-          dux server                     Serve on the configured host and port\n\
-          dux server --bind <ADDR:PORT>  Bind this exact address instead\n\
-          dux server --port <PORT>       Override the port only\n\
-          dux server --no-tailscale      Skip Tailscale detection this run\n\
-          One optional password for one owner: everyone who gets in shares\n\
-          this workspace. Set it with `dux config set server.auth.password`;\n\
-          with none, anyone who can reach the address is in.\n\n\
-         Config subcommands:\n\
-          dux config path          Print the config file path\n\
-          dux config get <setting> Print one setting, e.g. server.port\n\
-          dux config set <setting> <value>\n\
-                                   Change one setting and reload a running dux\n\
-          dux config set server.auth.password\n\
-                                   Set the web UI password (asked for, or --stdin)\n\
-          dux config diff          Show settings that differ from defaults.\n\
-                                   [env] and project details are summarized,\n\
-                                   never printed: safe to paste into a report.\n\
-          dux config diff --raw    Show a unified diff against the default\n\
-                                   config. Prints the WHOLE config, [env]\n\
-                                   values included: redact before sharing.\n\
-          dux config reset         Remove config and logs (keeps agents and worktrees)\n\
-          dux config reset --all   Full factory reset (config, logs, sessions, worktrees)\n\
-          dux config regenerate    Preview a fresh default config (shows diff;\n\
-                                   sensitive values hidden unless --show)\n\
-          dux config regenerate --yes\n\
-                                   Overwrite the config file with fresh defaults\n\n\
-         Environment variables:\n\
-           DUX_HOME    Override the config directory (must be an absolute path).\n\
-                       When unset, defaults to:\n\
-                         macOS: ~/.dux/\n\
-                         Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/\n\n\
-         First run writes a full default config to:\n\
-           macOS: ~/.dux/config.toml\n\
-           Linux: $XDG_CONFIG_HOME/dux/config.toml or ~/.config/dux/config.toml\n\
-         Session state is stored in:\n\
-           macOS: ~/.dux/sessions.sqlite3\n\
-           Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
-}
-
 fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
     match lockfile::SingleInstanceLock::acquire(path) {
         Ok(lock) => lock,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(1);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `dux server` is a real subcommand (`crates/dux/src/main.rs` dispatches on
-    /// it), so `--help` must list it next to the TUI and `config`. Without this,
-    /// an installed user has no way to discover the web UI exists.
-    #[test]
-    fn help_lists_the_server_subcommand() {
-        let help = help_text();
-        assert!(
-            help.contains("dux server"),
-            "--help must name the `dux server` subcommand:\n{help}"
-        );
-    }
-
-    #[test]
-    fn help_names_config_get_and_set_and_the_password() {
-        let help = help_text();
-        for needle in [
-            "dux config get",
-            "dux config set",
-            "server.auth.password",
-            "--stdin",
-        ] {
-            assert!(
-                help.contains(needle),
-                "--help must mention {needle}:\n{help}"
-            );
-        }
-    }
-
-    /// The flags `parse_server_args` already accepts must be discoverable from
-    /// the top-level help, not only from `dux server --help`.
-    #[test]
-    fn help_names_the_server_flags() {
-        let help = help_text();
-        for flag in ["--bind", "--port", "--no-tailscale"] {
-            assert!(
-                help.contains(flag),
-                "--help must mention the `dux server` flag {flag}:\n{help}"
-            );
-        }
-    }
-
-    /// `--help` is the one place a user is guaranteed to look, so it states the
-    /// trust model: one optional password for one owner, the one workspace
-    /// everyone who gets in shares, and that with no password anyone who can
-    /// reach the address is in.
-    #[test]
-    fn help_states_the_optional_password_and_the_shared_workspace() {
-        let help = help_text();
-        assert!(!help.contains("no login"), "{help}");
-        for needle in ["password", "shares", "server.auth.password"] {
-            assert!(help.contains(needle), "--help must say {needle}:\n{help}");
         }
     }
 }
