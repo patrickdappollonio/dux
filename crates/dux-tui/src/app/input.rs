@@ -30730,7 +30730,9 @@ cyan = "#00ffff"
     /// of the exact bytes.
     #[test]
     fn tab_and_shift_tab_reach_the_pty_when_the_option_is_on() {
-        let mut app = app_with_minimized_typeable_echo_child("", "cat -vT");
+        // `-t` shows a tab as `^I` in both GNU and BSD cat; GNU's `-T` does
+        // not exist on macOS.
+        let mut app = app_with_minimized_typeable_echo_child("", "cat -vt");
         app.engine.config.ui.tab_reaches_agent = true;
 
         tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);

@@ -819,9 +819,33 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // The short BSD info, because the kernel answers it for every
+        // process; the full `PROC_PIDTBSDINFO` is refused for another user's
+        // process, which is exactly the process this question has to tell
+        // apart. `libc` declares neither the flavor nor its struct, so both
+        // are spelled here from `<sys/proc_info.h>`.
+        const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+        #[repr(C)]
+        #[allow(dead_code)] // the kernel fills every field; only the uid is read
+        struct ProcBsdShortInfo {
+            pbsi_pid: u32,
+            pbsi_ppid: u32,
+            pbsi_pgid: u32,
+            pbsi_status: u32,
+            pbsi_comm: [libc::c_char; 16],
+            pbsi_flags: u32,
+            pbsi_uid: libc::uid_t,
+            pbsi_gid: libc::gid_t,
+            pbsi_ruid: libc::uid_t,
+            pbsi_rgid: libc::gid_t,
+            pbsi_svuid: libc::uid_t,
+            pbsi_svgid: libc::gid_t,
+            pbsi_rfu: u32,
+        }
+        const _: () = assert!(std::mem::size_of::<ProcBsdShortInfo>() == 64);
+        let size = std::mem::size_of::<ProcBsdShortInfo>();
         // SAFETY: zeroed is a valid value for this plain-data struct.
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let mut info: ProcBsdShortInfo = unsafe { std::mem::zeroed() };
         let Ok(raw) = libc::c_int::try_from(pid) else {
             return Ok(None);
         };
@@ -830,14 +854,14 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
         let written = unsafe {
             libc::proc_pidinfo(
                 raw,
-                libc::PROC_PIDTBSDINFO,
+                PROC_PIDT_SHORTBSDINFO,
                 0,
-                (&mut info as *mut libc::proc_bsdinfo).cast::<libc::c_void>(),
+                (&mut info as *mut ProcBsdShortInfo).cast::<libc::c_void>(),
                 size as libc::c_int,
             )
         };
         if usize::try_from(written).ok() == Some(size) {
-            Ok(Some(info.pbi_uid))
+            Ok(Some(info.pbsi_uid))
         } else if crate::file_drop::process_can_answer(pid) {
             Err(format!("who owns process {pid} could not be read"))
         } else {

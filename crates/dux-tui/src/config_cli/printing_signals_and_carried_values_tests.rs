@@ -96,6 +96,12 @@ fn get_through_a_dangling_symlink_does_not_claim_a_value_in_use() {
 /// A dux from before the reload signal holds the lock, so `set` does not
 /// signal it and the new password applies only when it restarts. The
 /// message must not say that browsers are signed out now.
+// Linux only: the stand-in dux is a python process holding the lock, which
+// Linux's /proc/locks names as the holder. macOS has no /proc/locks and
+// trusts a holder only when its process is named dux, which python is not.
+// The sentence for an older dux is covered on every platform by the
+// `reload_sentence` and `password_sentence` tests in `config_cli.rs`.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_password_set_beside_an_unsignalled_dux_does_not_claim_browsers_were_signed_out() {
     use std::process::{Command, Stdio};

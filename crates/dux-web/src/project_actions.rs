@@ -714,7 +714,14 @@ mod tests {
     async fn a_created_project_answers_with_its_location_body_and_idempotency_replay() {
         let repo = tempfile::tempdir().unwrap();
         init_repo_with_commit(repo.path());
-        let path = repo.path().to_string_lossy().to_string();
+        // The real path: the project is stored by it, and macOS reaches the
+        // temp folder through a symlink.
+        let path = repo
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let keyed = |path: &str| {
             Request::builder()
                 .method("POST")

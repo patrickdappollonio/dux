@@ -48,15 +48,9 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
     worktree
 }
 
+/// Running and not a zombie, on any platform.
 fn alive(pid: i32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    // A zombie has exited.
-    !stat
-        .rsplit(')')
-        .next()
-        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+    u32::try_from(pid).is_ok_and(crate::file_drop::process_can_answer)
 }
 
 fn kill(pid: i32) {

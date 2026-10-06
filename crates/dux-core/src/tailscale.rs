@@ -346,10 +346,12 @@ pub fn tailscaled_detectable(
 /// Whether a daemon answers on the socket at `path`: one non-blocking
 /// connect, which a local socket answers at once, so it needs no timeout. Only
 /// "refused" (a file left behind by a daemon that is gone, or not a socket at
-/// all) and "not found" mean nobody is there; counting the leftover would keep
-/// dux refusing forever. Everything else counts as something there that dux
-/// cannot ask: connected, a full accept queue (`EAGAIN`), a connect still in
-/// progress, a permission refused, and any other error.
+/// all, which macOS answers with "not a socket"), and "not found" mean nobody
+/// is there; counting the leftover would keep dux refusing forever. Everything
+/// else counts as something there that dux cannot ask: connected, a full
+/// accept queue (`EAGAIN` on Linux; macOS refuses it, so there it reads as
+/// nobody and the process check stands in), a connect still in progress, a
+/// permission refused, and any other error.
 fn socket_answers(path: &std::path::Path) -> bool {
     let Ok(address) = socket2::SockAddr::unix(path) else {
         return false;
@@ -366,7 +368,7 @@ fn socket_answers(path: &std::path::Path) -> bool {
         Ok(()) => true,
         Err(err) => !matches!(
             err.raw_os_error(),
-            Some(libc::ECONNREFUSED | libc::ENOENT | libc::ENOTDIR)
+            Some(libc::ECONNREFUSED | libc::ENOTSOCK | libc::ENOENT | libc::ENOTDIR)
         ),
     }
 }
@@ -2650,6 +2652,11 @@ mod identity_tests {
     /// A daemon too busy to take another connection is still a daemon: with
     /// its accept queue full, a non-blocking connect is refused for now
     /// (`EAGAIN`), not for good.
+    // Linux only: macOS refuses a connect to a full queue with ECONNREFUSED,
+    // the same answer a stale socket gets, so the socket cannot tell them
+    // apart there. On macOS a busy daemon is found by its process instead,
+    // which `a_daemon_is_detectable_by_its_socket_or_its_process` covers.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_daemon_whose_accept_queue_is_full_still_counts() {
         let dir = crate::test_scratch::ScratchDir::new();

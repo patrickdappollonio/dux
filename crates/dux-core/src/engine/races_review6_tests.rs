@@ -47,7 +47,7 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
 }
 
 fn cwd_of(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    crate::file_drop::process_cwds(&[pid]).found.remove(&pid)
 }
 
 /// "dux must never remove ... a folder that something it started is still
@@ -102,14 +102,9 @@ fn a_project_terminal_standing_in_a_worktree_keeps_it() {
     );
 }
 
+/// Running and not a zombie, on any platform.
 fn alive(pid: i32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    !stat
-        .rsplit(')')
-        .next()
-        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+    u32::try_from(pid).is_ok_and(crate::file_drop::process_can_answer)
 }
 
 /// The registry keeps only the newest `SESSIONS_PER_AGENT` (256) sessions per

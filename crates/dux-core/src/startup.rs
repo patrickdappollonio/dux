@@ -1711,10 +1711,7 @@ mod review16_tests {
             .unwrap();
         let started = Instant::now();
         std::thread::sleep(Duration::from_millis(1500));
-        let alive = std::path::Path::new(&format!("/proc/{job}")).exists()
-            && !fs::read_to_string(format!("/proc/{job}/stat"))
-                .unwrap_or_default()
-                .contains(") Z");
+        let alive = alive(job as u32);
         // Clean up the job's whole group, whatever happened.
         if let Some(pid) = rustix::process::Pid::from_raw(job) {
             if let Ok(pgid) = rustix::process::getpgid(Some(pid)) {
@@ -1730,15 +1727,9 @@ mod review16_tests {
         );
     }
 
+    /// Running and not a zombie, on any platform.
     fn alive(pid: u32) -> bool {
-        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            !stat
-                .rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
+        crate::file_drop::process_can_answer(pid)
     }
 
     fn wait_gone(pid: u32) -> bool {
@@ -1834,8 +1825,8 @@ mod review16_tests {
         for drain in &drains {
             assert!(alive(*drain), "the drain runs while the job does");
             assert_eq!(
-                fs::read_link(format!("/proc/{drain}/cwd")).unwrap(),
-                std::path::PathBuf::from("/")
+                crate::file_drop::process_cwds(&[*drain]).found.get(drain),
+                Some(&std::path::PathBuf::from("/"))
             );
         }
         // Not in the worktree's way: no tracked session holds it, and its

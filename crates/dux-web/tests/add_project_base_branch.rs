@@ -619,7 +619,8 @@ async fn a_folder_with_conflicting_changes_refuses_the_switch_and_keeps_the_base
         frame["message"],
         format!(
             "Couldn't check out \"develop\" in {}. Resolve in your terminal and retry.",
-            f.repo.display()
+            // The project's real path, which macOS reaches through a symlink.
+            f.repo.canonicalize().unwrap().display()
         )
     );
     assert_eq!(frame["tone"], "error");

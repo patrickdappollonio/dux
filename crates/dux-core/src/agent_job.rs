@@ -2865,7 +2865,13 @@ mod tests {
     fn hold_pr_branch_in_another_worktree(repo: &Path) -> (tempfile::TempDir, PathBuf) {
         git_in(repo, &["fetch", "origin"]);
         let holder_root = tempfile::tempdir().unwrap();
-        let holder = holder_root.path().join("first-agent");
+        // The real path, the one git names the worktree by (macOS reaches the
+        // temp folder through a symlink).
+        let holder = holder_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("first-agent");
         git_in(
             repo,
             &[
@@ -3204,7 +3210,9 @@ mod tests {
         );
         assert_eq!(run.session.unwrap().branch_name().unwrap(), "main-review");
         let message = run.status_message.expect("a create message");
-        let folder = crate::home_path::shorten_home(repo.path());
+        // git names a worktree by its real path, and macOS reaches the temp
+        // folder through a symlink.
+        let folder = crate::home_path::shorten_home(&repo.path().canonicalize().unwrap());
         assert!(
             message.starts_with("Created "),
             "no warning leads the line: {message}"
@@ -3257,7 +3265,9 @@ mod tests {
             run.failure
         );
         let message = run.status_message.expect("a create message");
-        let folder = crate::home_path::shorten_home(repo.path());
+        // git names a worktree by its real path, and macOS reaches the temp
+        // folder through a symlink.
+        let folder = crate::home_path::shorten_home(&repo.path().canonicalize().unwrap());
         assert!(
             message.ends_with(&format!(": \"pr-head\" is checked out at \"{folder}\".")),
             "{message}"
@@ -3312,7 +3322,9 @@ mod tests {
         );
 
         let failure = run.failure.expect("the create must fail");
-        let folder = crate::home_path::shorten_home(repo.path());
+        // git names a worktree by its real path, and macOS reaches the temp
+        // folder through a symlink.
+        let folder = crate::home_path::shorten_home(&repo.path().canonicalize().unwrap());
         assert_eq!(
             failure,
             format!(

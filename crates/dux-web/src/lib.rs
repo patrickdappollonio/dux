@@ -3556,11 +3556,18 @@ mod tests {
         // and return a warning naming it. host-only-from-bound is the caller's
         // concern; here we prove the bound set excludes the failed address.
         //
-        // 127.0.0.2 stands in for the Tailscale IP (all of 127.0.0.0/8 is loopback
-        // on Linux), held on an ephemeral port for the whole test so the leg is
-        // genuinely busy. The bind-failure path doesn't care that it's not a real
-        // Tailscale address, only that the entry is best-effort.
-        let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a best-effort addr");
+        // A second loopback address stands in for the Tailscale IP: 127.0.0.2
+        // on Linux (all of 127.0.0.0/8 is loopback there), IPv6 loopback on
+        // macOS (which configures only 127.0.0.1 of that range). It is held on
+        // an ephemeral port for the whole test so the leg is genuinely busy.
+        // The bind-failure path doesn't care that it's not a real Tailscale
+        // address, only that the entry is best-effort.
+        let second_loopback = if cfg!(target_os = "macos") {
+            "[::1]:0"
+        } else {
+            "127.0.0.2:0"
+        };
+        let held = std::net::TcpListener::bind(second_loopback).expect("hold a best-effort addr");
         let held_addr = held.local_addr().expect("held addr");
 
         // The required leg asks for port 0 and lets the KERNEL pick a free port
@@ -4470,7 +4477,7 @@ mod tests {
 /// the detector injected and no Tailscale binary anywhere.
 ///
 /// The Tailscale leg is stood in for by a second loopback address: `desired_leg`
-/// only refuses an address the primary already covers, so `127.0.0.2` is a leg
+/// only refuses an address the primary already covers, so [`leg_ip`] is a leg
 /// like any other and binds for real, which is what makes "did the listener
 /// actually move" a fact rather than a claim about a cell.
 #[cfg(test)]
@@ -4484,13 +4491,19 @@ mod live_tailscale_mode_tests {
     /// trips it, short enough that a regression fails instead of hanging.
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// The stand-in Tailscale address.
+    /// The stand-in Tailscale address: `127.0.0.2` on Linux, where all of
+    /// `127.0.0.0/8` answers, and IPv6 loopback on macOS, which configures
+    /// only `127.0.0.1` of that range.
     fn leg_ip() -> IpAddr {
-        "127.0.0.2".parse().unwrap()
+        if cfg!(target_os = "macos") {
+            "::1".parse().unwrap()
+        } else {
+            "127.0.0.2".parse().unwrap()
+        }
     }
 
     /// A primary listener held open for the whole test, so its port stays
-    /// reserved on `127.0.0.1` while the leg binds the same port on `127.0.0.2`.
+    /// reserved on `127.0.0.1` while the leg binds the same port on [`leg_ip`].
     fn primary_listener() -> (std::net::TcpListener, SocketAddr) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port");
         let addr = listener.local_addr().expect("its address");
@@ -5779,7 +5792,7 @@ mod live_tailscale_mode_tests {
             false,
             Some(primary_addr),
             Some(leg),
-            Arc::new(|| Ok("127.0.0.2".parse().unwrap())),
+            Arc::new(|| Ok(leg_ip())),
         );
         assert!(
             h.control.watched().load(Ordering::SeqCst),
@@ -6095,7 +6108,7 @@ mod live_tailscale_mode_tests {
                 false,
                 None,
                 None,
-                Arc::new(|| Ok("127.0.0.2".parse().unwrap())),
+                Arc::new(|| Ok(leg_ip())),
             );
             assert_eq!(
                 h.control.set_mode(mode).await,

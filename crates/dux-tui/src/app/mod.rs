@@ -8269,15 +8269,21 @@ mod tests {
         // best-effort, so the pre-flight must SUCCEED on loopback only, drop the
         // failed leg, and carry a warning naming the busy address.
         //
-        // The whole 127.0.0.0/8 range is loopback on Linux, so a SECOND loopback
-        // address (127.0.0.2) stands in for the Tailscale IP: hold 127.0.0.2:P,
-        // leave 127.0.0.1:P free. local_addrs builds required(127.0.0.1:P) +
-        // best_effort(127.0.0.2:P): distinct addresses (no dedupe), so the bind
-        // path is exercised exactly as production would hit it.
-        let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a second-loopback port");
+        // A SECOND loopback address stands in for the Tailscale IP: 127.0.0.2
+        // on Linux, where the whole 127.0.0.0/8 range is loopback, and IPv6
+        // loopback on macOS, which configures only 127.0.0.1 of that range.
+        // Hold it on port P and leave 127.0.0.1:P free. local_addrs builds
+        // required(127.0.0.1:P) + best_effort(second:P): distinct addresses
+        // (no dedupe), so the bind path is exercised exactly as production
+        // would hit it.
+        let ts_ip: std::net::IpAddr = if cfg!(target_os = "macos") {
+            "::1".parse().unwrap()
+        } else {
+            "127.0.0.2".parse().unwrap()
+        };
+        let held = std::net::TcpListener::bind((ts_ip, 0)).expect("hold a second-loopback port");
         let held_addr = held.local_addr().expect("held addr");
         let port = held_addr.port();
-        let ts_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
 
         let (listeners, urls, warnings) = preflight_server_listeners(port, Some(ts_ip))
             .expect("a busy Tailscale leg must NOT fail the pre-flight");
