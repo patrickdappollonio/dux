@@ -642,6 +642,21 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
     (column.saturating_sub(rect.x), row.saturating_sub(rect.y))
 }
 
+/// [`cursor_from_single_line_position`] for a field drawn scrolled to its
+/// caret: the click is mapped through the same offset
+/// (`render::single_line_scroll`) the field was drawn at, for the caret the
+/// field held when it was drawn.
+fn cursor_from_single_line_click(
+    text: &str,
+    cursor: usize,
+    text_area: Rect,
+    prefix_width: usize,
+    column: u16,
+) -> usize {
+    let skip = super::render::single_line_scroll(text, cursor, prefix_width, text_area.width);
+    skip + cursor_from_single_line_position(&text[skip..], text_area, prefix_width, column)
+}
+
 /// Map a clicked terminal column to a BYTE caret offset inside a single-line
 /// field, measured in DISPLAY COLUMNS rather than characters.
 ///
@@ -5686,7 +5701,8 @@ impl App {
                 CloneProjectFocus::RandomizedNameCheckbox => return,
             };
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, area, 1, column);
             *focus = field;
         }
     }
@@ -7498,8 +7514,13 @@ impl App {
         };
         if let PromptState::Command { input, .. } = &mut self.prompt {
             let prefix_width = 2; // "> "
-            input.cursor =
-                cursor_from_single_line_position(&input.text, input_area, prefix_width, column);
+            input.cursor = cursor_from_single_line_click(
+                &input.text,
+                input.cursor,
+                input_area,
+                prefix_width,
+                column,
+            );
         }
     }
 
@@ -7568,11 +7589,21 @@ impl App {
         } = &mut self.prompt
         {
             if *editing_path {
-                path_input.cursor =
-                    cursor_from_single_line_position(&path_input.text, input_area, 4, column);
+                path_input.cursor = cursor_from_single_line_click(
+                    &path_input.text,
+                    path_input.cursor,
+                    input_area,
+                    4,
+                    column,
+                );
             } else {
-                filter.cursor =
-                    cursor_from_single_line_position(&filter.text, input_area, 2, column);
+                filter.cursor = cursor_from_single_line_click(
+                    &filter.text,
+                    filter.cursor,
+                    input_area,
+                    2,
+                    column,
+                );
                 *searching = true;
             }
         }
@@ -7588,8 +7619,13 @@ impl App {
             _ => return,
         };
         if let PromptState::PickProject { list, .. } = &mut self.prompt {
-            list.filter.cursor =
-                cursor_from_single_line_position(&list.filter.text, input_area, 2, column);
+            list.filter.cursor = cursor_from_single_line_click(
+                &list.filter.text,
+                list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             list.searching = true;
         }
     }
@@ -7604,8 +7640,13 @@ impl App {
             _ => return,
         };
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
-            prompt.list.filter.cursor =
-                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.filter.cursor = cursor_from_single_line_click(
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             prompt.list.searching = true;
         }
     }
@@ -7619,8 +7660,13 @@ impl App {
             _ => return,
         };
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-            prompt.filter.cursor =
-                cursor_from_single_line_position(&prompt.filter.text, input_area, 0, column);
+            prompt.filter.cursor = cursor_from_single_line_click(
+                &prompt.filter.text,
+                prompt.filter.cursor,
+                input_area,
+                0,
+                column,
+            );
             prompt.searching = true;
             // Search is a mode over the list, not a stop of its own, so a
             // click into the filter leaves focus where the mode belongs. Same
@@ -7649,8 +7695,13 @@ impl App {
             _ => return,
         };
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
-            prompt.list.filter.cursor =
-                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.filter.cursor = cursor_from_single_line_click(
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             prompt.list.searching = true;
             prompt.focus = KillRunningFocus::List;
         }
@@ -8888,7 +8939,8 @@ impl App {
         };
         if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             *focus = RenameSessionFocus::Input;
         }
     }
@@ -8900,7 +8952,8 @@ impl App {
         };
         if let PromptState::PullRequestInput { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             // Focus follows the click, or the caret the click just placed would
             // sit in a field that takes no keystrokes.
             *focus = PullRequestInputFocus::Input;
@@ -8915,7 +8968,8 @@ impl App {
         if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
             // move: the field is the modal's only control and always has it.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
         }
     }
 
@@ -8927,7 +8981,8 @@ impl App {
         if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
             // move: the field is the modal's only control and always has it.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
         }
     }
 
@@ -8938,7 +8993,8 @@ impl App {
         };
         if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             *focus = NameNewAgentFocus::Input;
         }
     }
@@ -8949,8 +9005,13 @@ impl App {
         };
         if let Some(state) = self.macro_edit_state_mut() {
             // The single-line renderer pads by one leading space.
-            state.name_input.cursor =
-                cursor_from_single_line_position(&state.name_input.text, name_input, 1, column);
+            state.name_input.cursor = cursor_from_single_line_click(
+                &state.name_input.text,
+                state.name_input.cursor,
+                name_input,
+                1,
+                column,
+            );
         }
     }
 
@@ -29652,7 +29713,11 @@ cyan = "#00ffff"
             ..
         } = &mut app.prompt
         {
-            *address = TextInput::with_text("address-text".to_string());
+            // Far longer than the field, with the caret at its end.
+            *address = TextInput::with_text(format!(
+                "https://example.com/{}/address-text",
+                "a".repeat(120)
+            ));
             *destination = TextInput::with_text("/dest-text".to_string());
             *agent_name = TextInput::with_text("agent-text".to_string());
             *randomize_name = false;
@@ -29682,11 +29747,25 @@ cyan = "#00ffff"
             panic!("{text:?} is not on screen");
         };
 
+        // The long address is drawn scrolled to its end, with the caret in
+        // the cell after it.
+        let (x, y) = drawn_at("address-text");
+        assert_eq!(
+            buf[(x + 12, y)].bg,
+            app.theme.input_cursor_bg,
+            "the caret is not drawn after the address"
+        );
+
         // A click on the fourth character drawn puts the caret before it.
-        for (text, want_focus) in [
-            ("agent-text", CloneProjectFocus::AgentName),
-            ("/dest-text", CloneProjectFocus::Destination),
-            ("address-text", CloneProjectFocus::Address),
+        let address_len = 20 + 120 + "/address-text".len();
+        for (text, want_focus, want_cursor) in [
+            ("agent-text", CloneProjectFocus::AgentName, 3),
+            ("/dest-text", CloneProjectFocus::Destination, 3),
+            (
+                "address-text",
+                CloneProjectFocus::Address,
+                address_len - "address-text".len() + 3,
+            ),
         ] {
             let (x, y) = drawn_at(text);
             app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x + 3, y));
@@ -29704,7 +29783,7 @@ cyan = "#00ffff"
                         _ => agent_name,
                     };
                     assert_eq!(*focus, want_focus);
-                    assert_eq!(field.cursor, 3);
+                    assert_eq!(field.cursor, want_cursor);
                 }
                 other => panic!("expected the clone form, got {other:?}"),
             }

@@ -6,7 +6,7 @@ use super::components::ellipsis::{
     truncate_to_width,
 };
 use super::components::pane_card::CardPlan;
-use super::components::wrap_lines::{char_display_width, display_width};
+use super::components::wrap_lines::{char_display_width, cluster_width, display_width};
 use super::components::{
     Button, ButtonKind, ButtonPressedTarget, CardBlockPlan, CardContent, Checkbox, CheckboxState,
     Hint, Modal, PaneCardBlock, button_state_for, button_width_for, labelled_name, modal_hint_line,
@@ -2607,13 +2607,14 @@ impl App {
                 .as_ref()
                 .map(|input| (input.text.clone(), input.cursor))
                 .unwrap_or_default();
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &text,
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                search_area.width,
             ))
             .block(
                 Block::default()
@@ -5763,13 +5764,14 @@ impl App {
             .themed_overlay_block("Command Palette")
             .title_bottom(hints);
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             "> ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -6105,13 +6107,14 @@ impl App {
             };
             let input_block = self.themed_overlay_block_prose(&title);
             let input_inner = input_block.inner(filter_area);
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 prefix,
                 text,
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                input_inner.width,
             ))
             .block(input_block)
             .render(filter_area, frame.buffer_mut());
@@ -7083,13 +7086,14 @@ impl App {
             .is_filtering()
             .then(|| details_block.inner(details_area));
         if list.is_filtering() {
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &list.filter.text,
                 list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                filter_input_rect.map_or(0, |rect| rect.width),
             ))
             .block(details_block)
             .render(details_area, frame.buffer_mut());
@@ -7365,6 +7369,12 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(76, 70, frame.area());
         self.clear_overlay_area(frame, area);
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(3)])
+            .areas(area);
+        let details_block = self.themed_overlay_block("Change Base Branch");
+        let details_inner = details_block.inner(details_area);
 
         let label_style = Style::default().fg(self.theme.hint_desc_fg);
         let text_style = Style::default().fg(self.theme.text_fg);
@@ -7377,13 +7387,14 @@ impl App {
             None => first.push(Span::styled("no base recorded yet", text_style)),
         }
         let second = if prompt.list.is_filtering() {
-            render_single_line_cursor_input(
+            render_single_line_field(
                 "/ ",
                 &prompt.list.filter.text,
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                details_inner.width,
             )
         } else if let Some(note) = &prompt.fetch_note {
             Line::from(Span::styled(
@@ -7420,12 +7431,6 @@ impl App {
         };
         let hint_line = modal_hint_line(&self.theme, &hints, area.width.saturating_sub(2));
 
-        let [details_area, list_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(3)])
-            .areas(area);
-        let details_block = self.themed_overlay_block("Change Base Branch");
-        let details_inner = details_block.inner(details_area);
         Paragraph::new(vec![Line::from(first), second])
             .block(details_block)
             .render(details_area, frame.buffer_mut());
@@ -9103,13 +9108,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             input_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9269,14 +9275,16 @@ impl App {
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
                 .border_style(self.theme.overlay_field_border_style(focused));
-            field_rects.push(block.inner(field_area));
-            Paragraph::new(render_single_line_cursor_input(
+            let text_rect = block.inner(field_area);
+            field_rects.push(text_rect);
+            Paragraph::new(render_single_line_field(
                 " ",
                 &input.text,
                 input.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 focused,
+                text_rect.width,
             ))
             .block(block)
             .render(field_area, frame.buffer_mut());
@@ -9481,13 +9489,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(field_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             field_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9599,13 +9608,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(true));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9683,13 +9693,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(true));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -10071,13 +10082,14 @@ impl App {
             } else {
                 // The one single-line renderer, never a hand-rolled
                 // copy.
-                Paragraph::new(render_single_line_cursor_input(
+                Paragraph::new(render_single_line_field(
                     "",
                     &prompt.filter.text,
                     prompt.filter.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
                     prompt.searching,
+                    filter_inner.width,
                 ))
                 .style(Style::default().fg(self.theme.text_fg))
                 .render(filter_inner, frame.buffer_mut());
@@ -10088,10 +10100,11 @@ impl App {
                 // past the end of anything non-ASCII.
                 let cursor_x = filter_inner
                     .x
-                    .saturating_add(single_line_caret_column(
+                    .saturating_add(single_line_field_caret_column(
                         &prompt.filter.text,
                         prompt.filter.cursor,
                         0,
+                        filter_inner.width,
                     ))
                     .min(filter_inner.x + filter_inner.width.saturating_sub(1));
                 frame.set_cursor_position((cursor_x, filter_inner.y));
@@ -10259,13 +10272,14 @@ impl App {
         let (input, list) = if let Some(input_area) = top_area {
             let input_block = self.themed_overlay_block(title);
             let input_inner = input_block.inner(input_area);
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &prompt.list.filter.text,
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                input_inner.width,
             ))
             .block(input_block)
             .render(input_area, frame.buffer_mut());
@@ -10759,13 +10773,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             input_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -11195,13 +11210,14 @@ impl App {
         );
         // The one single-line renderer, never a hand-rolled copy: it owns the
         // caret model and the character-boundary clamp.
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &state.name_input.text,
             state.name_input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             focus == MacroEditFocus::Name,
+            name_inner.width,
         ))
         .render(name_inner, frame.buffer_mut());
 
@@ -11256,8 +11272,12 @@ impl App {
         // on the body while the body is ENGAGED. An unengaged body takes no
         // keystrokes, so showing a caret there would be a lie.
         if focus == MacroEditFocus::Name {
-            let cursor_col =
-                single_line_caret_column(&state.name_input.text, state.name_input.cursor, 1);
+            let cursor_col = single_line_field_caret_column(
+                &state.name_input.text,
+                state.name_input.cursor,
+                1,
+                name_inner.width,
+            );
             let (cx, cy) = (name_inner.x + cursor_col, name_inner.y);
             if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
                 frame.set_cursor_position((cx, cy));
@@ -11778,18 +11798,19 @@ impl App {
             .themed_overlay_block("Search log")
             .title_bottom(bottom_spans);
         let input_inner = input_block.inner(bar_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             "/ ",
             &query,
             cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(bar_area, frame.buffer_mut());
 
-        let cursor_col = single_line_caret_column(&query, cursor, 2);
+        let cursor_col = single_line_field_caret_column(&query, cursor, 2, input_inner.width);
         let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
@@ -11858,14 +11879,20 @@ impl App {
             .themed_overlay_block("Macros")
             .title_bottom(bottom_spans);
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
-            "", &query, cursor, cursor_fg, cursor_bg, true,
+        Paragraph::new(render_single_line_field(
+            "",
+            &query,
+            cursor,
+            cursor_fg,
+            cursor_bg,
+            true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
 
         // Place hardware cursor inside the input.
-        let cursor_col = single_line_caret_column(&query, cursor, 0);
+        let cursor_col = single_line_field_caret_column(&query, cursor, 0, input_inner.width);
         let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
@@ -12897,7 +12924,77 @@ fn glyph_start(text: &str, cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// The one single-line text-field renderer.
+/// Where a single-line field `width` cells wide starts drawing `text`, as a
+/// byte offset, so the caret stays in view: the start while the text up to and
+/// including the caret's cell fits beside the prefix, and otherwise the first
+/// glyph that leaves the caret's glyph ending in the field's last cells. The
+/// prefix is never scrolled.
+///
+/// Decided from the text and the caret alone, so the click mapping
+/// (`input::cursor_from_single_line_click`) recomputes the very offset the
+/// field was drawn at.
+pub(super) fn single_line_scroll(
+    text: &str,
+    cursor: usize,
+    prefix_width: usize,
+    width: u16,
+) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let room = usize::from(width).saturating_sub(prefix_width);
+    let cursor = glyph_start(text, cursor);
+    let caret_width = text[cursor..]
+        .graphemes(true)
+        .next()
+        .map_or(1, cluster_width)
+        .max(1);
+    let before: usize = text[..cursor].graphemes(true).map(cluster_width).sum();
+    let needed = before + caret_width;
+    if room == 0 || needed <= room {
+        return 0;
+    }
+    let mut excess = needed - room;
+    for (idx, glyph) in text[..cursor].grapheme_indices(true) {
+        if excess == 0 {
+            return idx;
+        }
+        excess = excess.saturating_sub(cluster_width(glyph));
+    }
+    cursor
+}
+
+/// The single-line field renderer for a field `width` cells wide: the text is
+/// drawn from [`single_line_scroll`], so a caret at the end of a long line is
+/// still on screen. Every single-line field draws through this.
+fn render_single_line_field(
+    prefix: &str,
+    text: &str,
+    cursor: usize,
+    cursor_fg: Color,
+    cursor_bg: Color,
+    focused: bool,
+    width: u16,
+) -> Line<'static> {
+    let skip = single_line_scroll(text, cursor, usize::from(prefix.cell_width()), width);
+    render_single_line_cursor_input(
+        prefix,
+        &text[skip..],
+        cursor.saturating_sub(skip),
+        cursor_fg,
+        cursor_bg,
+        focused,
+    )
+}
+
+/// The display column of a field's caret once the field is scrolled by
+/// [`single_line_scroll`], for placing the hardware cursor.
+fn single_line_field_caret_column(text: &str, cursor: usize, prefix_width: u16, width: u16) -> u16 {
+    let skip = single_line_scroll(text, cursor, usize::from(prefix_width), width);
+    single_line_caret_column(&text[skip..], cursor.saturating_sub(skip), prefix_width)
+}
+
+/// The single-line text-field renderer, drawing the whole line; fields call
+/// it through [`render_single_line_field`], which scrolls it to the caret.
 ///
 /// `focused` decides whether the caret is painted at all: a field that cannot
 /// take a keystroke must not look like it can, so callers whose modal has more
@@ -23992,6 +24089,49 @@ mod tests {
                 "{id}: caret-styled text is word-wrapped, the chip kept whole"
             );
         }
+    }
+
+    /// A field narrower than its text draws the part that keeps the caret
+    /// in view, the prefix staying put; text that fits is drawn from its start.
+    #[test]
+    fn a_single_line_field_scrolls_to_keep_the_caret_in_view() {
+        let drawn = |prefix: &str, text: &str, cursor: usize, width: u16| -> (String, String) {
+            let line = render_single_line_field(
+                prefix,
+                text,
+                cursor,
+                Color::White,
+                Color::Black,
+                true,
+                width,
+            );
+            let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+            let caret: String = line
+                .spans
+                .iter()
+                .filter(|span| span.style.bg == Some(Color::Black))
+                .map(|span| span.content.to_string())
+                .collect();
+            (all, caret)
+        };
+        // Caret at the end: the last cells hold the tail and the caret.
+        assert_eq!(
+            drawn(" ", "abcdefghij", 10, 6),
+            (" ghij ".into(), " ".into())
+        );
+        // Caret inside: the field ends on the glyph under the caret.
+        assert_eq!(
+            drawn(" ", "abcdefghij", 7, 6),
+            (" defghij".into(), "h".into())
+        );
+        // Text that fits, and a caret near the start, draw from the start.
+        assert_eq!(drawn(" ", "abc", 3, 6), (" abc ".into(), " ".into()));
+        assert_eq!(
+            drawn(" ", "abcdefghij", 1, 6),
+            (" abcdefghij".into(), "b".into())
+        );
+        // A wide glyph is skipped whole: four cells hold "語" and the caret.
+        assert_eq!(drawn("", "日本語", 9, 4), ("語 ".into(), " ".into()));
     }
 
     #[test]
