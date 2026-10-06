@@ -341,12 +341,15 @@ pub(crate) fn run_set(
 }
 
 /// Say how the running dux answered the request to reload. A reload it
-/// refused is the one answer that fails the command (exit 1): its sentence
-/// says the file is saved but not in force, and why, and goes out as the error
-/// so it reaches standard error.
+/// refused, or applied with a step failed, fails the command (exit 1): the
+/// sentence says whether the change is in force, and why not or what failed,
+/// and goes out as the error so it reaches standard error.
 fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
     let sentence = reload_sentence(answer, problems_remain);
-    if matches!(answer, ReloadAnswer::Refused(_)) {
+    if matches!(
+        answer,
+        ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_)
+    ) {
         bail!("{sentence}");
     }
     writeln!(out, "{sentence}")?;
@@ -1329,13 +1332,12 @@ port = 3890
         }
     }
 
-    /// Only a refused reload fails the command, and it still prints what was
-    /// saved before it fails.
+    /// A reload the running dux refused, or applied with a step failed, fails
+    /// the command; every other answer does not.
     #[test]
-    fn a_refused_reload_fails_the_command_and_nothing_else_does() {
+    fn a_refused_or_half_applied_reload_fails_the_command_and_nothing_else_does() {
         for answer in [
             ReloadAnswer::Applied("ok".into()),
-            ReloadAnswer::PartlyApplied("one step failed".into()),
             ReloadAnswer::NotRunning,
             ReloadAnswer::NotReached("why".into()),
             ReloadAnswer::Unknown("op-1".into()),
@@ -1350,6 +1352,18 @@ port = 3890
         assert!(
             error.to_string().contains("not in force"),
             "the failure carries the sentence: {error}"
+        );
+        let error = say_reload(
+            &ReloadAnswer::PartlyApplied("one step failed: the database is locked".into()),
+            false,
+            &mut out,
+        )
+        .expect_err("a half-applied reload fails");
+        let said = error.to_string();
+        assert!(said.contains("in force"), "{said}");
+        assert!(
+            said.contains("the database is locked"),
+            "names the step: {said}"
         );
     }
 

@@ -9897,6 +9897,73 @@ mod tests {
         assert_eq!(reloads_finished, 2, "the follow-up reload ran");
         assert_eq!(engine.config.ui.left_width_pct, 22);
         assert_eq!(state_of(&engine, &second), OperationState::Succeeded);
+
+        // A follow-up whose own dispatch fails (the writer will not pause)
+        // fails the clients waiting on it, and nothing later completes them.
+        let running = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::ReloadConfig {},
+                OperationKind::ConfigReload,
+            )
+            .expect("a reload")
+            .operation_id
+            .expect("record");
+        let queued = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::ReloadConfig {},
+                OperationKind::ConfigReload,
+            )
+            .expect("a queued reload")
+            .operation_id
+            .expect("record");
+        let live_writer = std::mem::replace(
+            &mut engine.config_writer,
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(
+                engine.paths.config_path.clone(),
+            ),
+        );
+        while let Some(event) = try_recv_worker_event(&engine) {
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                engine.process_worker_event(event);
+                break;
+            }
+        }
+        engine.finish_config_reload_operations(
+            &crate::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() },
+        );
+        assert_eq!(state_of(&engine, &running), OperationState::Succeeded);
+        let failed = engine
+            .operations
+            .peek(&queued, std::time::Instant::now())
+            .expect("kept");
+        assert_eq!(failed.state, OperationState::Failed);
+        assert_eq!(failed.message, "Config writer is busy; please retry.");
+        assert!(!engine.reloading, "no reload is running");
+
+        engine.config_writer = live_writer;
+        let later = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::ReloadConfig {},
+                OperationKind::ConfigReload,
+            )
+            .expect("a later reload")
+            .operation_id
+            .expect("record");
+        let event = try_recv_worker_event(&engine).expect("the later reload read the file");
+        engine.process_worker_event(event);
+        engine.finish_config_reload_operations(
+            &crate::config_reload_status::ConfigReloadOutcome::Refused("no".to_string()),
+        );
+        assert_eq!(state_of(&engine, &later), OperationState::Failed);
+        assert_eq!(
+            engine
+                .operations
+                .peek(&queued, std::time::Instant::now())
+                .unwrap()
+                .message,
+            "Config writer is busy; please retry.",
+            "the later reload's outcome is not the failed follow-up's"
+        );
     }
 
     /// A client that asked for a reload is told how it ended, in the words of

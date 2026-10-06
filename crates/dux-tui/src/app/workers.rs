@@ -943,15 +943,15 @@ impl App {
         // The listener's bind settings and the server log's are both read when a
         // serve starts, so a running one cannot adopt either.
         let mut owed: Vec<String> = Vec::new();
-        if dux_core::config::server_bind_settings_changed(
+        let mut changed =
+            dux_core::config::server_bind_setting_names(&before.server, &self.engine.config.server);
+        changed.extend(dux_core::config::server_log_file_setting_names(
             &before.server,
             &self.engine.config.server,
-        ) || dux_core::config::server_log_file_settings_changed(
-            &before.server,
-            &self.engine.config.server,
-        ) {
+        ));
+        if !changed.is_empty() {
             let serving = self.background_server_is_serving();
-            owed.push(server_restart_warning(serving).to_string());
+            owed.push(server_restart_warning(serving, &changed));
         }
         owed.extend(dux_core::control_socket::moved_warning(
             &before.server,
@@ -2020,16 +2020,18 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 /// A background listener is restarted from inside dux, so the serving copy names
 /// that pair of commands; with nothing serving there is nothing to restart and
 /// the change simply waits for the next listener.
-pub(crate) fn server_restart_warning(serving_in_background: bool) -> &'static str {
+/// `settings` are the keys that changed, named in the sentence.
+pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
+    let named = settings.join(", ");
     match serving_in_background {
-        true => {
-            "Server settings changed in config, but a listener that is already bound cannot adopt \
-             them. Stop the background server and start it again to apply them."
-        }
-        false => {
-            "Server settings changed in config. Nothing is serving right now, so they apply the \
-             next time a server starts."
-        }
+        true => format!(
+            "Server settings changed in config ({named}), but a listener that is already bound \
+             cannot adopt them. Stop the background server and start it again to apply them."
+        ),
+        false => format!(
+            "Server settings changed in config ({named}). Nothing is serving right now, so they \
+             apply the next time a server starts."
+        ),
     }
 }
 
@@ -3558,8 +3560,36 @@ mod tests {
         // A bind setting and each of the four server log settings: the log is
         // opened when the serve starts, so a running one cannot adopt them.
         type Change = fn(&mut dux_core::config::ServerConfig);
-        let changes: [(&str, Change); 5] = [
+        let changes: [(&str, Change); 15] = [
+            ("host", |server| server.host = "0.0.0.0".into()),
             ("port", |server| server.port += 1),
+            ("max_websocket_events_connections", |server| {
+                server.max_websocket_events_connections += 1
+            }),
+            ("max_websocket_agent_connections", |server| {
+                server.max_websocket_agent_connections += 1
+            }),
+            ("max_websocket_terminal_connections", |server| {
+                server.max_websocket_terminal_connections += 1
+            }),
+            ("max_websocket_tab_connections", |server| {
+                server.max_websocket_tab_connections += 1
+            }),
+            ("max_websocket_tabs_per_agent", |server| {
+                server.max_websocket_tabs_per_agent += 1
+            }),
+            ("file_drop_max_bytes", |server| {
+                server.file_drop_max_bytes += 1
+            }),
+            ("file_drop_max_concurrency", |server| {
+                server.file_drop_max_concurrency += 1
+            }),
+            ("tree_list_max_concurrency", |server| {
+                server.tree_list_max_concurrency += 1
+            }),
+            ("release_notes_max_concurrency", |server| {
+                server.release_notes_max_concurrency += 1
+            }),
             ("log_path", |server| server.log_path = "other.log".into()),
             ("log_max_bytes", |server| server.log_max_bytes += 1),
             ("log_keep", |server| server.log_keep += 1),
@@ -3584,10 +3614,13 @@ mod tests {
 
             let (tone, message) = app.status.most_recent_tui().expect("a status");
             assert_eq!(tone, StatusTone::Warning, "{setting}");
-            assert_eq!(
-                message,
-                server_restart_warning(true),
-                "{setting}: a serving companion picks the stop-and-start copy"
+            assert!(
+                message.contains(&format!("({setting})")),
+                "{setting}: the warning names what changed: {message}"
+            );
+            assert!(
+                message.contains("Stop the background server and start it again"),
+                "{setting}: a serving companion picks the stop-and-start copy: {message}"
             );
         }
     }
@@ -3609,7 +3642,7 @@ mod tests {
         });
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
     }
 
     #[test]
@@ -3623,7 +3656,11 @@ mod tests {
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            "Server settings changed in config (port). Nothing is serving right now, so they apply the next time a server starts."
+        );
 
         // The control socket is bound once per process: a new path waits for
         // dux itself to start again, serving or not.
@@ -3659,13 +3696,13 @@ mod tests {
             .status
             .most_recent_tui()
             .expect("the restart warning must survive the warning window");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
     }
 
     #[test]
     fn the_server_restart_warning_names_the_background_server_only_while_it_serves() {
-        let serving = server_restart_warning(true);
-        let idle = server_restart_warning(false);
+        let serving = server_restart_warning(true, &["port"]);
+        let idle = server_restart_warning(false, &["port"]);
         assert_ne!(serving, idle);
         assert!(
             serving.contains("background server"),

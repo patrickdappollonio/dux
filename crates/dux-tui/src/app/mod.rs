@@ -674,6 +674,9 @@ pub struct App {
     /// request, and a superseded one resolves as such, so at most one is open.
     pub(crate) pending_tailscale_mode_op:
         Option<dux_core::engine::HandlerStatusOp<dux_core::config::TailscaleModeOutcome>>,
+    /// Which listener changes a config reload set off are still running, so the
+    /// reload is not reported over until they have ended.
+    pub(crate) reload_listener_changes: background_server::ReloadListenerChanges,
     /// In-flight project-persistence status ops whose final is decided in the
     /// completion handler. Each non-`Add` persistence dispatch mints a
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
@@ -4505,6 +4508,7 @@ impl App {
             companion_followup_ran: false,
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
+            reload_listener_changes: Default::default(),
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
@@ -5981,7 +5985,7 @@ impl App {
             && before.server.tailscale_mode() != self.engine.config.server.tailscale_mode()
         {
             let mode = self.engine.config.server.tailscale_mode();
-            self.ask_companion_for_tailscale_mode(mode);
+            self.ask_companion_for_tailscale_mode_for_reload(mode);
         }
         // A config file can hand Tab to the agent while every `focus_next` and
         // `focus_prev` key is one the typeable pane types, and nobody toggled
@@ -10234,7 +10238,7 @@ mod pinned_warning_tests {
 
         // No project is missing here: the restart warning is the only thing on
         // the line, and it is owed until the user restarts.
-        app.set_pinned_warning(workers::server_restart_warning(true));
+        app.set_pinned_warning(workers::server_restart_warning(true, &["port"]));
         app.select_left_agent_item(agent_row);
         app.select_left_agent_item(elsewhere);
         assert!(

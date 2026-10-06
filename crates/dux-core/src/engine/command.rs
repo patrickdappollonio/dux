@@ -1109,6 +1109,13 @@ impl Engine {
                 // let the caller retry.
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
+                    // The reload that was to start never will: the clients
+                    // waiting on it (a queued follow-up's) are told so, and a
+                    // later reload is a different one.
+                    self.operations.fail_reload(
+                        "Config writer is busy; please retry.",
+                        std::time::Instant::now(),
+                    );
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "Config writer is busy; please retry.",
                     )));

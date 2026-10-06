@@ -130,11 +130,13 @@ for the answer. It then says which of these happened:
   dux starts or when a server binds, the same message says so and what to restart.
 - The reload was refused: the change is saved in `config.toml` but not in force, because the
   running dux could not take the file on, and the message gives the reason. The running dux
-  keeps its previous settings. This is the one case where `set` exits with status 1 after
-  writing; fix the file and run a command that reloads again, or use the reload command in
-  dux.
-- The reload applied but one step of applying it failed: the new settings are in force, and
-  the message names what failed.
+  keeps its previous settings. `set` exits with status 1 after writing; fix the file and run
+  a command that reloads again, or use the reload command in dux.
+- The reload applied but one step of applying it failed: the new settings are in force, the
+  message names the step that failed and says to fix it and reload again, and `set` exits
+  with status 1. The same goes when the change also started, stopped or moved a listener
+  (the background web server, the Tailscale address) and that could not be done: `set`
+  waits for the listener to answer, and the message names what it refused or why it failed.
 - dux is running but could not be asked, or did not answer in time: the change is saved and
   the message says why dux was not reached, so you can restart it or reload it by hand.
 

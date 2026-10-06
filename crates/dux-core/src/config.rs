@@ -658,6 +658,20 @@ pub struct TailscaleModeReport {
 }
 
 impl TailscaleModeOutcome {
+    /// Whether the change did not do what was asked: the mode saved, but the
+    /// listener could not follow it. A later request replacing this one, or
+    /// nothing serving, is not a failure.
+    pub fn failed(self) -> bool {
+        matches!(
+            self,
+            Self::NothingDetected
+                | Self::NoPrimary
+                | Self::BindFailed
+                | Self::RefusedForcedNo
+                | Self::TimedOut
+        )
+    }
+
     /// The sentence both surfaces show for this outcome, given the mode that was
     /// requested. Every sentence says what happened to the listener AND that the
     /// choice is saved, because those are two different questions a user has.
@@ -1157,10 +1171,23 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// True when a config reload changed a setting of `server.log`, which is opened
 /// when a serve starts, in every way of serving.
 pub fn server_log_file_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    prev.log_path != next.log_path
-        || prev.log_max_bytes != next.log_max_bytes
-        || prev.log_keep != next.log_keep
-        || prev.log_compress != next.log_compress
+    !server_log_file_setting_names(prev, next).is_empty()
+}
+
+/// The `server.log` settings a reload changed, by key.
+pub fn server_log_file_setting_names(
+    prev: &ServerConfig,
+    next: &ServerConfig,
+) -> Vec<&'static str> {
+    [
+        ("log_path", prev.log_path != next.log_path),
+        ("log_max_bytes", prev.log_max_bytes != next.log_max_bytes),
+        ("log_keep", prev.log_keep != next.log_keep),
+        ("log_compress", prev.log_compress != next.log_compress),
+    ]
+    .into_iter()
+    .filter_map(|(name, moved)| moved.then_some(name))
+    .collect()
 }
 
 /// True when a config reload changed a `[server]` setting read once, as the
@@ -1203,22 +1230,60 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 /// frozen into `RouterParams`. The deprecated `bind` field is migrated into
 /// `host`/`port` on load, so a change to it surfaces through those fields.
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    prev.host != next.host
-        || prev.port != next.port
-        || prev.max_websocket_events_connections != next.max_websocket_events_connections
-        || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
-        || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
-        || prev.max_websocket_tab_connections != next.max_websocket_tab_connections
-        || prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent
+    !server_bind_setting_names(prev, next).is_empty()
+}
+
+/// The settings [`server_bind_settings_changed`] compares that a reload
+/// changed, by key. Every surface names them in its restart sentence.
+pub fn server_bind_setting_names(prev: &ServerConfig, next: &ServerConfig) -> Vec<&'static str> {
+    [
+        ("host", prev.host != next.host),
+        ("port", prev.port != next.port),
+        (
+            "max_websocket_events_connections",
+            prev.max_websocket_events_connections != next.max_websocket_events_connections,
+        ),
+        (
+            "max_websocket_agent_connections",
+            prev.max_websocket_agent_connections != next.max_websocket_agent_connections,
+        ),
+        (
+            "max_websocket_terminal_connections",
+            prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections,
+        ),
+        (
+            "max_websocket_tab_connections",
+            prev.max_websocket_tab_connections != next.max_websocket_tab_connections,
+        ),
+        (
+            "max_websocket_tabs_per_agent",
+            prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent,
+        ),
         // The file-drop caps are frozen into RouterParams at bind time and the
         // routes enforce that frozen copy, while the viewmodel projects the
-        // reloaded value live. Without this row a reload silently leaves the
+        // reloaded value live. Without these rows a reload silently leaves the
         // browser believing a cap the server no longer enforces.
-        || prev.file_drop_max_bytes != next.file_drop_max_bytes
-        || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
+        (
+            "file_drop_max_bytes",
+            prev.file_drop_max_bytes != next.file_drop_max_bytes,
+        ),
+        (
+            "file_drop_max_concurrency",
+            prev.file_drop_max_concurrency != next.file_drop_max_concurrency,
+        ),
         // Both are semaphores sized once in `build_app`.
-        || prev.tree_list_max_concurrency != next.tree_list_max_concurrency
-        || prev.release_notes_max_concurrency != next.release_notes_max_concurrency
+        (
+            "tree_list_max_concurrency",
+            prev.tree_list_max_concurrency != next.tree_list_max_concurrency,
+        ),
+        (
+            "release_notes_max_concurrency",
+            prev.release_notes_max_concurrency != next.release_notes_max_concurrency,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, moved)| moved.then_some(name))
+    .collect()
 }
 
 /// True when a config reload changed a `[server]` setting that is read once, as
