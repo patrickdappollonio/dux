@@ -76,6 +76,7 @@ pub const DEFAULT_MINIMUM_PASSWORD_LENGTH: u32 = 12;
 pub const DEFAULT_MINIMUM_PASSWORD_SCORE: u8 = 2;
 pub const DEFAULT_MAX_FAILED_LOGINS: u32 = 5;
 pub const DEFAULT_SESSION_IDLE_SECONDS: u32 = 60;
+pub const DEFAULT_CLI_TOKEN_IDLE_DAYS: u32 = 30;
 pub const DEFAULT_MAX_CONCURRENT_PASSWORD_CHECKS: u32 = 2;
 pub const DEFAULT_PASSWORD_CHECK_QUEUE: u32 = 8;
 pub const DEFAULT_MAX_PASSWORD_BYTES: u32 = 1024;
@@ -118,6 +119,8 @@ pub struct ServerAuthConfig {
     pub blocked_addresses: Vec<String>,
     /// Seconds a session survives with no request and no open socket.
     pub session_idle_seconds: u32,
+    /// Days a command-line sign-in survives without being used.
+    pub cli_token_idle_days: u32,
     pub disable_no_auth_warning: bool,
     pub cookie_secure: CookieSecure,
     /// Password checks (Argon2id runs) at once, across every client.
@@ -152,6 +155,7 @@ impl Default for ServerAuthConfig {
             max_failed_logins: DEFAULT_MAX_FAILED_LOGINS,
             blocked_addresses: Vec::new(),
             session_idle_seconds: DEFAULT_SESSION_IDLE_SECONDS,
+            cli_token_idle_days: DEFAULT_CLI_TOKEN_IDLE_DAYS,
             disable_no_auth_warning: false,
             cookie_secure: CookieSecure::default(),
             max_concurrent_password_checks: DEFAULT_MAX_CONCURRENT_PASSWORD_CHECKS,
@@ -241,6 +245,12 @@ impl ServerAuthConfig {
             problems.push(Problem::about(
                 key("session_idle_seconds"),
                 "session_idle_seconds must be at least 1",
+            ));
+        }
+        if self.cli_token_idle_days == 0 {
+            problems.push(Problem::about(
+                key("cli_token_idle_days"),
+                "cli_token_idle_days must be at least 1",
             ));
         }
         if self.max_concurrent_password_checks == 0 {
@@ -499,6 +509,7 @@ struct RawServerAuthConfig {
     max_failed_logins: u32,
     blocked_addresses: Vec<String>,
     session_idle_seconds: u32,
+    cli_token_idle_days: u32,
     disable_no_auth_warning: bool,
     cookie_secure: CookieSecure,
     max_concurrent_password_checks: u32,
@@ -523,6 +534,7 @@ impl Default for RawServerAuthConfig {
             max_failed_logins: d.max_failed_logins,
             blocked_addresses: d.blocked_addresses,
             session_idle_seconds: d.session_idle_seconds,
+            cli_token_idle_days: d.cli_token_idle_days,
             disable_no_auth_warning: d.disable_no_auth_warning,
             cookie_secure: d.cookie_secure,
             max_concurrent_password_checks: d.max_concurrent_password_checks,
@@ -559,6 +571,7 @@ impl ServerAuthConfig {
             max_failed_logins: raw.max_failed_logins,
             blocked_addresses: raw.blocked_addresses,
             session_idle_seconds: raw.session_idle_seconds,
+            cli_token_idle_days: raw.cli_token_idle_days,
             disable_no_auth_warning: raw.disable_no_auth_warning,
             cookie_secure: raw.cookie_secure,
             max_concurrent_password_checks: raw.max_concurrent_password_checks,
@@ -708,6 +721,7 @@ mod tests {
         assert_eq!(config.minimum_password_score, 2);
         assert_eq!(config.max_failed_logins, 5);
         assert_eq!(config.session_idle_seconds, 60);
+        assert_eq!(config.cli_token_idle_days, 30);
     }
 
     #[test]
@@ -740,6 +754,7 @@ mod tests {
             ("cookie_secure = \"sometimes\"\n", "sometimes"),
             ("minimum_password_score = 5\n", "minimum_password_score"),
             ("session_idle_seconds = 0\n", "session_idle_seconds"),
+            ("cli_token_idle_days = 0\n", "cli_token_idle_days"),
             (
                 "max_concurrent_password_checks = 0\n",
                 "max_concurrent_password_checks",

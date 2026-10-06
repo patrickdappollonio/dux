@@ -18,6 +18,14 @@
 //! The await helpers watch the dispatched operation alongside the resource, so a
 //! create that fails is answered when it fails rather than at the end of the
 //! window.
+//!
+//! A client that would rather learn the real outcome than any of these asks
+//! with `?operation=1` ([`OperationQuery`]): the project add and remove, the
+//! agent create, delete, stop and start, the tab create, close and start, and
+//! the terminal create and close then answer at once with
+//! [`operation_accepted`], and the outcome is read from
+//! `GET /api/v1/operations/{id}` (see [`crate::operation_routes`]). Refusals
+//! answer exactly as they do without it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -275,6 +283,72 @@ pub(crate) fn delete_wire_response(result: Result<WireCommandOutcome, String>) -
             }
             _ => StatusCode::NO_CONTENT.into_response(),
         },
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// `?operation=1` on a change route: answer at once with the change's
+/// operation record instead of the route's usual reply, so a client learns the
+/// real outcome by polling `GET /api/v1/operations/{id}`. Absent, or `0`, the
+/// route answers exactly as it always has.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct OperationQuery {
+    #[serde(default)]
+    operation: u8,
+}
+
+impl OperationQuery {
+    pub(crate) fn asked(&self) -> bool {
+        self.operation != 0
+    }
+}
+
+/// The reply to a change followed as an operation: `202 Accepted`, a
+/// `Location` naming the record, and the record as the engine handed it back
+/// when the change answered, which is already final when the change ended
+/// inside the call. A snapshot rather than a read here, so neither a slow
+/// reply nor a record kept for no time at all can lose it.
+pub(crate) fn operation_accepted(record: &dux_core::operations::OperationView) -> Response {
+    let location = format!("/api/v1/operations/{}", record.id);
+    (
+        StatusCode::ACCEPTED,
+        [(axum::http::header::LOCATION, location)],
+        axum::Json(record),
+    )
+        .into_response()
+}
+
+/// [`operation_accepted`] for a change sent with an
+/// [`crate::engine_actor::OperationTicket`], from the record the engine left
+/// in its slot.
+pub(crate) fn ticket_accepted(
+    record: &std::sync::OnceLock<dux_core::operations::OperationView>,
+) -> Response {
+    match record.get() {
+        Some(record) => operation_accepted(record),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::engine_actor::MISSING_OPERATION_RECORD,
+        )
+            .into_response(),
+    }
+}
+
+/// [`delete_wire_response`] for a delete followed as an operation: the same
+/// refusals, and the record in place of the bare `204`.
+pub(crate) fn delete_operation_response(
+    result: Result<(WireCommandOutcome, dux_core::operations::OperationView), String>,
+) -> Response {
+    match result {
+        Ok((outcome, _)) if outcome_is_error(&outcome) => (
+            StatusCode::CONFLICT,
+            outcome
+                .status
+                .map(|status| status.message)
+                .unwrap_or_default(),
+        )
+            .into_response(),
+        Ok((_, record)) => operation_accepted(&record),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }

@@ -878,6 +878,28 @@ impl SessionStore {
             .unwrap_or_default())
     }
 
+    /// The saved process registry, refusing what [`Self::load_process_registry`]
+    /// forgives: a body that does not parse is an error here, not an empty
+    /// registry. For a caller that must not mistake "unreadable" for "nothing
+    /// was recorded".
+    pub fn load_process_registry_strict(
+        &self,
+    ) -> Result<Vec<crate::process_sessions::StoredSession>> {
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "select body from process_registry where id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match body {
+            None => Ok(Vec::new()),
+            Some(body) => serde_json::from_str(&body)
+                .context("the saved process registry is not valid JSON of the expected shape"),
+        }
+    }
+
     /// Run `f` inside one `BEGIN IMMEDIATE` transaction: a read-modify-write
     /// of a pending row that another connection (the snapshot thread, a
     /// leader-exit hook) may be updating at the same moment.

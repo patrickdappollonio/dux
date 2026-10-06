@@ -19,6 +19,7 @@ use dux_core::engine::{
 };
 use dux_core::ids::{TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
+use dux_core::operations::{OperationKind, OperationView};
 use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, QuietSurfaces, StatusScope, StatusTone,
@@ -59,6 +60,40 @@ pub struct ProjectWorktreeInputs {
     pub busy: Vec<dux_core::worktree_manager::BusyFolder>,
 }
 
+/// A client's request to follow a tab or terminal change as an operation: the
+/// record's id, minted before the request is sent so the reply can stay the
+/// shape it has always been, and its kind. The engine thread opens the record
+/// before it makes the change, so nothing the change raises can land first,
+/// and leaves the record as the change left it in `record` before it replies.
+pub struct OperationTicket {
+    pub id: String,
+    pub kind: OperationKind,
+    pub record: Arc<std::sync::OnceLock<OperationView>>,
+}
+
+impl OperationTicket {
+    pub fn new(kind: OperationKind) -> Self {
+        Self {
+            id: dux_core::operations::mint_operation_id(),
+            kind,
+            record: Arc::default(),
+        }
+    }
+
+    /// Leave the record as it stands for the route that sent this ticket.
+    fn hand_back(&self, engine: &Engine) {
+        if let Some(record) = engine.operations.peek(&self.id, Instant::now()) {
+            let _ = self.record.set(record);
+        }
+    }
+}
+
+/// What a route says when the engine made a followed change and handed back no
+/// record. The engine opens the record before the change and sets it before it
+/// replies, so this means something broke between the two.
+pub const MISSING_OPERATION_RECORD: &str =
+    "the change was made, but its operation record did not come back with the reply";
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
@@ -69,6 +104,11 @@ pub enum EngineRequest {
         /// resets it to [`StatusScope::All`] after, so a web operation's toasts
         /// reach only the originating connection. `All` is the broadcast default.
         StatusScope,
+        /// Set when a client asked to follow this command as an operation: the
+        /// actor then dispatches it through
+        /// [`dux_core::engine::Engine::apply_wire_operation`], and the reply
+        /// carries the record's id.
+        Option<OperationKind>,
     ),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
@@ -110,14 +150,25 @@ pub enum EngineRequest {
     /// Subscribe to an existing companion terminal (no launch; replies immediately).
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
     /// Create a companion terminal for a session, replying `(terminal_id, label)`.
-    CreateTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    CreateTerminal(
+        String,
+        Option<OperationTicket>,
+        oneshot::Sender<Result<(String, String), String>>,
+    ),
     /// Create a project terminal for a project (a plain shell at the project's
     /// repo root with no agent attached), replying `(terminal_id, label)`.
-    CreateProjectTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    CreateProjectTerminal(
+        String,
+        Option<OperationTicket>,
+        oneshot::Sender<Result<(String, String), String>>,
+    ),
     /// Create a standalone terminal (a plain shell in the user's home directory,
     /// owned by neither an agent nor a project), replying `(terminal_id, label)`.
     /// Carries no owner id, because there is no owner to name.
-    CreateStandaloneTerminal(oneshot::Sender<Result<(String, String), String>>),
+    CreateStandaloneTerminal(
+        Option<OperationTicket>,
+        oneshot::Sender<Result<(String, String), String>>,
+    ),
     /// Resolve the owner of a companion terminal, or `None` for an unknown id. Lets
     /// the nested PTY sockets and terminal REST routes enforce that a `:tid` belongs
     /// to its path owner before subscribing to or deleting it, which
@@ -139,13 +190,18 @@ pub enum EngineRequest {
     CreateAgentTab(
         String,
         Option<String>,
+        Option<OperationTicket>,
         oneshot::Sender<Result<(String, String), String>>,
     ),
     /// Start a dormant tab explicitly, the press on its start card. The one launch
     /// path that gets past a recorded failure verdict, and dispatching the launch
     /// is what clears that verdict, so the pane mounting behind the card attaches
     /// to a launch in flight rather than starting a second. Already running is `Ok`.
-    StartAgentTab(String, oneshot::Sender<Result<(), String>>),
+    StartAgentTab(
+        String,
+        Option<OperationTicket>,
+        oneshot::Sender<Result<(), String>>,
+    ),
     /// Resolve the owning session id of an EXTRA tab (instant lookup), or
     /// `None` when the tab id is unknown or names a session's first tab, whose
     /// owner is resolved from that session's slot pointer rather than looked up.
@@ -770,6 +826,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             reload_surface: engine.surface.start_surface(),
             admission: process_admission(engine),
             worktree_ops: engine.worktree_ops().clone(),
+            operations: engine.operations.clone(),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -836,6 +893,10 @@ struct PendingSubscribe {
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
+    /// The engine's operation registry, shared by handle: a client polls a
+    /// record by id here, off the engine thread, while the engine and the
+    /// status emitter finish it.
+    operations: dux_core::operations::Operations,
     /// The engine's per-worktree registry of operations in flight, shared by
     /// handle: the editor, upload and git routes run off the engine thread and
     /// still register the worktree they write into, so a removal waits for
@@ -1075,6 +1136,34 @@ impl EngineHandle {
     /// synchronous outcome, deferred busies/finals, worker busies) are delivered
     /// only to that connection. `apply_wire` delegates here with
     /// [`StatusScope::All`] (broadcast), so existing callers are unchanged.
+    /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
+    /// operation of `kind`: answers the outcome and the id of the record a
+    /// client polls with [`Self::operations`].
+    pub async fn apply_wire_operation(
+        &self,
+        command: WireCommand,
+        origin: StatusScope,
+        kind: OperationKind,
+    ) -> Result<(WireCommandOutcome, OperationView), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::ApplyWire(command, tx, origin, Some(kind)))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        let outcome = rx.await.map_err(|_| "engine reply dropped".to_string())??;
+        let record = outcome
+            .operation
+            .clone()
+            .map(|record| *record)
+            .ok_or_else(|| MISSING_OPERATION_RECORD.to_string())?;
+        Ok((outcome, record))
+    }
+
+    /// The engine's operation registry.
+    pub fn operations(&self) -> &dux_core::operations::Operations {
+        &self.operations
+    }
+
     pub async fn apply_wire_scoped(
         &self,
         command: WireCommand,
@@ -1082,7 +1171,7 @@ impl EngineHandle {
     ) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::ApplyWire(command, tx, origin))
+            .send(EngineRequest::ApplyWire(command, tx, origin, None))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1185,10 +1274,14 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
-    pub async fn create_terminal(&self, session_id: String) -> Result<(String, String), String> {
+    pub async fn create_terminal(
+        &self,
+        session_id: String,
+        ticket: Option<OperationTicket>,
+    ) -> Result<(String, String), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::CreateTerminal(session_id, tx))
+            .send(EngineRequest::CreateTerminal(session_id, ticket, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1200,10 +1293,11 @@ impl EngineHandle {
     pub async fn create_project_terminal(
         &self,
         project_id: String,
+        ticket: Option<OperationTicket>,
     ) -> Result<(String, String), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::CreateProjectTerminal(project_id, tx))
+            .send(EngineRequest::CreateProjectTerminal(project_id, ticket, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1212,10 +1306,13 @@ impl EngineHandle {
     /// Create a standalone terminal (a plain shell in the user's home directory
     /// owned by nothing), replying `(terminal_id, label)`. Takes no owner id,
     /// which is the whole point of the kind.
-    pub async fn create_standalone_terminal(&self) -> Result<(String, String), String> {
+    pub async fn create_standalone_terminal(
+        &self,
+        ticket: Option<OperationTicket>,
+    ) -> Result<(String, String), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::CreateStandaloneTerminal(tx))
+            .send(EngineRequest::CreateStandaloneTerminal(ticket, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1227,10 +1324,13 @@ impl EngineHandle {
         &self,
         session_id: String,
         provider: Option<String>,
+        ticket: Option<OperationTicket>,
     ) -> Result<(String, String), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::CreateAgentTab(session_id, provider, tx))
+            .send(EngineRequest::CreateAgentTab(
+                session_id, provider, ticket, tx,
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1239,10 +1339,14 @@ impl EngineHandle {
     /// Start dormant tab `tab_id` explicitly (the "Start session" press). See
     /// [`EngineRequest::StartAgentTab`] for why this exists alongside the
     /// subscribe-launch path.
-    pub async fn start_agent_tab(&self, tab_id: String) -> Result<(), String> {
+    pub async fn start_agent_tab(
+        &self,
+        tab_id: String,
+        ticket: Option<OperationTicket>,
+    ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::StartAgentTab(tab_id, tx))
+            .send(EngineRequest::StartAgentTab(tab_id, ticket, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -2426,6 +2530,7 @@ impl EngineService {
                 status_snapshot_tx,
                 events_watchers,
                 engine.live_status_keys.clone(),
+                engine.operations.clone(),
             ),
             config_reload_tx,
             spine_change_tx,
@@ -3097,13 +3202,13 @@ impl EngineService {
                 // A config-changing command over a file a raw save left ahead
                 // of memory takes the file on first, as a reload does, or is
                 // refused saying why.
-                EngineRequest::ApplyWire(cmd, reply, origin)
+                EngineRequest::ApplyWire(cmd, reply, origin, operation)
                     if cmd.mutates_config_static() && self.config_disk_ahead =>
                 {
                     match self.adopt_disk_config(engine) {
                         Ok(()) => handle_request(
                             engine,
-                            EngineRequest::ApplyWire(cmd, reply, origin),
+                            EngineRequest::ApplyWire(cmd, reply, origin, operation),
                             &mut self.status,
                             &self.config_reload_tx,
                             &mut self.config_disk_ahead,
@@ -3255,6 +3360,11 @@ struct StatusEmitter {
     /// the guard that deregisters it, so the two cannot come apart.
     watchers: Arc<AtomicUsize>,
     controller: KeyedStatusController,
+    /// The engine's operation registry. A keyed final landing here finishes
+    /// the records waiting on its key: this is the one place every final the
+    /// web raises passes through, so it is the completion point for every
+    /// worker-run change a client follows (see [`dux_core::operations`]).
+    operations: dux_core::operations::Operations,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
     /// concurrent operation (e.g. a rapid retry during commit-msg generation).
@@ -3268,8 +3378,10 @@ impl StatusEmitter {
         snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
         watchers: Arc<AtomicUsize>,
         live: dux_core::statusline::LiveStatusKeys,
+        operations: dux_core::operations::Operations,
     ) -> Self {
         Self {
+            operations,
             tx,
             clear_tx,
             snapshot_tx,
@@ -3295,6 +3407,19 @@ impl StatusEmitter {
     /// variant carries the whole status back, which is too large to return.
     fn send(&mut self, status: WireStatus) -> usize {
         let tone = StatusTone::from_wire(&status.tone);
+        // Before the quiet gate below: a final withheld from the web is still
+        // the outcome of the change a client is waiting on.
+        if tone != StatusTone::Busy
+            && let Some(key) = status.key.as_deref()
+        {
+            self.operations.finish_by_key(
+                key,
+                tone,
+                &status.message,
+                status.segments.as_deref(),
+                Instant::now(),
+            );
+        }
         // A status quiet on the web is the command's answer and not a
         // notification: it already rode back to its caller in the outcome, so it
         // must not enter the controller (which would replay it to every joining
@@ -3366,6 +3491,10 @@ impl StatusEmitter {
     }
 
     fn clear(&mut self, key: String) -> bool {
+        // A keyed operation that ends with nothing to say ends here, with no
+        // sentence. A hand-off moved its records to the next key first.
+        self.operations
+            .finish_by_key(&key, StatusTone::Info, "", None, Instant::now());
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
@@ -3837,11 +3966,18 @@ fn handle_pty_resize(
     }
 }
 
+/// Who a wire command's statuses go to, and whether a client follows it as an
+/// operation.
+struct WireOrigin {
+    scope: StatusScope,
+    operation: Option<OperationKind>,
+}
+
 fn handle_apply_wire_request(
     engine: &mut Engine,
     cmd: WireCommand,
     reply: oneshot::Sender<Result<WireCommandOutcome, String>>,
-    origin: StatusScope,
+    origin: WireOrigin,
     status_tx: &mut StatusEmitter,
     config_reload_tx: &broadcast::Sender<()>,
     config_disk_ahead: &mut bool,
@@ -3850,17 +3986,21 @@ fn handle_apply_wire_request(
     // A file a raw save left ahead of memory is taken on before this runs,
     // by the loop that owns the reload (`EngineService::adopt_disk_config`).
     debug_assert!(!(mutates_config && *config_disk_ahead));
-    engine.current_origin = origin;
-    let result = engine.apply_wire(cmd).map_err(|e| e.to_string());
+    engine.current_origin = origin.scope;
+    let result = match origin.operation {
+        Some(kind) => engine.apply_wire_operation(cmd, kind),
+        None => engine.apply_wire(cmd),
+    }
+    .map_err(|e| e.to_string());
     engine.current_origin = StatusScope::All;
 
     if result.is_ok() && mutates_config {
         let _ = config_reload_tx.send(());
     }
-    if let Ok(outcome) = &result
-        && let Some(status) = &outcome.status
-    {
-        let _ = status_tx.send(status.clone());
+    if let Ok(outcome) = &result {
+        for status in outcome.status.iter().chain(outcome.settled.iter()) {
+            let _ = status_tx.send(status.clone());
+        }
     }
     let _ = reply.send(result);
 }
@@ -4002,12 +4142,15 @@ fn handle_request(
     input_owners: &PtySizeOwners,
 ) {
     match req {
-        EngineRequest::ApplyWire(cmd, reply, origin) => {
+        EngineRequest::ApplyWire(cmd, reply, origin, operation) => {
             handle_apply_wire_request(
                 engine,
                 cmd,
                 reply,
-                origin,
+                WireOrigin {
+                    scope: origin,
+                    operation,
+                },
                 status_tx,
                 config_reload_tx,
                 config_disk_ahead,
@@ -4054,24 +4197,24 @@ fn handle_request(
             };
             let _ = reply.send(res);
         }
-        EngineRequest::CreateTerminal(session_id, reply) => {
+        EngineRequest::CreateTerminal(session_id, ticket, reply) => {
             // Headless spawn: seed a default 24x80 and let the first attaching
             // client resize the PTY to its real viewport.
-            let res = engine
-                .create_companion_terminal(&session_id, 24, 80)
-                .map_err(|e| e.to_string());
+            let res = create_terminal_operation(engine, ticket, |engine| {
+                engine.create_companion_terminal(&session_id, 24, 80)
+            });
             let _ = reply.send(res);
         }
-        EngineRequest::CreateProjectTerminal(project_id, reply) => {
-            let res = engine
-                .create_project_terminal(&project_id, 24, 80)
-                .map_err(|e| e.to_string());
+        EngineRequest::CreateProjectTerminal(project_id, ticket, reply) => {
+            let res = create_terminal_operation(engine, ticket, |engine| {
+                engine.create_project_terminal(&project_id, 24, 80)
+            });
             let _ = reply.send(res);
         }
-        EngineRequest::CreateStandaloneTerminal(reply) => {
-            let res = engine
-                .create_standalone_terminal(24, 80)
-                .map_err(|e| e.to_string());
+        EngineRequest::CreateStandaloneTerminal(ticket, reply) => {
+            let res = create_terminal_operation(engine, ticket, |engine| {
+                engine.create_standalone_terminal(24, 80)
+            });
             let _ = reply.send(res);
         }
         EngineRequest::TerminalOwnerOf(terminal_id, reply) => {
@@ -4088,18 +4231,77 @@ fn handle_request(
                 .map(|t| (t.owner.clone(), t.client.spawn_dir().to_path_buf()));
             let _ = reply.send(root);
         }
-        EngineRequest::CreateAgentTab(session_id, provider, reply) => {
+        EngineRequest::CreateAgentTab(session_id, provider, ticket, reply) => {
+            if let Some(ticket) = &ticket {
+                engine.open_operation(&ticket.id, ticket.kind);
+            }
             let res = create_agent_tab_inner(engine, &session_id, provider);
+            if let Some(ticket) = &ticket {
+                match &res {
+                    // The tab exists now; whether it came up is its launch's to
+                    // say, so the record waits for that report.
+                    Ok((tab_id, _)) => {
+                        engine.operations.note(
+                            &ticket.id,
+                            dux_core::operations::OperationNotes {
+                                created: vec![tab_id.clone()],
+                                ..Default::default()
+                            },
+                        );
+                        engine.operations.await_key(
+                            &ticket.id,
+                            &dux_core::operations::launch_binding_key(tab_id),
+                        );
+                        ticket.hand_back(engine);
+                    }
+                    Err(_) => engine.operations.discard(&ticket.id),
+                }
+            }
             let _ = reply.send(res);
         }
-        EngineRequest::StartAgentTab(tab_id, reply) => {
+        EngineRequest::StartAgentTab(tab_id, ticket, reply) => {
+            if let Some(ticket) = &ticket {
+                engine.open_operation(&ticket.id, ticket.kind);
+            }
             // Already running is success, not a second launch: the card can be
             // pressed from a page whose spine has not caught up yet.
-            let res = if engine.providers.contains_key(TabIdRef::new(&tab_id)) {
+            let running = engine.providers.contains_key(TabIdRef::new(&tab_id));
+            let res = if running {
                 Ok(())
             } else {
                 launch_agent(engine, &tab_id)
             };
+            if let Some(ticket) = &ticket {
+                match &res {
+                    // Nothing was started, so this is the end of it.
+                    Ok(()) if running => {
+                        engine.operations.finish(
+                            &ticket.id,
+                            StatusTone::Info,
+                            "",
+                            None,
+                            Instant::now(),
+                        );
+                        ticket.hand_back(engine);
+                    }
+                    // A launch it started, or one already in flight for this
+                    // tab: either way the tab's launch report is the outcome.
+                    // The slot tab is named by its stored id, which is what
+                    // that report carries, whichever spelling the route used.
+                    Ok(()) => {
+                        let launched = engine
+                            .session_for_slot_tab(TabIdRef::new(&tab_id))
+                            .map(|session| session.slot_tab_id().to_string())
+                            .unwrap_or_else(|| tab_id.clone());
+                        engine.operations.await_key(
+                            &ticket.id,
+                            &dux_core::operations::launch_binding_key(&launched),
+                        );
+                        ticket.hand_back(engine);
+                    }
+                    Err(_) => engine.operations.discard(&ticket.id),
+                }
+            }
             let _ = reply.send(res);
         }
         EngineRequest::SlotTabId(session_id, reply) => {
@@ -4522,6 +4724,39 @@ fn handle_subscribe(
 /// Resolve `provider` (or the session's project default) and create a Support
 /// tab, replying `(tab_id, provider)`. Mirrors the `create_terminal` direct
 /// return: the launch is dispatched fire-and-forget inside `Engine::create_tab`.
+/// Create a terminal through `create`, following it as an operation when a
+/// client asked to: the record opens before the terminal exists and ends with
+/// it, since a terminal is created whole inside the call and raises no status.
+fn create_terminal_operation(
+    engine: &mut Engine,
+    ticket: Option<OperationTicket>,
+    create: impl FnOnce(&mut Engine) -> anyhow::Result<(String, String)>,
+) -> Result<(String, String), String> {
+    if let Some(ticket) = &ticket {
+        engine.open_operation(&ticket.id, ticket.kind);
+    }
+    let res = create(engine).map_err(|e| e.to_string());
+    if let Some(ticket) = &ticket {
+        match &res {
+            Ok((terminal_id, _)) => {
+                engine.operations.note(
+                    &ticket.id,
+                    dux_core::operations::OperationNotes {
+                        created: vec![terminal_id.clone()],
+                        ..Default::default()
+                    },
+                );
+                engine
+                    .operations
+                    .finish(&ticket.id, StatusTone::Info, "", None, Instant::now());
+                ticket.hand_back(engine);
+            }
+            Err(_) => engine.operations.discard(&ticket.id),
+        }
+    }
+    res
+}
+
 fn create_agent_tab_inner(
     engine: &mut Engine,
     session_id: &str,
@@ -5288,6 +5523,7 @@ mod tests {
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
             Default::default(),
+            Default::default(),
         );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
@@ -5405,6 +5641,7 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
+            Default::default(),
             Default::default(),
         );
         let (tx, rx) = oneshot::channel();
@@ -5553,6 +5790,7 @@ mod tests {
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
             Default::default(),
+            Default::default(),
         );
 
         let _ =
@@ -5584,13 +5822,26 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, mut clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let operations = dux_core::operations::Operations::default();
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
             Default::default(),
+            operations.clone(),
         );
+        let policy = dux_core::operations::OperationPolicy {
+            unknown_after: Duration::from_secs(60),
+            retention: Duration::from_secs(60),
+        };
+        operations.open(
+            "op-start",
+            dux_core::operations::OperationKind::AgentStart,
+            policy,
+            Instant::now(),
+        );
+        operations.await_key("op-start", "launch:a");
 
         let mut tui_quiet = WireStatus::new("info", "the status line withholds this");
         tui_quiet.quiet_on = QuietSurfaces::TUI;
@@ -5616,6 +5867,14 @@ mod tests {
             clear_rx.try_recv().expect("the spinner is taken down"),
             Some("launch:a".to_string())
         );
+        // Withheld from the screen, still the outcome of the change a client is
+        // waiting on.
+        let record = operations.view("op-start", Instant::now()).unwrap();
+        assert_eq!(
+            record.state,
+            dux_core::operations::OperationState::Succeeded
+        );
+        assert_eq!(record.message, "launched");
     }
 
     /// Only an info may be withheld. A warning reports something the screen
@@ -5630,6 +5889,7 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
+            Default::default(),
             Default::default(),
         );
 
@@ -5660,6 +5920,7 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
+            Default::default(),
             Default::default(),
         );
 
@@ -5897,6 +6158,7 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
@@ -5914,13 +6176,23 @@ mod tests {
             snapshot_tx: snap_tx,
             watchers: Arc::new(AtomicUsize::new(0)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         }
     }
 
     #[test]
-    fn a_named_status_keeps_its_segments_in_the_replay_snapshot() {
+    fn a_named_status_keeps_its_segments_in_the_replay_snapshot_and_the_record_it_finishes() {
         let (mut e, snap) = make_emitter();
+        e.operations.open(
+            "checkout",
+            dux_core::operations::OperationKind::ProjectAdd,
+            dux_core::operations::OperationPolicy {
+                unknown_after: Duration::from_secs(60),
+                retention: Duration::from_secs(60),
+            },
+            Instant::now(),
+        );
         let named =
             dux_core::status_text!["Checked out ", q("main"), " for project ", q("app"), "."];
         let _ = e.send(WireStatus::keyed("checkout", "info", named.clone()));
@@ -5928,6 +6200,9 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].message, named.message());
         assert_eq!(snapshot[0].segments.as_deref(), named.segments());
+        let record = e.operations.view("checkout", Instant::now()).unwrap();
+        assert_eq!(record.message, "Checked out \"main\" for project \"app\".");
+        assert_eq!(record.segments.as_deref(), named.segments());
     }
 
     #[test]
@@ -5937,7 +6212,14 @@ mod tests {
         let (snap_tx, _snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
         let live = dux_core::statusline::LiveStatusKeys::default();
         live.register("pull");
-        let mut e = StatusEmitter::new(tx, clear_tx, snap_tx, Arc::new(AtomicUsize::new(1)), live);
+        let mut e = StatusEmitter::new(
+            tx,
+            clear_tx,
+            snap_tx,
+            Arc::new(AtomicUsize::new(1)),
+            live,
+            Default::default(),
+        );
         let busy = dux_core::status_text!["Pulling ", q("main"), "\u{2026}"];
         let _ = e.send(WireStatus::keyed("pull", "busy", busy.clone()));
         let _ = rx.try_recv();
@@ -6082,12 +6364,35 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
+        e.operations.open(
+            "notes",
+            dux_core::operations::OperationKind::AgentStop,
+            dux_core::operations::OperationPolicy {
+                unknown_after: Duration::from_secs(60),
+                retention: Duration::from_secs(60),
+            },
+            Instant::now(),
+        );
         let _ = e.send(WireStatus::keyed("notes", "busy", "Fetching\u{2026}"));
         assert_eq!(snap_rx.borrow().len(), 1, "busy must be in the snapshot");
+        assert_eq!(
+            e.operations.view("notes", Instant::now()).unwrap().state,
+            dux_core::operations::OperationState::Running,
+            "a busy is not an outcome"
+        );
 
         e.clear("notes".to_string());
+
+        // An operation that ends with nothing to say ends on its clear.
+        let record = e.operations.view("notes", Instant::now()).unwrap();
+        assert_eq!(
+            record.state,
+            dux_core::operations::OperationState::Succeeded
+        );
+        assert_eq!(record.message, "");
 
         assert!(
             snap_rx.borrow().is_empty(),
@@ -6119,6 +6424,7 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
         // One keyed Info, one anonymous Info, and a sticky error that must not
@@ -6213,6 +6519,7 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("del", "error", "Worktree delete failed.").sticky());
@@ -6298,6 +6605,7 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("create-1", "busy", "Pulling\u{2026}"));
@@ -6340,6 +6648,7 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
+            operations: Default::default(),
             generations: std::collections::HashMap::new(),
         };
         // Drain the initial sends so `rx` only sees the upgrades.
@@ -6471,6 +6780,7 @@ mod tests {
             max_failed_logins: 9,
             blocked_addresses: vec!["198.51.100.0/24".to_string()],
             session_idle_seconds: 120,
+            cli_token_idle_days: 7,
             disable_no_auth_warning: true,
             cookie_secure: dux_core::config::CookieSecure::Always,
             max_concurrent_password_checks: 4,
@@ -7829,6 +8139,7 @@ mod tests {
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
             Default::default(),
+            Default::default(),
         );
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
@@ -7960,6 +8271,7 @@ mod tests {
                     WireCommand::SetChangesPaneVisible { visible: true },
                     dead_reply(),
                     StatusScope::All,
+                    None,
                 ),
                 true,
             ),
@@ -8001,17 +8313,17 @@ mod tests {
             ),
             (
                 "CreateTerminal",
-                EngineRequest::CreateTerminal("s1".into(), dead_reply()),
+                EngineRequest::CreateTerminal("s1".into(), None, dead_reply()),
                 true,
             ),
             (
                 "CreateProjectTerminal",
-                EngineRequest::CreateProjectTerminal("p1".into(), dead_reply()),
+                EngineRequest::CreateProjectTerminal("p1".into(), None, dead_reply()),
                 true,
             ),
             (
                 "CreateStandaloneTerminal",
-                EngineRequest::CreateStandaloneTerminal(dead_reply()),
+                EngineRequest::CreateStandaloneTerminal(None, dead_reply()),
                 true,
             ),
             (
@@ -8026,7 +8338,7 @@ mod tests {
             ),
             (
                 "CreateAgentTab",
-                EngineRequest::CreateAgentTab("s1".into(), None, dead_reply()),
+                EngineRequest::CreateAgentTab("s1".into(), None, None, dead_reply()),
                 true,
             ),
             (

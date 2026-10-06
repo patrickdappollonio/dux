@@ -35,6 +35,7 @@ pub mod file_routes;
 pub mod first_load_routes;
 pub mod git_routes;
 pub mod host_guard;
+pub mod operation_routes;
 pub(crate) mod ownership_publish;
 pub mod project_actions;
 pub mod project_reads;

@@ -290,6 +290,16 @@ pub const DEFAULT_HEARTBEAT_DEADLINE_SECONDS: u32 = 30;
 /// far shorter than forever.
 pub const DEFAULT_PTY_SEND_TIMEOUT_SECONDS: u32 = 60;
 
+/// Default for `[server] operation_unknown_after_seconds`: how long a change a
+/// client asked about may run before its record reads as unknown. Equal to the
+/// status line's [`crate::statusline::BUSY_LIVE_CEILING`], the point past which
+/// a spinner is no longer believed either.
+pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
+
+/// Default for `[server] operation_retention_seconds`: how long a finished
+/// change's record can still be read by its id.
+pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
+
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
 /// the async reactor; this bounds how many can run at once so a burst of tree
@@ -1070,6 +1080,16 @@ pub struct ServerConfig {
     /// it then retries forever. Read live, so a config reload applies to the
     /// next connection with no restart.
     pub pty_send_timeout_seconds: u32,
+    /// How long, in seconds, a change a client is waiting on may run before
+    /// its operation record reads `unknown`. Default 1800. The record stays
+    /// open and still finishes with the real outcome; this never ends a change
+    /// or calls it failed. Read when the change starts, so a config reload
+    /// applies to the changes started after it.
+    pub operation_unknown_after_seconds: u64,
+    /// How long, in seconds, a finished change's operation record can still
+    /// be read by its id. Default 1800. Read when the change starts, like
+    /// `operation_unknown_after_seconds`.
+    pub operation_retention_seconds: u64,
     /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
     /// section refuses the whole config rather than resetting to "no
     /// password" (see [`crate::config_auth`] and [`load_config`]). Never
@@ -1142,6 +1162,8 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 ///   change retimes every open tab live.
 /// - `pty_send_timeout_seconds`: read on the server, but read live at the moment a
 ///   terminal connection opens, so the next connection already has the new value.
+/// - `operation_unknown_after_seconds` and `operation_retention_seconds`: read as
+///   each change starts, so the next one already has the new values.
 ///
 /// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
 /// are built once in `build_app` and never resized on reload, and the tab caps are
@@ -2140,6 +2162,8 @@ impl Default for ServerConfig {
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
+            operation_unknown_after_seconds: DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS,
+            operation_retention_seconds: DEFAULT_OPERATION_RETENTION_SECONDS,
             auth: ServerAuthConfig::default(),
         }
     }

@@ -31,6 +31,7 @@
 //! middleware changing.
 
 pub(crate) mod admission;
+pub(crate) mod bearer;
 pub(crate) mod blocked_page;
 pub(crate) mod cookie;
 pub(crate) mod gate;
@@ -50,7 +51,7 @@ use std::time::Instant;
 use axum::http::HeaderMap;
 use dux_core::auth::Password;
 use dux_core::config::{AddressBlock, AuthRequire, ServerAuthConfig};
-use dux_core::web_sessions::TokenDigest;
+use dux_core::web_sessions::{SessionKind, TokenDigest};
 
 use crate::exposure::{Exposure, ExposureCell};
 pub use provenance::{Arrival, ClientClass};
@@ -371,9 +372,12 @@ pub(crate) struct Assessment {
     pub(crate) required: bool,
     /// The valid session the request presented, if any.
     pub(crate) session: Option<TokenDigest>,
-    /// Every session token the request presented, valid or not: what a
-    /// sign-out revokes.
+    /// Every session token the request presented in a cookie, valid or not:
+    /// what a sign-out revokes.
     pub(crate) presented: Vec<TokenDigest>,
+    /// Every token the request presented as a bearer, valid or not: what a
+    /// command-line sign-out revokes.
+    pub(crate) bearer: Vec<TokenDigest>,
 }
 
 /// The [`Assessment`] of the request in hand, as an extension.
@@ -453,7 +457,11 @@ impl AuthState {
             let sessions = state.sessions.clone();
             tokio::spawn(async move {
                 sessions
-                    .load(db, snapshot.generation.clone(), idle_ms(&snapshot.config))
+                    .load(
+                        db,
+                        snapshot.generation.clone(),
+                        idle_windows(&snapshot.config),
+                    )
                     .await;
             });
         }
@@ -530,26 +538,37 @@ impl AuthState {
         );
         let cookie_port = facts.arrival.map_or(0, |arrival| arrival.local.port());
         let mut session = None;
-        let presented: Vec<TokenDigest> = if snapshot.has_password() {
-            cookie::read_all(headers, cookie_port)
-                .iter()
-                .filter_map(|value| dux_core::web_sessions::digest_of(value))
-                .collect()
+        let (presented, bearer): (Vec<TokenDigest>, Vec<TokenDigest>) = if snapshot.has_password() {
+            let digests = |values: Vec<String>| -> Vec<TokenDigest> {
+                values
+                    .iter()
+                    .filter_map(|value| dux_core::web_sessions::digest_of(value))
+                    .collect()
+            };
+            (
+                digests(cookie::read_all(headers, cookie_port)),
+                digests(bearer::read_all(headers)),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        if !presented.is_empty() {
+        if !presented.is_empty() || !bearer.is_empty() {
             self.sessions.ready().await;
-            // The first value that is a valid session wins; a planted or
-            // stale one beside it changes nothing.
-            session = presented.iter().copied().find(|digest| {
-                self.sessions.check(
-                    digest,
-                    &snapshot.generation,
-                    idle_ms(&snapshot.config),
-                    true,
-                )
-            });
+            // Every valid credential is refreshed, so none idles out while it
+            // is being presented; the first valid one names the session, and
+            // a planted or stale one beside it changes nothing.
+            let idle = idle_windows(&snapshot.config);
+            session = presented
+                .iter()
+                .chain(&bearer)
+                .copied()
+                .filter(|digest| {
+                    self.sessions
+                        .check(digest, &snapshot.generation, idle, true)
+                })
+                .collect::<Vec<_>>()
+                .first()
+                .copied();
         }
         let required =
             snapshot.has_password() && required_by(snapshot.config.require, classification.class);
@@ -562,6 +581,7 @@ impl AuthState {
             required,
             session,
             presented,
+            bearer,
         }
     }
 
@@ -593,7 +613,7 @@ impl AuthState {
             self.sessions.check(
                 digest,
                 &snapshot.generation,
-                idle_ms(&snapshot.config),
+                idle_windows(&snapshot.config),
                 false,
             )
         });
@@ -910,6 +930,7 @@ impl AuthState {
         &self,
         facts: &RequestFacts,
         generation: &str,
+        kind: SessionKind,
     ) -> Result<Issued, anyhow::Error> {
         let refused = |state: &Self| {
             if state.snapshot().generation != generation {
@@ -927,7 +948,7 @@ impl AuthState {
         if let Some(refused) = refused(self) {
             return Ok(refused);
         }
-        let token = self.sessions.issue(generation).await?;
+        let token = self.sessions.issue(generation, kind).await?;
         if let Some(refused) = refused(self) {
             self.end_session(token.digest).await;
             return Ok(refused);
@@ -967,15 +988,21 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// `session_idle_seconds`, in milliseconds.
-pub(crate) fn idle_ms(config: &ServerAuthConfig) -> i64 {
-    i64::from(config.session_idle_seconds) * 1000
+/// How long each kind of session may sit unused: `session_idle_seconds` for a
+/// browser's and `cli_token_idle_days` for the command line's, in milliseconds.
+pub(crate) fn idle_windows(config: &ServerAuthConfig) -> sessions::Idle {
+    sessions::Idle {
+        browser_ms: i64::from(config.session_idle_seconds) * 1000,
+        cli_ms: i64::from(config.cli_token_idle_days) * 86_400_000,
+    }
 }
 
 /// How often the sessions' last use is written: a third of the idle timeout,
 /// between one and fifteen seconds.
 fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
-    std::time::Duration::from_millis((idle_ms(config) / 3).clamp(1_000, 15_000) as u64)
+    std::time::Duration::from_millis(
+        (idle_windows(config).browser_ms / 3).clamp(1_000, 15_000) as u64
+    )
 }
 
 /// How often the reach behind the no-password alarm is looked at.
@@ -1089,7 +1116,7 @@ async fn maintain(state: Arc<AuthState>) {
                 say_forward(&state);
             }
             _ = flush.tick() => {
-                state.sessions.flush(idle_ms(&state.snapshot().config)).await;
+                state.sessions.flush(idle_windows(&state.snapshot().config)).await;
             }
             _ = reach.tick() => {
                 warning.check(&state);
@@ -1342,7 +1369,11 @@ mod tests {
             opening_hook: None,
         });
         state.sessions.ready().await;
-        let token = state.sessions.issue("").await.unwrap();
+        let token = state
+            .sessions
+            .issue("", SessionKind::Browser)
+            .await
+            .unwrap();
         let _lease = state.sessions.lease(token.digest).unwrap();
         let stored = || {
             dux_core::web_sessions::WebSessionStore::open(&db)
@@ -1384,5 +1415,80 @@ mod tests {
         assert_eq!(at(1).as_millis(), 1_000);
         assert_eq!(at(9).as_millis(), 3_000);
         assert_eq!(at(3600).as_millis(), 15_000);
+    }
+
+    /// A request carrying a cookie and a bearer token together keeps both
+    /// sessions alive, not only the one that identifies it.
+    #[tokio::test]
+    async fn a_cookie_and_a_bearer_presented_together_both_stay_alive() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "orbit velvet quarry lantern cobalt".to_string(),
+        ))
+        .unwrap();
+        let config = ServerAuthConfig {
+            password_hash: hash,
+            session_idle_seconds: 10 * 86_400,
+            cli_token_idle_days: 1,
+            ..ServerAuthConfig::default()
+        };
+        let now = Arc::new(AtomicI64::new(1_000_000));
+        let reads = Arc::clone(&now);
+        let state = AuthState::start_with_clock(
+            AuthSetup {
+                live: Arc::new(LiveAuth::new(&config)),
+                exposure: None,
+                bound_ips: Vec::new(),
+                tailscale_leg: None,
+                config_path: None,
+                sessions_db: None,
+                console: crate::console::Console::noop(),
+                engine: None,
+                reload: Arc::new(|| {}),
+                opening_hook: None,
+            },
+            Arc::new(move || reads.load(Ordering::SeqCst)),
+        );
+        let generation = state.snapshot().generation.clone();
+        let browser = state
+            .sessions
+            .issue(&generation, SessionKind::Browser)
+            .await
+            .unwrap();
+        let cli = state
+            .sessions
+            .issue(&generation, SessionKind::Cli)
+            .await
+            .unwrap();
+        let both = |headers: &mut HeaderMap| {
+            headers.insert(
+                "cookie",
+                format!("dux_session_0={}", browser.cookie_value)
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", cli.cookie_value).parse().unwrap(),
+            );
+        };
+        // Thirty-six hours, twelve at a time, each request carrying both.
+        for _ in 0..3 {
+            now.fetch_add(12 * 3_600_000, Ordering::SeqCst);
+            let mut headers = HeaderMap::new();
+            both(&mut headers);
+            let facts = RequestFacts::of(None, &headers);
+            assert!(state.assess(facts, &headers).await.session.is_some());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", cli.cookie_value).parse().unwrap(),
+        );
+        let facts = RequestFacts::of(None, &headers);
+        assert!(
+            state.assess(facts, &headers).await.session.is_some(),
+            "the bearer was presented every twelve hours, so it is not a day idle"
+        );
     }
 }

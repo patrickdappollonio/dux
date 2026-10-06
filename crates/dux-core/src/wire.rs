@@ -43,7 +43,7 @@ use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::prose::ProseSegment;
 use crate::status_text::StatusText;
-use crate::statusline::{QuietSurfaces, StatusScope};
+use crate::statusline::{QuietSurfaces, StatusScope, StatusTone};
 use crate::worker::{
     CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget,
 };
@@ -1014,6 +1014,22 @@ pub struct WireCommandOutcome {
     /// from-PR create (its op is minted later, inside the PR-lookup followup).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_op_id: Option<String>,
+    /// The operation record that follows this command, set only when it was
+    /// dispatched through [`Engine::apply_wire_operation`]. `None` for every
+    /// other dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// The final of the keyed busy in `status`, when the command already
+    /// reached it inside the call. Raised right after `status`, so the busy
+    /// does not outlive the work it stands for. `None` for every other
+    /// command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled: Option<WireStatus>,
+    /// The operation record as it stood when the command answered, set
+    /// beside `operation_id`. A snapshot rather than a later read, so the
+    /// reply holds it even when the record is kept for no time at all.
+    #[serde(skip)]
+    pub operation: Option<Box<crate::operations::OperationView>>,
 }
 
 impl WireCommandOutcome {
@@ -1064,7 +1080,7 @@ pub struct WebFollowupStatuses {
     pub clear_keys: Vec<String>,
 }
 
-fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
+pub(crate) fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     match reaction {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
@@ -1074,6 +1090,76 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
             .label
             .as_ref()
             .map(|l| WireStatus::new("info", crate::engine::closed_terminal_notice(l))),
+        _ => None,
+    }
+}
+
+/// The final of the keyed busy `answered`, when the same reaction already
+/// carries it. A command can open an operation and finish it in one call
+/// (deleting a project that has no worktree to wait for), and a command
+/// answers with one status, so without this the final was dropped and the
+/// spinner stayed up with nothing left to take it down.
+pub(crate) fn settled_final_from_reaction(
+    reaction: &EventReaction,
+    answered: Option<&WireStatus>,
+) -> Option<WireStatus> {
+    let busy = answered.filter(|s| StatusTone::from_wire(&s.tone) == StatusTone::Busy)?;
+    busy.key.as_ref()?;
+    wire_statuses_from_reaction(reaction)
+        .into_iter()
+        .rev()
+        .find(|status| {
+            status.key == busy.key && StatusTone::from_wire(&status.tone) != StatusTone::Busy
+        })
+}
+
+/// Whom a launch reaction reports to: the key its records wait on, the tab it
+/// launched when the report names one, and whether it came up.
+struct LaunchReport {
+    key: String,
+    tab_id: Option<String>,
+    launched: bool,
+}
+
+/// The [`LaunchReport`] of a launch reaction, or `None` for a reaction that is
+/// no launch report and for a create's launch, whose record follows the
+/// create's own key. A failure reported by agent, not by tab, reports under
+/// the agent's [`crate::operations::launch_failure_key`], where
+/// `Engine::process_agent_launch_failed` moved the records of the tab that
+/// failed: asking which tab is the first one now could name a tab a promotion
+/// put there in the meantime.
+fn launch_report(reaction: &EventReaction) -> Option<LaunchReport> {
+    let tab = |tab_id: &str, launched| LaunchReport {
+        key: crate::operations::launch_binding_key(tab_id),
+        tab_id: Some(tab_id.to_string()),
+        launched,
+    };
+    match reaction {
+        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
+            AgentLaunchReadyView::Reconnect { .. }
+            | AgentLaunchReadyView::ResumeFallback { .. }
+            | AgentLaunchReadyView::StartupAutoReopen => Some(tab(&outcome.tab_id, true)),
+            AgentLaunchReadyView::SessionMissing => Some(tab(&outcome.tab_id, false)),
+            AgentLaunchReadyView::CreateCommitted { .. }
+            | AgentLaunchReadyView::CreatePersistFailed { .. } => None,
+        },
+        EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
+            AgentLaunchFailedOutcome::Tab { tab_id, .. } => Some(tab(tab_id, false)),
+            AgentLaunchFailedOutcome::Reconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::ForceReconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::StartupAutoReopen { session_id, .. } => {
+                Some(LaunchReport {
+                    key: crate::operations::launch_failure_key(session_id),
+                    tab_id: None,
+                    launched: false,
+                })
+            }
+            // A ghost tab's failure finishes its records where it is decided,
+            // since it says nothing on the screen.
+            AgentLaunchFailedOutcome::ResumeFallback
+            | AgentLaunchFailedOutcome::Create { .. }
+            | AgentLaunchFailedOutcome::Silent => None,
+        },
         _ => None,
     }
 }
@@ -1095,7 +1181,7 @@ struct WebProjectAdd<'a> {
 /// The authoritative "added" status message from a `PersistProject::Add`
 /// reaction (the engine's real outcome: an honest dedup message when a race
 /// hit that path, or the normal success text), or `None` for any other reaction.
-fn added_status_message(reaction: &EventReaction) -> Option<StatusText> {
+pub(crate) fn added_status_message(reaction: &EventReaction) -> Option<StatusText> {
     if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
         && let ProjectPersistenceView::Added { status_message, .. } = &outcome.view
     {
@@ -1554,7 +1640,11 @@ impl Engine {
         if status.is_none() {
             status = self.drive_delete_followup(&reaction).into_iter().next();
         }
-        Ok(WireCommandOutcome::with_optional_status(status))
+        let settled = settled_final_from_reaction(&reaction, status.as_ref());
+        Ok(WireCommandOutcome {
+            settled,
+            ..WireCommandOutcome::with_optional_status(status)
+        })
     }
 
     /// Answer the commands that add a project or prepare its checkout.
@@ -2565,6 +2655,13 @@ impl Engine {
             .map(|t| TabId::new(t.id.clone()))
             .and_then(|id| self.tab_prose_label(sid, id.as_ref_id()));
         let outcome = self.close_tab(session_id, tab_id)?;
+        self.note_operation(
+            None,
+            crate::operations::OperationNotes {
+                removed: vec![tab_id.to_string()],
+                ..Default::default()
+            },
+        );
         let message = match (&outcome.promoted, closed.as_deref(), successor.as_deref()) {
             (Some(_), Some(closed), Some(next)) => crate::status_text![
                 "Closed the first tab, ",
@@ -3469,19 +3566,23 @@ impl Engine {
                                 clear_keys.push(key);
                             }
                         }
+                        let refusal = WireStatus::new(
+                            "error",
+                            crate::status_text![
+                                "PR ",
+                                n(format!("#{}", pr.number)),
+                                " has head branch ",
+                                q(pr.head_ref_name),
+                                ", which is not a usable agent \
+                                 name. Create the agent again and type a name using only \
+                                 letters, digits, dashes, underscores and slashes."
+                            ],
+                        );
+                        if let Some(lookup) = status_op_id {
+                            self.finish_pr_lookup_operation(lookup, Some(&refusal));
+                        }
                         return WebFollowupStatuses {
-                            statuses: vec![WireStatus::new(
-                                "error",
-                                crate::status_text![
-                                    "PR ",
-                                    n(format!("#{}", pr.number)),
-                                    " has head branch ",
-                                    q(pr.head_ref_name),
-                                    ", which is not a usable agent \
-                                     name. Create the agent again and type a name using only \
-                                     letters, digits, dashes, underscores and slashes."
-                                ],
-                            )],
+                            statuses: vec![refusal],
                             clear_keys,
                         };
                     }
@@ -3520,6 +3621,7 @@ impl Engine {
                     .map(|op| op.scope().clone())
                     .unwrap_or(crate::statusline::StatusScope::All);
                 self.current_origin = origin;
+                self.last_created_op_id = None;
                 let statuses = match self.apply(Command::DispatchCreateAgentRequest {
                     request: Box::new(request),
                     busy_message: busy_message.clone(),
@@ -3536,6 +3638,15 @@ impl Engine {
                     )],
                 };
                 self.current_origin = crate::statusline::StatusScope::All;
+                // A record following the lookup now follows the create it
+                // handed off to, whose final carries the outcome; a create that
+                // never started ends the record on the status that says why.
+                if let Some(lookup) = status_op_id {
+                    match self.last_created_op_id.take() {
+                        Some(create) => self.operations.hand_off(lookup, &create),
+                        None => self.finish_pr_lookup_operation(lookup, statuses.first()),
+                    }
+                }
                 // The lookup busy hands off to the create dispatch's busy (emitted
                 // above, keyed by the shared create op's opaque id), so resolve the
                 // PR-lookup op to a CLEAR so the `Resolving PR…` spinner is
@@ -3703,6 +3814,9 @@ impl Engine {
             .map(|op| op.scope().clone())
             .unwrap_or(crate::statusline::StatusScope::All);
         self.current_origin = origin;
+        // What was there before, so an add that found its project already
+        // registered (a race into the dedup) is not reported as creating it.
+        let existing: Vec<String> = self.projects.iter().map(|p| p.id.clone()).collect();
         // The engine's Added outcome carries the AUTHORITATIVE message, which is
         // the dedup chokepoint's honest "already in the workspace" text when a
         // race hit that path, not this caller's optimistic narrative. Surface
@@ -3721,10 +3835,21 @@ impl Engine {
             {
                 if let ProjectPersistenceView::Added {
                     status_message: engine_message,
-                    ..
+                    project_id,
                 } = &outcome.view
                 {
                     success_message = engine_message.clone();
+                    if let Some(key) = status_op_id
+                        && !existing.contains(project_id)
+                    {
+                        self.operations.note(
+                            key,
+                            crate::operations::OperationNotes {
+                                created: vec![project_id.clone()],
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
                 vec![WireStatus::new("info", success_message.clone())]
             }
@@ -3948,6 +4073,15 @@ impl Engine {
                             let removal = WorktreeRemoval::Performed {
                                 branches: branches.clone(),
                             };
+                            self.note_delete_parts(
+                                session_id,
+                                crate::operations::agent_delete_parts(
+                                    &facts.directory,
+                                    &facts.branch_name,
+                                    &facts.initial_branch,
+                                    &removal,
+                                ),
+                            );
                             crate::engine::WebDeleteOutcome::Succeeded {
                                 message: delete_session_status_message(&facts, &removal),
                                 refused: removal.refused_a_branch(),
@@ -3975,6 +4109,16 @@ impl Engine {
                 // Read the snapshot before resolving, which consumes it: the
                 // failure names the agent whose worktree is still on disk.
                 let facts = self.pending_delete_reports_web.get(session_id).cloned();
+                if let Some(facts) = &facts {
+                    self.note_delete_parts(
+                        session_id,
+                        crate::operations::agent_delete_failure_parts(
+                            &facts.directory,
+                            &facts.branch_name,
+                            message,
+                        ),
+                    );
+                }
                 self.resolve_web_delete_op(
                     session_id,
                     &crate::engine::WebDeleteOutcome::Failed {
@@ -3984,6 +4128,40 @@ impl Engine {
             }
             _ => vec![],
         }
+    }
+
+    /// End the records following a from-PR create's lookup on the status that
+    /// says why no create started. That status carries no key, so nothing else
+    /// could finish them: the lookup's own key is only ever cleared.
+    fn finish_pr_lookup_operation(&self, lookup: &str, status: Option<&WireStatus>) {
+        let (tone, message, segments) = match status {
+            Some(status) => (
+                crate::statusline::StatusTone::from_wire(&status.tone),
+                status.message.as_str(),
+                status.segments.as_deref(),
+            ),
+            None => (crate::statusline::StatusTone::Error, "", None),
+        };
+        self.operations
+            .finish_by_key(lookup, tone, message, segments, std::time::Instant::now());
+    }
+
+    /// Tell the operation record following this agent's delete, if a client
+    /// asked for one, what became of its worktree and branches: under the
+    /// delete op's key when the removal ran on a worker, or the record being
+    /// dispatched when the delete finished inline.
+    fn note_delete_parts(&self, session_id: &str, parts: Vec<crate::operations::OperationPart>) {
+        let key = self
+            .pending_delete_ops_web
+            .get(session_id)
+            .map(|op| op.id().to_string());
+        self.note_operation(
+            key.as_deref(),
+            crate::operations::OperationNotes {
+                parts,
+                ..Default::default()
+            },
+        );
     }
 
     /// Pop the web delete op for `session_id` and resolve it into its keyed final
@@ -4019,7 +4197,27 @@ impl Engine {
     /// now, and a `Kind::Tab` launch collapses into the `Reconnect` view. A live
     /// read would send a tab promoted mid-launch down the session-keyed branch
     /// and strand its `tab-launch-<id>` busy toast forever.
+    ///
+    /// It is also where a tab created or started by a route finishes its
+    /// operation record, on the final this follow-up produces: that final's key
+    /// is shared by every launch of the tab, or it has none, so it cannot name
+    /// the request on its own.
     pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
+        let followup = self.web_launch_followup_statuses(reaction);
+        if let Some(report) = launch_report(reaction) {
+            let first = followup.statuses.first();
+            self.finish_launch_operations(
+                &report.key,
+                report.tab_id.as_deref(),
+                report.launched,
+                first.map(|s| s.message.as_str()).unwrap_or(""),
+                first.and_then(|s| s.segments.as_deref()),
+            );
+        }
+        followup
+    }
+
+    fn web_launch_followup_statuses(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
                 AgentLaunchReadyView::Reconnect { status_message }
@@ -4208,9 +4406,16 @@ impl Engine {
             update_status: true,
         }) {
             Ok(EventReaction::FinishDeleteSessionView(view)) => {
-                let message = delete_session_status_message(
-                    &DeleteReportFacts::from_finish_outcome(&view.outcome),
-                    &view.removal,
+                let facts = DeleteReportFacts::from_finish_outcome(&view.outcome);
+                let message = delete_session_status_message(&facts, &view.removal);
+                self.note_delete_parts(
+                    session_id,
+                    crate::operations::agent_delete_parts(
+                        &facts.directory,
+                        &facts.branch_name,
+                        &facts.initial_branch,
+                        &view.removal,
+                    ),
                 );
                 match self.pending_delete_ops_web.remove(session_id) {
                     Some(op) => wire_statuses_from_reaction(
@@ -9526,6 +9731,15 @@ mod tests {
         // registered, the status must carry the engine's honest "already in the
         // workspace" text, not the losing caller's fabricated success narrative.
         let (mut engine, _tmp) = test_engine();
+        engine.operations.open(
+            "op-add",
+            crate::operations::OperationKind::ProjectAdd,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            std::time::Instant::now(),
+        );
         engine
             .apply(Command::PersistProject {
                 action: Box::new(crate::worker::ProjectPersistenceAction::Add {
@@ -9546,10 +9760,19 @@ mod tests {
                     .to_string()
                     .into(),
             add_failed_prefix: "Created the initial commit but couldn't add the project",
-            status_op_id: &None,
+            status_op_id: &Some("op-add".to_string()),
         });
 
         assert_eq!(engine.projects.len(), 1, "no duplicate project");
+        assert_eq!(
+            engine
+                .operations
+                .view("op-add", std::time::Instant::now())
+                .unwrap()
+                .created,
+            Vec::<String>::new(),
+            "an add that found the project already there created nothing"
+        );
         let msg = &statuses.last().expect("a status").message;
         assert!(
             msg.contains("already in the workspace"),
@@ -9924,6 +10147,29 @@ mod tests {
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn a_project_deletion_that_ends_inside_the_call_answers_its_final_beside_its_busy() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+
+        let outcome = engine
+            .apply_wire(WireCommand::DeleteProject {
+                project_id: "p1".to_string(),
+            })
+            .expect("apply_wire");
+
+        let busy = outcome.status.expect("the deletion's busy");
+        assert_eq!(busy.tone, "busy");
+        let settled = outcome.settled.expect("the deletion's final");
+        assert_eq!(settled.key, busy.key);
+        assert_eq!(settled.tone, "info");
+        assert!(
+            settled.message.starts_with("Deleted project "),
+            "{}",
+            settled.message
+        );
     }
 
     #[test]
@@ -12255,6 +12501,28 @@ mod tests {
     #[test]
     fn drive_pr_lookup_followup_dispatches_create_with_carried_name() {
         let repo = init_repo_with_commit();
+        // An origin carrying the pull request's head, so the create's fetch
+        // resolves without a network and the create can run to its end.
+        let origin = init_repo_with_commit();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = crate::git::test_support::git_command()
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(origin.path(), &["update-ref", "refs/pull/42/head", "HEAD"]);
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", &repo.path().to_string_lossy());
         project.path_missing = false;
@@ -12271,10 +12539,22 @@ mod tests {
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
             }),
-            // No registered op (id None), so the followup returns no clear key and
-            // resolves nothing: the create busy flows through the worker channel.
-            status_op_id: None,
+            // An id with no registered lookup op, so the followup returns no
+            // clear key and resolves nothing: the create busy flows through the
+            // worker channel. A client's operation record follows the id.
+            status_op_id: Some("op-lookup".to_string()),
         };
+        let policy = crate::operations::OperationPolicy {
+            unknown_after: std::time::Duration::from_secs(60),
+            retention: std::time::Duration::from_secs(60),
+        };
+        let now = std::time::Instant::now();
+        engine.operations.open(
+            "op-lookup",
+            crate::operations::OperationKind::AgentCreate,
+            policy,
+            now,
+        );
         // The followup dispatches the create worker; the busy status is posted on
         // the worker channel (CommandWorkerStarted), so the followup itself
         // returns no synchronous status on the happy path.
@@ -12295,6 +12575,64 @@ mod tests {
                 && busy.contains("launching a fresh session"),
             "msg: {busy}"
         );
+        // The record now follows the create the lookup handed off to: the
+        // lookup's own key ending does not end it, the create's final does.
+        let create = engine
+            .pending_create_ops
+            .keys()
+            .next()
+            .cloned()
+            .expect("the create op");
+        let tone = crate::statusline::StatusTone::Info;
+        engine
+            .operations
+            .finish_by_key("op-lookup", tone, "", None, now);
+        let record = |engine: &Engine| engine.operations.view("op-lookup", now).unwrap();
+        assert_eq!(
+            record(&engine).state,
+            crate::operations::OperationState::Running
+        );
+        // Run the create to its end, raising its finals the way the web's
+        // status emitter does, and the record resolves to the agent it made.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while record(&engine).state == crate::operations::OperationState::Running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the create never finished"
+            );
+            let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+            else {
+                continue;
+            };
+            let reaction = engine.process_worker_event(event);
+            for status in wire_statuses_from_reaction(&reaction) {
+                let tone = crate::statusline::StatusTone::from_wire(&status.tone);
+                if let Some(key) = &status.key
+                    && tone != crate::statusline::StatusTone::Busy
+                {
+                    engine.operations.finish_by_key(
+                        key,
+                        tone,
+                        &status.message,
+                        None,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
+        }
+        let record = record(&engine);
+        assert_eq!(
+            record.state,
+            crate::operations::OperationState::Succeeded,
+            "{}",
+            record.message
+        );
+        let created = engine
+            .created_session_for_op(&create)
+            .expect("the create made an agent");
+        assert_eq!(record.created, vec![created]);
     }
 
     /// When the resolved PR carries no custom name (the TUI path), the follow-up
@@ -12362,8 +12700,18 @@ mod tests {
                 head_ref_name: "feature/add colons: & spaces".to_string(),
                 custom_name: None,
             }),
-            status_op_id: None,
+            status_op_id: Some("op-lookup".to_string()),
         };
+        let now = std::time::Instant::now();
+        engine.operations.open(
+            "op-lookup",
+            crate::operations::OperationKind::AgentCreate,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            now,
+        );
         let followup = engine.drive_pr_lookup_followup(&reaction);
 
         let error = followup
@@ -12385,6 +12733,11 @@ mod tests {
             first_command_busy_message_opt(&engine).is_none(),
             "no create should have been dispatched"
         );
+        // A client's record of the create ends on the refusal, which carries no
+        // key of its own.
+        let record = engine.operations.view("op-lookup", now).unwrap();
+        assert_eq!(record.state, crate::operations::OperationState::Failed);
+        assert_eq!(record.message, error.message);
     }
 
     /// The refusal quotes the head branch, which is somebody else's text: the

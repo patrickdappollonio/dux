@@ -45,9 +45,10 @@ A handful of subcommands handle the file without you hunting for it:
 - `dux config reset` removes the config, the log, the server log with its rotated copies
   and your saved remotes, and keeps your agents and worktrees.
   `dux config reset --all` is the full factory reset: all of that, the session database and
-  every worktree dux made. It keeps one thing, the note that you have already seen the
-  welcome screen, in the fresh database it leaves behind, so the next start does not greet
-  you as a stranger.
+  every worktree dux made. It deletes nothing if a program dux started is still running,
+  and it keeps one thing, the note that you have already seen the welcome screen, in the
+  fresh database it leaves behind, so the next start does not greet you as a stranger.
+  Both refuse while another dux is running.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
 
@@ -145,15 +146,22 @@ change, a block after failed logins), never by dux saving its other settings.
 > touching the app: `kill -USR1 <pid>`. The PID is the first line of `dux.lock`, next to the config.
 
 > [!WARNING]
-> A factory reset deletes every worktree dux made, uncommitted work included. First it stops
-> what dux itself started and left running in those worktrees (a startup command's dev
-> server, or a job a terminal left working in one, say), giving each the same grace period
-> as a delete before forcing it. A folder
-> where something still runs (one of those that would not stop, or anything a standalone
-> agent started) is kept, and so may one something else is still writing into. The reset
-> carries on with everything else, then lists each folder it had to leave behind and why.
-> Stop whatever is still using it and delete the folder yourself. A folder a standalone
-> agent runs in is never touched.
+> A factory reset deletes every worktree dux made, uncommitted work included. It refuses to
+> run while another dux is running, and it is all or nothing. First it stops what dux itself
+> started and left running in those worktrees (a startup command's dev server, or a job a
+> terminal left working in one, say), giving each the same grace period as a delete before
+> forcing it. That includes everything a standalone agent started, wherever it works. Then it
+> looks once more: if anything dux started still runs, or any program of yours is working in a
+> folder the reset would delete (one dux never started included), or dux cannot tell whether
+> something does (it cannot read the database, the list of what it started, or the process
+> list), the reset deletes nothing: not the config, not the database, not a worktree. It says
+> why, lists each program and its folder, and exits with status 1. Stop what is listed and run
+> the reset again. If a folder cannot be removed once the deleting has begun, the reset stops
+> there, keeps the database and the config, lists what it removed and what failed, and exits
+> with status 1; fix that and run it again. A folder a standalone agent runs in is never
+> removed. Once the reset does delete, it keeps
+> the record that you have seen the welcome screen, so the screen does not open again on
+> the next start.
 
 ### What `dux config diff` shows, and what it holds back
 
@@ -247,6 +255,7 @@ refused until that is fixed: dux cannot tell which minimum you meant.
 | `minimum_password_length` | `12` | The fewest characters a new password may have. |
 | `minimum_password_score` | `2` | The lowest strength a new password may have, from 0 (weak) through fair, good and strong to 4 (excellent). |
 | `session_idle_seconds` | `60` | How long a browser stays signed in with nothing happening. An open dux tab counts as something happening. At least 1. |
+| `cli_token_idle_days` | `30` | How many days a sign-in made from the dux command line survives without being used. Unlike a browser, the command line keeps its sign-in between commands, so daily use never asks for the password again. A password change signs every one out. At least 1. |
 | `max_failed_logins` | `5` | Failed sign-ins one address may make, each within `failed_login_window_seconds` of the one before, before dux adds it to `blocked_addresses`. An IPv6 client on the network is also counted by its /64, and when the addresses of one /64 together reach the limit without any one of them reaching it alone, the whole /64 is added as one range; never for this machine's own network, link-local `fe80::` addresses, your tailnet or IPv4, which are counted one address at a time. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the sign-ins down and its log names the address for you to add by hand. `0` never blocks; the slow-down still applies. |
 | `blocked_addresses` | `[]` | Addresses and CIDR ranges refused outright, with or without a password. A request matches when any address it names does, forwarding headers included. Loopback and this machine's own addresses never match: the part of an entry covering them is accepted, warned about and ignored, and the rest of a range still applies. dux adds single addresses, or an IPv6 /64 as one range that replaces the addresses of it already listed. Yours to edit. |
 | `failed_login_window_seconds` | `900` | How long a failed sign-in counts against its address. |

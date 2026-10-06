@@ -1420,6 +1420,29 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.pty_send_timeout_seconds as usize),
         },
         ConfigEntry::Field {
+            key: "operation_unknown_after_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a change a client is waiting on (deleting an agent, creating\n\
+                 # one, removing a project) may keep running before dux reports its outcome\n\
+                 # as unknown. This never stops the change and never calls it failed: the\n\
+                 # change keeps running, and once it ends its real outcome replaces\n\
+                 # unknown. Default 1800 (30 minutes).\n\
+                 # A config reload applies this to the changes started after it.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.operation_unknown_after_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "operation_retention_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long dux keeps the outcome of a finished change so a client can still\n\
+                 # look it up. After this the outcome is forgotten, and asking about it says\n\
+                 # dux knows no such change. Outcomes live in memory only, so a restart\n\
+                 # forgets them all. Default 1800 (30 minutes).\n\
+                 # A config reload applies this to the changes started after it.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.operation_retention_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "tree_list_max_concurrency",
             comment: Some(CommentSource::Static(
                 "# Maximum number of /files/tree directory listings the web editor may run\n\
@@ -1606,6 +1629,19 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # later. Sessions survive a quick restart of dux. At least 1. Default 60.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.session_idle_seconds),
+        },
+        ConfigEntry::Field {
+            key: "cli_token_idle_days",
+            comment: Some(CommentSource::Static(
+                "# How many days the dux command line stays signed in to this server\n\
+                 # with nothing using it. Signing in from the command line gives that\n\
+                 # machine a token instead of a browser session, so daily use never asks\n\
+                 # for the password again; a token nobody uses for this many days stops\n\
+                 # working on its own. A password change ends every token at once; a\n\
+                 # command-line sign-out ends only the token it was sent with.\n\
+                 # At least 1. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.cli_token_idle_days),
         },
         ConfigEntry::Field {
             key: "disable_no_auth_warning",

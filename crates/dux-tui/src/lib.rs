@@ -71,7 +71,16 @@ pub fn run_config(config_args: &[String]) -> Result<()> {
     if cli::asks_for_help(config_args) {
         return cli::run(&["--help".to_string()], &paths);
     }
-    let _lock = lock_for_config_subcommand(config_args, &paths)?;
+    let _lock = match lock_for_config_subcommand(config_args, &paths)? {
+        ConfigLock::Held(lock) => Some(lock),
+        ConfigLock::NotNeeded => None,
+        // The one look at whether there is anything to reset. A reset that
+        // went on would look again without the lock.
+        ConfigLock::NothingToReset => {
+            println!("nothing to reset: {} does not exist", paths.root.display());
+            return Ok(());
+        }
+    };
 
     cli::run(config_args, &paths)
 }
@@ -162,24 +171,33 @@ fn run_app(
     }
 }
 
+/// What the lock decision for a `config` subcommand came to.
+enum ConfigLock {
+    Held(lockfile::SingleInstanceLock),
+    NotNeeded,
+    /// A reset with no config folder to reset: nothing to lock or do.
+    NothingToReset,
+}
+
 /// Takes the single-instance lock for the `config` subcommands that mutate
 /// shared on-disk state, creating the config folder owner-only first so the
 /// lock file never sits in a folder other users can read.
 fn lock_for_config_subcommand(
     config_args: &[String],
     paths: &config::DuxPaths,
-) -> Result<Option<lockfile::SingleInstanceLock>> {
+) -> Result<ConfigLock> {
     let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
     // Acquire the single-instance lock only for subcommands that
     // mutate shared on-disk state. Read-only operations (path, diff,
     // regenerate preview) skip the lock entirely.
     Ok(match sub {
-        // reset mutates state when root exists. When root is absent,
-        // run_reset's fast-path reports "nothing to reset" and exits,
-        // so we avoid creating the directory just to take a lock.
-        "reset" if paths.root.exists() => {
+        // reset mutates state when root exists. When root is absent there
+        // is nothing to reset, and this is where that is decided, so the
+        // directory is not created just to take a lock.
+        "reset" if !paths.root.exists() => ConfigLock::NothingToReset,
+        "reset" => {
             create_private_root(paths)?;
-            Some(acquire_lock_or_exit(&paths.lock_path))
+            ConfigLock::Held(acquire_lock_or_exit(&paths.lock_path))
         }
 
         // regenerate --yes creates directories and writes config.
@@ -188,7 +206,7 @@ fn lock_for_config_subcommand(
         // between directory creation and the config write.
         "regenerate" if config_args.iter().any(|a| a == "--yes") => {
             create_private_root(paths)?;
-            Some(acquire_lock_or_exit(&paths.lock_path))
+            ConfigLock::Held(acquire_lock_or_exit(&paths.lock_path))
         }
 
         // `set` deliberately runs beside a live dux: its write takes the
@@ -196,7 +214,7 @@ fn lock_for_config_subcommand(
         // holds for its whole life), and it then signals that dux to
         // reload. Everything else is read-only or prints help, so there
         // is no shared state to protect.
-        _ => None,
+        _ => ConfigLock::NotNeeded,
     })
 }
 
@@ -238,6 +256,7 @@ mod tests {
         };
 
         let lock = lock_for_config_subcommand(&["reset".to_string()], &paths).unwrap();
+        assert!(matches!(lock, ConfigLock::Held(_)));
         drop(lock);
         let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
@@ -248,11 +267,10 @@ mod tests {
             lock_path: missing.join("dux.lock"),
             ..paths
         };
-        assert!(
-            lock_for_config_subcommand(&["reset".to_string()], &absent)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            lock_for_config_subcommand(&["reset".to_string()], &absent).unwrap(),
+            ConfigLock::NothingToReset
+        ));
         assert!(!missing.exists());
     }
 

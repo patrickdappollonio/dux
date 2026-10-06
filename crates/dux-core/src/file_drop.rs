@@ -1190,7 +1190,7 @@ fn probe_process_cwd(pid: u32) -> CwdProbe {
 /// while `kill(pid, 0)` succeeds. Treating it as alive turns "this job finished"
 /// into a REFUSAL, where a surviving group member or the shell should be asked
 /// instead.
-fn process_can_answer(pid: u32) -> bool {
+pub(crate) fn process_can_answer(pid: u32) -> bool {
     signal_zero_finds(pid) && !process_is_zombie(pid)
 }
 

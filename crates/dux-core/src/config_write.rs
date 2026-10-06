@@ -2144,6 +2144,18 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "operation_unknown_after_seconds",
+        config.server.operation_unknown_after_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "operation_retention_seconds",
+        config.server.operation_retention_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "tree_list_max_concurrency",
         config.server.tree_list_max_concurrency as usize,
     );
