@@ -621,28 +621,19 @@ impl Planned {
     }
 }
 
-/// Send a planned change and, unless `wait` is `None`, wait for its
-/// outcome. A change that finished prints its sentence, what became of each
-/// piece of it, and the ids it created, one per line, last, so a script can
-/// take the id from the end. With no wait it prints the operation's id.
+/// Send a planned change and, unless `wait` is `None`, wait for its outcome. A finished change
+/// prints its sentence, each part, then the ids it created, last; with no wait, the operation's id.
 pub fn perform(
     client: &Client,
     planned: Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
-    let record = start(client, planned)?;
+    let record = client.change(planned.method, &planned.path, planned.body)?;
     let Some(timeout) = wait else {
         return Ok(format!("{}\n", record.id));
     };
     let record = client.wait(record, timeout)?;
     report(&record)
-}
-
-/// The one place a change is sent. A refused change is answered here, an
-/// agent create refused because another create is running among them, so a
-/// wait-and-retry for that refusal belongs here too.
-fn start(client: &Client, planned: Planned) -> Result<OperationRecord, CliError> {
-    client.change(planned.method, &planned.path, planned.body)
 }
 
 fn report(record: &OperationRecord) -> Result<String, CliError> {

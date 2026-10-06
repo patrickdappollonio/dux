@@ -120,8 +120,10 @@ const LINE_LIMIT: usize = 1024 * 1024;
 
 /// The last `lines` lines of a running dux's server log, then every line it
 /// writes after, handed to `on_line` as they arrive, until `on_line` breaks.
-/// The stream ending on its own means dux stopped serving it: it is stopping,
-/// or this sign-in ended.
+///
+/// # Errors
+///
+/// [`Exit::NotRunning`] when the stream ends on its own: dux is stopping, or this sign-in ended.
 pub fn log_follow(
     client: &Client,
     lines: usize,
@@ -144,7 +146,6 @@ pub fn log_follow(
                 }
                 return ControlFlow::Continue(());
             }
-            // Only the bytes that just arrived are looked at for a line end.
             let mut rest = piece;
             while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
                 line.extend_from_slice(&rest[..end]);
@@ -225,9 +226,8 @@ pub fn follow_or_file(
     }
 }
 
-/// Where the server log is on this machine: `[server] log_path`, read from
-/// `config.toml` (the defaults when there is none), with a link at that path
-/// resolved the way the server's own log resolves it.
+/// Where the server log is on this machine: `[server] log_path` from `config.toml`, or the
+/// default when there is no config file.
 pub fn log_file(paths: &DuxPaths) -> Result<PathBuf, CliError> {
     let config = crate::config::load_config(paths)
         .map_err(|error| CliError::new(Exit::Failed, error.to_string()))?;
@@ -248,9 +248,12 @@ pub fn file_tail(
     Ok((read.lines, read.note))
 }
 
-/// The last `lines` lines of the log file, then every line written to it
-/// after, across rotations, handed to `on_line` until it breaks. A link put
-/// where the file is ends it with an error.
+/// The last `lines` lines of the log file, then every line written to it after, across
+/// rotations, handed to `on_line` until it breaks.
+///
+/// # Errors
+///
+/// A link put where the file is ends the follow with an error.
 pub fn file_follow(
     path: &std::path::Path,
     lines: usize,

@@ -117,11 +117,12 @@ impl Client {
         }
     }
 
-    /// Read `record` again by its id until it has an outcome or `timeout`
-    /// passes. A read that drops is retried by the same id, and no read is
-    /// allowed past the time left. Running out of time is [`Exit::Unknown`],
-    /// naming the id to look it up by later; an outcome that did arrive is
-    /// always reported, however late.
+    /// Read `record` again by its id until it has an outcome or `timeout` passes. A read
+    /// that drops is retried by the same id; an outcome that arrived is reported, however late.
+    ///
+    /// # Errors
+    ///
+    /// [`Exit::Unknown`], naming the id, when `timeout` runs out first.
     pub fn wait(
         &self,
         record: OperationRecord,

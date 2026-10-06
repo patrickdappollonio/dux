@@ -298,18 +298,8 @@ pub enum Writer<'a> {
     },
 }
 
-/// What segment escapes in a path: everything but the URL's unreserved marks.
-const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'~');
-
 fn entry_path(collection: &str, name: &str) -> String {
-    format!(
-        "/api/v1/{collection}/{}",
-        percent_encoding::utf8_percent_encode(name, SEGMENT)
-    )
+    format!("/api/v1/{collection}/{}", super::wait::segment(name))
 }
 
 /// Send one change to a running dux and say how it ended.
@@ -398,18 +388,14 @@ pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> 
     result.map_err(|error| macro_named_by_label(name, error))
 }
 
-/// What a macro change that went through a running dux prints: its
-/// operation's id when it did not wait, else this command line's own
-/// sentence (`done`), never the record's, which names the macro as it was
-/// given whatever its name.
+/// A macro change through a running dux prints its operation's id when it did not wait, else
+/// `done`, never the record's sentence, which names the macro as given whatever its name.
 fn own_outcome(said: String, wait: Option<Duration>, done: String) -> String {
     if wait.is_none() { said } else { done }
 }
 
-/// `error` with the macro `name` replaced by its label wherever it appears,
-/// when the name is outside the `[macros]` rule. A running dux and the
-/// shared checks name a macro as it was given; the command line never
-/// prints such a name.
+/// `error` with the macro `name` replaced by its label when the name is outside the `[macros]`
+/// rule: a running dux and the shared checks name a macro as given.
 fn macro_named_by_label(name: &str, mut error: CliError) -> CliError {
     let (label, hidden) = resources::shown_name("", "macros", name.trim());
     if hidden {
@@ -430,9 +416,8 @@ pub fn set_env_question(name: &str) -> String {
     )
 }
 
-/// What `dux env rm` asks before it changes anything. It may be asked of a
-/// remote, whose file this machine cannot see, so a hidden name is named by
-/// no line.
+/// What `dux env rm` asks before it changes anything. A remote's file is not visible here, so
+/// the label is judged on the name alone.
 pub fn remove_env_question(name: &str) -> String {
     format!(
         "Remove {} from the global environment",

@@ -6,12 +6,8 @@ use anyhow::Result;
 use clap::Parser;
 
 fn main() -> Result<()> {
-    // First of all: a person reloading by hand with `kill -USR1` signals
-    // whichever dux holds the single-instance lock, and the signal's default
-    // action would end a dux that had not installed its handler yet. The
-    // handler only sets a flag; each serving mode reloads on it. A failure is
-    // reported where the mode starts (both entry points install it again and
-    // say so).
+    // First of all: until the handler is installed, a hand reload's SIGUSR1 would end this
+    // dux. A failure is reported where each serving mode starts, which installs it again.
     let _ = dux_core::reload_signal::install();
     // `dux config` owns every word after it, `--` and flag-looking words
     // included, so it is recognised before clap sees the line.
@@ -270,9 +266,8 @@ fn run_tui_with_flip() -> Result<()> {
     Ok(())
 }
 
-/// Creates the config folder owner-only before anything is written in it.
-/// `dux server` never runs `DuxPaths::ensure_dirs`, so without this a first run
-/// leaves the folder at the umask default.
+/// Creates the config folder owner-only: `dux server` never runs `DuxPaths::ensure_dirs`,
+/// so a first run would otherwise leave it at the umask default.
 fn create_config_root(paths: &dux_core::config::DuxPaths) -> Result<()> {
     dux_core::file_modes::create_private_dir_all(&paths.root)?;
     Ok(())
@@ -283,10 +278,8 @@ fn init_server_logger(
     paths: &dux_core::config::DuxPaths,
 ) {
     dux_core::logger::init(logging, paths);
-    // The folder was tightened before the log existed, so any warning that
-    // raised (a symlinked folder, a mode dux could not change) was dropped.
-    // Tightening is idempotent, so running it again raises the same warning
-    // into the log that is open now.
+    // The folder was tightened before the log existed, dropping its warnings; tightening is
+    // idempotent, so running it again puts them in the log.
     dux_core::file_modes::restrict_to_owner_best_effort(&paths.root, "directory");
 }
 

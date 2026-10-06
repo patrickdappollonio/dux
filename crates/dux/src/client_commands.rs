@@ -263,10 +263,8 @@ fn read_with<T>(
     }
 }
 
-/// Run a change: through the running dux it is selected on, so it applies at
-/// once, or, on this machine with no dux running, on config.toml itself.
-/// `question` is asked first (see [`output::confirm`]); `stdin_taken` says
-/// standard input carries a value, so it cannot carry the answer too.
+/// Run a change through the selected running dux, or on config.toml when this machine runs
+/// none. `stdin_taken` says standard input carries a value, so it cannot also carry the answer.
 fn change_with(
     selection: &Selection,
     flags: &ChangeFlags,
@@ -275,11 +273,7 @@ fn change_with(
     change: impl FnOnce(Writer<'_>) -> Result<String, CliError>,
 ) -> Result<String, CliError> {
     let paths = discover()?;
-    let client = match selection.target(&paths)? {
-        Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
-        target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
-    };
-    let Some(client) = client else {
+    let Some(client) = client_if_running(&selection.target(&paths)?, &paths)? else {
         ask(
             question,
             &paths.config_path.display().to_string(),
@@ -298,6 +292,17 @@ fn change_with(
         client: &client,
         wait,
     })
+}
+
+/// The selected dux, or `None` when it is this machine's and none is running.
+fn client_if_running(
+    target: &Target,
+    paths: &DuxPaths,
+) -> Result<Option<connect::Client>, CliError> {
+    match target {
+        Target::Local => connect::connect_local_if_running(&paths.lock_path),
+        Target::Remote { .. } => connect::connect(target, &paths.lock_path).map(Some),
+    }
 }
 
 /// Confirm a change on the terminal, or take `--yes` for it.
@@ -641,9 +646,8 @@ pub fn server_connections(
     server_inspect::connections_ls(&client, shape(&list))
 }
 
-/// `dux server logs`: the last lines of the server log and, with `follow`,
-/// every line after, printed as they come. A dux on this machine that is not
-/// running has left the log in its file, which is read as it stands.
+/// `dux server logs`: the last lines of the server log and, with `follow`, every line after.
+/// With no dux running on this machine, its log file is read as it stands.
 pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<String, CliError> {
     use std::io::Write;
     use std::ops::ControlFlow;
@@ -660,25 +664,14 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
     // This machine's dux that writes no log leaves its file to be read; a
     // remote's file is not here, so its sentence is shown.
     let this_machine = matches!(target, Target::Local).then_some(&paths);
-    let client = match target {
-        Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
-        target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
-    };
-    match client {
+    match client_if_running(&target, &paths)? {
         Some(client) if follow => {
             server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?
         }
-        Some(client) => {
-            let (tail, note) = server_inspect::tail_or_file(&client, this_machine, lines)?;
-            for line in tail {
-                if print(&line).is_break() {
-                    break;
-                }
-            }
-            if let Some(note) = note {
-                eprintln!("{note}");
-            }
-        }
+        Some(client) => print_tail(
+            server_inspect::tail_or_file(&client, this_machine, lines)?,
+            &mut print,
+        ),
         None => {
             let path = server_inspect::log_file(&paths)?;
             if !path.exists() {
@@ -690,17 +683,24 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
             if follow {
                 server_inspect::file_follow(&path, lines, &mut print)?;
             } else {
-                let (tail, note) = server_inspect::file_tail(&path, lines)?;
-                for line in tail {
-                    if print(&line).is_break() {
-                        break;
-                    }
-                }
-                if let Some(note) = note {
-                    eprintln!("{note}");
-                }
+                print_tail(server_inspect::file_tail(&path, lines)?, &mut print);
             }
         }
     }
     Ok(String::new())
+}
+
+/// Print a log's last lines, then on stderr the sentence saying they were cut short, if any.
+fn print_tail(
+    (tail, note): (Vec<String>, Option<String>),
+    print: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
+) {
+    for line in tail {
+        if print(&line).is_break() {
+            break;
+        }
+    }
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
 }
