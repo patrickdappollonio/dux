@@ -218,15 +218,19 @@ the provider every new project gets by default. One progress message covers the 
 ends with one outcome: the agent is running, or what stopped it and how far it got. In
 the browser the dialog closes as soon as the clone starts and dux selects the new agent
 when it appears, however long that takes; in the terminal UI the status line carries the
-progress and the outcome.
+progress and the outcome. Either way, a problem dux spots straight away keeps the form open
+with the reason. In the terminal UI, a refusal or a failed clone that arrives after the
+form has closed hands your typed values back the next time you open it, so a typo in the
+address costs you one fix rather than the whole form.
 
 > [!IMPORTANT]
-> **dux never asks for anything while it clones.** It uses your own git setup: credential
-> helpers, your ssh agent and keys, and URL rewrites apply exactly as in your shell. What
-> would need a prompt fails straight away with git's or ssh's own message instead, so a
-> host you have never connected to must be trusted once from a shell first (connect to it
-> or clone anything from it), and an ssh key with a passphrase must already be loaded in
-> your agent.
+> **dux never asks for anything while it clones.** It uses your own git setup: your ssh
+> agent and keys, URL rewrites, and credential helpers that answer without asking (a
+> stored token, a keychain) work exactly as in your shell. Nothing that would ask is ever
+> waited on, a password pop-up included: it fails straight away with git's or ssh's own
+> message instead. So a host you have never connected to must be trusted once from a
+> shell first (connect to it or clone anything from it), and an ssh key with a passphrase
+> must already be loaded in your agent.
 
 A few more things worth knowing:
 
@@ -251,14 +255,16 @@ A few more things worth knowing:
 
 ### When a clone stops partway
 
-dux never deletes a folder on your behalf, so what is left depends on where it stopped.
-The message always says which of these happened and what to do next.
+dux never deletes anything you put there. The one folder it ever removes is a destination
+it created itself for this clone, and only while that folder is still empty. Everything
+else stays, so what is left depends on where it stopped. The message always says which of
+these happened and what to do next.
 
 | What stopped it | What you have afterwards |
 |---|---|
 | A check before git ran (bad name, folder not empty, and so on) | Nothing changed. |
-| git failed (wrong address, no access, the host refused) | Nothing added. git cleans up the folder it was cloning into. |
-| The clone went quiet for too long, or dux quit mid-clone | Nothing added, and the destination may hold part of a clone. Remove it before trying again: dux refuses a folder that is not empty, and says an earlier clone may have been interrupted there. |
+| git failed (wrong address, no access, the host refused) | Nothing added. git clears out what it wrote, and the destination folder goes too if dux created it; an empty folder you made yourself stays. |
+| The clone went quiet for too long, or dux quit mid-clone | Nothing added, and the destination may hold part of a clone. dux leaves it there. Remove it before trying again: dux refuses a folder that is not empty, and says an earlier clone may have been interrupted there. |
 | The remote has no commits yet | The clone stays, no project is added. Use Add project on it, which offers to make a first commit. |
 | The remote's default branch could not be checked out | The clone stays, no project is added. Check a branch out in it, then use Add project. |
 | Adding the project failed | The clone stays, no agent is created, and the message gives the reason. |
