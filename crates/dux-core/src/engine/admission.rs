@@ -25,8 +25,13 @@
 //!   shared. It holds the tab or terminal.
 //! - A macro or environment change: the macro list or the environment.
 //!
-//! The terminal UI's own gestures do not pass through here; the in-flight
-//! guards each of them already has still apply to it.
+//! The terminal UI's gestures keep no record, so they hold nothing, but they
+//! are checked against what the followed changes hold all the same: the
+//! commands it sends through `Engine::apply` in [`Engine::check_command`], and
+//! the gestures that call an engine method directly (stop, start, a tab's
+//! create and close, a terminal's create) through [`Engine::check_admission`]
+//! at the gesture. Its own in-flight and closing guards cover two of its own
+//! gestures racing each other.
 
 use super::{Engine, InFlightKey};
 use crate::ids::TabId;
@@ -51,6 +56,58 @@ impl Engine {
         }
     }
 
+    /// Check `admission` without holding anything: refused when an open
+    /// record other than the one being dispatched holds what it wants.
+    pub fn check_admission(&self, admission: &Admission) -> Result<(), InTheWay> {
+        self.operations
+            .admit(self.operation_in_dispatch.as_deref(), &admission.wants, &[])
+    }
+
+    /// [`Self::check_admission`] for the engine commands a surface sends
+    /// itself: an agent delete, a project removal or deletion, a terminal
+    /// close, and a macro or environment save.
+    pub(crate) fn check_command(&self, command: &super::Command) -> Result<(), InTheWay> {
+        use super::Command;
+        let admission = match command {
+            Command::BeginDeleteSession { session_id, .. } => self.agent_admission(session_id),
+            Command::RemoveProject { project_id, .. }
+            | Command::DeleteProject { project_id, .. } => self.project_admission(project_id),
+            Command::DeleteTerminal { terminal_id } => self.terminal_admission(terminal_id),
+            Command::UpdateMacros { .. } => Self::whole(InFlightKey::MacroList),
+            Command::PersistGlobalEnv { .. } => Self::whole(InFlightKey::GlobalEnv),
+            _ => return Ok(()),
+        };
+        self.check_admission(&admission)
+    }
+
+    /// A change to a whole agent (delete, stop, start).
+    pub fn agent_admission(&self, session_id: &str) -> Admission {
+        Admission {
+            wants: self.agent_wants(session_id),
+            takes: vec![Hold::exclusive(InFlightKey::Agent(session_id.to_string()))],
+        }
+    }
+
+    /// A project removal or deletion.
+    pub fn project_admission(&self, project_id: &str) -> Admission {
+        Admission {
+            wants: self.project_wants(project_id),
+            takes: vec![Hold::exclusive(InFlightKey::Project(
+                project_id.to_string(),
+            ))],
+        }
+    }
+
+    /// A terminal's close.
+    pub fn terminal_admission(&self, terminal_id: &str) -> Admission {
+        Admission {
+            wants: self.terminal_wants(terminal_id),
+            takes: vec![Hold::exclusive(InFlightKey::Terminal(
+                terminal_id.to_string(),
+            ))],
+        }
+    }
+
     /// Admit `admission`, holding its keys on `record` when there is one.
     pub fn admit(&self, record: Option<&str>, admission: &Admission) -> Result<(), InTheWay> {
         self.operations
@@ -63,15 +120,11 @@ impl Engine {
         match command {
             WireCommand::DeleteSession { session_id, .. }
             | WireCommand::DetachAgent { session_id, .. }
-            | WireCommand::ReconnectSession { session_id, .. } => Some(Admission {
-                wants: self.agent_wants(session_id),
-                takes: vec![Hold::exclusive(InFlightKey::Agent(session_id.clone()))],
-            }),
+            | WireCommand::ReconnectSession { session_id, .. } => {
+                Some(self.agent_admission(session_id))
+            }
             WireCommand::RemoveProject { project_id }
-            | WireCommand::DeleteProject { project_id } => Some(Admission {
-                wants: self.project_wants(project_id),
-                takes: vec![Hold::exclusive(InFlightKey::Project(project_id.clone()))],
-            }),
+            | WireCommand::DeleteProject { project_id } => Some(self.project_admission(project_id)),
             WireCommand::CreateAgent { project_id, .. }
             | WireCommand::CreateAgentFromWorktree { project_id, .. }
             | WireCommand::CreateAgentFromPr { project_id, .. } => {
@@ -95,10 +148,9 @@ impl Engine {
             WireCommand::CloseAgentTab { session_id, tab_id } => {
                 Some(self.tab_admission(session_id, TabId::new(tab_id.clone())))
             }
-            WireCommand::DeleteTerminal { terminal_id } => Some(Admission {
-                wants: self.terminal_wants(terminal_id),
-                takes: vec![Hold::exclusive(InFlightKey::Terminal(terminal_id.clone()))],
-            }),
+            WireCommand::DeleteTerminal { terminal_id } => {
+                Some(self.terminal_admission(terminal_id))
+            }
             WireCommand::UpdateMacros { .. }
             | WireCommand::SetMacro { .. }
             | WireCommand::RemoveMacro { .. } => Some(Self::whole(InFlightKey::MacroList)),
@@ -211,5 +263,86 @@ impl Engine {
             .filter(|(_, terminal)| &terminal.owner == owner)
             .map(|(id, _)| Hold::exclusive(InFlightKey::Terminal(id.clone())))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::Command;
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::operations::{Hold, OperationKind};
+
+    use super::*;
+
+    /// A terminal UI gesture keeps no record, so it holds nothing, but it is
+    /// still refused, with the sentence naming the operation, while a change
+    /// another surface follows holds what the gesture would change.
+    #[test]
+    fn a_terminal_ui_command_is_refused_while_a_followed_operation_holds_what_it_changes() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.open_operation("op-held", OperationKind::AgentStop);
+        engine
+            .operations
+            .admit(
+                Some("op-held"),
+                &[],
+                &[
+                    Hold::exclusive(InFlightKey::Agent("s1".to_string())),
+                    Hold::exclusive(InFlightKey::MacroList),
+                    Hold::exclusive(InFlightKey::GlobalEnv),
+                ],
+            )
+            .unwrap();
+
+        let commands = vec![
+            (
+                "an agent delete",
+                Command::BeginDeleteSession {
+                    session_id: "s1".to_string(),
+                    delete_worktree: false,
+                    delete_branch: None,
+                },
+            ),
+            (
+                "a project removal",
+                Command::RemoveProject {
+                    project_id: "p1".to_string(),
+                    project_name: "p1".to_string(),
+                },
+            ),
+            (
+                "a project deletion",
+                Command::DeleteProject {
+                    project_id: "p1".to_string(),
+                    project_name: "p1".to_string(),
+                },
+            ),
+            (
+                "a macro save",
+                Command::UpdateMacros {
+                    macros: Default::default(),
+                },
+            ),
+            (
+                "an environment save",
+                Command::PersistGlobalEnv {
+                    env: Default::default(),
+                },
+            ),
+        ];
+        for (name, command) in commands {
+            let Err(refused) = engine.apply(command) else {
+                panic!("{name} went ahead");
+            };
+            let sentence = refused.to_string();
+            assert!(sentence.contains("op-held"), "{name}: {sentence}");
+            assert!(sentence.contains("stopping an agent"), "{name}: {sentence}");
+        }
+        assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+        assert!(engine.projects.iter().any(|p| p.id == "p1"));
     }
 }

@@ -404,6 +404,11 @@ pub struct App {
     /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
     /// and it is spent by the create's own outcome, success or failure.
     pub(crate) create_agent_started_here: bool,
+    /// The macro list's version (`dux_core::wire::macros_version`) as the
+    /// macro editor last saw it: when it opened, then after each of its own
+    /// writes. A save finding the list moved on since (a browser or the command
+    /// line changed it) is refused rather than written over that change.
+    pub(crate) macro_editor_version: Option<String>,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
     /// answers "has the grid moved since I looked?", which is the one question
@@ -4413,6 +4418,7 @@ impl App {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
             grid_generation: 0,
@@ -5964,6 +5970,8 @@ impl App {
             .iter()
             .map(|(k, v)| (k.clone(), v.text.clone(), v.surface))
             .collect();
+        self.macro_editor_version =
+            Some(dux_core::wire::macros_version(&self.engine.config.macros));
         // Preserve declaration order from config file (IndexMap iteration order).
         self.prompt = PromptState::EditMacros {
             entries,

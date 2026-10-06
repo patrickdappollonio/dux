@@ -434,6 +434,9 @@ impl Engine {
         // reader only asks whether anything happened this iteration. Counted at
         // the top so an early return cannot skip it.
         self.command_applies = self.command_applies.wrapping_add(1);
+        // Refused while a change another surface follows holds what this one
+        // would change. Checked only: a command has no record to hold with.
+        self.check_command(&command)?;
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands, so it re-applies against the fresh
         // config instead of racing it.
