@@ -301,10 +301,14 @@ impl App {
     /// untouched.
     pub(crate) fn start_background_server(&mut self, trigger: BackgroundServerStart) {
         if let Err(refusal) = self.try_start_background_server(trigger) {
-            match refusal.tone {
-                RefusalTone::Error => self.set_error(refusal.message),
-                RefusalTone::Warning => self.set_warning(refusal.message),
-            }
+            self.say_start_refusal(refusal);
+        }
+    }
+
+    fn say_start_refusal(&mut self, refusal: StartRefusal) {
+        match refusal.tone {
+            RefusalTone::Error => self.set_error(refusal.message),
+            RefusalTone::Warning => self.set_warning(refusal.message),
         }
     }
 
@@ -848,10 +852,7 @@ impl App {
                             "The background web server was not started: {}",
                             sentence(&refusal.message)
                         ));
-                        match refusal.tone {
-                            RefusalTone::Error => self.set_error(refusal.message),
-                            RefusalTone::Warning => self.set_warning(refusal.message),
-                        }
+                        self.say_start_refusal(refusal);
                     }
                 }
             }

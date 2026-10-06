@@ -131,12 +131,6 @@ Subcommands:
 // dux config reset
 // ---------------------------------------------------------------------------
 
-fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
-    run_reset_reporting(paths, all)?;
-    println!("reset complete");
-    Ok(())
-}
-
 /// A folder or program in the way of the factory reset, and why.
 #[derive(Debug)]
 struct ResetLeftover {
@@ -224,7 +218,7 @@ impl std::fmt::Display for ResetFailed {
 impl std::error::Error for ResetFailed {}
 
 /// The reset itself. Prints what it removed as it goes.
-fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
+fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
     let (log_path, server_log_path) = resolve_reset_log_paths(paths);
 
     if all {
@@ -268,6 +262,7 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
     // `remove_root_if_empty` therefore skips the root when the lockfile is the
     // sole remaining entry.
     remove_root_if_empty_with_message(&paths.root)?;
+    println!("reset complete");
     Ok(())
 }
 

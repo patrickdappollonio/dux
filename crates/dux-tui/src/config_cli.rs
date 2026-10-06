@@ -338,19 +338,16 @@ pub(crate) fn run_set(
 /// unknown code (6), a refusal or a failed step fails the command on standard error.
 fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
     let sentence = reload_sentence(answer, problems_remain);
-    if matches!(answer, ReloadAnswer::Unknown(_)) {
-        return Err(
-            dux_core::client::CliError::new(dux_core::client::Exit::Unknown, sentence).into(),
-        );
+    match answer {
+        ReloadAnswer::Unknown(_) => {
+            Err(dux_core::client::CliError::new(dux_core::client::Exit::Unknown, sentence).into())
+        }
+        ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_) => bail!("{sentence}"),
+        _ => {
+            writeln!(out, "{sentence}")?;
+            Ok(())
+        }
     }
-    if matches!(
-        answer,
-        ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_)
-    ) {
-        bail!("{sentence}");
-    }
-    writeln!(out, "{sentence}")?;
-    Ok(())
 }
 
 /// A setting's path as printed, through the one formatter, against the
