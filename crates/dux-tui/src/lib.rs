@@ -84,31 +84,7 @@ pub fn run(
         let config_args = &args[1..];
         let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
 
-        // Acquire the single-instance lock only for subcommands that
-        // mutate shared on-disk state. Read-only operations (path, diff,
-        // regenerate preview) skip the lock entirely.
-        let _lock = match sub {
-            // reset mutates state when root exists. When root is absent,
-            // run_reset's fast-path reports "nothing to reset" and exits,
-            // so we avoid creating the directory just to take a lock.
-            "reset" if paths.root.exists() => Some(acquire_lock_or_exit(&paths.lock_path)),
-
-            // regenerate --yes creates directories and writes config.
-            // Create root (so the lockfile can be opened) and lock before
-            // any writes, preventing a concurrent TUI from starting
-            // between directory creation and the config write.
-            "regenerate" if config_args.iter().any(|a| a == "--yes") => {
-                create_private_root(&paths)?;
-                Some(acquire_lock_or_exit(&paths.lock_path))
-            }
-
-            // `set` deliberately runs beside a live dux: its write takes the
-            // config file's own lock (never this one, which the running dux
-            // holds for its whole life), and it then signals that dux to
-            // reload. Everything else is read-only or prints help, so there
-            // is no shared state to protect.
-            _ => None,
-        };
+        let _lock = lock_for_config_subcommand(config_args, &paths)?;
 
         cli::run(config_args, &paths)?;
         return Ok(TuiExit::Done);
@@ -242,6 +218,44 @@ pub fn help_text() -> &'static str {
            Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
 }
 
+/// Takes the single-instance lock for the `config` subcommands that mutate
+/// shared on-disk state, creating the config folder owner-only first so the
+/// lock file never sits in a folder other users can read.
+fn lock_for_config_subcommand(
+    config_args: &[String],
+    paths: &config::DuxPaths,
+) -> Result<Option<lockfile::SingleInstanceLock>> {
+    let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
+    // Acquire the single-instance lock only for subcommands that
+    // mutate shared on-disk state. Read-only operations (path, diff,
+    // regenerate preview) skip the lock entirely.
+    Ok(match sub {
+        // reset mutates state when root exists. When root is absent,
+        // run_reset's fast-path reports "nothing to reset" and exits,
+        // so we avoid creating the directory just to take a lock.
+        "reset" if paths.root.exists() => {
+            create_private_root(paths)?;
+            Some(acquire_lock_or_exit(&paths.lock_path))
+        }
+
+        // regenerate --yes creates directories and writes config.
+        // Create root (so the lockfile can be opened) and lock before
+        // any writes, preventing a concurrent TUI from starting
+        // between directory creation and the config write.
+        "regenerate" if config_args.iter().any(|a| a == "--yes") => {
+            create_private_root(paths)?;
+            Some(acquire_lock_or_exit(&paths.lock_path))
+        }
+
+        // `set` deliberately runs beside a live dux: its write takes the
+        // config file's own lock (never this one, which the running dux
+        // holds for its whole life), and it then signals that dux to
+        // reload. Everything else is read-only or prints help, so there
+        // is no shared state to protect.
+        _ => None,
+    })
+}
+
 /// Creates the config folder owner-only. Every path that is about to open the
 /// lock file calls this first, so the lock never sits in a folder other users
 /// can read.
@@ -263,6 +277,40 @@ fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_reset_tightens_an_existing_loose_folder_and_a_missing_one_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("restored-home");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = config::DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+
+        let lock = lock_for_config_subcommand(&["reset".to_string()], &paths).unwrap();
+        drop(lock);
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        let missing = dir.path().join("never-created");
+        let absent = config::DuxPaths {
+            root: missing.clone(),
+            lock_path: missing.join("dux.lock"),
+            ..paths
+        };
+        assert!(
+            lock_for_config_subcommand(&["reset".to_string()], &absent)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!missing.exists());
+    }
 
     #[test]
     fn the_config_folder_is_created_owner_only_before_the_lock_file_exists() {
