@@ -5683,12 +5683,16 @@ mod tests {
         wait_until_ready(&engine, "straggler");
         let abort = std::sync::atomic::AtomicBool::new(true);
 
-        let report = engine.shutdown_ptys_interruptible(Duration::from_secs(30), Some(&abort));
+        let mut waits = 0;
+        let report =
+            engine.shutdown_ptys_waiting(Duration::from_secs(30), Some(&abort), || waits += 1);
 
         assert_eq!(report.agents_total, 1);
         assert_eq!(report.agents_exited, 0);
         assert!(report.timed_out);
-        assert!(report.elapsed < Duration::from_millis(50));
+        // Counted rather than timed: the SIGKILL's settle wait is in the
+        // elapsed time and takes longer than a poll on macOS.
+        assert_eq!(waits, 0, "an abort set beforehand waits no pass");
     }
 
     #[test]

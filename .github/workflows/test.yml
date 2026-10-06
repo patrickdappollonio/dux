@@ -96,9 +96,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Same reason as the Linux test job: the plain-folder adoption test
+      # commits under whatever identity git can see.
       - name: Give git the identity a developer's machine has
         run: |
           git config --global user.name "dux ci"
           git config --global user.email "ci@getdux.app"
       - name: Run tests
-        run: cargo test --no-fail-fast
+        run: cargo test

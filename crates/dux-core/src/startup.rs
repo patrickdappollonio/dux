@@ -1501,6 +1501,10 @@ mod tests {
     /// after the run has returned and its log is written, nothing ever reads
     /// it, no file names it, and it grows on disk in dux's config folder for
     /// as long as the job runs.
+    // Linux only: the job's output is measured through /proc, which macOS does
+    // not have, so there the size would read 0 and the test would pass without
+    // looking. The capture is the same code on both; the Linux run covers it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");

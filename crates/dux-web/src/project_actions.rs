@@ -773,7 +773,13 @@ mod tests {
         // route answers, and its record names the project it added.
         let other = tempfile::tempdir().unwrap();
         init_repo_with_commit(other.path());
-        let other_path = other.path().to_string_lossy().to_string();
+        // The real path, as above.
+        let other_path = other
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let resp = app
             .clone()
             .oneshot(
