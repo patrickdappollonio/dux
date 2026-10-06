@@ -24,4 +24,5 @@ mod auth_lifecycle;
 mod auth_login;
 mod auth_network;
 mod auth_proxies;
+mod cli;
 mod smoke;

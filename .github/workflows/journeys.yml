@@ -20,7 +20,8 @@ permissions:
 
 env:
   # Which journeys run. `auth` is every journey: the smoke journeys, which prove
-  # the harness, and the journeys for the web password login.
+  # the harness, the journeys for the web password login, and the command-line
+  # journeys.
   JOURNEY_FEATURES: auth
   # The image the harness uses instead of building its own: the cached build
   # step below produces it.
