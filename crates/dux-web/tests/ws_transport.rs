@@ -48,6 +48,14 @@ fn sample_session(
 }
 
 async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
+    boot_with_extra_sessions(&[]).await
+}
+
+/// [`boot`], with one more session per id in `extra`, each on a branch named
+/// after it and in a plain directory of its own under the root.
+async fn boot_with_extra_sessions(
+    extra: &[&str],
+) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let paths = DuxPaths {
@@ -82,6 +90,18 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 root.to_string_lossy().as_ref(),
             ))
             .unwrap();
+        for id in extra {
+            let worktree = root.join(id);
+            std::fs::create_dir_all(&worktree).unwrap();
+            store
+                .create_session(&sample_session(
+                    id,
+                    "p1",
+                    id,
+                    worktree.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
     }
     let mut engine = bootstrap_engine(&paths).unwrap();
     dux_core::test_provider::defuse_config(&mut engine.config);
@@ -937,21 +957,24 @@ async fn a_final_is_replayable_continuously_from_the_moment_it_is_broadcast() {
 /// sleep in the suite would cost more than the coverage is worth.)
 #[tokio::test]
 async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() {
-    let (addr, tmp) = boot().await;
+    let (addr, tmp) = boot_with_extra_sessions(&["s2"]).await;
     let (mut ws_a, _id_a) = connect_events(addr).await;
 
-    // Deleting s1 with its worktree and branch runs an async removal whose git
-    // call fails (the seeded worktree path is a plain directory, not a linked
-    // worktree). Followed as an operation, it answers with an id at once.
+    // Deleting s1 with its worktree runs an async removal whose git call fails
+    // (the seeded worktree path is a plain directory, not a linked worktree).
     let client = reqwest::Client::new();
     let resp = client
         .delete(format!(
-            "http://{addr}/api/v1/sessions/s1?delete_worktree=true&delete_branch=true&operation=1"
+            "http://{addr}/api/v1/sessions/s1?delete_worktree=true"
         ))
         .send()
         .await
         .expect("DELETE session");
-    let op = followed(resp).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "the delete is accepted; the failure arrives as a status"
+    );
 
     let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
     let seen = seen.expect("the attached connection must receive the broadcast error");
@@ -963,22 +986,36 @@ async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() 
         "a half-done delete must be marked sticky on the wire, got {seen}"
     );
 
-    // The record ends on the same final, and says what became of each part:
-    // the agent is gone, its worktree could not be removed, and its branch was
-    // never reached.
+    // The same delete of s2, with its branch, followed as an operation: it
+    // answers with an id at once, and the record ends on the same kind of
+    // final and says what became of each part: the agent is gone, its
+    // worktree could not be removed, and its branch was never reached.
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s2?delete_worktree=true&delete_branch=true&operation=1"
+        ))
+        .send()
+        .await
+        .expect("DELETE session");
+    let op = followed(resp).await;
+    let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
+    let seen = seen.expect("the second delete's error reaches the connection too");
     let record = operation_outcome(addr, &op).await;
     let frame: serde_json::Value = serde_json::from_str(&seen).unwrap();
     assert_eq!(record["state"], "partial");
     assert_eq!(record["message"], frame["message"]);
-    assert_eq!(record["removed"], serde_json::json!(["s1"]));
+    assert_eq!(record["removed"], serde_json::json!(["s2"]));
     let parts = record["parts"].as_array().expect("parts");
     assert_eq!(parts.len(), 2, "{record}");
     assert_eq!(parts[0]["part"], "worktree");
-    assert_eq!(parts[0]["subject"], tmp.path().to_string_lossy().as_ref());
+    assert_eq!(
+        parts[0]["subject"],
+        tmp.path().join("s2").to_string_lossy().as_ref()
+    );
     assert_eq!(parts[0]["outcome"], "failed");
     assert_eq!(
         parts[1],
-        serde_json::json!({"part": "branch", "subject": "feat", "outcome": "kept"})
+        serde_json::json!({"part": "branch", "subject": "s2", "outcome": "kept"})
     );
 }
 

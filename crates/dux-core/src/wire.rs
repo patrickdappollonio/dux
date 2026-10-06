@@ -1025,6 +1025,11 @@ pub struct WireCommandOutcome {
     /// command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled: Option<WireStatus>,
+    /// The operation record as it stood when the command answered, set
+    /// beside `operation_id`. A snapshot rather than a later read, so the
+    /// reply holds it even when the record is kept for no time at all.
+    #[serde(skip)]
+    pub operation: Option<Box<crate::operations::OperationView>>,
 }
 
 impl WireCommandOutcome {
@@ -1075,7 +1080,7 @@ pub struct WebFollowupStatuses {
     pub clear_keys: Vec<String>,
 }
 
-fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
+pub(crate) fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     match reaction {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
@@ -1094,7 +1099,7 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
 /// (deleting a project that has no worktree to wait for), and a command
 /// answers with one status, so without this the final was dropped and the
 /// spinner stayed up with nothing left to take it down.
-fn settled_final_from_reaction(
+pub(crate) fn settled_final_from_reaction(
     reaction: &EventReaction,
     answered: Option<&WireStatus>,
 ) -> Option<WireStatus> {
@@ -1106,6 +1111,57 @@ fn settled_final_from_reaction(
         .find(|status| {
             status.key == busy.key && StatusTone::from_wire(&status.tone) != StatusTone::Busy
         })
+}
+
+/// Whom a launch reaction reports to: the key its records wait on, the tab it
+/// launched when the report names one, and whether it came up.
+struct LaunchReport {
+    key: String,
+    tab_id: Option<String>,
+    launched: bool,
+}
+
+/// The [`LaunchReport`] of a launch reaction, or `None` for a reaction that is
+/// no launch report and for a create's launch, whose record follows the
+/// create's own key. A failure reported by agent, not by tab, reports under
+/// the agent's [`crate::operations::launch_failure_key`], where
+/// `Engine::process_agent_launch_failed` moved the records of the tab that
+/// failed: asking which tab is the first one now could name a tab a promotion
+/// put there in the meantime.
+fn launch_report(reaction: &EventReaction) -> Option<LaunchReport> {
+    let tab = |tab_id: &str, launched| LaunchReport {
+        key: crate::operations::launch_binding_key(tab_id),
+        tab_id: Some(tab_id.to_string()),
+        launched,
+    };
+    match reaction {
+        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
+            AgentLaunchReadyView::Reconnect { .. }
+            | AgentLaunchReadyView::ResumeFallback { .. }
+            | AgentLaunchReadyView::StartupAutoReopen => Some(tab(&outcome.tab_id, true)),
+            AgentLaunchReadyView::SessionMissing => Some(tab(&outcome.tab_id, false)),
+            AgentLaunchReadyView::CreateCommitted { .. }
+            | AgentLaunchReadyView::CreatePersistFailed { .. } => None,
+        },
+        EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
+            AgentLaunchFailedOutcome::Tab { tab_id, .. } => Some(tab(tab_id, false)),
+            AgentLaunchFailedOutcome::Reconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::ForceReconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::StartupAutoReopen { session_id, .. } => {
+                Some(LaunchReport {
+                    key: crate::operations::launch_failure_key(session_id),
+                    tab_id: None,
+                    launched: false,
+                })
+            }
+            // A ghost tab's failure finishes its records where it is decided,
+            // since it says nothing on the screen.
+            AgentLaunchFailedOutcome::ResumeFallback
+            | AgentLaunchFailedOutcome::Create { .. }
+            | AgentLaunchFailedOutcome::Silent => None,
+        },
+        _ => None,
+    }
 }
 
 /// Named-field args for `finish_web_project_add`, so the two adjacent branch
@@ -1125,7 +1181,7 @@ struct WebProjectAdd<'a> {
 /// The authoritative "added" status message from a `PersistProject::Add`
 /// reaction (the engine's real outcome: an honest dedup message when a race
 /// hit that path, or the normal success text), or `None` for any other reaction.
-fn added_status_message(reaction: &EventReaction) -> Option<StatusText> {
+pub(crate) fn added_status_message(reaction: &EventReaction) -> Option<StatusText> {
     if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
         && let ProjectPersistenceView::Added { status_message, .. } = &outcome.view
     {
@@ -3758,6 +3814,9 @@ impl Engine {
             .map(|op| op.scope().clone())
             .unwrap_or(crate::statusline::StatusScope::All);
         self.current_origin = origin;
+        // What was there before, so an add that found its project already
+        // registered (a race into the dedup) is not reported as creating it.
+        let existing: Vec<String> = self.projects.iter().map(|p| p.id.clone()).collect();
         // The engine's Added outcome carries the AUTHORITATIVE message, which is
         // the dedup chokepoint's honest "already in the workspace" text when a
         // race hit that path, not this caller's optimistic narrative. Surface
@@ -3780,7 +3839,9 @@ impl Engine {
                 } = &outcome.view
                 {
                     success_message = engine_message.clone();
-                    if let Some(key) = status_op_id {
+                    if let Some(key) = status_op_id
+                        && !existing.contains(project_id)
+                    {
                         self.operations.note(
                             key,
                             crate::operations::OperationNotes {
@@ -4143,48 +4204,17 @@ impl Engine {
     /// the request on its own.
     pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         let followup = self.web_launch_followup_statuses(reaction);
-        if let Some((tab_id, launched)) = self.launch_report(reaction) {
+        if let Some(report) = launch_report(reaction) {
             let first = followup.statuses.first();
             self.finish_launch_operations(
-                &tab_id,
-                launched,
+                &report.key,
+                report.tab_id.as_deref(),
+                report.launched,
                 first.map(|s| s.message.as_str()).unwrap_or(""),
                 first.and_then(|s| s.segments.as_deref()),
             );
         }
         followup
-    }
-
-    /// Which tab a launch reaction reports on, and whether it came up. `None`
-    /// for a reaction that is no launch report, and for a create's launch,
-    /// whose record follows the create's own key.
-    fn launch_report(&self, reaction: &EventReaction) -> Option<(String, bool)> {
-        let slot_of = |session_id: &str| {
-            self.session_by_id(session_id)
-                .map(|s| s.slot_tab_id().to_string())
-        };
-        match reaction {
-            EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
-                AgentLaunchReadyView::Reconnect { .. }
-                | AgentLaunchReadyView::ResumeFallback { .. }
-                | AgentLaunchReadyView::StartupAutoReopen => Some((outcome.tab_id.clone(), true)),
-                AgentLaunchReadyView::SessionMissing => Some((outcome.tab_id.clone(), false)),
-                AgentLaunchReadyView::CreateCommitted { .. }
-                | AgentLaunchReadyView::CreatePersistFailed { .. } => None,
-            },
-            EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
-                AgentLaunchFailedOutcome::Tab { tab_id, .. } => Some((tab_id.clone(), false)),
-                AgentLaunchFailedOutcome::Reconnect { session_id, .. }
-                | AgentLaunchFailedOutcome::ForceReconnect { session_id, .. }
-                | AgentLaunchFailedOutcome::StartupAutoReopen { session_id, .. } => {
-                    slot_of(session_id).map(|slot| (slot, false))
-                }
-                AgentLaunchFailedOutcome::ResumeFallback
-                | AgentLaunchFailedOutcome::Create { .. }
-                | AgentLaunchFailedOutcome::Silent => None,
-            },
-            _ => None,
-        }
     }
 
     fn web_launch_followup_statuses(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
@@ -9701,6 +9731,15 @@ mod tests {
         // registered, the status must carry the engine's honest "already in the
         // workspace" text, not the losing caller's fabricated success narrative.
         let (mut engine, _tmp) = test_engine();
+        engine.operations.open(
+            "op-add",
+            crate::operations::OperationKind::ProjectAdd,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            std::time::Instant::now(),
+        );
         engine
             .apply(Command::PersistProject {
                 action: Box::new(crate::worker::ProjectPersistenceAction::Add {
@@ -9721,10 +9760,19 @@ mod tests {
                     .to_string()
                     .into(),
             add_failed_prefix: "Created the initial commit but couldn't add the project",
-            status_op_id: &None,
+            status_op_id: &Some("op-add".to_string()),
         });
 
         assert_eq!(engine.projects.len(), 1, "no duplicate project");
+        assert_eq!(
+            engine
+                .operations
+                .view("op-add", std::time::Instant::now())
+                .unwrap()
+                .created,
+            Vec::<String>::new(),
+            "an add that found the project already there created nothing"
+        );
         let msg = &statuses.last().expect("a status").message;
         assert!(
             msg.contains("already in the workspace"),
@@ -12453,6 +12501,28 @@ mod tests {
     #[test]
     fn drive_pr_lookup_followup_dispatches_create_with_carried_name() {
         let repo = init_repo_with_commit();
+        // An origin carrying the pull request's head, so the create's fetch
+        // resolves without a network and the create can run to its end.
+        let origin = init_repo_with_commit();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = crate::git::test_support::git_command()
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(origin.path(), &["update-ref", "refs/pull/42/head", "HEAD"]);
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", &repo.path().to_string_lossy());
         project.path_missing = false;
@@ -12522,10 +12592,47 @@ mod tests {
             record(&engine).state,
             crate::operations::OperationState::Running
         );
-        engine
-            .operations
-            .finish_by_key(&create, tone, "Created.", None, now);
-        assert_eq!(record(&engine).message, "Created.");
+        // Run the create to its end, raising its finals the way the web's
+        // status emitter does, and the record resolves to the agent it made.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while record(&engine).state == crate::operations::OperationState::Running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the create never finished"
+            );
+            let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+            else {
+                continue;
+            };
+            let reaction = engine.process_worker_event(event);
+            for status in wire_statuses_from_reaction(&reaction) {
+                let tone = crate::statusline::StatusTone::from_wire(&status.tone);
+                if let Some(key) = &status.key
+                    && tone != crate::statusline::StatusTone::Busy
+                {
+                    engine.operations.finish_by_key(
+                        key,
+                        tone,
+                        &status.message,
+                        None,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
+        }
+        let record = record(&engine);
+        assert_eq!(
+            record.state,
+            crate::operations::OperationState::Succeeded,
+            "{}",
+            record.message
+        );
+        let created = engine
+            .created_session_for_op(&create)
+            .expect("the create made an agent");
+        assert_eq!(record.created, vec![created]);
     }
 
     /// When the resolved PR carries no custom name (the TUI path), the follow-up

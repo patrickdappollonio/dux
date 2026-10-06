@@ -4313,6 +4313,7 @@ impl App {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            deferred_operations: Vec::new(),
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
         };

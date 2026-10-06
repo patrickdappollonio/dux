@@ -412,6 +412,24 @@ impl Engine {
             .filter(|session| session.project_id() == Some(project_id))
             .map(|session| session.id.clone())
             .collect();
+        // The deletion's record names what it removes, here where it happens:
+        // after a wait for a create, that is long after the request answered.
+        if let Some(op) = self
+            .removal_coordination
+            .project_deletions
+            .get(project_id)
+            .and_then(|deletion| deletion.op.as_ref())
+        {
+            let mut removed = vec![project_id.to_string()];
+            removed.extend(session_ids.iter().cloned());
+            self.operations.note(
+                op.id(),
+                crate::operations::OperationNotes {
+                    removed,
+                    ..Default::default()
+                },
+            );
+        }
         let mut pending = HashSet::new();
         let mut paths = HashMap::new();
         for session_id in &session_ids {
@@ -1221,6 +1239,17 @@ mod tests {
             "{}",
             busy[0].message
         );
+        // A client follows the deletion under its key.
+        let key = busy[0].key.clone().expect("a keyed busy");
+        engine.operations.open(
+            &key,
+            crate::operations::OperationKind::ProjectRemove,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            std::time::Instant::now(),
+        );
         assert_eq!(
             engine.projects.len(),
             1,
@@ -1236,6 +1265,13 @@ mod tests {
             matches!(event, WorkerEvent::ProjectDeletionContinue { .. })
         });
         assert!(engine.projects.is_empty() && engine.sessions.is_empty());
+        let mut removed = engine
+            .operations
+            .view(&key, std::time::Instant::now())
+            .unwrap()
+            .removed;
+        removed.sort();
+        assert_eq!(removed, vec!["p1", "s-new", "s-old"]);
         pump_until(&mut engine, is_completion);
         pump_until(&mut engine, is_completion);
         assert!(!worktrees[0].exists() && !worktrees[1].exists());

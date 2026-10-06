@@ -161,7 +161,7 @@ async fn add_project(
             )
             .await
         {
-            Ok((_, op)) => operation_accepted(&state.engine, &op),
+            Ok((_, op)) => operation_accepted(&op),
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         };
     }
@@ -257,7 +257,7 @@ async fn remove_project(
                 OperationKind::ProjectRemove,
             )
             .await;
-        return delete_operation_response(&state.engine, result);
+        return delete_operation_response(result);
     }
     delete_wire_response(
         state
@@ -1192,6 +1192,48 @@ mod tests {
                 .starts_with("Deleted project "),
             "{record}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_record_kept_for_no_time_still_answers_its_change_whole() {
+        // With `operation_retention_seconds = 0` a finished record is forgotten
+        // the moment anything looks, so the reply has to carry the record as
+        // the change left it rather than read it back.
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+        engine.config.server.operation_retention_seconds = 0;
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects?operation=1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"path":{}}}"#,
+                        serde_json::to_string(&repo.path().to_string_lossy()).unwrap()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let record = json_body(resp).await;
+        assert_eq!(record["kind"], "project.add");
+        assert_eq!(record["state"], "succeeded");
+        assert_eq!(record["created"].as_array().map(Vec::len), Some(1));
     }
 
     #[tokio::test]

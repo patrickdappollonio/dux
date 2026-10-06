@@ -49,7 +49,7 @@ async fn get_operation(
     if !id_within_bound(&id) {
         return unknown_operation();
     }
-    let deadline = Instant::now() + Duration::from_secs(query.wait_seconds).min(MAX_WAIT);
+    let deadline = wait_deadline(Instant::now(), query.wait_seconds);
     loop {
         let Some(view) = state.engine.operations().view(&id, Instant::now()) else {
             return unknown_operation();
@@ -59,6 +59,12 @@ async fn get_operation(
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// When a read asked to wait `wait_seconds` from `now` answers at the latest:
+/// never later than [`MAX_WAIT`] away, whatever was asked.
+fn wait_deadline(now: Instant, wait_seconds: u64) -> Instant {
+    now + Duration::from_secs(wait_seconds).min(MAX_WAIT)
 }
 
 fn unknown_operation() -> Response {
@@ -94,6 +100,13 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn a_wait_asked_past_the_cap_is_cut_to_twenty_five_seconds() {
+        let now = Instant::now();
+        assert_eq!(wait_deadline(now, 1000), now + Duration::from_secs(25));
+        assert_eq!(wait_deadline(now, 3), now + Duration::from_secs(3));
     }
 
     #[tokio::test]

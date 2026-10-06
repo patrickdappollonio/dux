@@ -325,9 +325,14 @@ async fn create_session(
     // create op (or, for a from-PR create, the lookup that hands off to it).
     if operation.asked() {
         return match dispatch_create(&state, body, &headers, true).await {
-            Ok(outcome) => {
-                operation_accepted(&state.engine, outcome.operation_id.as_deref().unwrap_or(""))
-            }
+            Ok(outcome) => match &outcome.operation {
+                Some(record) => operation_accepted(record),
+                None => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    crate::engine_actor::MISSING_OPERATION_RECORD,
+                )
+                    .into_response(),
+            },
             Err(refusal) => refusal.into_response(),
         };
     }
@@ -557,7 +562,7 @@ async fn delete_session(
                 OperationKind::AgentDelete,
             )
             .await;
-        return delete_operation_response(&state.engine, result);
+        return delete_operation_response(result);
     }
     delete_wire_response(
         state
@@ -706,7 +711,7 @@ async fn reconnect_session(
             .apply_wire_operation(command, scope, OperationKind::AgentStart)
             .await
         {
-            Ok((_, op)) => operation_accepted(&state.engine, &op),
+            Ok((_, op)) => operation_accepted(&op),
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         };
     }
@@ -801,7 +806,7 @@ async fn kill_session(
             .map(|_| None)
     };
     match result {
-        Ok(Some(op)) => operation_accepted(&state.engine, &op),
+        Ok(Some(op)) => operation_accepted(&op),
         Ok(None) => StatusCode::OK.into_response(),
         // The engine returns "unknown session: …" when the row is gone (e.g. a
         // concurrent delete); surface that as 404, not a generic 400.

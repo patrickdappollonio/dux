@@ -16,7 +16,7 @@ use dux_core::engine::{
 };
 use dux_core::ids::{TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
-use dux_core::operations::OperationKind;
+use dux_core::operations::{OperationKind, OperationView};
 use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, QuietSurfaces, StatusScope, StatusTone,
@@ -60,10 +60,12 @@ pub struct ProjectWorktreeInputs {
 /// A client's request to follow a tab or terminal change as an operation: the
 /// record's id, minted before the request is sent so the reply can stay the
 /// shape it has always been, and its kind. The engine thread opens the record
-/// before it makes the change, so nothing the change raises can land first.
+/// before it makes the change, so nothing the change raises can land first,
+/// and leaves the record as the change left it in `record` before it replies.
 pub struct OperationTicket {
     pub id: String,
     pub kind: OperationKind,
+    pub record: Arc<std::sync::OnceLock<OperationView>>,
 }
 
 impl OperationTicket {
@@ -71,9 +73,23 @@ impl OperationTicket {
         Self {
             id: dux_core::operations::mint_operation_id(),
             kind,
+            record: Arc::default(),
+        }
+    }
+
+    /// Leave the record as it stands for the route that sent this ticket.
+    fn hand_back(&self, engine: &Engine) {
+        if let Some(record) = engine.operations.peek(&self.id, Instant::now()) {
+            let _ = self.record.set(record);
         }
     }
 }
+
+/// What a route says when the engine made a followed change and handed back no
+/// record. The engine opens the record before the change and sets it before it
+/// replies, so this means something broke between the two.
+pub const MISSING_OPERATION_RECORD: &str =
+    "the change was made, but its operation record did not come back with the reply";
 
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
@@ -1107,17 +1123,19 @@ impl EngineHandle {
         command: WireCommand,
         origin: StatusScope,
         kind: OperationKind,
-    ) -> Result<(WireCommandOutcome, String), String> {
+    ) -> Result<(WireCommandOutcome, OperationView), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::ApplyWire(command, tx, origin, Some(kind)))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         let outcome = rx.await.map_err(|_| "engine reply dropped".to_string())??;
-        // Always set on this path; `Engine::apply_wire_operation` opens the
-        // record before it dispatches.
-        let id = outcome.operation_id.clone().unwrap_or_default();
-        Ok((outcome, id))
+        let record = outcome
+            .operation
+            .clone()
+            .map(|record| *record)
+            .ok_or_else(|| MISSING_OPERATION_RECORD.to_string())?;
+        Ok((outcome, record))
     }
 
     /// The engine's operation registry.
@@ -4213,6 +4231,7 @@ fn handle_request(
                             &ticket.id,
                             &dux_core::operations::launch_binding_key(tab_id),
                         );
+                        ticket.hand_back(engine);
                     }
                     Err(_) => engine.operations.discard(&ticket.id),
                 }
@@ -4234,13 +4253,16 @@ fn handle_request(
             if let Some(ticket) = &ticket {
                 match &res {
                     // Nothing was started, so this is the end of it.
-                    Ok(()) if running => engine.operations.finish(
-                        &ticket.id,
-                        StatusTone::Info,
-                        "",
-                        None,
-                        Instant::now(),
-                    ),
+                    Ok(()) if running => {
+                        engine.operations.finish(
+                            &ticket.id,
+                            StatusTone::Info,
+                            "",
+                            None,
+                            Instant::now(),
+                        );
+                        ticket.hand_back(engine);
+                    }
                     // A launch it started, or one already in flight for this
                     // tab: either way the tab's launch report is the outcome.
                     // The slot tab is named by its stored id, which is what
@@ -4254,6 +4276,7 @@ fn handle_request(
                             &ticket.id,
                             &dux_core::operations::launch_binding_key(&launched),
                         );
+                        ticket.hand_back(engine);
                     }
                     Err(_) => engine.operations.discard(&ticket.id),
                 }
@@ -4705,6 +4728,7 @@ fn create_terminal_operation(
                 engine
                     .operations
                     .finish(&ticket.id, StatusTone::Info, "", None, Instant::now());
+                ticket.hand_back(engine);
             }
             Err(_) => engine.operations.discard(&ticket.id),
         }

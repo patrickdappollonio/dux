@@ -33,7 +33,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, unknown_session,
+    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
+    unknown_session,
 };
 use crate::server::AppState;
 
@@ -91,7 +92,7 @@ async fn create_terminal(
     }
     let (ticket, followed) = terminal_ticket(&operation);
     match state.engine.create_terminal(id.clone(), ticket).await {
-        Ok(_) if let Some(op) = &followed => operation_accepted(&state.engine, op),
+        Ok(_) if let Some(record) = &followed => ticket_accepted(record),
         Ok((terminal_id, label)) => {
             let location = format!("/api/v1/sessions/{id}/terminals/{terminal_id}");
             (
@@ -125,7 +126,7 @@ async fn create_project_terminal(
         .create_project_terminal(id.clone(), ticket)
         .await
     {
-        Ok(_) if let Some(op) = &followed => operation_accepted(&state.engine, op),
+        Ok(_) if let Some(record) = &followed => ticket_accepted(record),
         Ok((terminal_id, label)) => {
             let location = format!("/api/v1/projects/{id}/terminals/{terminal_id}");
             (
@@ -150,7 +151,7 @@ async fn create_standalone_terminal(
 ) -> Response {
     let (ticket, followed) = terminal_ticket(&operation);
     match state.engine.create_standalone_terminal(ticket).await {
-        Ok(_) if let Some(op) = &followed => operation_accepted(&state.engine, op),
+        Ok(_) if let Some(record) = &followed => ticket_accepted(record),
         Ok((terminal_id, label)) => {
             let location = format!("/api/v1/terminals/{terminal_id}");
             (
@@ -280,7 +281,7 @@ async fn dispatch_delete(
             .apply_wire_operation(command, scope, OperationKind::TerminalClose)
             .await
         {
-            Ok((_, op)) => operation_accepted(&state.engine, &op),
+            Ok((_, op)) => operation_accepted(&op),
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         };
     }
@@ -291,12 +292,19 @@ async fn dispatch_delete(
 }
 
 /// A terminal create followed as an operation carries a ticket, and the route
-/// keeps its id to answer with.
-fn terminal_ticket(operation: &OperationQuery) -> (Option<OperationTicket>, Option<String>) {
+/// keeps the slot the engine leaves its record in, to answer with.
+fn terminal_ticket(
+    operation: &OperationQuery,
+) -> (
+    Option<OperationTicket>,
+    Option<std::sync::Arc<std::sync::OnceLock<dux_core::operations::OperationView>>>,
+) {
     let ticket = operation
         .asked()
         .then(|| OperationTicket::new(OperationKind::TerminalCreate));
-    let followed = ticket.as_ref().map(|ticket| ticket.id.clone());
+    let followed = ticket
+        .as_ref()
+        .map(|ticket| std::sync::Arc::clone(&ticket.record));
     (ticket, followed)
 }
 

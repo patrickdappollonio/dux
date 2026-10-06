@@ -304,29 +304,40 @@ impl OperationQuery {
 }
 
 /// The reply to a change followed as an operation: `202 Accepted`, a
-/// `Location` naming the record, and the record as it stands, which is already
-/// final when the change ended inside the call. A record kept for no time at
-/// all (`operation_retention_seconds = 0`) is gone by the time this reads it,
-/// and is answered with its id alone.
-pub(crate) fn operation_accepted(engine: &EngineHandle, id: &str) -> Response {
-    let location = format!("/api/v1/operations/{id}");
-    let body = match engine.operations().view(id, Instant::now()) {
-        Some(view) => axum::Json(view).into_response(),
-        None => axum::Json(serde_json::json!({ "id": id })).into_response(),
-    };
+/// `Location` naming the record, and the record as the engine handed it back
+/// when the change answered, which is already final when the change ended
+/// inside the call. A snapshot rather than a read here, so neither a slow
+/// reply nor a record kept for no time at all can lose it.
+pub(crate) fn operation_accepted(record: &dux_core::operations::OperationView) -> Response {
+    let location = format!("/api/v1/operations/{}", record.id);
     (
         StatusCode::ACCEPTED,
         [(axum::http::header::LOCATION, location)],
-        body,
+        axum::Json(record),
     )
         .into_response()
+}
+
+/// [`operation_accepted`] for a change sent with an
+/// [`crate::engine_actor::OperationTicket`], from the record the engine left
+/// in its slot.
+pub(crate) fn ticket_accepted(
+    record: &std::sync::OnceLock<dux_core::operations::OperationView>,
+) -> Response {
+    match record.get() {
+        Some(record) => operation_accepted(record),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::engine_actor::MISSING_OPERATION_RECORD,
+        )
+            .into_response(),
+    }
 }
 
 /// [`delete_wire_response`] for a delete followed as an operation: the same
 /// refusals, and the record in place of the bare `204`.
 pub(crate) fn delete_operation_response(
-    engine: &EngineHandle,
-    result: Result<(WireCommandOutcome, String), String>,
+    result: Result<(WireCommandOutcome, dux_core::operations::OperationView), String>,
 ) -> Response {
     match result {
         Ok((outcome, _)) if outcome_is_error(&outcome) => (
@@ -337,7 +348,7 @@ pub(crate) fn delete_operation_response(
                 .unwrap_or_default(),
         )
             .into_response(),
-        Ok((_, id)) => operation_accepted(engine, &id),
+        Ok((_, record)) => operation_accepted(&record),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }

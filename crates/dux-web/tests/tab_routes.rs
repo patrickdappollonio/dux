@@ -615,19 +615,18 @@ async fn delete_extra_tab_with_live_sibling_does_not_detach() {
     let client = reqwest::Client::new();
     let tab = create_extra_tab(&client, addr, "s1").await;
     // Launch the session-slot tab too, so a live sibling remains after the
-    // extra tab closes. Followed as an operation, the start ends when the
-    // launch comes up.
+    // extra tab closes.
     let launch_resp = client
-        .post(format!(
-            "http://{addr}/api/v1/sessions/s1/reconnect?operation=1"
-        ))
+        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
         .json(&serde_json::json!({ "force": false }))
         .send()
         .await
         .unwrap();
-    let record = followed_outcome(&client, addr, launch_resp).await;
-    assert_eq!(record["kind"], "agent.start");
-    assert_eq!(record["state"], "succeeded");
+    assert!(
+        launch_resp.status().is_success(),
+        "reconnect should launch the session-slot tab: {}",
+        launch_resp.status()
+    );
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
 
     let resp = client
@@ -641,6 +640,28 @@ async fn delete_extra_tab_with_live_sibling_does_not_detach() {
         body["detached"], false,
         "the session-slot tab is still live, so the agent must not detach"
     );
+
+    // Followed as operations, a stop ends when the agent has exited, and a
+    // start ends when its launch comes up.
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/kill?operation=1"))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "agent.stop");
+    assert_eq!(record["state"], "succeeded");
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/reconnect?operation=1"
+        ))
+        .json(&serde_json::json!({ "force": false }))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "agent.start");
+    assert_eq!(record["state"], "succeeded");
 }
 
 #[tokio::test]
@@ -687,15 +708,12 @@ async fn patch_tab_retargets_to_a_valid_provider() {
     // (kills every tab's process but keeps the `agent_tabs` rows) so the tab is
     // dormant before retargeting.
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &tab)).await;
-    // Followed as an operation, the stop ends when the agent has exited.
     let kill_resp = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/kill?operation=1"))
+        .post(format!("http://{addr}/api/v1/sessions/s1/kill"))
         .send()
         .await
         .unwrap();
-    let record = followed_outcome(&client, addr, kill_resp).await;
-    assert_eq!(record["kind"], "agent.stop");
-    assert_eq!(record["state"], "succeeded");
+    assert_eq!(kill_resp.status(), 200);
     wait_for_session(&client, addr, "s1", |s| !tab_has_live_process(s, &tab)).await;
 
     let resp = client

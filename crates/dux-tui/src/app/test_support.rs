@@ -228,6 +228,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_created_op_id: None,
         operations: Default::default(),
         operation_in_dispatch: None,
+        deferred_operations: Vec::new(),
         created_session_by_op: std::collections::HashMap::new(),
         removal_coordination: Default::default(),
     };

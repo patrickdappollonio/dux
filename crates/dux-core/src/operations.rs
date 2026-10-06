@@ -262,6 +262,14 @@ pub fn launch_binding_key(tab_id: &str) -> String {
     format!("launch:{tab_id}")
 }
 
+/// The key a failed launch of an agent's first tab moves its records to. That
+/// failure is reported by agent, not by tab, and a promotion may have made
+/// another tab the first by the time it lands, so the engine moves the waiting
+/// records off the tab that failed while it still knows which one that was.
+pub fn launch_failure_key(session_id: &str) -> String {
+    format!("launch-failed:{session_id}")
+}
+
 /// A fresh record id, from the same minter as every keyed status, so an id
 /// minted here can never name another change's status.
 pub fn mint_operation_id() -> String {
@@ -324,6 +332,16 @@ impl Operations {
     fn with<T>(&self, f: impl FnOnce(&mut Registry) -> T) -> T {
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
+    }
+
+    /// How many records are held, running and finished. For tests and
+    /// diagnostics: a leak shows up here as a number that only grows.
+    pub fn len(&self) -> usize {
+        self.with(|registry| registry.records.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Open a running record under `id`, waiting on a final keyed `id`.
@@ -491,11 +509,23 @@ impl Operations {
         });
     }
 
+    /// Forget the finished records whose retention has passed by `now`.
+    pub fn prune(&self, now: Instant) {
+        self.with(|registry| registry.prune(now));
+    }
+
     /// The record `id` as a client reads it at `now`, or `None` when there is
     /// none (never opened, or finished longer ago than its retention).
     pub fn view(&self, id: &str, now: Instant) -> Option<OperationView> {
+        self.prune(now);
+        self.peek(id, now)
+    }
+
+    /// [`Self::view`] without forgetting anything first: the snapshot a route
+    /// answers with, taken where the change ended, so it holds whatever the
+    /// retention is.
+    pub fn peek(&self, id: &str, now: Instant) -> Option<OperationView> {
         self.with(|registry| {
-            registry.prune(now);
             let record = registry.records.get(id)?;
             let (state, message, segments) = match &record.end {
                 Some(end) => (end.state, end.message.clone(), end.segments.clone()),
@@ -687,19 +717,98 @@ impl crate::engine::Engine {
                 return Err(error);
             }
         };
-        self.operations
-            .note(&provisional, before.changes_to(&IdSnapshot::of(self)));
-        let id = match running_key(&outcome) {
+        let deferred = self
+            .deferred_operations
+            .iter()
+            .any(|op| op.as_deref() == Some(provisional.as_str()));
+        let id = if deferred {
+            // Held behind a config reload: nothing has happened yet, so the
+            // record waits for the drain that runs it.
+            provisional
+        } else {
+            self.operations
+                .note(&provisional, before.changes_to(&IdSnapshot::of(self)));
+            let settled = outcome.settled.clone();
+            self.settle_operation(
+                &provisional,
+                running_key(&outcome),
+                outcome.status.as_mut(),
+                settled.as_ref(),
+                true,
+                now,
+            )
+        };
+        outcome.operation = self.operations.peek(&id, now).map(Box::new);
+        outcome.operation_id = Some(id);
+        Ok(outcome)
+    }
+
+    /// Run a command a config reload deferred, finishing the record of the
+    /// client that asked for it, if one did, the way
+    /// [`Self::apply_wire_operation`] would have. The drain of the deferred
+    /// queue is this record's completion point.
+    pub(crate) fn apply_deferred_operation(
+        &mut self,
+        command: crate::engine::Command,
+        operation: Option<String>,
+    ) -> anyhow::Result<crate::engine::EventReaction> {
+        let Some(id) = operation else {
+            return self.apply(command);
+        };
+        let now = Instant::now();
+        let before = IdSnapshot::of(self);
+        self.operation_in_dispatch = Some(id.clone());
+        let result = self.apply(command);
+        self.operation_in_dispatch = None;
+        match &result {
+            Ok(reaction) => {
+                self.operations
+                    .note(&id, before.changes_to(&IdSnapshot::of(self)));
+                let mut status = crate::wire::added_status_message(reaction)
+                    .map(|message| crate::wire::WireStatus::new("info", message))
+                    .or_else(|| crate::wire::wire_status_from_reaction(reaction));
+                let settled = crate::wire::settled_final_from_reaction(reaction, status.as_ref());
+                let running = status
+                    .as_ref()
+                    .filter(|s| StatusTone::from_wire(&s.tone) == StatusTone::Busy)
+                    .and_then(|s| s.key.clone());
+                // The client already holds the id, so a key the run mints is
+                // waited on rather than taken as the id.
+                self.settle_operation(&id, running, status.as_mut(), settled.as_ref(), false, now);
+            }
+            Err(error) => {
+                self.operations
+                    .finish(&id, StatusTone::Error, &format!("{error:#}"), None, now);
+            }
+        }
+        result
+    }
+
+    /// Where a record goes once its change has answered: still running under
+    /// `running` (a key minted for it alone becomes its id when `may_rekey`,
+    /// any other key is waited on), ended at once by a final the change
+    /// already reached (`settled`), or ended on the status it answered with,
+    /// which carries the record's id as its key when it had none. Answers the
+    /// record's id.
+    fn settle_operation(
+        &self,
+        provisional: &str,
+        running: Option<String>,
+        status: Option<&mut crate::wire::WireStatus>,
+        settled: Option<&crate::wire::WireStatus>,
+        may_rekey: bool,
+        now: Instant,
+    ) -> String {
+        match running {
             Some(key) => {
-                let id = if crate::engine::status_op::is_minted_status_id(&key) {
-                    self.operations.rekey(&provisional, &key);
+                let id = if may_rekey && crate::engine::status_op::is_minted_status_id(&key) {
+                    self.operations.rekey(provisional, &key);
                     key.clone()
                 } else {
-                    self.operations.await_key(&provisional, &key);
-                    provisional
+                    self.operations.await_key(provisional, &key);
+                    provisional.to_string()
                 };
-                // The work already reached its final inside the call.
-                if let Some(settled) = &outcome.settled {
+                if let Some(settled) = settled {
                     self.operations.finish_by_key(
                         &key,
                         StatusTone::from_wire(&settled.tone),
@@ -711,13 +820,13 @@ impl crate::engine::Engine {
                 id
             }
             None => {
-                match outcome.status.as_mut() {
+                match status {
                     Some(status) => {
                         if status.key.is_none() {
-                            status.key = Some(provisional.clone());
+                            status.key = Some(provisional.to_string());
                         }
                         self.operations.finish(
-                            &provisional,
+                            provisional,
                             StatusTone::from_wire(&status.tone),
                             &status.message,
                             status.segments.as_deref(),
@@ -726,13 +835,11 @@ impl crate::engine::Engine {
                     }
                     None => self
                         .operations
-                        .finish(&provisional, StatusTone::Info, "", None, now),
+                        .finish(provisional, StatusTone::Info, "", None, now),
                 }
-                provisional
+                provisional.to_string()
             }
-        };
-        outcome.operation_id = Some(id);
-        Ok(outcome)
+        }
     }
 
     /// Open a running record under `id`, with the policy `[server]` sets now.
@@ -756,27 +863,48 @@ impl crate::engine::Engine {
         }
     }
 
-    /// A tab's launch reported back: finish every record bound to it, a
-    /// completion point of its own because the launch's status rides a key
-    /// shared by every launch of that tab. `launched` is whether it came up; a
-    /// tab that did not is no longer counted as created, since a fresh tab
-    /// whose first launch failed is deleted.
+    /// A launch reported back: finish every record waiting on `key` (a
+    /// tab's [`launch_binding_key`], or for a failure reported by agent, its
+    /// [`launch_failure_key`]). A completion point of its own, because the
+    /// launch's status rides a key shared by every launch of that tab.
+    ///
+    /// A launch that came up succeeds. One that did not is a failure, unless
+    /// the record created `tab_id` and that tab is still there (a promotion
+    /// kept it, or its cleanup failed): then the create half-happened, and the
+    /// record says so. A tab that is gone is no longer counted as created.
     pub fn finish_launch_operations(
         &self,
-        tab_id: &str,
+        key: &str,
+        tab_id: Option<&str>,
         launched: bool,
         message: &str,
         segments: Option<&[ProseSegment]>,
     ) {
-        let key = launch_binding_key(tab_id);
-        let state = if launched {
-            OperationState::Succeeded
-        } else {
-            self.operations.retract_created(&key, tab_id);
-            OperationState::Failed
-        };
+        let now = Instant::now();
+        if launched {
+            self.operations.finish_awaiting_as(
+                key,
+                OperationState::Succeeded,
+                message,
+                segments,
+                now,
+            );
+            return;
+        }
+        if let Some(tab_id) = tab_id
+            && self.owning_session_for_tab(tab_id).is_none()
+        {
+            self.operations.retract_created(key, tab_id);
+        }
         self.operations
-            .finish_awaiting_as(&key, state, message, segments, Instant::now());
+            .finish_by_key(key, StatusTone::Error, message, segments, now);
+    }
+
+    /// Forget the finished records past their retention. Called from the one
+    /// per-tick engine call every serving surface makes, so a registry nobody
+    /// reads still lets go of what it no longer has to keep.
+    pub fn prune_operations(&self) {
+        self.operations.prune(Instant::now());
     }
 }
 
@@ -1080,7 +1208,63 @@ mod tests {
                     },
                 ]
             );
+
+            // Removing the project while keeping worktrees names each agent's
+            // worktree as kept.
+            let session = sample_session("s2", "p1", "other");
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+            let outcome = engine
+                .apply_wire_operation(
+                    WireCommand::RemoveProject {
+                        project_id: "p1".to_string(),
+                    },
+                    OperationKind::ProjectRemove,
+                )
+                .expect("the removal dispatches");
+            let view = engine
+                .operations
+                .view(&outcome.operation_id.unwrap(), Instant::now())
+                .unwrap();
+            assert_eq!(view.state, OperationState::Succeeded);
+            assert_eq!(
+                view.parts,
+                vec![OperationPart {
+                    part: PartKind::Worktree,
+                    subject: "/tmp/s2-worktree".to_string(),
+                    outcome: PartOutcome::Kept,
+                    reason: None,
+                }]
+            );
         }
+
+        #[test]
+        fn the_engine_forgets_finished_records_on_its_periodic_pass() {
+            let (mut engine, _tmp) = engine_with_session();
+            let long_ago = Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("the clock reaches back ten seconds");
+            engine
+                .operations
+                .open("op-old", OperationKind::TabClose, POLICY_1S, long_ago);
+            engine
+                .operations
+                .finish("op-old", StatusTone::Info, "", None, long_ago);
+            assert_eq!(engine.operations.len(), 1);
+
+            engine.poll_pty_activity();
+
+            assert_eq!(
+                engine.operations.len(),
+                0,
+                "a finished record past its retention goes"
+            );
+        }
+
+        const POLICY_1S: OperationPolicy = OperationPolicy {
+            unknown_after: Duration::from_secs(60),
+            retention: Duration::from_secs(1),
+        };
 
         #[test]
         fn a_change_refused_outright_leaves_no_record() {

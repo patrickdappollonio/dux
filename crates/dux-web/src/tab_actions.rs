@@ -40,9 +40,11 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, unknown_session,
+    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
+    unknown_session,
 };
 use crate::server::AppState;
+use std::sync::Arc;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -110,13 +112,13 @@ async fn create_tab(
     let ticket = operation
         .asked()
         .then(|| OperationTicket::new(OperationKind::TabCreate));
-    let followed = ticket.as_ref().map(|ticket| ticket.id.clone());
+    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
     match state
         .engine
         .create_agent_tab(id.clone(), provider, ticket)
         .await
     {
-        Ok(_) if let Some(op) = &followed => operation_accepted(&state.engine, op),
+        Ok(_) if let Some(record) = &followed => ticket_accepted(record),
         Ok((tab_id, provider)) => {
             let location = format!("/api/v1/sessions/{id}/tabs/{tab_id}");
             (
@@ -196,7 +198,7 @@ async fn delete_tab(
             .map(|outcome| (outcome, None))
     };
     match result {
-        Ok((_, Some(op))) => operation_accepted(&state.engine, &op),
+        Ok((_, Some(op))) => operation_accepted(&op),
         // `Engine::close_tab` detaches the agent the same way `KillSessionPty`
         // does when this was the session's LAST live tab, and returns that
         // in-flight-aware outcome on the wire result. Consume it directly rather
@@ -234,9 +236,9 @@ async fn start_tab(
     let ticket = operation
         .asked()
         .then(|| OperationTicket::new(OperationKind::TabStart));
-    let followed = ticket.as_ref().map(|ticket| ticket.id.clone());
+    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
     match state.engine.start_agent_tab(tab, ticket).await {
-        Ok(()) if let Some(op) = &followed => operation_accepted(&state.engine, op),
+        Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
