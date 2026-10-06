@@ -13197,11 +13197,32 @@ not_a_real_action = ["x"]
         assert_ne!(app.left_width_pct, 37);
         app.engine.config.ui.left_width_pct = 37;
         app.engine.config.ui.show_changes_pane = false;
+        // Clients that asked for these two reloads wait on their records.
+        let ask_for_a_reload = |app: &mut App, id: &str| {
+            app.engine
+                .open_operation(id, dux_core::operations::OperationKind::ConfigReload);
+            app.engine.operations.await_reload(id, false);
+            app.engine.operations.reload_closed();
+        };
+        let record_of = |app: &App, id: &str| {
+            app.engine
+                .operations
+                .peek(id, std::time::Instant::now())
+                .expect("the record is kept")
+        };
+        ask_for_a_reload(&mut app, "refused-reload");
         app.apply_reaction(EventReaction::OpenConfigReloadFailedModal(
             "the file is not valid TOML".to_string(),
         ));
         assert_ne!(app.left_width_pct, 37, "a refused reload adopts nothing");
+        let refused = record_of(&app, "refused-reload");
+        assert_eq!(refused.state, dux_core::operations::OperationState::Failed);
+        assert_eq!(
+            refused.message,
+            "Config reload failed: the file is not valid TOML"
+        );
         app.prompt = PromptState::None;
+        ask_for_a_reload(&mut app, "adopted-reload");
         let mut before = app.engine.config.clone();
         before.ui.left_width_pct = 20;
         before.ui.show_changes_pane = true;
@@ -13228,6 +13249,13 @@ not_a_real_action = ["x"]
             said.message.contains("session database"),
             "{}",
             said.message
+        );
+        let adopted = record_of(&app, "adopted-reload");
+        assert_eq!(adopted.state, dux_core::operations::OperationState::Partial);
+        assert!(
+            adopted.message.contains("session database"),
+            "{}",
+            adopted.message
         );
     }
 

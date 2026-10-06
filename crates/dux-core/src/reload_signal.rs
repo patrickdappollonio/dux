@@ -1,12 +1,12 @@
-//! SIGUSR1: "config.toml changed, reload it".
+//! SIGUSR1: "config.toml changed, reload it", for a person reloading by hand
+//! with `kill -USR1 <pid>` after editing the file.
 //!
-//! `dux config set` writes the file and then tells the running dux to reload
-//! by sending it SIGUSR1, so a change (a new password above all) takes effect
-//! at once instead of at the next start. A hand edit can do the same with
-//! `kill -USR1 <pid>`. Not SIGHUP, which a terminal sends its processes when it
-//! closes. There is deliberately no file watcher: it would turn the explicit
-//! reload model of every setting into an implicit one and could apply a file
-//! halfway through an editor's save.
+//! `dux config set` and dux's own reloads (a password change, a ban) do not use
+//! it: they ask the running dux over its control socket and hear how the reload
+//! went (see [`crate::client::reload`]). Not SIGHUP, which a terminal sends its
+//! processes when it closes. There is deliberately no file watcher: it would turn
+//! the explicit reload model of every setting into an implicit one and could
+//! apply a file halfway through an editor's save.
 //!
 //! Two halves live here:
 //!

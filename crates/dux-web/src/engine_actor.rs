@@ -14,6 +14,7 @@ use dux_core::config::{
     server_bind_settings_changed, server_log_file_settings_changed,
     server_log_viewer_settings_changed,
 };
+use dux_core::config_reload_status::ConfigReloadOutcome;
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -551,6 +552,16 @@ fn find_config_adopted(
             error,
         } => Some(((**before).clone(), *github_was_enabled, error.clone())),
         EventReaction::Multi(reactions) => reactions.iter().find_map(find_config_adopted),
+        _ => None,
+    }
+}
+
+/// The reason a refused reload carries, whether the reaction is bare or inside
+/// a `Multi`.
+fn find_config_reload_refused(reaction: &EventReaction) -> Option<&str> {
+    match reaction {
+        EventReaction::OpenConfigReloadFailedModal(message) => Some(message),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(find_config_reload_refused),
         _ => None,
     }
 }
@@ -2811,29 +2822,38 @@ impl EngineService {
     /// after a failed apply (this loop's own, or the engine's, which arrives as
     /// `ConfigAdopted`) gets everything a reload owes the running server, as a
     /// successful one does, so nothing stays on the config it replaced.
+    ///
+    /// This is the reload's owner for these two ways of serving, so it also
+    /// says how the reload ended to any client that asked for it as an
+    /// operation: applied, adopted with a step failed, or refused.
     pub(crate) fn apply_reload_followup(&mut self, engine: &mut Engine, reaction: EventReaction) {
         let adopted = find_config_adopted(&reaction);
+        let refused = find_config_reload_refused(&reaction).map(str::to_string);
         if let Some(config) = take_apply_reloaded_config(reaction) {
             let before = engine.config.clone();
             let github_was_enabled = engine.github_integration_enabled;
-            match engine.apply_reloaded_config(*config) {
+            let outcome = match engine.apply_reloaded_config(*config) {
                 Ok(()) => {
                     let _ = self.status.send(WireStatus::from_update(
                         &dux_core::config_reload_status::applied(),
                     ));
-                    self.config_in_force(engine, &before, github_was_enabled);
+                    let notes = self.config_in_force(engine, &before, github_was_enabled);
+                    ConfigReloadOutcome::Applied {
+                        notes: notes.into_iter().collect(),
+                    }
                 }
                 Err(e) => {
                     // The engine kept the new config anyway, so it is in
                     // force; the failure is said last, so it holds the line.
                     self.config_in_force(engine, &before, github_was_enabled);
+                    let error = format!("{e:#}");
                     let _ = self.status.send(WireStatus::from_update(
-                        &dux_core::config_reload_status::adopted_but_apply_failed(&format!(
-                            "{e:#}"
-                        )),
+                        &dux_core::config_reload_status::adopted_but_apply_failed(&error),
                     ));
+                    ConfigReloadOutcome::ApplyFailed(error)
                 }
-            }
+            };
+            engine.finish_config_reload_operations(&outcome);
         }
         if let Some((before, github_was_enabled, error)) = adopted {
             // The engine applied this config only to drain the commands it had
@@ -2843,6 +2863,10 @@ impl EngineService {
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&error),
             ));
+            engine.finish_config_reload_operations(&ConfigReloadOutcome::ApplyFailed(error));
+        }
+        if let Some(reason) = refused {
+            engine.finish_config_reload_operations(&ConfigReloadOutcome::Refused(reason));
         }
     }
 
@@ -2891,13 +2915,15 @@ impl EngineService {
     /// Everything a reload owes the running server once `engine.config` is
     /// in force, compared with `before`, the config it replaced, the same
     /// pull-request sync the terminal UI's reload runs included.
-    /// `github_was_enabled` is whether the integration was on before.
+    /// `github_was_enabled` is whether the integration was on before. Answers
+    /// the sentence about the settings only a restart applies, which it has
+    /// also raised as a warning, or `None` when nothing needs one.
     fn config_in_force(
         &mut self,
         engine: &mut Engine,
         before: &dux_core::config::Config,
         github_was_enabled: bool,
-    ) {
+    ) -> Option<String> {
         engine.retune_pr_sync_after_reload(github_was_enabled);
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
@@ -2912,10 +2938,12 @@ impl EngineService {
         // The `[server]` bind section only takes effect at startup; a reload
         // cannot rebind listeners. Warn so the user knows a restart is needed
         // for those specific changes to take effect.
-        if let Some(warning) =
-            server_restart_warning_copy(&before.server, &engine.config.server, self.surface)
-        {
-            let _ = self.status.send(WireStatus::new("warning", warning));
+        let restart_warning =
+            server_restart_warning_copy(&before.server, &engine.config.server, self.surface);
+        if let Some(warning) = &restart_warning {
+            let _ = self
+                .status
+                .send(WireStatus::new("warning", warning.clone()));
         }
         // `dux server` has no status line, and its operator reads the console.
         if let ShutdownEcho::Console(console, _) = &self.shutdown_echo
@@ -2948,6 +2976,7 @@ impl EngineService {
                 ));
             });
         }
+        restart_warning
     }
 
     /// Adopt the two live `[server]` limits from a config the drainer has already
@@ -5102,6 +5131,13 @@ mod tests {
         );
 
         let mut statuses = handle.subscribe_status();
+        // A client that asked for this reload waits on its record.
+        engine.open_operation(
+            "reload-op",
+            dux_core::operations::OperationKind::ConfigReload,
+        );
+        engine.operations.await_reload("reload-op", false);
+        engine.operations.reload_closed();
         svc.apply_reload_followup(
             &mut engine,
             EventReaction::ConfigAdopted {
@@ -5109,6 +5145,18 @@ mod tests {
                 before: Box::new(before),
                 error: "the session database could not be read".to_string(),
             },
+        );
+        let record = engine
+            .operations
+            .peek("reload-op", Instant::now())
+            .expect("the record is kept");
+        assert_eq!(record.state, dux_core::operations::OperationState::Partial);
+        assert!(
+            record
+                .message
+                .contains("the session database could not be read"),
+            "{}",
+            record.message
         );
         let said = std::iter::from_fn(|| statuses.try_recv().ok())
             .find(|status| {

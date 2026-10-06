@@ -55,6 +55,14 @@
 //! | `POST /sessions/{id}/tabs/{tab}/start` | inside the call when the tab already runs, else its launch report |
 //! | `POST` and `DELETE` on the three terminal addresses | inside the call |
 //! | `PUT` and `DELETE` on `/macros/{name}` and `/global-env/{name}` | inside the call |
+//! | `POST /config/reload` | its reload's owner saying how it ended (`Engine::finish_config_reload_operations`) |
+//!
+//! A config reload has one owner per way of serving, and each says how the
+//! reload ended: the terminal UI's handlers for a reloaded config, an adopted
+//! one and a refused one (plain terminal UI and background serving), and the
+//! web actor's reload follow-up (`dux server` and the flip). A reload asked
+//! for while another is reading waits for the follow-up that reads the file
+//! after it.
 //!
 //! A record still running past its policy's `unknown_after` reads as
 //! [`OperationState::Unknown`] but stays open, and finishes with the real
@@ -118,6 +126,8 @@ pub enum OperationKind {
     EnvSet,
     #[serde(rename = "env.remove")]
     EnvRemove,
+    #[serde(rename = "config.reload")]
+    ConfigReload,
 }
 
 impl OperationKind {
@@ -140,6 +150,7 @@ impl OperationKind {
             Self::MacroRemove => "removing a macro",
             Self::EnvSet => "saving a global environment variable",
             Self::EnvRemove => "removing a global environment variable",
+            Self::ConfigReload => "reloading the config",
         }
     }
 }
@@ -393,6 +404,15 @@ pub fn launch_failure_key(session_id: &str) -> String {
 
 /// A fresh record id, from the same minter as every keyed status, so an id
 /// minted here can never name another change's status.
+/// What a record waiting for a config reload waits on. Not a status key: the
+/// reload's own statuses (the browsers' refresh notice among them) must not
+/// end it, only its owner saying how it ended does.
+const RELOAD_KEY_PREFIX: &str = "reload-epoch:";
+
+fn reload_key(epoch: u64) -> String {
+    format!("{RELOAD_KEY_PREFIX}{epoch}")
+}
+
 pub fn mint_operation_id() -> String {
     crate::engine::status_op::next_status_id()
 }
@@ -424,6 +444,13 @@ struct Record {
 #[derive(Default)]
 struct Registry {
     records: HashMap<String, Record>,
+    /// Which reload a record asked for follows. The reload whose barrier is
+    /// open, or the next one to open, is `reload_epoch`; one asked for while a
+    /// reload is already reading waits for the follow-up, `reload_epoch + 1`.
+    reload_epoch: u64,
+    /// The epochs whose barrier has closed and whose owner has not yet said
+    /// how it ended, oldest first.
+    reloads_closed: std::collections::VecDeque<u64>,
 }
 
 impl Registry {
@@ -619,6 +646,51 @@ impl Operations {
                 record.awaiting = Some(key.to_string());
             }
         });
+    }
+
+    /// Make the running record `id` wait for the config reload that will read
+    /// the file next: the one whose barrier is open now, or, with `queued`
+    /// (a reload is already reading), the follow-up it asked for.
+    pub fn await_reload(&self, id: &str, queued: bool) {
+        self.with(|registry| {
+            let key = reload_key(registry.reload_epoch + u64::from(queued));
+            if let Some(record) = registry.records.get_mut(id)
+                && record.end.is_none()
+            {
+                record.awaiting = Some(key);
+            }
+        });
+    }
+
+    /// Whether the running record `id` waits for a config reload.
+    pub fn awaits_reload(&self, id: &str) -> bool {
+        self.with(|registry| {
+            registry
+                .records
+                .get(id)
+                .and_then(|record| record.awaiting.as_deref())
+                .is_some_and(|key| key.starts_with(RELOAD_KEY_PREFIX))
+        })
+    }
+
+    /// The reload whose barrier was open has closed: its outcome is the owner's
+    /// to say, through [`Self::finish_reload`], and the next reload is the one
+    /// after it.
+    pub fn reload_closed(&self) {
+        self.with(|registry| {
+            let closed = registry.reload_epoch;
+            registry.reloads_closed.push_back(closed);
+            registry.reload_epoch += 1;
+        });
+    }
+
+    /// The owner of the oldest closed reload says how it ended: finish every
+    /// record that waited for it. Nothing happens when no reload has closed.
+    pub fn finish_reload(&self, state: OperationState, message: &str, now: Instant) {
+        let closed = self.with(|registry| registry.reloads_closed.pop_front());
+        if let Some(epoch) = closed {
+            self.finish_awaiting_as(&reload_key(epoch), state, message, None, now);
+        }
     }
 
     /// Every record waiting on `from` now waits on `to`: the work behind
@@ -986,9 +1058,10 @@ impl crate::engine::Engine {
             .deferred_operations
             .iter()
             .any(|op| op.as_deref() == Some(provisional.as_str()));
-        let id = if deferred {
-            // Held behind a config reload: nothing has happened yet, so the
-            // record waits for the drain that runs it.
+        let id = if deferred || self.operations.awaits_reload(&provisional) {
+            // Held behind a config reload, or itself a reload: nothing has
+            // happened yet, so the record waits for the drain that runs it, or
+            // for its reload's owner to say how it ended.
             provisional
         } else {
             self.operations
@@ -1179,6 +1252,21 @@ impl crate::engine::Engine {
         }
         self.operations
             .finish_by_key(key, StatusTone::Error, message, segments, now);
+    }
+
+    /// A config reload ended, and `outcome` is how its owner says it did: finish
+    /// the records of every client that asked for it. Each serving mode has
+    /// exactly one owner (the terminal UI's reload handlers, or the web
+    /// actor's reload follow-up) and each calls this once per reload, on
+    /// whichever of the three results the reload had: applied, adopted with a
+    /// step failed, or refused.
+    pub fn finish_config_reload_operations(
+        &self,
+        outcome: &crate::config_reload_status::ConfigReloadOutcome,
+    ) {
+        let (state, message) = outcome.record();
+        self.operations
+            .finish_reload(state, &message, Instant::now());
     }
 
     /// Forget the finished records past their retention. Called from the one

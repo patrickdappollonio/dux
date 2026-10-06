@@ -1,5 +1,6 @@
 use std::sync::mpsc::Sender;
 
+use dux_core::config_reload_status::ConfigReloadOutcome;
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
@@ -875,6 +876,7 @@ impl App {
         let before = self.engine.config.clone();
         let github_was_enabled = self.engine.github_integration_enabled;
         let fallback = config.clone();
+        let mut apply_error = None;
         let outcome = match self.apply_reloaded_config(config) {
             Err(error) => {
                 // The view could not take the new config, but the engine still
@@ -886,18 +888,25 @@ impl App {
                 self.engine.keep_reloaded_config(fallback);
                 self.run_config_swap_effects(&before, github_was_enabled);
                 self.note_config_adopted(&before);
-                TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
+                let error = format!("{error:#}");
+                apply_error = Some(error.clone());
+                TuiConfigReloadOutcome::ApplyFailed(error)
             }
             Ok(()) => TuiConfigReloadOutcome::Applied,
         };
-        let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
         self.post_config_reload_outcome(&outcome);
-        if applied {
-            self.note_config_adopted(&before);
-        }
+        // This surface owns the reload here, so a client that asked for it
+        // hears how it ended.
+        let told = match apply_error {
+            Some(error) => ConfigReloadOutcome::ApplyFailed(error),
+            None => ConfigReloadOutcome::Applied {
+                notes: self.note_config_adopted(&before).into_iter().collect(),
+            },
+        };
+        self.engine.finish_config_reload_operations(&told);
     }
 
     /// The engine adopted a reloaded config its own apply could not finish
@@ -914,16 +923,20 @@ impl App {
         let _ = self.take_reload_view_state(&adopted);
         self.run_config_swap_effects(&before, github_was_enabled);
         self.note_config_adopted(&before);
-        let outcome = TuiConfigReloadOutcome::ApplyFailed(error);
+        let outcome = TuiConfigReloadOutcome::ApplyFailed(error.clone());
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
         self.post_config_reload_outcome(&outcome);
+        self.engine
+            .finish_config_reload_operations(&ConfigReloadOutcome::ApplyFailed(error));
     }
 
     /// A new config is in force: the background server adopts its
     /// `[server]` section, and a change only a restart applies says so.
-    fn note_config_adopted(&mut self, before: &Config) {
+    /// Answers the warning sentence it raised, so a client that asked for the
+    /// reload hears it too.
+    fn note_config_adopted(&mut self, before: &Config) -> Option<String> {
         if let Some(companion) = self.companion.as_mut() {
             companion.note_config_applied(&self.engine.config);
         }
@@ -944,9 +957,12 @@ impl App {
             &before.server,
             &self.engine.config.server,
         ));
-        if !owed.is_empty() {
-            self.set_pinned_warning(owed.join(" "));
+        if owed.is_empty() {
+            return None;
         }
+        let warning = owed.join(" ");
+        self.set_pinned_warning(warning.clone());
+        Some(warning)
     }
 
     /// Answer the reload on the worker lane, so the browsers that were told to
@@ -970,6 +986,8 @@ impl App {
     }
 
     fn apply_open_config_reload_failed_modal(&mut self, message: String) {
+        self.engine
+            .finish_config_reload_operations(&ConfigReloadOutcome::Refused(message.clone()));
         self.open_config_reload_failed_modal(message);
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(
@@ -3463,6 +3481,13 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let mut config = app.engine.config.clone();
         config.server.port += 1;
+        // A client that asked for this reload waits on its record.
+        app.engine.open_operation(
+            "reload-op",
+            dux_core::operations::OperationKind::ConfigReload,
+        );
+        app.engine.operations.await_reload("reload-op", false);
+        app.engine.operations.reload_closed();
 
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
         app.drain_worker_events();
@@ -3472,6 +3497,22 @@ mod tests {
         assert!(
             message.contains("server"),
             "the warning names what needs restarting: {message}"
+        );
+        let record = app
+            .engine
+            .operations
+            .peek("reload-op", std::time::Instant::now())
+            .expect("the record is kept");
+        assert_eq!(
+            record.state,
+            dux_core::operations::OperationState::Succeeded
+        );
+        assert!(
+            record.message.starts_with(
+                "Configuration reloaded. New settings are active now. Server settings changed"
+            ),
+            "{}",
+            record.message
         );
     }
 

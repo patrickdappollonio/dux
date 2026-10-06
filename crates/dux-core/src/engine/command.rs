@@ -1089,6 +1089,11 @@ impl Engine {
                         self.deferred_commands.push(Command::ReloadConfig);
                         self.deferred_operations.push(None);
                     }
+                    // A client waiting on this one follows the reload that
+                    // reads the file after the one running.
+                    if let Some(id) = &self.operation_in_dispatch {
+                        self.operations.await_reload(id, true);
+                    }
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already running; another runs right after it, so \
                          the latest config.toml is the one that applies.",
@@ -1110,6 +1115,9 @@ impl Engine {
                 }
                 self.reloading = true;
                 self.reload_guard = Some(guard);
+                if let Some(id) = &self.operation_in_dispatch {
+                    self.operations.await_reload(id, false);
+                }
                 self.surface
                     .reload(self.paths.clone(), self.worker_tx.clone());
                 Ok(EventReaction::Nothing)

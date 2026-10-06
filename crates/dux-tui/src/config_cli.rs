@@ -8,16 +8,18 @@
 //!
 //! Neither command takes the single-instance lock: `get` only reads, and
 //! `set` is meant to run beside a live dux. Its write takes the config file's
-//! own lock, and it then signals the dux holding `dux.lock` with SIGUSR1
-//! (see [`dux_core::reload_signal`]).
+//! own lock, and it then asks the dux holding `dux.lock` to reload over its
+//! control socket and prints how that went (see
+//! [`dux_core::client::reload`]).
 
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
-use dux_core::config::{DuxPaths, StartProblem, Surface};
+use dux_core::client::reload::ReloadAnswer;
+use dux_core::config::{Config, DuxPaths, StartProblem, Surface};
 use dux_core::config_keys::{self, GetValue, Key, SecretKind, SetPasswordError, WritePolicy};
-use dux_core::reload_signal::{NoReloadHandler, SignalOutcome};
 use zeroize::Zeroizing;
 
 /// What the live strength line measures against: the configured minimums
@@ -328,11 +330,26 @@ pub(crate) fn run_set(
     write_surface_verdicts(out, &remaining)?;
     // What happened to a running dux is said only from the outcome of
     // asking it, and only once that outcome is known.
-    let outcome = dux_core::reload_signal::signal_running_dux(&paths.lock_path);
-    writeln!(out, "{}", reload_sentence(&outcome, !remaining.is_empty()))?;
-    if password && let Some(sentence) = password_sentence(&outcome, &remaining) {
+    let wait = dux_core::client::wait::wait_timeout(None, &paths.config_path)
+        .unwrap_or_else(|_| Duration::from_secs(Config::default().cli.wait_timeout_seconds));
+    let answer = dux_core::client::reload::ask_to_reload(&paths.lock_path, wait);
+    say_reload(&answer, !remaining.is_empty(), out)?;
+    if password && let Some(sentence) = password_sentence(&answer) {
         writeln!(out, "{sentence}")?;
     }
+    Ok(())
+}
+
+/// Say how the running dux answered the request to reload. A reload it
+/// refused is the one answer that fails the command (exit 1): its sentence
+/// says the file is saved but not in force, and why, and goes out as the error
+/// so it reaches standard error.
+fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
+    let sentence = reload_sentence(answer, problems_remain);
+    if matches!(answer, ReloadAnswer::Refused(_)) {
+        bail!("{sentence}");
+    }
+    writeln!(out, "{sentence}")?;
     Ok(())
 }
 
@@ -605,113 +622,68 @@ fn user_inputs() -> Vec<String> {
     dux_core::auth::guess_words()
 }
 
-/// What happens next. With `problems_remain`, what each surface makes of
-/// the file is said above it (see [`write_surface_verdicts`]), so this says
-/// only what was done about the running dux, never that the change applies.
-fn reload_sentence(outcome: &SignalOutcome, problems_remain: bool) -> String {
+/// What happens next, from how the running dux answered the request to
+/// reload. With `problems_remain`, what each surface makes of the file is said
+/// above it (see [`write_surface_verdicts`]), so this says only what the
+/// running dux did, never that the change applies.
+///
+/// A refused reload is the one answer that fails the command, so the caller
+/// turns it into an error; its sentence says the file is saved and not in
+/// force, and why.
+fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
     let then = if problems_remain {
         " A kind that refuses this file will not start with it until the problems above are \
          fixed."
     } else {
         ""
     };
-    // `kill -USR1` is offered only for a dux that has said it handles the
-    // signal: sent to one that does not, it stops that dux.
-    let by_hand = |pid: &Option<u32>| match pid {
-        Some(pid) => format!("Run Reload config in dux, or `kill -USR1 {pid}`."),
-        None => "Run Reload config in dux.".to_string(),
-    };
-    match outcome {
-        SignalOutcome::Sent { pid } if problems_remain => format!(
-            "Asked the running dux (PID {pid}) to reload its config: if it is a kind that \
-             refuses this file, it keeps its current settings until the problems above are \
-             fixed. It says whether the reload worked in its status line, in the web UI's \
-             notifications and in dux.log."
+    match answer {
+        ReloadAnswer::Applied(said) => format!("{said}{then}"),
+        ReloadAnswer::PartlyApplied(said) => format!(
+            "The change is saved and the running dux has it in force, but applying it did not \
+             finish. {said}{then}"
         ),
-        SignalOutcome::Sent { pid } => format!(
-            "Asked the running dux (PID {pid}) to reload its config. It says whether the \
-             reload worked in its status line, in the web UI's notifications and in dux.log."
+        ReloadAnswer::Refused(said) => format!(
+            "The change is saved in config.toml but is not in force: the running dux kept its \
+             current settings, the old web UI password and its signed-in sessions included. \
+             {}. Fix the file, then run a command that reloads again, or use Reload config \
+             in dux.{then}",
+            said.trim_end_matches('.')
         ),
-        SignalOutcome::NotRunning if problems_remain => "dux is not running. A terminal UI or \
-                                                         dux server started now reads this \
-                                                         file as said above, and a kind that \
-                                                         refuses it will not start until the \
-                                                         problems above are fixed."
+        ReloadAnswer::NotRunning if problems_remain => "dux is not running. A terminal UI or \
+                                                        dux server started now reads this \
+                                                        file as said above, and a kind that \
+                                                        refuses it will not start until the \
+                                                        problems above are fixed."
             .to_string(),
-        SignalOutcome::NotRunning => {
+        ReloadAnswer::NotRunning => {
             "dux is not running, so the change applies the next time it starts.".to_string()
         }
-        SignalOutcome::NotSignalled {
-            pid,
-            why: NoReloadHandler::OlderVersion,
-        } => format!(
-            "The running dux (PID {pid}) is an older version that cannot reload its config while \
-             running; the change applies when you restart it. Until then it keeps its current \
-             settings, the old web UI password and its signed-in sessions included.{then}"
+        ReloadAnswer::NotReached(why) => format!(
+            "The change is saved, but the running dux was not asked to reload it: {why}. Until \
+             it is reloaded (Reload config in dux) or restarted it keeps its current settings, \
+             the old web UI password and its signed-in sessions included.{then}"
         ),
-        SignalOutcome::NotSignalled {
-            pid,
-            why: NoReloadHandler::NotCaught,
-        } => format!(
-            "The running dux (PID {pid}) does not handle the reload signal right now, so it was \
-             not sent one. Until it is reloaded (Reload config in it) or restarted, it keeps its \
-             current settings, the old web UI password and its signed-in sessions \
-             included.{then}"
-        ),
-        SignalOutcome::Failed { pid, reason } if problems_remain => format!(
-            "The change is saved, but the running dux could not be told to reload ({reason}). \
-             Until it is reloaded or restarted it keeps its current settings, the old web UI \
-             password and its signed-in sessions included, and if it is a kind that refuses this \
-             file it keeps them until the problems above are fixed. {}",
-            by_hand(pid)
-        ),
-        SignalOutcome::Failed { pid, reason } => format!(
-            "The change is saved, but the running dux could not be told to reload ({reason}). \
-             Until it is reloaded or restarted it keeps its current settings, the old web UI \
-             password and its signed-in sessions included. {}",
-            by_hand(pid)
+        ReloadAnswer::Unknown(why) => format!(
+            "The change is saved, but the running dux has not said whether the reload worked: \
+             {why}. Until it has, it may still be on its current settings.{then}"
         ),
     }
 }
 
-/// What a new web UI password does to a running dux, from the outcome of
-/// asking it to reload and nothing else: only a dux that was sent the
-/// signal signs anyone out, and then only a kind that takes the file. Each
-/// kind is said for itself, since which one is running cannot be told from
-/// outside. `None` where the reload sentence already says it all.
-fn password_sentence(outcome: &SignalOutcome, problems: &[StartProblem]) -> Option<String> {
-    let SignalOutcome::Sent { .. } = outcome else {
-        return None;
-    };
-    if problems.is_empty() {
-        return Some(
-            "Once it has reloaded, the new password is in force: every browser signed in to it \
-             is signed out and logs in with the new password."
+/// What a new web UI password does to a running dux, from how it answered the
+/// request to reload and nothing else: a dux that has the new file in force
+/// signs every browser out. `None` where the reload sentence already says it
+/// all.
+fn password_sentence(answer: &ReloadAnswer) -> Option<String> {
+    match answer {
+        ReloadAnswer::Applied(_) | ReloadAnswer::PartlyApplied(_) => Some(
+            "The new password is in force: every browser signed in to it is signed out and logs \
+             in with the new password."
                 .to_string(),
-        );
+        ),
+        _ => None,
     }
-    let said_of = |surface: Surface, name: &str, signed_in: &str| {
-        if stopping(problems, surface, true).is_empty() {
-            format!(
-                "If it is {name}, the new password is in force once it has reloaded: every \
-                 browser signed in to {signed_in} is signed out and logs in with the new password."
-            )
-        } else {
-            format!(
-                "If it is {name}, it keeps the old password and its signed-in sessions until the \
-                 problems above are fixed."
-            )
-        }
-    };
-    Some(format!(
-        "{} {}",
-        said_of(Surface::DuxServer, "dux server", "it"),
-        said_of(
-            Surface::TerminalUi,
-            "the terminal UI",
-            "its background server"
-        )
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,41 +1285,72 @@ port = 3890
 
     #[test]
     fn the_reload_sentence_names_each_outcome() {
-        let sent = reload_sentence(&SignalOutcome::Sent { pid: 42 }, false);
-        assert!(sent.contains("PID 42"), "{sent}");
-        assert!(
-            !sent.contains("live now"),
-            "only the running dux knows: {sent}"
-        );
-        assert!(
-            sent.contains("status line") && sent.contains("dux.log"),
-            "{sent}"
-        );
-        assert!(reload_sentence(&SignalOutcome::NotRunning, false).contains("next time it starts"));
-        let failed = reload_sentence(
-            &SignalOutcome::Failed {
-                pid: Some(7),
-                reason: "permission denied".to_string(),
-            },
+        let applied = reload_sentence(
+            &ReloadAnswer::Applied("Configuration reloaded. New settings are active now.".into()),
             false,
         );
-        assert!(failed.contains("kill -USR1 7"), "{failed}");
-        // With problems left, neither "applied" sentence is said.
-        for outcome in [
-            SignalOutcome::Sent { pid: 42 },
-            SignalOutcome::NotRunning,
-            SignalOutcome::Failed {
-                pid: Some(7),
-                reason: "permission denied".to_string(),
-            },
+        assert_eq!(
+            applied,
+            "Configuration reloaded. New settings are active now."
+        );
+        let refused = reload_sentence(
+            &ReloadAnswer::Refused("Config reload failed: bad value for ui.theme".into()),
+            false,
+        );
+        assert!(
+            refused.contains("saved in config.toml but is not in force"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("Config reload failed: bad value for ui.theme. Fix the file"),
+            "the reason is said once, with one full stop: {refused}"
+        );
+        assert!(reload_sentence(&ReloadAnswer::NotRunning, false).contains("next time it starts"));
+        let not_reached = reload_sentence(
+            &ReloadAnswer::NotReached("dux (PID 7) is running but does not answer".into()),
+            false,
+        );
+        assert!(
+            not_reached.contains("dux (PID 7) is running but does not answer"),
+            "the lock's reason is said: {not_reached}"
+        );
+        // With problems left, no sentence promises the change applies.
+        for answer in [
+            ReloadAnswer::Applied("Reloaded.".into()),
+            ReloadAnswer::NotRunning,
+            ReloadAnswer::NotReached("why".into()),
         ] {
-            let said = reload_sentence(&outcome, true);
+            let said = reload_sentence(&answer, true);
             assert!(!said.contains("next time it starts"), "{said}");
             assert!(
                 said.contains("until the problems above are fixed"),
                 "{said}"
             );
         }
+    }
+
+    /// Only a refused reload fails the command, and it still prints what was
+    /// saved before it fails.
+    #[test]
+    fn a_refused_reload_fails_the_command_and_nothing_else_does() {
+        for answer in [
+            ReloadAnswer::Applied("ok".into()),
+            ReloadAnswer::PartlyApplied("one step failed".into()),
+            ReloadAnswer::NotRunning,
+            ReloadAnswer::NotReached("why".into()),
+            ReloadAnswer::Unknown("op-1".into()),
+        ] {
+            let mut out = Vec::new();
+            say_reload(&answer, false, &mut out).expect("not a failure");
+            assert!(!out.is_empty(), "{answer:?} says something");
+        }
+        let mut out = Vec::new();
+        let error = say_reload(&ReloadAnswer::Refused("no".into()), false, &mut out)
+            .expect_err("refused fails");
+        assert!(
+            error.to_string().contains("not in force"),
+            "the failure carries the sentence: {error}"
+        );
     }
 
     #[test]
@@ -1468,9 +1471,11 @@ port = 3890
     }
 
     /// config.toml deleted while a dux runs: `set` must not write a fresh
-    /// default (password-less) file and tell that dux to reload it.
+    /// default (password-less) file and tell that dux to reload it. With the
+    /// file there, a dux that holds the lock but does not answer on a control
+    /// socket is named as not asked, and the change is still saved.
     #[test]
-    fn set_refuses_a_missing_config_while_a_dux_is_running() {
+    fn set_refuses_a_missing_config_while_a_dux_runs_and_says_when_it_cannot_ask_it() {
         let (_tmp, paths) = setup(None);
         let _running =
             dux_core::lockfile::SingleInstanceLock::acquire(&paths.lock_path).expect("lock");
@@ -1478,6 +1483,19 @@ port = 3890
         let text = err.to_string();
         assert!(text.contains("Recover config"), "{text}");
         assert!(!paths.config_path.exists(), "nothing was written");
+
+        std::fs::write(&paths.config_path, "[server]\nport = 3890\n").expect("seed");
+        let said = set(&paths, &["server.port", "4000"], &mut no_secrets()).expect("saved");
+        assert!(
+            said.contains("is running but does not answer on its control socket; restart it"),
+            "{said}"
+        );
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("port = 4000"),
+            "the change is saved though dux could not be asked"
+        );
     }
 
     /// A password stored beside a problem the file already had says dux will
@@ -1648,46 +1666,29 @@ port = 3890
         assert!(said.contains("dux is not running"), "{said}");
     }
 
-    /// A password reaches browsers only through a dux that was asked to
-    /// reload: with problems left, each kind is said for itself, from the
-    /// file's verdict for it; with none, the reload signs them out; with no
-    /// signal sent, nothing is said to have happened at all.
+    /// A password reaches browsers only through a dux that has the new file in
+    /// force, and only the answer of that dux says so: nothing is claimed when
+    /// no dux ran, could not be asked, or refused the file.
     #[test]
-    fn the_password_sentence_follows_the_signal_outcome() {
-        let sent = SignalOutcome::Sent { pid: 7 };
-        // The terminal UI's own `[keys]` check joins the start checks.
-        crate::config::install_canonical_renderer();
-        let keys_only =
-            dux_core::config::start_problems_of("[keys]\nnot_a_real_action = [\"x\"]\n");
-        let said = password_sentence(&sent, &keys_only).expect("sent");
-        assert!(
-            said.contains("If it is dux server, the new password is in force"),
-            "{said}"
-        );
-        assert!(
-            said.contains("If it is the terminal UI, it keeps the old password"),
-            "{said}"
-        );
-        let said = password_sentence(&sent, &[]).expect("sent");
-        assert!(said.contains("is signed out"), "{said}");
-        for outcome in [
-            SignalOutcome::NotRunning,
-            SignalOutcome::NotSignalled {
-                pid: 7,
-                why: NoReloadHandler::OlderVersion,
-            },
-            SignalOutcome::NotSignalled {
-                pid: 7,
-                why: NoReloadHandler::NotCaught,
-            },
-            SignalOutcome::Failed {
-                pid: Some(7),
-                reason: "x".to_string(),
-            },
+    fn the_password_sentence_follows_the_reload_answer() {
+        for answer in [
+            ReloadAnswer::Applied("Reloaded.".into()),
+            ReloadAnswer::PartlyApplied("One step failed.".into()),
         ] {
-            assert_eq!(password_sentence(&outcome, &[]), None, "{outcome:?}");
-            let said = reload_sentence(&outcome, false);
-            assert!(!said.contains("signed out"), "{said}");
+            let said = password_sentence(&answer).expect("in force");
+            assert!(said.contains("is signed out"), "{said}");
+        }
+        for answer in [
+            ReloadAnswer::NotRunning,
+            ReloadAnswer::NotReached("why".into()),
+            ReloadAnswer::Unknown("op-1".into()),
+            ReloadAnswer::Refused("no".into()),
+        ] {
+            assert_eq!(password_sentence(&answer), None, "{answer:?}");
+            assert!(
+                !reload_sentence(&answer, false).contains("signed out"),
+                "{answer:?}"
+            );
         }
     }
 
@@ -2083,48 +2084,6 @@ mod overridable_problems_name_their_flag_tests {
             "{said}"
         );
         assert!(!said.contains("--port or --bind gets past"), "{said}");
-    }
-
-    /// A dux with no reload handler is never signalled, and is said to be an
-    /// older version whose change applies when it restarts.
-    #[test]
-    fn an_older_dux_is_told_apart_and_never_promised_a_reload() {
-        let said = reload_sentence(
-            &SignalOutcome::NotSignalled {
-                pid: 42,
-                why: NoReloadHandler::OlderVersion,
-            },
-            false,
-        );
-        assert!(
-            said.starts_with(
-                "The running dux (PID 42) is an older version that cannot reload its config \
-                 while running; the change applies when you restart it."
-            ),
-            "{said}"
-        );
-        assert!(
-            said.contains("the old web UI password and its signed-in sessions"),
-            "{said}"
-        );
-        let said = reload_sentence(
-            &SignalOutcome::NotSignalled {
-                pid: 42,
-                why: NoReloadHandler::NotCaught,
-            },
-            true,
-        );
-        assert!(said.contains("not sent one"), "{said}");
-        assert!(!said.contains("kill -USR1"), "{said}");
-        // A holder that could not be identified is never offered `kill`.
-        let said = reload_sentence(
-            &SignalOutcome::Failed {
-                pid: None,
-                reason: "x".to_string(),
-            },
-            false,
-        );
-        assert!(!said.contains("kill -USR1"), "{said}");
     }
 }
 

@@ -334,8 +334,32 @@ async fn set_changes_pane(
 
 /// `POST /api/v1/config/reload`. No body is required (the frontend sends `{}`),
 /// so no `Json` extractor is used. A config reload re-reads `config.toml` from disk.
-async fn reload_config(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    dispatch(&state, &headers, WireCommand::ReloadConfig {}).await
+///
+/// With `?operation=1` it answers `202` and an operation record that ends when
+/// the reload's owner says how it went, which is how `dux config set` learns
+/// whether its change took effect. Without it, a bare `200` once the reload is
+/// under way.
+async fn reload_config(
+    State(state): State<AppState>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !operation.asked() {
+        return dispatch(&state, &headers, WireCommand::ReloadConfig {}).await;
+    }
+    let scope = scope_from_headers(&headers, &state.connections);
+    match state
+        .engine
+        .apply_wire_operation(
+            WireCommand::ReloadConfig {},
+            scope,
+            OperationKind::ConfigReload,
+        )
+        .await
+    {
+        Ok((_, record)) => operation_accepted(&record),
+        Err(e) => config_refusal(e),
+    }
 }
 
 // Each preference toggle below is a parameterless POST: the server owns the
@@ -1332,6 +1356,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Asked as an operation, a reload answers its record at once and the
+    /// record ends on how the reload really went: applied when the file
+    /// reads, refused, with the reason, when it does not.
+    #[tokio::test]
+    async fn a_reload_asked_as_an_operation_ends_on_how_it_went() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = crate::test_support::unstarted_test_engine(tmp.path());
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        let (status, record) = answer(
+            &app,
+            json_req("POST", "/api/v1/config/reload?operation=1", "{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(record["kind"], "config.reload");
+        let id = record["id"].as_str().expect("an id").to_string();
+        let (status, done) = answer(
+            &app,
+            json_req(
+                "GET",
+                &format!("/api/v1/operations/{id}?wait_seconds=10"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(done["state"], "failed", "{done}");
+        assert!(
+            done["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Config reload failed:"),
+            "{done}"
+        );
+
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[ui]\nleft_width_pct = 30\n",
+        )
+        .unwrap();
+        let (_, record) = answer(
+            &app,
+            json_req("POST", "/api/v1/config/reload?operation=1", "{}"),
+        )
+        .await;
+        let id = record["id"].as_str().expect("an id").to_string();
+        let (_, done) = answer(
+            &app,
+            json_req(
+                "GET",
+                &format!("/api/v1/operations/{id}?wait_seconds=10"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(done["state"], "succeeded", "{done}");
+        assert_eq!(
+            done["message"],
+            "Configuration reloaded. New settings are active now."
+        );
     }
 
     #[tokio::test]

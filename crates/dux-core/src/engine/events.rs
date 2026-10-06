@@ -3026,6 +3026,9 @@ impl Engine {
         // applies the reloaded config, which moves it; it goes back with the
         // old config, so every surface's apply compares with the true state.
         let github_before = self.github_integration_enabled;
+        // The reload that read the file is over; how it ended is its owner's to
+        // say once the reaction below reaches it.
+        self.operations.reload_closed();
         let deferred = std::mem::take(&mut self.deferred_commands);
         let mut deferred_operations = std::mem::take(&mut self.deferred_operations).into_iter();
         let has_deferred = !deferred.is_empty();
@@ -9814,21 +9817,43 @@ mod tests {
     /// Two `dux config set` runs in quick succession each signal a reload; the
     /// second arrives while the first is still reading. It must not be
     /// dropped: it runs right after, so the file's final state is what runs.
+    /// A client that asked for either reload follows its own: the one asked
+    /// during the first waits for the follow-up, not for the reload that was
+    /// already reading.
     #[test]
     fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
+        use crate::operations::{OperationKind, OperationState};
         let (mut engine, _tmp) = test_engine();
         engine.surface = Box::new(FileReloadSurface);
         std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 21\n").unwrap();
-        engine
-            .apply(crate::engine::Command::ReloadConfig)
-            .expect("first reload");
+        let first = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::ReloadConfig {},
+                OperationKind::ConfigReload,
+            )
+            .expect("first reload")
+            .operation_id
+            .expect("a record for the first");
         assert!(engine.reloading);
         std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 22\n").unwrap();
         let second = engine
-            .apply(crate::engine::Command::ReloadConfig)
+            .apply_wire_operation(
+                crate::wire::WireCommand::ReloadConfig {},
+                OperationKind::ConfigReload,
+            )
             .expect("second reload");
-        let status = unwrap_status(second);
+        let status = second.status.expect("a status");
         assert!(status.message.contains("right after"), "{}", status.message);
+        let second = second.operation_id.expect("a record for the second");
+        let state_of = |engine: &Engine, id: &str| {
+            engine
+                .operations
+                .peek(id, std::time::Instant::now())
+                .expect("record kept")
+                .state
+        };
+        assert_eq!(state_of(&engine, &first), OperationState::Running);
+        assert_eq!(state_of(&engine, &second), OperationState::Running);
         // A third collapses into the same follow-up.
         engine
             .apply(crate::engine::Command::ReloadConfig)
@@ -9854,12 +9879,81 @@ mod tests {
                     engine.apply_reloaded_config(*config).expect("apply");
                 }
             }
+            engine.finish_config_reload_operations(
+                &crate::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() },
+            );
+            if reloads_finished == 1 {
+                assert_eq!(state_of(&engine, &first), OperationState::Succeeded);
+                assert_eq!(
+                    state_of(&engine, &second),
+                    OperationState::Running,
+                    "the follow-up has not read the file yet"
+                );
+            }
             if !engine.reloading {
                 break;
             }
         }
         assert_eq!(reloads_finished, 2, "the follow-up reload ran");
         assert_eq!(engine.config.ui.left_width_pct, 22);
+        assert_eq!(state_of(&engine, &second), OperationState::Succeeded);
+    }
+
+    /// A client that asked for a reload is told how it ended, in the words of
+    /// the outcome its owner reports: applied (with what only a restart
+    /// applies), adopted but not fully applied, or refused.
+    #[test]
+    fn a_reload_record_ends_on_the_outcome_its_owner_reports() {
+        use crate::config_reload_status::ConfigReloadOutcome as Outcome;
+        use crate::operations::{OperationKind, OperationState};
+        let cases = [
+            (
+                Outcome::Applied { notes: Vec::new() },
+                OperationState::Succeeded,
+                "Configuration reloaded. New settings are active now.",
+            ),
+            (
+                Outcome::Applied {
+                    notes: vec!["Restart dux to use the new port.".to_string()],
+                },
+                OperationState::Succeeded,
+                "Configuration reloaded. New settings are active now. Restart dux to use the \
+                 new port.",
+            ),
+            (
+                Outcome::ApplyFailed("the database is locked".to_string()),
+                OperationState::Partial,
+                "The reloaded config.toml is in force and its settings are active, but one step \
+                 of applying it failed: the database is locked. Fix that, then reload the config \
+                 again to finish.",
+            ),
+            (
+                Outcome::Refused("config.toml no longer exists".to_string()),
+                OperationState::Failed,
+                "Config reload failed: config.toml no longer exists",
+            ),
+        ];
+        for (outcome, state, message) in cases {
+            let (mut engine, _tmp) = test_engine();
+            engine.surface = Box::new(RecordingConfigSurface(Arc::new(Mutex::new(Vec::new()))));
+            let id = engine
+                .apply_wire_operation(
+                    crate::wire::WireCommand::ReloadConfig {},
+                    OperationKind::ConfigReload,
+                )
+                .expect("reload")
+                .operation_id
+                .expect("record");
+            let event = try_recv_worker_event(&engine).expect("the reload finished");
+            engine.process_worker_event(event);
+            engine.finish_config_reload_operations(&outcome);
+            let record = engine
+                .operations
+                .peek(&id, std::time::Instant::now())
+                .expect("kept");
+            assert_eq!(record.state, state, "{outcome:?}");
+            assert_eq!(record.message, message);
+        }
     }
 
     /// When a follow-up reload (or any deferred command) rides on a reload,
