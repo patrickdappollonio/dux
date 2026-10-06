@@ -24,7 +24,7 @@ fn main() -> Result<()> {
                     format!("{error:#}"),
                 )
             })
-            .and_then(|paths| selection.remote_name(&paths));
+            .and_then(|paths| selection.config_remote_name(&paths, &config.args));
         let remote = match remote {
             Ok(remote) => remote,
             Err(error) => client_commands::finish(Err(error)),

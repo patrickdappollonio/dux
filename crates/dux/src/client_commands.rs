@@ -42,6 +42,35 @@ impl Selection {
         Ok(Remotes::load(&paths.root)?.default)
     }
 
+    /// [`Self::remote_name`] for the `dux config` command `args`. A reset never reads
+    /// remotes.toml, so a broken one cannot stop the reset that removes it; any other
+    /// command that cannot read it says so, with the ways on.
+    pub fn config_remote_name(
+        &self,
+        paths: &DuxPaths,
+        args: &[String],
+    ) -> Result<Option<String>, CliError> {
+        if args.first().is_some_and(|word| word == "reset") {
+            return Ok(connect::selected_remote(
+                self.remote.as_deref(),
+                self.local,
+                Self::variable().as_deref(),
+                None,
+            ));
+        }
+        self.remote_name(paths).map_err(|error| {
+            CliError::new(
+                error.exit,
+                format!(
+                    "{}. dux config reads that file to learn whether a remote is selected: run \
+                     \"dux --local config …\" to go ahead without it, or fix the file (\"dux \
+                     config reset\" removes it, along with config.toml and the logs)",
+                    error.message
+                ),
+            )
+        })
+    }
+
     fn target(&self, paths: &DuxPaths) -> Result<Target, CliError> {
         let remotes = Remotes::load(&paths.root)?;
         connect::choose_target(

@@ -207,6 +207,10 @@ machine instead.
 > `DUX_REMOTE` or a default, it refuses rather than let you think you changed the other
 > machine. Run `dux --local config …` to go ahead.
 
+`dux config` reads the saved remotes only to learn whether one is selected. If that file
+cannot be read, `dux config` stops and names it: `dux --local config …` goes ahead without
+it, and `dux config reset` never reads it (a reset removes it).
+
 The listings of macros, providers, keys, themes and the environment come from the remote's
 own config when a remote is selected, and so do the changes to macros and the
 environment.
