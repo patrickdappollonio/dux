@@ -1584,6 +1584,42 @@ mod tests {
         );
     }
 
+    /// A PANE DIVIDER STILL DRAGS ACROSS THE CARD. The grab lands on the
+    /// divider, which the card does not cover, but widening the left pane drags
+    /// the pointer over the covered grid; the card must leave that drag, and its
+    /// release, to the resize rather than swallow them and strand the divider.
+    #[test]
+    fn a_pane_divider_drags_across_the_take_over_card() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.mouse_layout.body = Rect::new(0, 1, 100, 20);
+        app.mouse_layout.left = Rect::new(0, 1, 20, 20);
+        app.mouse_layout.center = Rect::new(20, 1, 60, 20);
+        app.mouse_layout.right = Rect::new(80, 1, 20, 20);
+        app.mouse_layout.agent_term = Some(Rect::new(21, 2, 58, 18));
+        let at = |kind, column| MouseEvent {
+            kind,
+            column,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), 20));
+        app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), 29));
+        assert_eq!(
+            app.left_width_pct, 30,
+            "dragging the divider over the covered grid must still widen the left pane"
+        );
+
+        app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), 29));
+        assert_eq!(
+            app.mouse_drag, None,
+            "the release over the card ends the drag"
+        );
+    }
+
     /// Pressing the button twice says nothing the second time. The arm is
     /// already placed and spent by the next render, so a second message is dux
     /// reporting the same act twice at a user who pressed a button that had not
