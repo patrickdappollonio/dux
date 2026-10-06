@@ -109,6 +109,7 @@ Subcommands:
                            redact it before sharing.
   dux config reset         Remove config and logs (keeps agents and worktrees)
   dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
+                           (deletes nothing if a program dux started still runs)
   dux config regenerate    Preview a fresh default config (shows diff; [env]
                            and other sensitive values are hidden unless you
                            add --show)
@@ -165,6 +166,35 @@ impl ResetLeftover {
         )
     }
 }
+
+/// Why `reset --all` deleted nothing: programs dux started that are still
+/// running, each with the folder it works in. Carried as the command's error,
+/// so it is printed once and the exit code is 1.
+#[derive(Debug)]
+struct ResetRefused {
+    running: Vec<ResetLeftover>,
+}
+
+impl std::fmt::Display for ResetRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dux config reset --all deleted nothing: {} that dux started still runs. Stop what \
+             is listed, then run the reset again.",
+            if self.running.len() == 1 {
+                "a program"
+            } else {
+                "programs"
+            }
+        )?;
+        for program in &self.running {
+            write!(f, "\n  {}: {}", program.path.display(), program.reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ResetRefused {}
 
 /// The reset itself, answering every folder it had to leave behind. Prints
 /// what it removed as it goes; the caller prints the leftovers and the summary.
@@ -762,6 +792,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     // link in the root is kept when one of these is at or through it.
     let mut recorded_folders: Vec<PathBuf> = Vec::new();
     let mut leftovers: Vec<ResetLeftover> = Vec::new();
+    let seen_welcome = last_seen_welcome(paths);
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
@@ -798,30 +829,22 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                             .extend(projects.iter().map(|project| PathBuf::from(&project.path)));
                     }
                     // What dux started in a folder the reset removes is ended
-                    // first, the way a removal ends it; a folder something
-                    // still runs in is kept and reported. Which folders the
-                    // reset removes is decided first, keeping everything the
-                    // user owns, and the same set decides whose processes end:
-                    // nothing working in a folder that is kept is touched.
+                    // first, the way a removal ends it, and nothing is deleted
+                    // until all of it has stopped: anything still running
+                    // refuses the whole reset. Which folders the reset removes
+                    // is decided first, keeping everything the user owns, and
+                    // the same set decides whose processes end: nothing
+                    // working in a folder that is kept is touched.
                     let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
-                    let kept = end_recorded_processes(paths, &store, &removing);
-                    let kept_folders: Vec<PathBuf> =
-                        kept.iter().map(|leftover| leftover.path.clone()).collect();
-                    leftovers.extend(kept);
+                    let running = end_recorded_processes(paths, &store, &removing);
+                    if !running.is_empty() {
+                        return Err(ResetRefused { running }.into());
+                    }
                     let mut removed = 0usize;
                     for session in &sessions {
                         let Some(managed) = session.workspace.as_managed() else {
                             continue;
                         };
-                        // Kept when something still runs in it, or in a folder
-                        // around it (a session started above the worktree).
-                        let worktree = Path::new(&managed.worktree_path);
-                        if kept_folders.iter().any(|folder| {
-                            dux_core::worktree_ops::folder_contains(worktree, folder)
-                                || dux_core::worktree_ops::folder_contains(folder, worktree)
-                        }) {
-                            continue;
-                        }
                         match remove_session_worktree(paths, managed, &occupied_folders) {
                             SessionWorktreeReset::Removed => removed += 1,
                             SessionWorktreeReset::Skipped => {}
@@ -829,8 +852,6 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                         }
                     }
                     println!("{}", removed_worktrees_line(removed));
-                    recorded_folders.extend(kept_folders.iter().cloned());
-                    occupied_folders.extend(kept_folders);
                 }
                 Err(error) => {
                     eprintln!("warning: could not load sessions from database: {error}");
@@ -857,7 +878,29 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     );
     leftovers.extend(swept);
     remove_file_with_message(&paths.sessions_db_path)?;
+    // The welcome screen was already seen, and a reset does not make it new
+    // again: the fresh database starts with that one record.
+    if let Some(version) = seen_welcome {
+        let kept = SessionStore::open(&paths.sessions_db_path)
+            .and_then(|store| store.set_last_seen_version(&version));
+        if let Err(error) = kept {
+            eprintln!(
+                "warning: could not keep the record that you saw the welcome screen, so it \
+                 opens again on the next start: {error}"
+            );
+        }
+    }
     Ok(leftovers)
+}
+
+/// The release whose welcome screen was last seen, read before the database
+/// is deleted. Absent when there is no database or it holds no such record.
+fn last_seen_welcome(paths: &DuxPaths) -> Option<String> {
+    if !paths.sessions_db_path.exists() {
+        return None;
+    }
+    let store = SessionStore::open(&paths.sessions_db_path).ok()?;
+    store.last_seen_version().ok().flatten()
 }
 
 /// Every folder the reset will remove: each agent's managed worktree under
@@ -1387,10 +1430,9 @@ mod tests {
 
     /// Review 21: a startup command's job that dux left running (recorded in
     /// the saved process registry for agent m1, in m1's worktree) is still
-    /// running when `dux config reset --all` runs. The reset neither ends it
-    /// nor keeps the folder: it removes the worktree out from under it, and the
-    /// registry that recorded it goes with the database, so nothing of dux's
-    /// can ever end it again.
+    /// running when `dux config reset --all` runs. The reset ends it first and
+    /// then removes everything, so nothing is left running in a folder that
+    /// is gone.
     #[test]
     fn review21_factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
         use std::os::unix::process::CommandExt;
@@ -1454,17 +1496,21 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        run_reset(&paths, true).expect("reset");
 
         let still_running = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
         let _ = job.wait();
         assert!(
-            worktree.exists() || !still_running,
-            "the reset removed {} while the dux job recorded there (pid {}) was still running in it",
-            worktree.display(),
+            !still_running,
+            "the recorded dux job (pid {}) was left running",
             job.id()
         );
+        assert!(
+            !worktree.exists(),
+            "its worktree is removed once it stopped"
+        );
+        assert!(!paths.sessions_db_path.exists(), "the database goes too");
     }
 
     /// Review 24: a project whose repository lives under the worktrees root
@@ -1693,9 +1739,10 @@ mod tests {
     }
 
     /// A process a standalone agent's run left in a managed folder is never
-    /// ended by a reset: the folder is kept, and listed with why.
+    /// ended by a reset, so the reset deletes nothing at all and lists the
+    /// process and its folder.
     #[test]
-    fn a_factory_reset_keeps_a_folder_a_recorded_standalone_process_runs_in() {
+    fn a_factory_reset_deletes_nothing_while_a_recorded_standalone_process_runs() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -1738,24 +1785,24 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let leftovers = reset_agent_data(&paths).expect("reset");
+        fs::write(&paths.config_path, "# user config\n").expect("config");
+        let other = paths.worktrees_root.join("other");
+        fs::create_dir_all(&other).expect("other folder");
+
+        let refusal = run_reset(&paths, true).expect_err("the reset refuses");
 
         assert!(
             job.0.try_wait().expect("try_wait").is_none(),
             "the standalone agent's process is left running"
         );
         assert!(folder.exists(), "its folder is kept");
-        assert!(
-            leftovers
-                .iter()
-                .any(|leftover| leftover.path == folder && leftover.reason.contains("standalone")),
-            "and listed with why: {:?}",
-            leftovers
-                .iter()
-                .map(|l| (&l.path, &l.reason))
-                .collect::<Vec<_>>()
-        );
-        assert!(!paths.sessions_db_path.exists(), "the database still goes");
+        assert!(other.exists(), "so is every other folder");
+        assert!(paths.config_path.exists(), "and the config");
+        assert!(paths.sessions_db_path.exists(), "and the database");
+        let message = format!("{refusal:#}");
+        assert!(message.contains(&folder.display().to_string()), "{message}");
+        assert!(message.contains("standalone"), "{message}");
+        assert!(message.contains("deleted nothing"), "{message}");
     }
 
     /// A factory reset must not remove a STANDALONE agent's folder, even when
@@ -2561,14 +2608,34 @@ mod tests {
 
     #[test]
     fn reset_all_wipes_database_and_worktrees() {
-        let harness = ResetHarness::new();
-        harness.write_config_with_log_path("logs/custom.log");
-        harness.write_log("logs/custom.log");
-        harness.create_session("agent-1");
+        for seen in [None, Some("v0.6.0")] {
+            let harness = ResetHarness::new();
+            harness.write_config_with_log_path("logs/custom.log");
+            harness.write_log("logs/custom.log");
+            let worktree = harness.create_session("agent-1");
+            if let Some(version) = seen {
+                SessionStore::open(&harness.paths.sessions_db_path)
+                    .expect("store")
+                    .set_last_seen_version(version)
+                    .expect("record the welcome screen as seen");
+            }
 
-        run_reset(&harness.paths, true).expect("reset");
+            run_reset(&harness.paths, true).expect("reset");
 
-        assert!(!harness.paths.root.exists());
+            assert!(!worktree.exists());
+            assert!(!harness.paths.config_path.exists());
+            match seen {
+                // Nothing to keep: the folder goes with everything else.
+                None => assert!(!harness.paths.root.exists()),
+                // The welcome screen stays dismissed: a fresh database holds
+                // that one record and no agents.
+                Some(version) => {
+                    let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
+                    assert_eq!(store.last_seen_version().unwrap().as_deref(), Some(version));
+                    assert!(store.load_sessions().unwrap().is_empty());
+                }
+            }
+        }
     }
 
     #[test]
