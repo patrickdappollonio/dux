@@ -49,14 +49,54 @@ use axum::serve::IncomingStream;
 
 use crate::exposure::Exposure;
 
-/// The two ends of an accepted connection, as the kernel reported them.
+/// How an accepted connection reached dux, as the kernel reported it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Arrival {
-    /// The client's address (the nearest hop).
-    pub peer: SocketAddr,
-    /// The address dux was reached at: the listener's own address, or for a
-    /// wildcard listener the specific local address the connection used.
-    pub local: SocketAddr,
+pub enum Arrival {
+    /// A web listener: the two ends of the TCP connection.
+    Tcp {
+        /// The client's address (the nearest hop).
+        peer: SocketAddr,
+        /// The address dux was reached at: the listener's own address, or for
+        /// a wildcard listener the specific local address the connection used.
+        local: SocketAddr,
+    },
+    /// The control socket: the connecting process's user, which the listener
+    /// already checked is this process's own. This machine's owner, trusted
+    /// without a Host check, an Origin check or a password, and never slowed
+    /// or banned, since it names no address.
+    Unix { uid: u32 },
+}
+
+impl Arrival {
+    /// The TCP client's address, or `None` over the control socket.
+    pub fn peer(self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp { peer, .. } => Some(peer),
+            Self::Unix { .. } => None,
+        }
+    }
+
+    /// The address dux was reached at, or `None` over the control socket.
+    pub fn local(self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp { local, .. } => Some(local),
+            Self::Unix { .. } => None,
+        }
+    }
+
+    /// Whether this came over the control socket.
+    pub fn is_control_socket(self) -> bool {
+        matches!(self, Self::Unix { .. })
+    }
+}
+
+/// Whether `request` arrived over the control socket, as the serve recorded
+/// it. A request with no recorded arrival is not.
+pub fn over_control_socket<B>(request: &axum::http::Request<B>) -> bool {
+    request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<Arrival>>()
+        .is_some_and(|info| info.0.is_control_socket())
 }
 
 /// A listener that records both ends of each connection it accepts, so a serve
@@ -93,7 +133,7 @@ where
             .io()
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
-        Self {
+        Self::Tcp {
             peer: *stream.remote_addr(),
             local,
         }
@@ -317,6 +357,9 @@ pub enum Via {
     Forwarded,
     /// Plain loopback with no marker and no forwarding header.
     PlainLoopback,
+    /// The control socket: this machine's own user, with no address to slow
+    /// or ban.
+    ControlSocket,
     /// From one of this machine's own non-loopback addresses.
     OwnAddress,
     /// A direct peer that is somebody else.
@@ -397,6 +440,11 @@ pub fn classify(
     let Some(arrival) = facts.arrival else {
         return untrusted_base(facts);
     };
+    let (peer, local) = match arrival {
+        Arrival::Tcp { peer, local } => (peer, local),
+        Arrival::Unix { .. } => return control_socket_client(),
+    };
+    let arrival = Tcp { peer, local };
     let base = Classification {
         via: via(facts, exposure, interfaces, arrival),
         own_network: on_own_network(arrival, exposure, interfaces),
@@ -458,13 +506,38 @@ pub fn classify(
     }
 }
 
+/// The two ends of a TCP arrival, for the rules below, which only TCP reaches.
+#[derive(Clone, Copy)]
+struct Tcp {
+    peer: SocketAddr,
+    local: SocketAddr,
+}
+
+/// This machine's own user over the control socket: encrypted (it never
+/// leaves the machine), naming no address, so nothing about it can be slowed,
+/// banned or written anywhere.
+fn control_socket_client() -> Classification {
+    Classification {
+        class: ClientClass::ThisMachine,
+        named: Vec::new(),
+        verified_ip: None,
+        claimed_ip: None,
+        transport_encrypted: true,
+        https_serve_route: false,
+        unvouched_proxy: false,
+        loopback_distrusted: None,
+        via: Via::ControlSocket,
+        own_network: false,
+    }
+}
+
 /// The network, with every address the request names and the one it claims;
 /// what every untrusted answer starts from.
 fn untrusted_base(facts: &RequestFacts) -> Classification {
     let canonical = dux_core::config_auth::canonical;
     let mut named: Vec<IpAddr> = Vec::new();
-    if let Some(arrival) = facts.arrival {
-        named.push(canonical(arrival.peer.ip()));
+    if let Some(peer) = facts.arrival.and_then(Arrival::peer) {
+        named.push(canonical(peer.ip()));
     }
     named.extend(facts.forwarded_for.iter().copied().map(canonical));
     named.extend(facts.other_named.iter().copied().map(canonical));
@@ -489,7 +562,7 @@ fn untrusted_base(facts: &RequestFacts) -> Classification {
 
 /// Whether `arrival`'s peer shares an IPv6 /64 with any of this machine's own
 /// addresses, read from the same sources as the own-address rule.
-fn on_own_network(arrival: Arrival, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
+fn on_own_network(arrival: Tcp, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
     let canonical = dux_core::config_auth::canonical;
     let prefix = |ip: IpAddr| match canonical(ip) {
         IpAddr::V6(v6) => Some(u128::from(v6) >> 64),
@@ -510,7 +583,7 @@ fn on_own_network(arrival: Arrival, exposure: &Exposure, interfaces: &[IpAddr]) 
 }
 
 /// The route a recorded request took to dux.
-fn via(facts: &RequestFacts, exposure: &Exposure, interfaces: &[IpAddr], arrival: Arrival) -> Via {
+fn via(facts: &RequestFacts, exposure: &Exposure, interfaces: &[IpAddr], arrival: Tcp) -> Via {
     let canonical = dux_core::config_auth::canonical;
     let local = canonical(arrival.local.ip());
     let peer = canonical(arrival.peer.ip());
@@ -532,7 +605,7 @@ fn candidate(
     facts: &RequestFacts,
     exposure: &Exposure,
     interfaces: &[IpAddr],
-    arrival: Arrival,
+    arrival: Tcp,
     base: &Classification,
 ) -> Result<Candidate, Classification> {
     let canonical = dux_core::config_auth::canonical;
@@ -634,7 +707,7 @@ mod tests {
     use dux_core::tailscale::ServeRoute;
 
     fn arrival(peer: &str, local: &str) -> Option<Arrival> {
-        Some(Arrival {
+        Some(Arrival::Tcp {
             peer: peer.parse().unwrap(),
             local: local.parse().unwrap(),
         })

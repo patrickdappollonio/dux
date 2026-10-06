@@ -107,6 +107,7 @@ async fn boot() -> Fixture {
         sessions_db_path: state.join("sessions.sqlite3"),
         worktrees_root: state.join("worktrees"),
         lock_path: state.join("dux.lock"),
+        socket_path: state.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     let mut engine = bootstrap_engine(&paths).unwrap();

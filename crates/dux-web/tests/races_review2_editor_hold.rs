@@ -57,6 +57,7 @@ async fn a_terminal_editor_cannot_write_into_a_worktree_being_removed() {
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {

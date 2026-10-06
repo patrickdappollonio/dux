@@ -4152,7 +4152,7 @@ impl App {
     /// subcommands) and that a losing process never touches shared state.
     pub fn bootstrap_with_lock(
         paths: DuxPaths,
-        single_instance_lock: SingleInstanceLock,
+        mut single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
         let mut config = ensure_config(&paths)?;
 
@@ -4169,6 +4169,13 @@ impl App {
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
+
+        // The lock is held and the config read and accepted: bind the control
+        // socket now, before anything can ask for it. A dux without it still
+        // starts.
+        let paths = paths.with_control_socket(&config.server.control_socket);
+        let socket_warning =
+            dux_core::control_socket::open(&mut single_instance_lock, &paths.socket_path);
 
         // Register the SIGWINCH handler (so resizes are seen even when bypassing
         // crossterm's event reader during interactive mode) and the shutdown
@@ -4206,13 +4213,16 @@ impl App {
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
-        let status = boot_status(
+        let mut status = boot_status(
             Duration::from_secs(config.ui.status_clear_seconds as u64),
             live_status_keys.clone(),
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
             theme_warning,
         );
+        if let Some(message) = socket_warning {
+            status.set(Instant::now(), None, StatusTone::Warning, message);
+        }
         let gh_integration_val = config.ui.github_integration;
         let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
             paths.config_path.clone(),
@@ -4583,6 +4593,7 @@ impl App {
 
         // Stop PTY forwarders while the engine and terminal screen are still owned here.
         self.stop_background_server_quietly();
+        self.release_companion();
         let _ = execute!(
             stdout(),
             DisableMouseCapture,
@@ -4603,6 +4614,7 @@ impl App {
         self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
         // The background server assumes these process-wide workers are already running.
+        self.start_control_socket();
         self.start_background_server_from_config();
     }
 
@@ -8857,6 +8869,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees");
@@ -8907,6 +8920,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -8946,6 +8960,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -8994,6 +9009,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9073,6 +9089,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9120,6 +9137,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9170,6 +9188,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9234,6 +9253,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");

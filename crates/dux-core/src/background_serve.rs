@@ -211,6 +211,13 @@ pub struct ServiceOutcome {
 ///
 /// Every method takes `&mut Engine` rather than holding one: the TUI owns the
 /// engine and lends it for the duration of the call.
+///
+/// Two questions, kept apart: [`Self::has_core`] (is anything served at all,
+/// the control socket included) decides whether the engine is lent, because a
+/// command-line client's request waits on that; [`Self::is_serving`] (is the
+/// web served) decides everything a person sees or a browser drives: the
+/// serving crumb, the connection count, the terminal UI's seat in the PTY
+/// ownership registry, the poll cap and the flip refusal.
 pub trait BackgroundServeCompanion {
     /// Do the companion's share of one drained reaction, before the terminal UI
     /// applies it.
@@ -250,8 +257,22 @@ pub trait BackgroundServeCompanion {
     /// server whether changes it wrote itself are in that text yet.
     fn note_config_applied(&mut self, config: &crate::config::Config);
 
-    /// Whether a listener is serving right now.
+    /// Whether the web is served right now.
     fn is_serving(&self) -> bool;
+
+    /// Whether a core is up: the web served, or the control socket alone.
+    /// While one is, the engine is lent every iteration.
+    fn has_core(&self) -> bool;
+
+    /// Serve the control socket the engine's lock holds, alone, when nothing
+    /// is served yet: the plain terminal UI's core. A no-op when a core is
+    /// already up or dux runs without the socket.
+    fn start_control_socket(&mut self, engine: &mut Engine);
+
+    /// Stop every core, the control socket's included, letting the requests
+    /// the socket already accepted finish first. For leaving the terminal UI:
+    /// a quit, or the flip, whose own core serves the socket next.
+    fn release(&mut self, engine: &mut Engine);
 
     /// The URLs currently being served, for status copy. Empty when not serving.
     fn urls(&self) -> Vec<String>;
@@ -296,8 +317,9 @@ pub trait BackgroundServeCompanion {
     /// serving; the CONFIG write is the caller's, and happens either way.
     fn set_tailscale_mode(&mut self, engine: &Engine, mode: crate::config::TailscaleMode);
 
-    /// Stop serving and release everything the serve owned. A no-op when not
-    /// serving, so a caller never has to check first.
+    /// Stop serving the web and release everything the serve owned, going
+    /// back to serving the control socket alone. A no-op when not serving, so
+    /// a caller never has to check first.
     fn stop(&mut self, engine: &mut Engine);
 
     /// The terminal UI's seat in this serve's PTY-ownership registry, or `None`

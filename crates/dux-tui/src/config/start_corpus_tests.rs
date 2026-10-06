@@ -15,6 +15,7 @@ fn the_terminal_ui_starts_exactly_as_the_start_corpus_says() {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };

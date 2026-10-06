@@ -24,6 +24,7 @@ use std::time::Duration;
 use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
 
+use crate::control_socket::{ControlSocket, Unavailable};
 use crate::io_retry::retry_on_interrupt_errno;
 
 /// Exclusive single-instance lock on the dux config directory.
@@ -32,18 +33,89 @@ use crate::io_retry::retry_on_interrupt_errno;
 /// releases the advisory lock when the file descriptor is closed, including
 /// on process exit via `SIGKILL` or crash, so stale lockfiles never block a
 /// future launch. Only a live peer actively holding the lock will.
+///
+/// The lock also owns the control socket once [`Self::open_control_socket`]
+/// bound it, which is what makes "only the lock holder binds the socket" a
+/// fact of the types rather than of the call sites.
 #[derive(Debug)]
 pub struct SingleInstanceLock {
-    _file: File,
+    file: File,
+    control_socket: ControlSocketState,
+}
+
+/// What the lock holder knows about its control socket, and so what its lock
+/// file says about it.
+#[derive(Debug)]
+enum ControlSocketState {
+    NotOpened,
+    Open(ControlSocket),
+    Unavailable(String),
 }
 
 impl Drop for SingleInstanceLock {
     fn drop(&mut self) {
+        // A clean exit takes the socket file and its line with it, before the
+        // lock is let go, so the next holder never finds a socket of ours.
+        if !matches!(self.control_socket, ControlSocketState::NotOpened) {
+            self.control_socket = ControlSocketState::NotOpened;
+            self.rewrite();
+        }
         // The kernel also releases the advisory lock when the file
         // descriptor closes, but explicitly unlocking here makes the
         // handoff point deterministic for tests and avoids depending on
         // close-side timing alone.
-        let _ = retry_on_interrupt_errno(|| flock(&self._file, FlockOperation::Unlock));
+        let _ = retry_on_interrupt_errno(|| flock(&self.file, FlockOperation::Unlock));
+    }
+}
+
+impl SingleInstanceLock {
+    /// Bind the control socket at `path` and say so in the lock file, as
+    /// `control-socket=<path>`; when it cannot be bound, say why instead, as
+    /// `control-socket-unavailable=<reason>`. A dead socket at the path is
+    /// replaced; anything else there is left alone.
+    pub fn open_control_socket(&mut self, path: &Path) -> Result<(), Unavailable> {
+        let result = match ControlSocket::bind(path) {
+            Ok(socket) => {
+                self.control_socket = ControlSocketState::Open(socket);
+                Ok(())
+            }
+            Err(reason) => {
+                self.control_socket = ControlSocketState::Unavailable(reason.to_string());
+                Err(reason)
+            }
+        };
+        self.rewrite();
+        result
+    }
+
+    /// The bound control socket, when there is one.
+    pub fn control_socket(&self) -> Option<&ControlSocket> {
+        match &self.control_socket {
+            ControlSocketState::Open(socket) => Some(socket),
+            ControlSocketState::NotOpened | ControlSocketState::Unavailable(_) => None,
+        }
+    }
+
+    /// Replace the lock file's text with what this holder knows now.
+    /// Best-effort like the first write: the lock itself is the `flock`.
+    fn rewrite(&mut self) {
+        let mut text = lock_file_text(std::process::id());
+        match &self.control_socket {
+            ControlSocketState::NotOpened => {}
+            ControlSocketState::Open(socket) => {
+                text.push_str(&format!(
+                    "{CONTROL_SOCKET_PREFIX}{}\n",
+                    socket.path().display()
+                ));
+            }
+            ControlSocketState::Unavailable(reason) => {
+                text.push_str(&format!("{CONTROL_SOCKET_UNAVAILABLE_PREFIX}{reason}\n"));
+            }
+        }
+        let _ = self.file.set_len(0);
+        let _ = self.file.seek(SeekFrom::Start(0));
+        let _ = self.file.write_all(text.as_bytes());
+        let _ = self.file.flush();
     }
 }
 
@@ -144,7 +216,10 @@ impl SingleInstanceLock {
                 let _ = file.seek(SeekFrom::Start(0));
                 let _ = file.write_all(lock_file_text(std::process::id()).as_bytes());
                 let _ = file.flush();
-                Ok(Self { _file: file })
+                Ok(Self {
+                    file,
+                    control_socket: ControlSocketState::NotOpened,
+                })
             }
             Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
                 // Someone else owns the lock. Read their PID so the caller
@@ -227,13 +302,24 @@ fn lock_file_text(pid: u32) -> String {
     }
 }
 
+/// The line a dux adds to its lock file once its control socket is bound,
+/// followed by the socket's path.
+pub const CONTROL_SOCKET_PREFIX: &str = "control-socket=";
+
+/// The line a dux adds instead when it could not bind its control socket,
+/// followed by the reason.
+pub const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unavailable=";
+
 /// A lock file's contents as written by any dux: the holder's PID on the
-/// first line (the whole file, for a dux from before the marker), and
-/// whether a later line says it handles the reload signal.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// first line (the whole file, for a dux from before the marker), whether a
+/// later line says it handles the reload signal, and where its control socket
+/// is or why it has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFileContents {
     pub pid: Option<u32>,
     pub handles_reload_signal: bool,
+    pub control_socket: Option<PathBuf>,
+    pub control_socket_unavailable: Option<String>,
 }
 
 impl LockFileContents {
@@ -242,11 +328,20 @@ impl LockFileContents {
         let pid = lines
             .next()
             .and_then(|line| line.trim().parse::<u32>().ok());
-        let handles_reload_signal = lines.any(|line| line.trim() == RELOAD_SIGNAL_MARKER);
-        Self {
+        let mut contents = Self {
             pid,
-            handles_reload_signal,
+            ..Self::default()
+        };
+        for line in lines {
+            if line.trim() == RELOAD_SIGNAL_MARKER {
+                contents.handles_reload_signal = true;
+            } else if let Some(reason) = line.strip_prefix(CONTROL_SOCKET_UNAVAILABLE_PREFIX) {
+                contents.control_socket_unavailable = Some(reason.to_string());
+            } else if let Some(path) = line.strip_prefix(CONTROL_SOCKET_PREFIX) {
+                contents.control_socket = Some(PathBuf::from(path));
+            }
         }
+        contents
     }
 }
 
@@ -274,11 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn acquire_writes_own_pid_to_lockfile() {
+    fn acquire_writes_own_pid_and_the_control_socket_to_the_lockfile() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");
 
-        let _lock = SingleInstanceLock::acquire(&path).expect("first acquire should succeed");
+        let mut lock = SingleInstanceLock::acquire(&path).expect("first acquire should succeed");
         let contents = fs::read_to_string(&path).unwrap();
         let written = LockFileContents::parse(&contents).pid;
         assert_eq!(
@@ -290,6 +386,112 @@ mod tests {
             contents.starts_with(&format!("{}\n", std::process::id())),
             "the PID is the whole first line: {contents:?}"
         );
+
+        let socket = tmp.path().join("dux.sock");
+        lock.open_control_socket(&socket)
+            .expect("a short path in an owner-only folder binds");
+        let meta = fs::symlink_metadata(&socket).unwrap();
+        assert!(meta.file_type().is_socket());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.starts_with(&format!("{}\n", std::process::id())),
+            "the PID stays the first line: {contents:?}"
+        );
+        assert!(
+            contents.contains(&format!("control-socket={}\n", socket.display())),
+            "{contents:?}"
+        );
+        std::os::unix::net::UnixStream::connect(&socket).expect("the socket accepts");
+        drop(lock);
+
+        let mut lock = SingleInstanceLock::acquire(&path).expect("acquire again");
+        let long = tmp.path().join("x".repeat(120)).join("dux.sock");
+        let warning = crate::control_socket::open(&mut lock, &long)
+            .expect("a path past the platform limit starts dux without the socket");
+        let contents = fs::read_to_string(&path).unwrap();
+        let parsed = LockFileContents::parse(&contents);
+        assert_eq!(parsed.control_socket, None, "{contents:?}");
+        let reason = parsed
+            .control_socket_unavailable
+            .expect("the lock file says why");
+        assert!(reason.contains("too long"), "{reason}");
+        assert!(warning.contains(&reason), "{warning}");
+        assert!(warning.contains("[server] control_socket"), "{warning}");
+        assert!(!contents.contains("\ncontrol-socket="), "{contents:?}");
+    }
+
+    /// A clean exit takes the socket file and its line in the lock file with it.
+    #[test]
+    fn releasing_the_lock_removes_the_socket_and_its_line() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        let socket = tmp.path().join("dux.sock");
+        let mut lock = SingleInstanceLock::acquire(&path).unwrap();
+        lock.open_control_socket(&socket).unwrap();
+
+        drop(lock);
+
+        assert!(!socket.exists(), "the socket file is removed");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(LockFileContents::parse(&contents).control_socket, None);
+        assert!(!contents.contains("control-socket"), "{contents:?}");
+    }
+
+    /// The next lock holder replaces a socket a crashed dux left behind, and
+    /// leaves alone anything at the path that is not a dead socket.
+    #[test]
+    fn a_leftover_socket_is_replaced_and_anything_else_is_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        let socket = tmp.path().join("dux.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let leftover = fs::symlink_metadata(&socket).unwrap().ino();
+
+        let mut lock = SingleInstanceLock::acquire(&path).unwrap();
+        lock.open_control_socket(&socket)
+            .expect("a dead socket is replaced");
+        assert_ne!(fs::symlink_metadata(&socket).unwrap().ino(), leftover);
+        std::os::unix::net::UnixStream::connect(&socket).expect("the new socket accepts");
+        drop(lock);
+
+        let file = tmp.path().join("notes.txt");
+        fs::write(&file, "keep me").unwrap();
+        let mut lock = SingleInstanceLock::acquire(&path).unwrap();
+        assert!(lock.open_control_socket(&file).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep me");
+
+        let live = tmp.path().join("live.sock");
+        let _serving = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        let serving_ino = fs::symlink_metadata(&live).unwrap().ino();
+        assert!(lock.open_control_socket(&live).is_err());
+        assert_eq!(fs::symlink_metadata(&live).unwrap().ino(), serving_ino);
+    }
+
+    /// A dux that loses the lock race cannot reach the socket the winner holds.
+    #[test]
+    fn the_loser_of_the_lock_never_touches_the_winners_socket() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        let socket = tmp.path().join("dux.sock");
+        let mut winner = SingleInstanceLock::acquire(&path).unwrap();
+        winner.open_control_socket(&socket).unwrap();
+        let ino = fs::symlink_metadata(&socket).unwrap().ino();
+
+        let lost = SingleInstanceLock::acquire(&path);
+        assert!(matches!(lost, Err(AcquireError::AlreadyRunning { .. })));
+        drop(lost);
+
+        assert_eq!(fs::symlink_metadata(&socket).unwrap().ino(), ino);
+        std::os::unix::net::UnixStream::connect(&socket).expect("still serving");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            LockFileContents::parse(&contents).control_socket,
+            Some(socket.clone())
+        );
+        drop(winner);
     }
 
     /// A lock file from before the marker is the PID alone; one from now
@@ -300,17 +502,37 @@ mod tests {
             LockFileContents::parse("1234"),
             LockFileContents {
                 pid: Some(1234),
-                handles_reload_signal: false
+                handles_reload_signal: false,
+                ..LockFileContents::default()
             }
         );
         assert_eq!(
             LockFileContents::parse(&format!("1234\n{RELOAD_SIGNAL_MARKER}\n")),
             LockFileContents {
                 pid: Some(1234),
-                handles_reload_signal: true
+                handles_reload_signal: true,
+                ..LockFileContents::default()
             }
         );
         assert_eq!(LockFileContents::parse("").pid, None);
+        let with_socket = LockFileContents::parse(&format!(
+            "1234\n{RELOAD_SIGNAL_MARKER}\ncontrol-socket=/home/me/.config/dux/dux.sock\n"
+        ));
+        assert_eq!(with_socket.pid, Some(1234));
+        assert!(with_socket.handles_reload_signal);
+        assert_eq!(
+            with_socket.control_socket,
+            Some(PathBuf::from("/home/me/.config/dux/dux.sock"))
+        );
+        assert_eq!(with_socket.control_socket_unavailable, None);
+        let without = LockFileContents::parse(
+            "1234\ncontrol-socket-unavailable=binding /x/dux.sock failed: Permission denied\n",
+        );
+        assert_eq!(without.control_socket, None);
+        assert_eq!(
+            without.control_socket_unavailable.as_deref(),
+            Some("binding /x/dux.sock failed: Permission denied")
+        );
     }
 
     /// The marker is written only by a process whose reload handler is in

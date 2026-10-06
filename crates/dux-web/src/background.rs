@@ -40,7 +40,9 @@ pub struct BackgroundServer {
     last_command_applies: u64,
     /// This serve's PTY-ownership registry and the terminal UI's seat in it, taken
     /// at start. Both die with the serve, which is what releases everything on stop.
-    ownership: dux_core::background_serve::TuiOwnership,
+    /// `None` for a core that serves only the control socket, which serves no
+    /// terminal and so gives the terminal UI no seat.
+    ownership: Option<dux_core::background_serve::TuiOwnership>,
     /// The two buses this serve announces the terminal UI's ownership changes on,
     /// filled by `build_app`. Empty is survivable: nothing is announced and
     /// browsers fall back to the fingerprint backstop and the handshake.
@@ -50,6 +52,10 @@ pub struct BackgroundServer {
     /// rendered frame from the thread that also services this serve.
     connections: Arc<AtomicUsize>,
 }
+
+/// How long a hand-over waits for the control socket's accepted requests to be
+/// answered before the core stops anyway.
+const HAND_OVER_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Choose between the live address list and the one captured at start.
 ///
@@ -112,6 +118,7 @@ impl BackgroundServer {
         let core = ServeCore::start(
             handle,
             listeners,
+            crate::control_socket::listener_of(engine),
             &engine.config,
             console,
             // The access log would print to a console that writes nowhere, and it
@@ -129,12 +136,55 @@ impl BackgroundServer {
             shutdown_flag,
             urls,
             last_command_applies: engine.command_applies,
-            ownership,
+            ownership: Some(ownership),
             publisher,
             connections,
         };
         server.publish_ownership_events(&seeded_claims);
         Ok(server)
+    }
+
+    /// Serve only the control socket `engine`'s lock holds: the plain terminal
+    /// UI's core, so a command-line client can reach a dux that serves no web
+    /// UI. `None` when dux runs without the socket. It claims no terminal,
+    /// counts no connection and serves nothing a browser could open.
+    pub fn start_control_only(engine: &mut Engine) -> Result<Option<Self>> {
+        let Some(control) = crate::control_socket::listener_of(engine) else {
+            return Ok(None);
+        };
+        let (handle, ends) = build_actor_channels(engine);
+        let shutdown_flag = handle.shutdown_flag();
+        let service = EngineService::new(engine, ends, ShutdownEcho::Silent);
+        let core = ServeCore::start_control_only(handle, control, &engine.config)?;
+        Ok(Some(Self {
+            core,
+            service,
+            shutdown_flag,
+            urls: Vec::new(),
+            last_command_applies: engine.command_applies,
+            ownership: None,
+            publisher: Arc::new(std::sync::OnceLock::new()),
+            connections: Arc::new(AtomicUsize::new(0)),
+        }))
+    }
+
+    /// Whether this serves the web UI, rather than only the control socket.
+    pub fn serves_web(&self) -> bool {
+        self.ownership.is_some()
+    }
+
+    /// Stop serving, first letting the control socket finish the requests it
+    /// already accepted, servicing `engine` meanwhile (bounded). A connection
+    /// that arrives from then on waits in the socket's backlog for the next
+    /// core, so moving between cores loses no command-line request.
+    pub fn hand_over(mut self, engine: &mut Engine) -> Option<anyhow::Error> {
+        self.core.stop_control_socket();
+        let deadline = std::time::Instant::now() + HAND_OVER_BOUND;
+        while !self.core.control_socket_drained() && std::time::Instant::now() < deadline {
+            self.service(engine);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        self.stop()
     }
 
     /// How many browser tabs are connected to this serve right now. Connections,
@@ -225,8 +275,9 @@ impl BackgroundServer {
         self.core.tailscale_mode()
     }
 
-    /// The terminal UI's seat in this serve's PTY-ownership registry.
-    pub fn ownership(&self) -> dux_core::background_serve::TuiOwnership {
+    /// The terminal UI's seat in this serve's PTY-ownership registry, or
+    /// `None` for a core that serves only the control socket.
+    pub fn ownership(&self) -> Option<dux_core::background_serve::TuiOwnership> {
         self.ownership.clone()
     }
 
@@ -283,6 +334,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -332,6 +384,57 @@ mod tests {
             .ok_or_else(|| "the server closed without answering".to_string())
     }
 
+    /// Send `GET <uri>` over the control socket at `path` on its own thread,
+    /// so it can be sent before anything serves the socket.
+    fn request_over_socket(
+        path: &std::path::Path,
+        uri: &str,
+    ) -> std::thread::JoinHandle<Result<String, String>> {
+        use std::io::{Read, Write};
+        let path = path.to_path_buf();
+        let uri = uri.to_string();
+        std::thread::spawn(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)
+                .map_err(|e| format!("connect failed: {e}"))?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                .map_err(|e| e.to_string())?;
+            write!(
+                stream,
+                "GET {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\r\n"
+            )
+            .map_err(|e| format!("write failed: {e}"))?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|e| format!("read failed: {e}"))?;
+            Ok(response)
+        })
+    }
+
+    /// Service `server` the way the terminal UI's loop does until `request`
+    /// has its answer.
+    fn serviced_until_answered(
+        server: &mut BackgroundServer,
+        engine: &mut dux_core::engine::Engine,
+        request: std::thread::JoinHandle<Result<String, String>>,
+    ) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !request.is_finished() && std::time::Instant::now() < deadline {
+            server.service(engine);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        request
+            .join()
+            .expect("the request thread")
+            .expect("the request was answered")
+    }
+
+    fn socket_inode(path: &std::path::Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).expect("the socket").ino()
+    }
+
     /// The address list the terminal UI shows has to follow the legs, not the
     /// snapshot the flip handed over: the Tailscale leg comes and goes under a
     /// running serve, and a remembered list keeps naming an address that stopped
@@ -363,31 +466,73 @@ mod tests {
     /// The runtime is the reaper for everything `build_app` spawns, so this is
     /// also what stops a toggle cycle from leaving a second changed-files poller
     /// or a second event-bus forwarder running beside the first.
+    ///
+    /// The control socket rides through it: the plain terminal UI's core serves
+    /// it alone, each serve takes it over, and a request sent while nothing
+    /// serves it is answered by whichever core comes next, on the same socket.
     #[test]
     fn a_toggle_cycle_stops_serving_and_starts_a_fresh_app() {
         let (mut engine, _tmp) = engine_in_tempdir();
         // Not a test about Tailscale: on any other mode every request waits on
         // the first Funnel check, which would consult this machine's real CLI.
         engine.config.server.tailscale = "no".to_string();
+        let socket = engine.paths.root.join("dux.sock");
+        assert_eq!(
+            dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),
+            None
+        );
+        let bound = socket_inode(&socket);
+
+        let mut plain = BackgroundServer::start_control_only(&mut engine)
+            .expect("the socket core starts")
+            .expect("dux holds a control socket");
+        assert!(!plain.serves_web());
+        assert!(plain.ownership().is_none(), "the socket core claims no pty");
+        let answer = serviced_until_answered(
+            &mut plain,
+            &mut engine,
+            request_over_socket(&socket, "/api/v1/workspace"),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert!(answer.contains("\"projects\""), "{answer}");
+        assert!(plain.hand_over(&mut engine).is_none());
+        let waiting = request_over_socket(&socket, "/api/v1/workspace");
 
         let (listener, first_addr) = loopback_listener();
-        let server = BackgroundServer::start(
+        let mut server = BackgroundServer::start(
             &mut engine,
             vec![listener],
             vec![format!("http://{first_addr}")],
             false,
         )
         .expect("the first serve starts");
+        let answer = serviced_until_answered(&mut server, &mut engine, waiting);
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "a request sent between cores is answered by the next: {answer}"
+        );
+        assert_eq!(socket_inode(&socket), bound, "the same bound socket");
         let status = healthz(first_addr).expect("the first serve answers");
         assert!(
             status.contains("200"),
             "a started background server must answer on its own address, got {status:?}"
         );
-        assert!(server.stop().is_none(), "a clean stop records no failure");
+        assert!(
+            server.hand_over(&mut engine).is_none(),
+            "a clean stop records no failure"
+        );
         assert!(
             healthz(first_addr).is_err(),
             "the stopped serve must not still be accepting on {first_addr}"
         );
+        let waiting = request_over_socket(&socket, "/api/v1/workspace");
+        let mut plain = BackgroundServer::start_control_only(&mut engine)
+            .expect("the socket core starts again")
+            .expect("dux still holds its control socket");
+        let answer = serviced_until_answered(&mut plain, &mut engine, waiting);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert_eq!(socket_inode(&socket), bound, "the same bound socket");
+        assert!(plain.hand_over(&mut engine).is_none());
 
         // Toggling back on builds a fresh app rather than reviving the old one.
         let (listener, second_addr) = loopback_listener();

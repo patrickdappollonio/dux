@@ -997,6 +997,7 @@ port = 3890
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         if let Some(body) = body {
             std::fs::write(&paths.config_path, body).expect("seed");
@@ -1749,6 +1750,7 @@ mod set_speaks_per_surface_tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         // Port 0 with no background server: only `dux server` refuses it, and
         // its --port overrides it.
@@ -1798,6 +1800,7 @@ mod set_speaks_per_surface_tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         // An environment variable the terminal UI refuses; dux server does not.
         std::fs::write(&paths.config_path, "[env]\nFOO = \"${\"\n").unwrap();
@@ -1849,6 +1852,7 @@ mod names_fields_and_per_surface_get_tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::write(&paths.config_path, body).unwrap();
         (tmp, paths)
@@ -2007,6 +2011,7 @@ mod overridable_problems_name_their_flag_tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::write(&paths.config_path, "[server]\nhost = \"localhost\"\n").unwrap();
         let args: Vec<String> = ["ui.left_width_pct", "30"]
@@ -2047,6 +2052,7 @@ mod overridable_problems_name_their_flag_tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::write(&paths.config_path, "[server]\nhost = \"localhost\"\n").unwrap();
         let mut out = Vec::new();

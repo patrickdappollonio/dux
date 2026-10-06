@@ -528,9 +528,15 @@ impl AuthState {
             &classification,
             &own_addresses(&exposure, &interfaces, facts.arrival),
         );
-        let cookie_port = facts.arrival.map_or(0, |arrival| arrival.local.port());
+        let cookie_port = facts
+            .arrival
+            .and_then(Arrival::local)
+            .map_or(0, |local| local.port());
+        // The control socket carries no cookie: its client is this machine's
+        // own user, who never needs a session.
+        let over_socket = facts.arrival.is_some_and(Arrival::is_control_socket);
         let mut session = None;
-        let presented: Vec<TokenDigest> = if snapshot.has_password() {
+        let presented: Vec<TokenDigest> = if snapshot.has_password() && !over_socket {
             cookie::read_all(headers, cookie_port)
                 .iter()
                 .filter_map(|value| dux_core::web_sessions::digest_of(value))
@@ -551,8 +557,9 @@ impl AuthState {
                 )
             });
         }
-        let required =
-            snapshot.has_password() && required_by(snapshot.config.require, classification.class);
+        let required = snapshot.has_password()
+            && !over_socket
+            && required_by(snapshot.config.require, classification.class);
         Assessment {
             snapshot,
             facts,
@@ -987,7 +994,11 @@ fn own_addresses(
     arrival: Option<Arrival>,
 ) -> Vec<IpAddr> {
     let mut own = interfaces.to_vec();
-    own.extend(arrival.map(|arrival| dux_core::config_auth::canonical(arrival.local.ip())));
+    own.extend(
+        arrival
+            .and_then(Arrival::local)
+            .map(|local| dux_core::config_auth::canonical(local.ip())),
+    );
     if let Some(facts) = &exposure.identity {
         own.extend(
             facts
@@ -1150,7 +1161,7 @@ mod tests {
             .expect("the section is broken");
         let status_of = |peer: &str, local: &str| {
             let facts = RequestFacts::of(
-                Some(Arrival {
+                Some(Arrival::Tcp {
                     peer: peer.parse().unwrap(),
                     local: local.parse().unwrap(),
                 }),

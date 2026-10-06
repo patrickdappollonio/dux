@@ -27,6 +27,7 @@ fn set_says_the_terminal_ui_will_not_start_with_a_file_it_refuses() {
         sessions_db_path: dir.join("sessions.sqlite3"),
         worktrees_root: dir.join("worktrees"),
         lock_path: dir.join("dux.lock"),
+        socket_path: dir.join("dux.sock"),
     };
     let text = "keys = { generate_commit_message = \"ctrl-y\" }\n";
     std::fs::write(&paths.config_path, text).expect("seed");

@@ -808,6 +808,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("lock"),
+            socket_path: root.join("dux.sock"),
         };
         let sessions = vec![AgentSession {
             id: "session-1".to_string(),
@@ -931,6 +932,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("lock"),
+            socket_path: root.join("dux.sock"),
         };
         // Reached through a symlink, to prove the comparison is canonical.
         let link = root.join("link-to-occupied");

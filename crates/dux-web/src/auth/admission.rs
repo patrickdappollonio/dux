@@ -90,6 +90,11 @@ impl TrackKey {
     /// any) and the shared bucket. This is the only place a key is made, so a
     /// claim can never become a verified key.
     fn of(c: &Classification) -> Vec<Self> {
+        // This machine's own user over the control socket names no address,
+        // so there is nothing to count its failures against.
+        if c.via == Via::ControlSocket {
+            return Vec::new();
+        }
         let canonical = dux_core::config_auth::canonical;
         if let Some(ip) = c.verified_ip {
             let ip = canonical(ip);
@@ -208,6 +213,7 @@ impl HeldBy {
             Self::Route(Via::PlainLoopback) => "over loopback",
             Self::Route(Via::OwnAddress) => "from this machine's own addresses",
             Self::Route(Via::Direct) => "from addresses dux cannot verify",
+            Self::Route(Via::ControlSocket) => "over the control socket",
             Self::Network => "from the network",
         }
     }
@@ -946,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn this_machine_and_loopback_are_slowed_but_never_blocked() {
+    fn loopback_is_slowed_but_never_blocked_and_the_control_socket_is_never_slowed() {
         let a = Admission::default();
         let c = ServerAuthConfig {
             failed_login_delay_seconds: 0,
@@ -973,6 +979,15 @@ mod tests {
         // Nothing to block for a forwarded request with no readable address.
         let unknown = from(ClientClass::Network, "garbage");
         assert_eq!(a.record_failure(&c, &unknown, t0), Strike::Counted);
+        // This machine's own user over the control socket names no address.
+        let socket = Classification {
+            via: Via::ControlSocket,
+            ..from(ClientClass::ThisMachine, "none")
+        };
+        for _ in 0..5 {
+            assert_eq!(a.record_failure(&slowed, &socket, t0), Strike::Counted);
+        }
+        assert_eq!(a.check(&slowed, &socket, t0), Ok(()), "never waits");
     }
 
     #[test]

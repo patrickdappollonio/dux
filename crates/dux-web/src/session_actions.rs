@@ -1064,6 +1064,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         std::fs::write(
@@ -1192,6 +1193,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -1330,6 +1332,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let project_dir = tmp.path().join("plain-project");

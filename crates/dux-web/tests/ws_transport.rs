@@ -56,6 +56,7 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -148,6 +149,7 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -433,6 +435,7 @@ async fn boot_for_create_agent_window(
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -647,6 +650,7 @@ async fn boot_with_gated_startup_command() -> (
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -1502,6 +1506,7 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {

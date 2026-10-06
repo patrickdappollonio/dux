@@ -10,6 +10,7 @@ fn paths(dir: &std::path::Path) -> DuxPaths {
         sessions_db_path: dir.join("sessions.sqlite3"),
         worktrees_root: dir.join("worktrees"),
         lock_path: dir.join("dux.lock"),
+        socket_path: dir.join("dux.sock"),
     }
 }
 

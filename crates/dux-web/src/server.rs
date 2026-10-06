@@ -972,6 +972,11 @@ pub fn build_app(
             allowlist = allowlist.without_host_rules();
         }
         crate::host_guard::host_allowlist_layer(router, allowlist)
+            // Outermost of all: the control socket's route set is decided
+            // before anything else reads the request.
+            .layer(middleware::from_fn(
+                crate::control_socket::control_socket_routes,
+            ))
     }
 }
 
@@ -1106,7 +1111,11 @@ async fn rest_mutation_origin_check(request: Request, next: Next) -> Response {
         *request.method(),
         Method::POST | Method::PATCH | Method::PUT | Method::DELETE
     );
-    if is_mutation && !same_origin_allowed(request.headers()) {
+    // No browser reaches the control socket, so no other site can either.
+    if is_mutation
+        && !crate::auth::provenance::over_control_socket(&request)
+        && !same_origin_allowed(request.headers())
+    {
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     next.run(request).await
@@ -3893,6 +3902,7 @@ mod tests {
             sessions_db_path: tmp.join("sessions.sqlite3"),
             worktrees_root: tmp.join("worktrees"),
             lock_path: tmp.join("dux.lock"),
+            socket_path: tmp.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
@@ -4208,6 +4218,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {
@@ -6926,6 +6937,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {

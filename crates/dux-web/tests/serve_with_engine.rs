@@ -61,6 +61,7 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -105,14 +106,59 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
     (engine, tmp)
 }
 
+/// Send `GET <uri>` over the control socket at `path` on its own thread, so it
+/// can be sent while nothing serves the socket and wait in its backlog.
+fn request_over_socket(
+    path: &std::path::Path,
+    uri: &str,
+) -> std::thread::JoinHandle<Result<String, String>> {
+    use std::io::{Read, Write};
+    let path = path.to_path_buf();
+    let uri = uri.to_string();
+    std::thread::spawn(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(&path)
+            .map_err(|e| format!("connect failed: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|e| e.to_string())?;
+        write!(
+            stream,
+            "GET {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\r\n"
+        )
+        .map_err(|e| format!("write failed: {e}"))?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|e| format!("read failed: {e}"))?;
+        Ok(response)
+    })
+}
+
+fn socket_inode(path: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).expect("the socket").ino()
+}
+
 /// A ws client connects to `/ws/events` and receives the `connected` handshake
 /// frame, then a programmatic `ReturnToTui` tick stops serving: the engine comes
 /// back (proved by the returned `ServerExit::ReturnToTui` and a surviving
 /// in-memory terminal), and the port can be re-bound (the server is actually down
 /// and released it).
+///
+/// The control socket rides through the flip and back: a request sent before
+/// the flip serves is answered by the flip, one sent while it serves too, and
+/// one sent after it returned is answered by the terminal UI's own core, all on
+/// the one socket bound before any of it.
 #[tokio::test]
 async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (mut engine, _tmp) = build_engine();
+    let socket = engine.paths.root.join("dux.sock");
+    assert_eq!(
+        dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),
+        None
+    );
+    let bound = socket_inode(&socket);
+    let before_the_flip = request_over_socket(&socket, "/api/v1/workspace");
 
     // Create a live companion terminal BEFORE serving so we can prove the
     // ReturnToTui path preserves running PTYs (the engine is never dropped).
@@ -139,7 +185,8 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     // dedicated thread (the engine is `!Send`, hence we build it here too). The
     // thread reports back only `Send` values: the exit reason plus a flag for
     // whether the live terminal survived the round-trip.
-    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, String)>();
+    let socket_for_thread = socket.clone();
     let serve_thread = std::thread::spawn(move || {
         let (returned_engine, exit) = serve_with_engine(
             engine,
@@ -168,8 +215,37 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
             Some(t) => !t.client.is_exited() && t.client.write_bytes(b"ping\n").is_ok(),
             None => false,
         };
-        result_tx.send((exit, survived)).unwrap();
+
+        // Back under the terminal UI: a request sent before its core is up
+        // waits for it.
+        let mut engine = returned_engine;
+        let after_the_flip = request_over_socket(&socket_for_thread, "/api/v1/workspace");
+        let mut core = dux_web::background::BackgroundServer::start_control_only(&mut engine)
+            .expect("the socket core starts")
+            .expect("the engine still holds its socket");
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !after_the_flip.is_finished() && std::time::Instant::now() < deadline {
+            core.service(&mut engine);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let answer = after_the_flip
+            .join()
+            .unwrap()
+            .unwrap_or_else(|e| format!("unanswered: {e}"));
+        let _ = core.hand_over(&mut engine);
+        result_tx.send((exit, survived, answer)).unwrap();
     });
+
+    let answer = before_the_flip
+        .join()
+        .unwrap()
+        .expect("a request sent before the flip is answered by it");
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    let answer = request_over_socket(&socket, "/api/v1/workspace")
+        .join()
+        .unwrap()
+        .expect("the flip answers on the socket");
+    assert!(answer.contains("\"projects\""), "{answer}");
 
     // Connect a ws client to `/ws/events` and confirm the `connected` handshake
     // frame arrives, proof the socket is live. All data (the session spine, its
@@ -193,9 +269,15 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     stop.store(true, Ordering::SeqCst);
 
     // The serve thread should return promptly with the engine intact.
-    let (exit, survived) = result_rx
-        .recv_timeout(Duration::from_secs(10))
+    let (exit, survived, after_the_flip) = result_rx
+        .recv_timeout(Duration::from_secs(30))
         .expect("serve thread reported a result");
+    assert!(
+        after_the_flip.starts_with("HTTP/1.1 200"),
+        "a request sent after the flip returned is answered by the terminal UI's core: \
+         {after_the_flip}"
+    );
+    assert_eq!(socket_inode(&socket), bound, "the same bound socket");
     assert!(
         matches!(exit, ServerExit::ReturnToTui),
         "expected ReturnToTui exit"

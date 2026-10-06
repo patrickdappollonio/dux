@@ -26,6 +26,7 @@ fn setup(body: Option<&str>) -> (tempfile::TempDir, DuxPaths) {
         sessions_db_path: tmp.path().join("sessions.sqlite3"),
         worktrees_root: tmp.path().join("worktrees"),
         lock_path: tmp.path().join("dux.lock"),
+        socket_path: tmp.path().join("dux.sock"),
     };
     if let Some(body) = body {
         std::fs::write(&paths.config_path, body).expect("seed");

@@ -324,6 +324,7 @@ mod tests {
             sessions_db_path: cfg_root.path().join("sessions.sqlite3"),
             worktrees_root: cfg_root.path().join("worktrees"),
             lock_path: cfg_root.path().join("dux.lock"),
+            socket_path: cfg_root.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();

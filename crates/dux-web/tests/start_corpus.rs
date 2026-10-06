@@ -15,6 +15,7 @@ fn dux_server_starts_exactly_as_the_start_corpus_says() {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::write(&paths.config_path, &case.text).expect("seed");
         // As `dux server` starts: the config read, the listener plan with no

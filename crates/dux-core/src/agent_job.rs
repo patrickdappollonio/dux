@@ -2175,6 +2175,7 @@ mod tests {
             sessions_db_path: paths_root.path().join("sessions.sqlite3"),
             worktrees_root: paths_root.path().join("worktrees"),
             lock_path: paths_root.path().join("dux.lock"),
+            socket_path: paths_root.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         setup(&paths);
@@ -2439,6 +2440,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
             root: tmp.path().to_path_buf(),
         };
         let (tx, rx) = std::sync::mpsc::channel();

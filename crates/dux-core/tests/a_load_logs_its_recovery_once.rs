@@ -10,6 +10,7 @@ fn a_load_logs_its_recovery_once_whatever_read_the_file_before() {
         sessions_db_path: dir.path().join("sessions.sqlite3"),
         worktrees_root: dir.path().join("worktrees"),
         lock_path: dir.path().join("dux.lock"),
+        socket_path: dir.path().join("dux.sock"),
     };
     let logging = dux_core::config::LoggingConfig {
         path: dir.path().join("dux.log").to_string_lossy().into_owned(),

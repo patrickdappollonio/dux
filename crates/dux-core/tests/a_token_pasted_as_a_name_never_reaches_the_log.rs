@@ -13,6 +13,7 @@ fn a_token_pasted_as_an_env_name_is_not_written_to_dux_log() {
         sessions_db_path: dir.path().join("sessions.sqlite3"),
         worktrees_root: dir.path().join("worktrees"),
         lock_path: dir.path().join("dux.lock"),
+        socket_path: dir.path().join("dux.sock"),
     };
     let logging = dux_core::config::LoggingConfig {
         path: dir.path().join("dux.log").to_string_lossy().into_owned(),

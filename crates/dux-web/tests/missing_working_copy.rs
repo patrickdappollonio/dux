@@ -98,6 +98,7 @@ async fn boot_with_repo() -> (
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     {
         let store = SessionStore::open(&paths.sessions_db_path).unwrap();
