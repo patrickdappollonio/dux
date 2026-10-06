@@ -582,11 +582,7 @@ impl Attachments {
             state
                 .presences
                 .retain(|presence| !scope.covers(&presence.target));
-            state.prune_reservations();
-            state.next += 1;
-            let id = state.next;
-            state.reservations.insert(id, Reservation { scope, life });
-            Ok(id)
+            Ok(state.install(scope, life))
         })
     }
 
@@ -617,11 +613,7 @@ impl Attachments {
             {
                 return Err(blockers);
             }
-            state.prune_reservations();
-            state.next += 1;
-            let id = state.next;
-            state.reservations.insert(id, Reservation { scope, life });
-            Ok(id)
+            Ok(state.install(scope, life))
         })
     }
 
@@ -662,6 +654,15 @@ fn connection_live(connection: &Connection, now: Instant) -> bool {
 }
 
 impl State {
+    /// Install a reservation, answering its id.
+    fn install(&mut self, scope: Scope, life: Life) -> u64 {
+        self.prune_reservations();
+        self.next += 1;
+        let id = self.next;
+        self.reservations.insert(id, Reservation { scope, life });
+        id
+    }
+
     fn prune_reservations(&mut self) {
         self.reservations
             .retain(|_, reservation| reservation.live());

@@ -458,6 +458,24 @@ struct Record {
     removing: Option<Box<crate::viewmodel::SessionView>>,
 }
 
+impl Record {
+    fn end_as(
+        &mut self,
+        state: OperationState,
+        message: &str,
+        segments: Option<&[ProseSegment]>,
+        now: Instant,
+    ) {
+        self.end = Some(End {
+            state,
+            message: message.to_string(),
+            segments: segments.map(<[ProseSegment]>::to_vec),
+            at: now,
+        });
+        self.awaiting = None;
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     records: HashMap<String, Record>,
@@ -874,13 +892,7 @@ impl Operations {
         self.with(|registry| {
             for record in registry.awaiting(key) {
                 let state = record.notes.settle(tone);
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
@@ -897,13 +909,7 @@ impl Operations {
     ) {
         self.with(|registry| {
             for record in registry.awaiting(key) {
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
@@ -922,13 +928,7 @@ impl Operations {
                 && record.end.is_none()
             {
                 let state = record.notes.settle(tone);
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
