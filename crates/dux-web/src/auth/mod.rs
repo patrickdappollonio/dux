@@ -610,6 +610,11 @@ impl AuthState {
         ) {
             return Some(socket::CLOSE_BLOCKED);
         }
+        // As in `assess`: the control socket's client is this machine's own
+        // user, who never holds a session, so none can end.
+        if facts.arrival.is_some_and(Arrival::is_control_socket) {
+            return None;
+        }
         if !snapshot.has_password() || !required_by(snapshot.config.require, classification.class) {
             return None;
         }
