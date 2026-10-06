@@ -9642,7 +9642,7 @@ mod tests {
             .expect("an operation id");
         // Other workers (the project's save among them) answer on the same
         // channel in no fixed order, so step to each reload's own completion.
-        let mut through_next_reload = |engine: &mut Engine| loop {
+        let through_next_reload = |engine: &mut Engine| loop {
             let event = engine
                 .worker_rx
                 .recv_timeout(std::time::Duration::from_secs(30))
