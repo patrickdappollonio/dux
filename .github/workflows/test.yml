@@ -103,4 +103,4 @@ jobs:
           git config --global user.name "dux ci"
           git config --global user.email "ci@getdux.app"
       - name: Run tests
-        run: cargo test
+        run: cargo test --no-fail-fast

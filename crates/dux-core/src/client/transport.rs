@@ -164,7 +164,7 @@ impl Deadline {
 impl Read for Deadline {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let left = self.left()?;
-        self.stream.set_read_timeout(Some(left))?;
+        unless_shut_down(self.stream.set_read_timeout(Some(left)))?;
         self.stream.read(buf)
     }
 }
@@ -172,12 +172,23 @@ impl Read for Deadline {
 impl Write for Deadline {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let left = self.left()?;
-        self.stream.set_write_timeout(Some(left))?;
+        unless_shut_down(self.stream.set_write_timeout(Some(left)))?;
         self.stream.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.stream.flush()
+    }
+}
+
+/// A timeout that could not be set because the other end has already shut
+/// the connection down is no failure: macOS refuses to set one then
+/// (`EINVAL`), and the read or write after it cannot wait anyway, so it goes
+/// ahead and answers with what is left or with the end.
+fn unless_shut_down(set: std::io::Result<()>) -> std::io::Result<()> {
+    match set {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        other => other,
     }
 }
 
