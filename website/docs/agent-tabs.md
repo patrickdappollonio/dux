@@ -125,7 +125,7 @@ fall back on. Closing one ends that session, so dux asks you to confirm. Closing
 agent's **last running** tab detaches the whole agent: it leaves the sidebar's active list
 but stays in Projects, ready to reopen.
 
-![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
+![A running tab's menu open over the tab strip, offering Change provider, Stop tab and Close tab.](/screens/agent-tab-actions-menu.png)
 
 A separate **Detach agent** action stops every one of the agent's tabs at once and parks
 it in Projects. Deleting the agent takes every tab with it. See

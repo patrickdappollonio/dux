@@ -4,7 +4,7 @@
 // change can't silently break or re-scope search:
 //
 //   1. The Pagefind runtime (pagefind.js) actually shipped.
-//   2. The docs are in the index (at least one /docs URL).
+//   2. The docs are in the index: every page in website/docs has its /docs URL.
 //   3. The blog is in the index (at least one /blog URL).
 //   4. The marketing homepage is NOT in the index (scope stays docs + blog).
 //
@@ -86,6 +86,19 @@ const isHomepage = (u) => {
 if (!urls.some(isDocs)) {
   fail(
     `no /docs pages are indexed. Indexed URLs: ${JSON.stringify(urls)}`,
+  );
+}
+
+// Every Markdown page in docs/ must be findable, a new one included.
+const docsSource = resolve(here, "..", "docs");
+const indexed = new Set(urls.map((u) => norm(u).replace(/\/+$/, "")));
+const missing = readdirSync(docsSource)
+  .filter((name) => /\.mdx?$/.test(name))
+  .map((name) => `/docs/${name.replace(/\.mdx?$/, "")}`)
+  .filter((url) => !indexed.has(url));
+if (missing.length > 0) {
+  fail(
+    `these docs pages are not in the search index: ${JSON.stringify(missing)}. Indexed URLs: ${JSON.stringify(urls)}`,
   );
 }
 

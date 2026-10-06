@@ -4,7 +4,7 @@
 
 <img src="assets/dux-logo.png" width="200" align="right" />
 
-Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multiple AI coding agents side by side, each in its own git worktree (or, for a standalone agent, in a folder you already have), with companion terminals, provider tabs, macros, and a full git staging area. Drive it from a terminal, or run `dux server` and drive the same workspace from a browser, phone included.
+Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multiple AI coding agents side by side, each in its own git worktree (or, for a standalone agent, in a folder you already have), with companion terminals, provider tabs, macros, and a full git staging area. Drive it from a terminal, or run `dux server` and drive the same workspace from a browser, phone included, or script it from a shell with the `dux` command line.
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 
@@ -25,6 +25,8 @@ dux has two front ends over one running app: a terminal UI and a web UI. Both ar
 They are not identical, on purpose. Each surface does what its medium is good at. The terminal gives you full keyboard control, rebindable keys, a command palette that knows more tricks than you do, and themes. The browser gives you reach: any device on your network, including a phone, plus editing files in the page and desktop notifications. Where a capability only makes sense on one side, it lives on one side, and the page that covers it says why.
 
 You won't find a per-feature comparison table here, because a table like that is stale the week after it's written. The app is the reference: in the terminal, the help overlay and the command palette; in the browser, the cog menu and the row `⋯` menus.
+
+Beside the two front ends there is a command line, for scripts and for the times a shell is quicker than a pane: `dux agents ls`, `dux agents rm`, `dux macros add` and the rest list and change the same workspace through whichever dux is running. [Command Line](#command-line) has the tour.
 
 One thing worth knowing before you point a browser at anything: **the web UI's password is optional, and off until you set one.** [Server Mode](#server-mode) explains who can get in and which shapes are safe; read it before you bind anything but loopback.
 
@@ -119,6 +121,7 @@ The full documentation lives at **[getdux.app/docs](https://getdux.app/docs)**. 
 - **Pull request banner settings**: including whether the banner sits above or below the terminal.
 - **Naming a web instance**: `[server] title` and `favicon`, so you can tell several dux tabs apart.
 - **The web password**: who is asked for it, failed sign-ins and blocked addresses, reverse proxies, Tailscale Funnel, and what a password cannot protect against.
+- **The command line**: every command and flag, the output forms, the exit codes, and reaching a dux on another machine.
 - **Hosting dux on the public internet**: TLS in front, with the dux password or oauth2-proxy and GitHub sign-in as the gate.
 
 ## How It Works
@@ -302,6 +305,25 @@ The safe shapes are loopback (the default), your own tailnet, or a LAN or public
 Two defenses do always run, and they're about hostile web pages rather than about users: a Host-header allowlist, so a malicious site can't DNS-rebind your browser into the server, and a same-origin check on every live terminal connection and every request that changes something, so another site can't ride along. Both are automatic. This machine's own Tailscale MagicDNS name is accepted by itself (dux reads it from Tailscale and follows a tailnet rename), and when `tailscale serve --bg 3890` points at dux it picks up the `https://` URL too and lists it with the others; dux never runs that command for you. Any other name, such as a proxy hostname, goes in `allowed_hosts` under `[server]` or the host guard answers `403`, and a config reload applies a change to it with no restart.
 
 The rest of `[server]` tunes presentation and limits: console color, the per-request access log, the shutdown grace period, and how many live connections of each kind dux accepts at once. As ever, each key explains itself inline in your config file.
+
+### Command Line
+
+`dux` is also a command-line tool for the workspace it runs:
+
+```bash
+dux projects ls                                  # aligned table; --format json or -q for ids
+dux agents add --project web --name fix-login    # waits until the agent exists, prints its id last
+dux agents tabs add fix-login --provider codex   # a second provider tab in the same worktree
+dux agents rm fix-login --delete-worktree        # asks first; --yes for scripts
+dux terminals ls
+dux macros add Review "review this diff for bugs"
+dux server logs -f                               # follow server.log
+dux server connections ls                        # who is connected right now
+dux remote add box https://box.tailnet-name.ts.net
+dux --remote box agents ls                       # the same commands, another machine
+```
+
+Projects, agents, tabs, worktrees and terminals go through the dux that is running (the terminal UI, the flip, background serving or `dux server`, whichever it is); with none running the command says so and stops, and never reads dux's database behind its back. Macros, providers, keys, themes and the global environment live in `config.toml`, so those work with dux stopped too. A change waits until it has really finished, says how it went, and exits with a code a script can trust; one that would cut off somebody connected to an agent or a terminal is refused unless you add `--dangerously-ignore-connected`. A dux on another machine is a saved remote, signed in with its web password. The [command-line docs](https://getdux.app/docs/command-line) cover every command, flag and exit code.
 
 ### Configuration
 
