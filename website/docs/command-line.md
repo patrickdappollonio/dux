@@ -49,7 +49,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | `dux projects worktrees ls <project>` | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
 | `dux agents ls`, `show <agent>` | Agents, with their project or folder, provider, state, running tabs and how many browsers are connected. `--project` keeps one project's; `--worktrees` prints just each agent's id and the folder it works in. |
 | `dux agents add` | Creates an agent. `--project` on a new branch, plus `--existing-branch`, `--from-pr <number or URL>` or `--from-worktree <path>`; `--fork <agent>`; or `--standalone <folder>` with an optional `--provider`. `--name` names it and `--copy-uncommitted` brings the project's uncommitted changes along. |
-| `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. |
+| `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. `--delete-branch` needs `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
 | `dux agents stop <agent>`, `start <agent>` | Stops everything an agent runs, or starts it again. |
 | `dux agents tabs ls <agent>` | The agent's provider tabs and whether each is running. |
 | `dux agents tabs add <agent>` | Adds a tab, running the project's provider unless `--provider` names another. |

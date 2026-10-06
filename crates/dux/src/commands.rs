@@ -433,8 +433,9 @@ pub enum AgentsSub {
         /// Also remove the agent's worktree.
         #[arg(long)]
         delete_worktree: bool,
-        /// Delete its branch with the worktree.
-        #[arg(long, conflicts_with = "keep_branch")]
+        /// Delete its branch with the worktree. Needs --delete-worktree: git
+        /// will not delete a branch a worktree still has checked out.
+        #[arg(long, conflicts_with = "keep_branch", requires = "delete_worktree")]
         delete_branch: bool,
         /// Keep its branch.
         #[arg(long)]
@@ -909,6 +910,7 @@ mod tests {
             &["agents", "add", "--fork", "a", "--name", "b"][..],
             &["agents", "ls", "--worktrees", "--project", "app"][..],
             &["agents", "rm", "a", "--delete-worktree", "--keep-branch"][..],
+            &["agents", "rm", "a", "--keep-branch"][..],
             &[
                 "agents",
                 "tabs",
@@ -938,6 +940,7 @@ mod tests {
                 "--existing-branch",
             ][..],
             &["agents", "rm", "a", "--delete-branch", "--keep-branch"][..],
+            &["agents", "rm", "a", "--delete-branch"][..],
             &["terminals", "add", "--agent", "a", "--project", "p"][..],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
