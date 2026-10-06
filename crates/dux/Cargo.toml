@@ -8,3 +8,4 @@ dux-tui = { path = "../dux-tui" }
 dux-web = { path = "../dux-web" }
 dux-core.workspace = true
 anyhow.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }
