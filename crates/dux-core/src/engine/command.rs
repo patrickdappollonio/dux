@@ -471,6 +471,10 @@ impl Engine {
         // Refused while a change another surface follows holds what this one
         // would change. Checked only: a command has no record to hold with.
         self.check_command(&command)?;
+        // Refused while somebody else is attached to what it would end; held
+        // against new attachments until the change ends (see
+        // `attachment_guard`).
+        let _reservation = self.guard_command(&command)?;
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands, so it re-applies against the fresh
         // config instead of racing it.

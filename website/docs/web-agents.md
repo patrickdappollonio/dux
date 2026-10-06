@@ -293,6 +293,29 @@ together.
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.
 
+### When somebody else is connected
+
+Deleting an agent, detaching it, force-stopping it, restarting it from scratch, closing a
+tab, closing a terminal and removing a project all end terminals, and somebody else may be
+looking at one: another browser tab, a phone, or the terminal app. dux refuses the change
+while anybody else is connected to what it would end, and says who: the device, the address
+it connects from (marked unverified when dux cannot vouch for it), whether they are typing
+in it or watching, and which tab or terminal. Nothing is changed.
+
+Only the connection asking is left out. The browser tab you are using is never in its own
+way, and neither is the terminal app deleting the agent it shows, but a second tab open on
+the same computer counts like any other device.
+
+> [!IMPORTANT]
+> **A phone with its screen off still counts.** When a browser tab was showing a terminal and
+> that terminal's connection closes (the screen locked, the tab went to the background), the
+> tab keeps counting as connected to it for `presence_grace_seconds` under `[server]` (300
+> seconds by default), as long as the tab itself is still connected. A device that has gone
+> silent for 75 seconds stops counting.
+
+The terminal app counts as connected to exactly the terminals it is drawing: an agent that is
+selected but not on screen, because a diff fills the center pane, protects nothing.
+
 ### What a delete with the worktree waits for
 
 With the worktree box ticked, dux removes nothing until everything it started for that agent

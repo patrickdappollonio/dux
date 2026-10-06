@@ -373,6 +373,89 @@ pub(crate) fn delete_operation_response(
     }
 }
 
+/// `force_connected=true` on a change that would end terminals: go ahead
+/// even though somebody else is attached to them. Only that refusal is
+/// skipped; every other check still runs, and nobody can attach to what the
+/// change is ending until it has finished.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct ForceConnectedQuery {
+    #[serde(default)]
+    force_connected: bool,
+}
+
+/// The answer to a change refused because somebody else is attached to what
+/// it would end: `409 {"error":"attached","blockers":[...]}`, one entry per
+/// attachment in the way, each saying which surface, which device and from
+/// which address (and whether dux could verify it), whether it is typing in
+/// or watching, and which tab or terminal.
+pub(crate) fn attached_refusal(blockers: &[dux_core::attachments::Blocker]) -> Response {
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({
+            "error": "attached",
+            "blockers": blockers,
+        })),
+    )
+        .into_response()
+}
+
+/// Dispatch a change that would end terminals (an agent delete, stop or
+/// forced restart, a tab or terminal close, a project removal), covered by an
+/// operation record of `kind` and followed when the client asked
+/// (`?operation=1`). A refusal because somebody else is attached is answered
+/// here, as [`attached_refusal`]; anything else is handed back as the route's
+/// usual outcome, with the record when the change was followed.
+pub(crate) async fn dispatch_guarded(
+    state: &crate::server::AppState,
+    command: dux_core::wire::WireCommand,
+    headers: &HeaderMap,
+    kind: dux_core::operations::OperationKind,
+    operation: &OperationQuery,
+    force: &ForceConnectedQuery,
+) -> Result<Result<Guarded, String>, RouteRejection> {
+    let followed = crate::engine_actor::Followed {
+        kind,
+        answered: operation.asked(),
+        force_connected: force.force_connected,
+    };
+    let scope = scope_from_headers(headers, &state.connections);
+    match state
+        .engine
+        .apply_wire_guarded(command, scope, followed)
+        .await
+    {
+        Ok(outcome) => Ok(Ok(Guarded {
+            record: outcome.operation.as_deref().cloned(),
+            outcome,
+        })),
+        Err(crate::engine_actor::WireError {
+            attached: Some(blockers),
+            ..
+        }) => Err(attached_refusal(&blockers).into()),
+        Err(error) => Ok(Err(error.message)),
+    }
+}
+
+/// What [`dispatch_guarded`] hands back for a change it dispatched.
+pub(crate) struct Guarded {
+    pub(crate) outcome: WireCommandOutcome,
+    /// The change's record, when the client asked to follow it.
+    pub(crate) record: Option<dux_core::operations::OperationView>,
+}
+
+impl Guarded {
+    /// The outcome with its record, as a followed change answers; a followed
+    /// change that came back without one is the engine's own failure.
+    pub(crate) fn followed(
+        self,
+    ) -> Result<(WireCommandOutcome, dux_core::operations::OperationView), String> {
+        match self.record {
+            Some(record) => Ok((self.outcome, record)),
+            None => Err(crate::engine_actor::MISSING_OPERATION_RECORD.to_string()),
+        }
+    }
+}
+
 /// A boxed error arm for helpers and extractors whose failure is a ready-made
 /// axum [`Response`]. `Response` is a large type, and the stable clippy that
 /// newly reached CI fires `result_large_err` on any `Result` carrying it in the

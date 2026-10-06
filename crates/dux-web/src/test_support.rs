@@ -116,6 +116,7 @@ pub(crate) fn unstarted_test_engine(tmp: &Path) -> dux_core::engine::Engine {
         sessions_db_path: tmp.join("sessions.sqlite3"),
         worktrees_root: tmp.join("worktrees"),
         lock_path: tmp.join("dux.lock"),
+        socket_path: tmp.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     bootstrap_test_engine(&paths).unwrap()

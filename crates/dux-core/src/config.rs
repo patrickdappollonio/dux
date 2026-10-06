@@ -304,6 +304,11 @@ pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
 /// change's record can still be read by its id.
 pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
 
+/// Default for `[server] presence_grace_seconds`: how long a browser tab keeps
+/// protecting a terminal it was looking at after that terminal's connection
+/// closed (a phone whose screen went off), while the tab itself is connected.
+pub const DEFAULT_PRESENCE_GRACE_SECONDS: u64 = 300;
+
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
 /// the async reactor; this bounds how many can run at once so a burst of tree
@@ -1101,6 +1106,12 @@ pub struct ServerConfig {
     /// be read by its id. Default 1800. Read when the change starts, like
     /// `operation_unknown_after_seconds`.
     pub operation_retention_seconds: u64,
+    /// How long, in seconds, a browser tab still counts as attached to a
+    /// terminal after that terminal's connection closed while the tab was
+    /// showing it (the last beat said it was being looked at), for as long as
+    /// the tab's own connection is up. Default 300. Read when the terminal's
+    /// connection closes, so a config reload applies to the next one.
+    pub presence_grace_seconds: u64,
     /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
     /// section refuses the whole config rather than resetting to "no
     /// password" (see [`crate::config_auth`] and [`load_config`]). Never
@@ -1175,6 +1186,7 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 ///   terminal connection opens, so the next connection already has the new value.
 /// - `operation_unknown_after_seconds` and `operation_retention_seconds`: read as
 ///   each change starts, so the next one already has the new values.
+/// - `presence_grace_seconds`: read as each terminal connection closes.
 ///
 /// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
 /// are built once in `build_app` and never resized on reload, and the tab caps are
@@ -2176,6 +2188,7 @@ impl Default for ServerConfig {
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
             operation_unknown_after_seconds: DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS,
             operation_retention_seconds: DEFAULT_OPERATION_RETENTION_SECONDS,
+            presence_grace_seconds: DEFAULT_PRESENCE_GRACE_SECONDS,
             auth: ServerAuthConfig::default(),
         }
     }

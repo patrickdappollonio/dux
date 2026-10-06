@@ -5,6 +5,7 @@
 //! engine actor.
 
 mod admission;
+mod attachment_guard;
 pub mod command;
 mod companion;
 pub mod config_saver;
@@ -73,6 +74,7 @@ mod worktree_removal_race_tests;
 
 pub use crate::destructive::DestructiveCheck;
 pub use admission::Admission;
+pub use attachment_guard::{Attached, Reservation};
 pub use command::{COMMIT_EMPTY_MESSAGE, COMMIT_NOTHING_STAGED, Command};
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
@@ -851,6 +853,15 @@ pub struct Engine {
     /// of its own (what an inline delete did to the worktree and the branch)
     /// reaches that record. `None` outside that call.
     pub operation_in_dispatch: Option<String>,
+
+    /// Who is attached to which agent tab and terminal, asked by every change
+    /// that would end one. See [`crate::attachments`].
+    pub attachments: crate::attachments::Attachments,
+
+    /// Who is asking for the change being dispatched right now, and whether
+    /// they said to go ahead over everybody attached. Set by the web layer
+    /// around each request it dispatches; `None` means the terminal UI asked.
+    pub dispatch_policy: Option<crate::attachments::Policy>,
 
     /// Maps a create op's opaque id to the session it produced (and when), filled
     /// in the launch-ready Create branch once the worker-minted session lands. A

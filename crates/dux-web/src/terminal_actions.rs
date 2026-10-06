@@ -33,8 +33,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, refusal, scope_from_headers,
-    ticket_accepted, unknown_session,
+    ForceConnectedQuery, OperationQuery, dispatch_guarded, id_within_bound, operation_accepted,
+    refusal, scope_from_headers, ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
 
@@ -173,6 +173,7 @@ async fn delete_standalone_terminal(
     State(state): State<AppState>,
     Path(tid): Path<String>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&tid) {
@@ -182,7 +183,7 @@ async fn delete_standalone_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Standalone) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation).await
+    dispatch_delete(&state, tid, &headers, &operation, &force).await
 }
 
 /// `DELETE /api/v1/sessions/:id/terminals/:tid`: delete a companion terminal,
@@ -191,6 +192,7 @@ async fn delete_terminal(
     State(state): State<AppState>,
     Path((id, tid)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) || !id_within_bound(&tid) {
@@ -207,7 +209,7 @@ async fn delete_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Session(&id)) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation).await
+    dispatch_delete(&state, tid, &headers, &operation, &force).await
 }
 
 /// `DELETE /api/v1/projects/:id/terminals/:tid` deletes a project terminal,
@@ -216,6 +218,7 @@ async fn delete_project_terminal(
     State(state): State<AppState>,
     Path((id, tid)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) || !id_within_bound(&tid) {
@@ -231,7 +234,7 @@ async fn delete_project_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Project(&id)) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation).await
+    dispatch_delete(&state, tid, &headers, &operation, &force).await
 }
 
 /// Body for the global terminal reorder: the complete set of terminal ids in the
@@ -272,25 +275,31 @@ async fn dispatch_delete(
     tid: String,
     headers: &HeaderMap,
     operation: &OperationQuery,
+    force: &ForceConnectedQuery,
 ) -> Response {
     let command = WireCommand::DeleteTerminal { terminal_id: tid };
-    let scope = scope_from_headers(headers, &state.connections);
-    if operation.asked() {
-        return match state
-            .engine
-            .apply_wire_operation(command, scope, OperationKind::TerminalClose)
-            .await
-        {
-            Ok((_, op)) => operation_accepted(&op),
-            Err(e) => refusal(e, StatusCode::BAD_REQUEST),
-        };
-    }
-    match state
-        .engine
-        .apply_wire_recorded(command, scope, OperationKind::TerminalClose)
-        .await
+    let result = match dispatch_guarded(
+        state,
+        command,
+        headers,
+        OperationKind::TerminalClose,
+        operation,
+        force,
+    )
+    .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
+    };
+    match result.and_then(|guarded| {
+        if operation.asked() {
+            guarded.followed().map(|(_, op)| Some(op))
+        } else {
+            Ok(None)
+        }
+    }) {
+        Ok(Some(op)) => operation_accepted(&op),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }

@@ -40,8 +40,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, refusal, scope_from_headers,
-    ticket_accepted, unknown_session,
+    ForceConnectedQuery, OperationQuery, dispatch_guarded, id_within_bound, operation_accepted,
+    refusal, scope_from_headers, ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
 use std::sync::Arc;
@@ -175,6 +175,7 @@ async fn delete_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
@@ -184,20 +185,26 @@ async fn delete_tab(
         session_id: id.clone(),
         tab_id: tab,
     };
-    let scope = scope_from_headers(&headers, &state.connections);
-    let result = if operation.asked() {
-        state
-            .engine
-            .apply_wire_operation(command, scope, OperationKind::TabClose)
-            .await
-            .map(|(outcome, op)| (outcome, Some(op)))
-    } else {
-        state
-            .engine
-            .apply_wire_recorded(command, scope, OperationKind::TabClose)
-            .await
-            .map(|outcome| (outcome, None))
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::TabClose,
+        &operation,
+        &force,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
     };
+    let result = result.and_then(|guarded| {
+        if operation.asked() {
+            guarded.followed().map(|(outcome, op)| (outcome, Some(op)))
+        } else {
+            Ok((guarded.outcome, None))
+        }
+    });
     match result {
         Ok((_, Some(op))) => operation_accepted(&op),
         // `Engine::close_tab` detaches the agent the same way `KillSessionPty`

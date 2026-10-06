@@ -16,6 +16,10 @@
 //     only when the PTY is unowned. Adding `"takeover":true` transfers ownership,
 //     and is the only frame this client sends while it knows it is not the owner.
 //   - Close = detach.
+//   - Every open names this tab's events connection as `?events=<id>`, read at
+//     that moment, so the server counts the terminal as part of this browser
+//     tab: the tab is not in its own way when it deletes or stops what it shows,
+//     and a reconnected events socket is named by the next reopen.
 //
 // Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at
@@ -30,6 +34,7 @@
 import { assertNever } from "./assertNever"
 import { wsUrl } from "./apiBase"
 import { authPaused } from "./authGate"
+import { getConnectionId } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
@@ -152,6 +157,15 @@ export class PtySocket extends ReconnectingSocket {
     this.unsubscribeGate = onServerValidated(() => {
       this.resumeNow()
     })
+  }
+
+  // Names this tab's events connection (see the protocol notes above). None
+  // yet, or none right now, and the socket opens as a connection of its own.
+  protected override openUrl(): string {
+    const events = getConnectionId()
+    if (events === null) return this.url
+    const separator = this.url.includes("?") ? "&" : "?"
+    return `${this.url}${separator}events=${encodeURIComponent(events)}`
   }
 
   // A lifecycle close (`pagehide`) keeps the gate subscription, as it keeps the

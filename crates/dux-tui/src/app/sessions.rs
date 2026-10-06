@@ -3794,6 +3794,22 @@ impl App {
         force: bool,
         seek_fullscreen: bool,
     ) -> Result<()> {
+        // A forced restart ends what is running, so it is refused while
+        // somebody else is attached to it.
+        let _reservation = if force {
+            match self
+                .engine
+                .reserve_destruction(self.engine.agent_scope(session_id))
+            {
+                Ok(reservation) => Some(reservation),
+                Err(attached) => {
+                    self.set_error(attached.to_string());
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
         let pty_size = self.pty_size_for_launch();
         match self.engine.reconnect_plan(session_id, force, pty_size)? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
@@ -4832,6 +4848,8 @@ mod tests {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            attachments: Default::default(),
+            dispatch_policy: None,
             deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
@@ -4959,6 +4977,8 @@ mod tests {
             url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
+            drawn_ptys: Vec::new(),
+            published_ptys: None,
             companion: None,
             background_server_preflight_pending: false,
             background_server_wanted: false,
@@ -5185,6 +5205,8 @@ mod tests {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            attachments: Default::default(),
+            dispatch_policy: None,
             deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
@@ -8393,6 +8415,16 @@ mod tests {
                 "s1-slot",
             )));
 
+        // Refused, naming who, while a browser watches the agent.
+        crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
+        app.force_reconnect_agent().expect("force reconnect");
+        assert!(
+            app.status.message().contains("10.0.0.7"),
+            "{}",
+            app.status.message()
+        );
+        app.engine.attachments.deregister("browser-tab");
+
         app.force_reconnect_agent().expect("force reconnect");
 
         assert!(
@@ -8906,6 +8938,18 @@ mod tests {
         );
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
         release_agent_elsewhere(&mut app);
+
+        // Refused, naming who, while a browser watches it.
+        crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
+        app.confirm_detach_selected_session().expect("dispatch");
+        app.resolve_confirm_detach_agent(true);
+        assert!(
+            app.status.text().contains("10.0.0.7"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!app.engine.providers.is_empty(), "nothing was stopped");
+        app.engine.attachments.deregister("browser-tab");
 
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);

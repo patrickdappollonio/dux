@@ -902,7 +902,8 @@ pub(super) fn provider_picker_kind(prompt: &PromptState) -> Option<ProviderPicke
 }
 
 impl App {
-    /// The one quit path: ask for confirmation while anything is still running,
+    /// The one quit path: ask for confirmation while anything is still running
+    /// or anybody else is attached to one of this process's terminals,
     /// otherwise quit outright. Returns whether the run loop should exit.
     ///
     /// The first-load modal's `Ctrl-c` routes here too rather than re-deriving
@@ -910,10 +911,12 @@ impl App {
     pub(crate) fn begin_quit(&mut self) -> bool {
         let agent_count = self.engine.providers.len();
         let terminal_count = self.running_companion_terminal_count();
-        if agent_count + terminal_count > 0 {
+        let attached = self.engine.attached_elsewhere();
+        if agent_count + terminal_count > 0 || !attached.is_empty() {
             self.prompt = PromptState::ConfirmQuit {
                 agent_count,
                 terminal_count,
+                attached,
                 focus: ConfirmFocus::Cancel,
             };
             return false;
@@ -8011,6 +8014,16 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
+        let _reservation = match self
+            .engine
+            .reserve_destruction(self.engine.agent_scope(&session_id))
+        {
+            Ok(reservation) => reservation,
+            Err(attached) => {
+                self.set_error(attached.to_string());
+                return false;
+            }
+        };
         match self.engine.begin_detach_session(&session_id) {
             // The row went between opening the dialog and answering it.
             dux_core::engine::DetachSessionOutcome::UnknownSession => {
@@ -8285,6 +8298,16 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
+        let _reservation = match self
+            .engine
+            .reserve_destruction(dux_core::engine::Engine::pty_scope(&tab_id))
+        {
+            Ok(reservation) => reservation,
+            Err(attached) => {
+                self.set_error(attached.to_string());
+                return false;
+            }
+        };
         // Read both names off the PRE-close strip, which is the strip the
         // confirmation named its successor from: after the close the labels can
         // renumber (two tabs on one provider lose their " 2"), and the closed
@@ -13587,6 +13610,7 @@ not_a_real_action = ["x"]
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Cancel,
         };
         tap(&mut app, KeyCode::Tab);
@@ -24747,6 +24771,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Cancel,
         };
         install_confirm_quit_overlay(&mut app);
@@ -24759,6 +24784,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Confirm,
         };
         install_confirm_quit_overlay(&mut app);
@@ -24774,6 +24800,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Cancel,
         };
 
@@ -24821,19 +24848,24 @@ cyan = "#00ffff"
             },
         );
 
+        crate::app::test_support::watch_from_a_browser(&app, &slot_tab, "s-any");
+
         let should_quit = app
             .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .expect("handle quit");
 
         assert!(!should_quit);
-        match app.prompt {
+        match &app.prompt {
             PromptState::ConfirmQuit {
                 agent_count,
                 terminal_count,
+                attached,
                 ..
             } => {
-                assert_eq!(agent_count, 1);
-                assert_eq!(terminal_count, 1);
+                assert_eq!(*agent_count, 1);
+                assert_eq!(*terminal_count, 1);
+                assert_eq!(attached.len(), 1, "the browser watching is named");
+                assert_eq!(attached[0].address.as_deref(), Some("10.0.0.7"));
             }
             _ => panic!("expected quit confirmation"),
         }
@@ -34855,6 +34887,19 @@ cyan = "#00ffff"
             None,
             std::time::Instant::now(),
         );
+
+        // While a browser watches the tab, the close is refused naming who.
+        crate::app::test_support::watch_from_a_browser(&app, &tab_id, &session_id);
+        app.prompt = prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+        assert!(
+            app.status.text().contains("10.0.0.7"),
+            "{}",
+            app.status.text()
+        );
+        assert!(app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)));
+        app.engine.attachments.deregister("browser-tab");
 
         app.prompt = prompt();
         // Space activates the focused (Close) button.

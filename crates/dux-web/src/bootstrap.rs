@@ -207,6 +207,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         last_created_op_id: None,
         operations: Default::default(),
         operation_in_dispatch: None,
+        attachments: Default::default(),
+        dispatch_policy: None,
         deferred_operations: Vec::new(),
         created_session_by_op: HashMap::new(),
         removal_coordination: Default::default(),

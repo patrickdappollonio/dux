@@ -229,6 +229,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_created_op_id: None,
         operations: Default::default(),
         operation_in_dispatch: None,
+        attachments: Default::default(),
+        dispatch_policy: None,
         deferred_operations: Vec::new(),
         created_session_by_op: std::collections::HashMap::new(),
         removal_coordination: Default::default(),
@@ -360,6 +362,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         url_opener: crate::app::default_url_opener(),
         startup_log_selection: None,
         pending_server_flip: None,
+        drawn_ptys: Vec::new(),
+        published_ptys: None,
         companion: None,
         background_server_preflight_pending: false,
         background_server_wanted: false,
@@ -395,6 +399,36 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
 /// and the wheel use. Polls instead of sleeping a fixed amount, so the test is
 /// waiting on the fact it depends on (real history) rather than on a guess.
 /// Panics if no history appears within ~2s.
+/// A browser tab at 10.0.0.7 watching `pty_id`, a terminal of `agent`, as
+/// the attachment registry records one.
+pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) {
+    use dux_core::attachments::{ConnectionFacts, Surface, Target, TargetKind};
+    app.engine.attachments.register(
+        "browser-tab",
+        ConnectionFacts {
+            surface: Surface::Browser,
+            device: Some("Firefox".to_string()),
+            address: Some("10.0.0.7".parse().unwrap()),
+            verified: false,
+            events: true,
+        },
+        None,
+    );
+    app.engine
+        .attachments
+        .attach(
+            "browser-tab",
+            Target {
+                kind: TargetKind::Tab,
+                id: pty_id.to_string(),
+                agent: Some(agent.to_string()),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+}
+
 pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
     for _ in 0..200 {
         if let Some(provider) = app.selected_terminal_surface_client() {

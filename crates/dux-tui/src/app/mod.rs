@@ -619,6 +619,13 @@ pub struct App {
     /// `StartWebServer` palette action only after its (worker) pre-flight
     /// succeeds. LOCAL MODE may bind more than one address (loopback + Tailscale).
     pub(crate) pending_server_flip: Option<PendingServerFlip>,
+    /// The terminals the frame being drawn shows, in the attachment registry's
+    /// terms. Filled while a frame renders; see `attachment_presence`.
+    pub(crate) drawn_ptys: Vec<dux_core::attachments::Target>,
+    /// What this surface last told the attachment registry it is attached to,
+    /// with its seat in the ownership record then, so an unchanged frame
+    /// tells it nothing.
+    pub(crate) published_ptys: Option<(Vec<dux_core::attachments::Target>, Option<u64>)>,
     /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
     /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
     /// would both spawn workers and the second would hit a confusing EADDRINUSE.
@@ -2830,6 +2837,9 @@ pub(crate) enum PromptState {
     ConfirmQuit {
         agent_count: usize,
         terminal_count: usize,
+        /// Everybody else attached to a terminal quitting would end, named in
+        /// the dialog.
+        attached: Vec<dux_core::attachments::Blocker>,
         focus: ConfirmFocus, // Cancel (default) or Quit
     },
     ConfirmDiscardFile {
@@ -4081,6 +4091,7 @@ pub(crate) fn build_left_items(
     items
 }
 
+mod attachment_presence;
 mod background_server;
 pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
 // `pub(crate)` for its width helpers alone: the diff wrapper has to measure a
@@ -4337,6 +4348,8 @@ impl App {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            attachments: Default::default(),
+            dispatch_policy: None,
             deferred_operations: Vec::new(),
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
@@ -4499,6 +4512,8 @@ impl App {
             url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
+            drawn_ptys: Vec::new(),
+            published_ptys: None,
             companion: None,
             background_server_preflight_pending: false,
             background_server_wanted: false,
@@ -4611,6 +4626,8 @@ impl App {
 
         let result = self.run_loop(&mut terminal);
 
+        // Nothing is drawn from here on, so nothing here is attached.
+        self.release_drawn_attachments();
         // Stop PTY forwarders while the engine and terminal screen are still owned here.
         self.stop_background_server_quietly();
         self.release_companion();

@@ -1460,6 +1460,21 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.operation_retention_seconds as usize),
         },
         ConfigEntry::Field {
+            key: "presence_grace_seconds",
+            comment: Some(CommentSource::Static(
+                "# Deleting, stopping or restarting an agent, closing a tab or a terminal,\n\
+                 # and removing a project are refused while somebody else is connected to\n\
+                 # what they would end, unless whoever asks says to go ahead anyway. A\n\
+                 # browser tab keeps counting as connected to a terminal for this many\n\
+                 # seconds after the terminal's connection closes, when the tab was showing\n\
+                 # it and is itself still connected: a phone whose screen goes off for a\n\
+                 # minute still protects the agent its owner is working in. 0 stops\n\
+                 # counting the moment the terminal's connection closes. Default 300.\n\
+                 # A config reload applies this to the next connection that closes.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.presence_grace_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "tree_list_max_concurrency",
             comment: Some(CommentSource::Static(
                 "# Maximum number of /files/tree directory listings the web editor may run\n\

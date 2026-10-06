@@ -13,6 +13,7 @@ import {
   terminalSocketUrl,
 } from "./ptySocket"
 import { setAppSocketGivenUp } from "./appSocketGiveUp"
+import { setConnectionId } from "./connection"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import type { ConnState } from "./types"
 
@@ -165,6 +166,20 @@ describe("PtySocket", () => {
     const ws = last()
     expect(ws.url).toBe("ws://x/ws/sessions/s1/pty")
     expect(ws.binaryType).toBe("arraybuffer")
+  })
+
+  it("names this tab's events connection on every open, the one it has at that moment", () => {
+    vi.useFakeTimers()
+    setConnectionId("e/1")
+    const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
+    sock.connect()
+    expect(last().url).toBe("ws://x/ws/sessions/s1/pty?events=e%2F1")
+    last().open()
+    setConnectionId("e2")
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(600)
+    expect(last().url).toBe("ws://x/ws/sessions/s1/pty?events=e2")
+    setConnectionId(null)
   })
 
   it("records connection id and replay generation from the connected frame", () => {
