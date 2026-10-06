@@ -171,8 +171,8 @@ pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
 }
 
 /// `dux config` edits this machine's file, so it refuses when a remote is
-/// selected unless `--local` is given. Callers pass whatever selected the
-/// remote; today that is the `--remote` flag.
+/// selected unless `--local` is given. `remote` is the remote selected by
+/// `--remote`, `DUX_REMOTE` or the saved default.
 pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), String> {
     if remote.is_some() && !local {
         return Err(
@@ -531,7 +531,15 @@ pub struct RemoteCmd {
 #[derive(Subcommand, Debug)]
 pub enum RemoteSub {
     /// Save a remote under a name.
-    Add { name: String, url: String },
+    Add {
+        name: String,
+        url: String,
+        /// Allow plain http:// to an address that is neither this machine nor
+        /// a Tailscale address. The password then crosses the network
+        /// unencrypted, and every login says so.
+        #[arg(long)]
+        insecure: bool,
+    },
     /// List saved remotes.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -546,9 +554,14 @@ pub enum RemoteSub {
         #[arg(long, conflicts_with = "name")]
         unset: bool,
     },
-    /// Sign in to a remote.
-    Login { name: Option<String> },
-    /// Sign out of a remote.
+    /// Sign in to a remote (the selected one when no name is given).
+    Login {
+        name: Option<String>,
+        /// Read the password from standard input instead of asking for it.
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Sign out of a remote (the selected one when no name is given).
     Logout { name: Option<String> },
 }
 

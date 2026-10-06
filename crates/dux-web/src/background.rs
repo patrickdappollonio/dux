@@ -585,6 +585,31 @@ mod tests {
         );
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
         assert!(answer.contains("\"projects\""), "{answer}");
+        // The command line's own wait rides the hand-over: its read is answered
+        // with the record still running, it reads again by the same id, and
+        // the next core answers that read with the outcome.
+        let cli_wait = {
+            let lock_path = engine.paths.lock_path.clone();
+            engine.operations.open(
+                "op-cli",
+                dux_core::operations::OperationKind::TabClose,
+                dux_core::operations::OperationPolicy {
+                    unknown_after: std::time::Duration::from_secs(600),
+                    retention: std::time::Duration::from_secs(600),
+                },
+                std::time::Instant::now(),
+            );
+            let wait = std::thread::spawn(move || {
+                let client = dux_core::client::connect::connect(
+                    &dux_core::client::connect::Target::Local,
+                    &lock_path,
+                )?;
+                let record = client.operation("op-cli")?;
+                client.wait(record, std::time::Duration::from_secs(30))
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            wait
+        };
         // A command-line wait on an operation answers the record as it stands
         // the moment its core hands over, and the hand-over does not wait it out.
         let wait = waiting_on_an_operation(&engine, &socket, "op-to-background");
@@ -612,6 +637,22 @@ mod tests {
             answer.starts_with("HTTP/1.1 200"),
             "a request sent between cores is answered by the next: {answer}"
         );
+        engine.operations.finish(
+            "op-cli",
+            dux_core::statusline::StatusTone::Info,
+            "Closed the tab.",
+            None,
+            std::time::Instant::now(),
+        );
+        let finished = cli_wait
+            .join()
+            .expect("the command line's wait thread")
+            .expect("the wait ends with the outcome");
+        assert_eq!(
+            finished.state,
+            dux_core::client::wait::RecordState::Succeeded
+        );
+        assert_eq!(finished.message, "Closed the tab.");
         assert_eq!(socket_inode(&socket), bound, "the same bound socket");
         let status = healthz(first_addr).expect("the first serve answers");
         assert!(

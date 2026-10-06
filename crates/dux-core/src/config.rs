@@ -185,6 +185,28 @@ pub struct EditorConfig {
     pub default: String,
 }
 
+/// Default for `[cli] wait_timeout_seconds`: how long a command-line change
+/// waits for its outcome before saying it is unknown.
+pub const DEFAULT_CLI_WAIT_TIMEOUT_SECONDS: u64 = 600;
+
+/// `[cli]`: how the `dux` command line behaves on this machine. Read by the
+/// command line only; a running dux never uses it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CliConfig {
+    /// Seconds a change waits for its outcome; `--wait-timeout` overrides it
+    /// for one command.
+    pub wait_timeout_seconds: u64,
+}
+
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            wait_timeout_seconds: DEFAULT_CLI_WAIT_TIMEOUT_SECONDS,
+        }
+    }
+}
+
 /// Default cap on concurrent events (`/ws`) WebSocket connections; see
 /// [`ServerConfig::max_websocket_events_connections`]. Shared so the config
 /// default and the server's router default cannot drift apart.
@@ -2727,6 +2749,7 @@ pub struct Config {
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
     pub editor: EditorConfig,
+    pub cli: CliConfig,
     #[serde(default)]
     pub server: ServerConfig,
     pub keys: KeysConfig,
@@ -2883,6 +2906,7 @@ impl Default for Config {
             },
             capabilities: CapabilitiesConfig::default(),
             editor: EditorConfig::default(),
+            cli: CliConfig::default(),
             server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),

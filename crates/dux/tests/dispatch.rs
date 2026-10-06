@@ -30,9 +30,17 @@ fn home(test: &str) -> PathBuf {
 }
 
 fn dux(test: &str, args: &[&str]) -> Run {
+    dux_in(&home(test), args, &[])
+}
+
+/// Run dux on `dir` as it stands, with `env` set and no `DUX_REMOTE` from
+/// the shell running the tests.
+fn dux_in(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> Run {
     let out = Command::new(env!("CARGO_BIN_EXE_dux"))
         .args(args)
-        .env("DUX_HOME", home(test))
+        .env("DUX_HOME", dir)
+        .env_remove("DUX_REMOTE")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
         .expect("the dux binary runs");
@@ -172,46 +180,125 @@ fn remote_and_local_cannot_be_combined() {
 }
 
 #[test]
-fn resource_commands_are_declared_but_not_built_yet() {
-    for args in [
-        &["projects", "ls"][..],
-        &["projects", "list"][..],
-        &["projects", "worktrees", "ls", "p"][..],
-        &["agents", "rm", "a"][..],
-        &["agents", "remove", "a", "--yes"][..],
-        &["agents", "tabs", "stop", "a", "t"][..],
-        &["terminals", "ls", "-q"][..],
-        &["macros", "show", "m"][..],
-        &["env", "ls", "--show"][..],
-        &["remote", "default", "--unset"][..],
-        &["operations", "show", "op1"][..],
-        &["server", "logs", "-f"][..],
-        &["server", "connections", "ls"][..],
+fn resource_commands_answer_with_no_dux_running_and_never_create_the_database() {
+    const NOT_BUILT: &str = "this command is not built yet\n";
+    const NOT_RUNNING: &str = "dux isn't running; start it with \"dux\" or \"dux server\"\n";
+    for (args, code, stderr) in [
+        (&["projects", "ls"][..], 2, NOT_BUILT),
+        (&["projects", "list"][..], 2, NOT_BUILT),
+        (&["projects", "worktrees", "ls", "p"][..], 2, NOT_BUILT),
+        (&["agents", "rm", "a"][..], 2, NOT_BUILT),
+        (&["agents", "remove", "a", "--yes"][..], 2, NOT_BUILT),
+        (&["agents", "tabs", "stop", "a", "t"][..], 2, NOT_BUILT),
+        (&["terminals", "ls", "-q"][..], 2, NOT_BUILT),
+        (&["macros", "show", "m"][..], 2, NOT_BUILT),
+        (&["env", "ls", "--show"][..], 2, NOT_BUILT),
+        (&["server", "logs", "-f"][..], 2, NOT_BUILT),
+        (&["server", "connections", "ls"][..], 2, NOT_BUILT),
+        (&["operations", "show", "op1"][..], 4, NOT_RUNNING),
     ] {
-        let run = dux("not-built", args);
-        assert_eq!(run.code(), 2, "{args:?}: {}", run.stderr());
-        assert_eq!(run.stderr(), "this command is not built yet\n", "{args:?}");
+        let dir = home("no-dux");
+        let run = dux_in(&dir, args, &[]);
+        assert_eq!(run.code(), code, "{args:?}: {}", run.stderr());
+        assert_eq!(run.stderr(), stderr, "{args:?}");
         assert_eq!(run.stdout(), "", "{args:?}");
+        assert!(!dir.join("sessions.sqlite3").exists(), "{args:?}");
     }
 }
 
 #[test]
-fn config_refuses_an_explicit_remote_and_touches_nothing() {
-    let dir = home("config-remote");
-    let out = Command::new(env!("CARGO_BIN_EXE_dux"))
-        .args(["--remote", "box", "config", "set", "server.port", "4000"])
-        .env("DUX_HOME", &dir)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let run = Run { out };
-    assert_eq!(run.code(), 2);
-    assert_eq!(
-        run.stderr(),
-        "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n"
+fn remotes_are_saved_listed_made_default_and_forgotten() {
+    let dir = home("remotes");
+    let run = dux_in(
+        &dir,
+        &["remote", "add", "lan", "http://192.168.1.20:3890"],
+        &[],
     );
-    assert_eq!(run.stdout(), "");
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    assert_eq!(run.code(), 2);
+    assert!(run.stderr().contains("--insecure"), "{}", run.stderr());
+    assert!(!dir.join("remotes.toml").exists());
+
+    let run = dux_in(
+        &dir,
+        &["remote", "add", "home", "http://127.0.0.1:3890/"],
+        &[],
+    );
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let run = dux_in(
+        &dir,
+        &[
+            "remote",
+            "add",
+            "lan",
+            "http://192.168.1.20:3890",
+            "--insecure",
+        ],
+        &[],
+    );
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let run = dux_in(&dir, &["remote", "default", "lan"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+
+    let run = dux_in(&dir, &["remote", "ls", "-q"], &[]);
+    assert_eq!(run.stdout(), "home\nlan\n");
+    let run = dux_in(&dir, &["remote", "list", "--format", "json"], &[]);
+    let listed: serde_json::Value = serde_json::from_str(&run.stdout()).expect("one array");
+    assert_eq!(listed[0]["url"], "http://127.0.0.1:3890");
+    assert_eq!(listed[1]["default"], true);
+    assert_eq!(listed[1]["insecure"], true);
+
+    let run = dux_in(&dir, &["remote", "rm", "lan"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let run = dux_in(&dir, &["remote", "ls"], &[]);
+    assert_eq!(run.stdout().lines().count(), 2, "{}", run.stdout());
+    assert!(run.stdout().starts_with("NAME "), "{}", run.stdout());
+    let saved = std::fs::read_to_string(dir.join("remotes.toml")).unwrap();
+    assert!(!saved.contains("default"), "{saved}");
+}
+
+#[test]
+fn config_refuses_a_selected_remote_and_touches_nothing() {
+    let refusal = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n";
+    let saved_default =
+        "default = \"work\"\n\n[remotes.work]\nurl = \"https://work.example.com\"\n";
+    for (case, args, env, remotes) in [
+        (
+            "flag",
+            &["--remote", "box", "config", "set", "server.port", "4000"][..],
+            &[][..],
+            None,
+        ),
+        (
+            "variable",
+            &["config", "set", "ui.theme", "x"][..],
+            &[("DUX_REMOTE", "work")][..],
+            None,
+        ),
+        (
+            "default",
+            &["config", "set", "ui.theme", "x"][..],
+            &[][..],
+            Some(saved_default),
+        ),
+    ] {
+        let dir = home(&format!("config-remote-{case}"));
+        if let Some(text) = remotes {
+            std::fs::write(dir.join("remotes.toml"), text).unwrap();
+        }
+        let run = dux_in(&dir, args, env);
+        assert_eq!(run.code(), 2, "{case}: {}", run.stderr());
+        assert_eq!(run.stderr(), refusal, "{case}");
+        assert_eq!(run.stdout(), "", "{case}");
+        assert!(!dir.join("config.toml").exists(), "{case}");
+    }
+    let dir = home("config-remote-local");
+    let run = dux_in(
+        &dir,
+        &["--local", "config", "set", "ui.theme", "dux_dark"],
+        &[("DUX_REMOTE", "work")],
+    );
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(dir.join("config.toml").exists());
 }
 
 #[test]

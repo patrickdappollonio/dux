@@ -336,6 +336,21 @@ itself is left alone.
 | `path` | At startup only. The log file is opened once, so a new path needs a restart. |
 | `max_bytes`, `keep`, `compress` | On a config reload, applied at the next line dux writes. |
 
+## How long a command waits (`[cli]`)
+
+```toml
+[cli]
+wait_timeout_seconds = 600  # 10 minutes
+```
+
+A change made from the `dux` command line waits until it has really finished
+before the command ends. `wait_timeout_seconds` is how long it waits; past that,
+the command stops waiting and says the outcome is unknown, naming the change's id
+so `dux operations show <id>` can look it up later. The change itself keeps
+running either way. `--wait-timeout <seconds>` sets a different wait for one
+command, and `--no-wait` returns at once with the id. Only the command line on
+this machine reads this setting, the next time it runs.
+
 ## Environment variables and portable paths
 
 Project paths understand `$HOME`, `${HOME}`, and `~`, and environment values expand

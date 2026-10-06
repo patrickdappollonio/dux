@@ -201,6 +201,24 @@ pub fn dux_may_be_running(lock_path: &Path) -> bool {
     !matches!(holder(lock_path, None), Holder::None)
 }
 
+/// Who holds `lock_path`, by the same checks as [`dux_may_be_running`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LockHolder {
+    Free,
+    Held(u32),
+    /// The lock could not be checked; the reason says why.
+    Unknown(String),
+}
+
+/// [`LockHolder`] for `lock_path`.
+pub fn lock_holder(lock_path: &Path) -> LockHolder {
+    match holder(lock_path, None) {
+        Holder::None => LockHolder::Free,
+        Holder::Pid(pid) => LockHolder::Held(pid),
+        Holder::Unknown(reason) => LockHolder::Unknown(reason),
+    }
+}
+
 fn send(pid: u32) -> SignalOutcome {
     let Some(raw) = i32::try_from(pid)
         .ok()
