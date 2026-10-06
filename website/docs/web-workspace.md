@@ -123,6 +123,17 @@ The launcher's `⋯` holds both flavors under **Projects** ("Add project…" and
 a repository…"); either way the picker inspects your selection and offers the right
 action. The TUI's project browser makes the same offer.
 
+### Cloning a repository
+
+Not on the server yet? **Clone a repository…** sits right beside them, under **Projects**
+in the launcher's `⋯` and in the app menu's **Add project** submenu. Paste the remote's
+address and dux clones it, adds it as a project and starts its first agent, all in one go.
+The destination folder fills itself in from the address (your start directory plus the
+repository's name) until you type over it, and the agent gets the name you give it or a
+random one, exactly like **New agent**. When the agent appears, dux selects it for you,
+however long the clone took. The full story, including what happens when something goes
+wrong halfway, is in [Creating agents](/docs/creating-agents#cloning-a-repository).
+
 ## Managing projects
 
 **Projects…** in the app menu (the cog), right under **Add project**, lists every project

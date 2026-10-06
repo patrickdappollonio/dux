@@ -11,7 +11,9 @@ and switching between them is instant.
 
 First you need a project: the Add-project button in the browser, or the `add-project`
 command in the terminal UI's palette. Either opens a project browser over the same
-filesystem.
+filesystem. Repository not on the machine yet? Skip the shell trip:
+[Cloning a repository](#cloning-a-repository) clones it, adds it as a project and starts
+its first agent in one go.
 
 One path skips all of that. A **standalone agent** has no branch and no worktree and runs
 in a folder you point it at, with no project at all. See
@@ -192,6 +194,77 @@ commit. When they are not, creation still proceeds and the status message notes 
 nothing was copied. Files matched by `.gitignore`, submodule and embedded-repository
 contents, and empty directories never travel.
 
+## Cloning a repository
+
+The repository you want to work on lives on a remote and not on this machine? One action
+clones it, adds it as a project and starts its first agent there. In the browser it is
+**Clone a repository…**, beside **Add project…** under **Projects** in the launcher's `⋯`
+and in the app menu's **Add project** submenu. In the terminal UI it is the
+`clone-project` palette command.
+
+Both open the same short form:
+
+- **The address.** Anything `git clone` takes: `https://…`, `ssh://…`,
+  `git@host:owner/repo.git`, a `file://` address, or a plain path.
+- **The destination folder.** It fills itself in as your project browser's start
+  directory plus the repository's name, and keeps following the address until you edit
+  it. A leading `~` works; otherwise give a full path.
+- **The first agent's name**, with the same pet-name checkbox as every other naming
+  prompt. Leave the name empty and dux picks a pet name for you.
+
+Then dux runs a full clone, checks out the remote's default branch, adds the folder as a
+project with that branch as its base branch, and starts the agent on a fresh branch under
+the provider every new project gets by default. One progress message covers the lot and
+ends with one outcome: the agent is running, or what stopped it and how far it got. In
+the browser the dialog closes as soon as the clone starts and dux selects the new agent
+when it appears, however long that takes; in the terminal UI the status line carries the
+progress and the outcome.
+
+> [!IMPORTANT]
+> **dux never asks for anything while it clones.** It uses your own git setup: credential
+> helpers, your ssh agent and keys, and URL rewrites apply exactly as in your shell. What
+> would need a prompt fails straight away with git's or ssh's own message instead, so a
+> host you have never connected to must be trusted once from a shell first (connect to it
+> or clone anything from it), and an ssh key with a passphrase must already be loaded in
+> your agent.
+
+A few more things worth knowing:
+
+- **The machine that clones is the one dux runs on.** A path or `file://` address is read
+  from that machine's disk, not from the device your browser is on, and the destination
+  is on that machine too.
+- **The destination must be new or an empty folder**, its parent folder must already
+  exist, and it cannot already be a project. dux will not clone into a symbolic link, and
+  will not start a second clone into a folder it is already cloning into.
+- **A user name and token in the address work, and dux keeps them out of sight.** Every
+  message and log line dux writes shows the address without them. git itself still saves
+  the address as you typed it in the clone's own `.git/config`, which is your call.
+- **There is no time limit, only a silence limit.** A big repository is slow, not stuck,
+  so dux lets a clone run as long as git keeps printing progress. One that goes quiet for
+  [`[git] clone_stall_seconds`](/docs/configuration#how-long-a-clone-may-go-quiet-git)
+  (5 minutes by default) is stopped, and the message says so. There is no cancel button;
+  quitting dux stops a running clone. A clone still going after 30 minutes swaps its
+  spinner for a warning while git carries on, and the outcome still arrives when it ends.
+- **Submodules are not initialized**, the same as everywhere else in dux.
+- **The `dux` command line has no clone command.** Clone from the browser or the terminal
+  UI.
+
+### When a clone stops partway
+
+dux never deletes a folder on your behalf, so what is left depends on where it stopped.
+The message always says which of these happened and what to do next.
+
+| What stopped it | What you have afterwards |
+|---|---|
+| A check before git ran (bad name, folder not empty, and so on) | Nothing changed. |
+| git failed (wrong address, no access, the host refused) | Nothing added. git cleans up the folder it was cloning into. |
+| The clone went quiet for too long, or dux quit mid-clone | Nothing added, and the destination may hold part of a clone. Remove it before trying again: dux refuses a folder that is not empty, and says an earlier clone may have been interrupted there. |
+| The remote has no commits yet | The clone stays, no project is added. Use Add project on it, which offers to make a first commit. |
+| The remote's default branch could not be checked out | The clone stays, no project is added. Check a branch out in it, then use Add project. |
+| Adding the project failed | The clone stays, no agent is created, and the message gives the reason. |
+| A branch named like the agent already exists in the clone (the default branch included) | The project is added, no agent is created. Pick another name with New agent, which also offers to attach to that branch. |
+| The agent could not start | The project is added, and the message says why the agent is missing. |
+
 ## Creating an agent from a GitHub PR
 
 In the browser, **New agent from PR…** in the launcher's `⋯` menu at the bottom of the
@@ -251,9 +324,9 @@ every project you have.
 - **None is.** dux names the repository it could not place and offers the project picker.
 
 > [!IMPORTANT]
-> **dux will not clone a repository it does not have.** Every way of adding a project
-> takes a directory that already exists. If the repository is not on this machine yet,
-> clone it yourself and add it as a project first.
+> **This path never clones a repository dux does not have.** If no project is a checkout
+> of it, get one first with [Cloning a repository](#cloning-a-repository), then paste the
+> reference again.
 
 Some projects cannot be compared at all: the directory is gone, git cannot read an
 `origin`, or the address is on a host `gh` is not signed in to. dux reports those as
