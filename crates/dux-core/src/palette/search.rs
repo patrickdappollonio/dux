@@ -381,12 +381,13 @@ mod tests {
 
     #[test]
     fn corpus_agent_tab_has_both_kinds_of_hit() {
-        // Two name-token hits first, then the commands that carry one of the
+        // Three name-token hits first, then the commands that carry one of the
         // words in their description only.
         assert_eq!(
             ranked_match_names("agent tab"),
             vec![
                 "new-agent-tab",
+                "stop-agent-tab",
                 "toggle-tab-to-agent",
                 "close-tab",
                 "toggle-always-show-tabs"
@@ -408,6 +409,7 @@ mod tests {
                 "fork-agent",
                 "change-agent-provider",
                 "new-agent-tab",
+                "stop-agent-tab",
                 "toggle-agent-auto-reopen",
                 "rerun-startup-command-on-agent",
                 "show-agent",

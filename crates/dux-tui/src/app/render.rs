@@ -8068,6 +8068,78 @@ impl App {
         };
     }
 
+    /// The stop-tab confirmation. Prose plus a Cancel/Stop pair, the Confirm
+    /// family, Cancel focused. Says what the browser's dialog says: the tab's
+    /// session ends, the tab stays, and the agent detaches when this was its
+    /// last running tab.
+    fn render_confirm_stop_tab_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ConfirmStopTab {
+            session_id,
+            provider_label,
+            last_running,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let agent_name = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| &s.id == session_id)
+            .map(|s| self.session_label(s))
+            .unwrap_or_else(|| session_id.clone());
+        let tail = Prose::new()
+            .text(" This ends the tab's session, interrupting whatever it is doing. The tab stays in the strip, ready to start again.")
+            .text(if *last_running {
+                " It's this agent's last running tab, so the agent detaches and stays in Projects, reopenable."
+            } else {
+                ""
+            });
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::raw(" Stop the "),
+                name_chip(provider_label, &self.theme),
+                Span::raw(" tab on "),
+                name_chip(&agent_name, &self.theme),
+                Span::raw("?"),
+            ]),
+            Line::from(""),
+        ];
+        lines.extend(prose_lines(
+            &tail,
+            "",
+            Style::default().fg(self.theme.warning_fg),
+            &self.theme,
+        ));
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmStopTabCancel,
+            (
+                "Stop",
+                ButtonKind::Danger,
+                ButtonPressedTarget::ConfirmStopTabConfirm,
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Stop Tab",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmStopTab {
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
+        };
+    }
+
     /// The detach confirmation. Prose plus a Cancel/Detach pair, the Confirm
     /// family, Cancel focused.
     ///
@@ -10656,6 +10728,7 @@ impl App {
                 self.render_confirm_delete_terminal_prompt(frame)
             }
             PromptState::ConfirmCloseTab { .. } => self.render_confirm_close_tab_prompt(frame),
+            PromptState::ConfirmStopTab { .. } => self.render_confirm_stop_tab_prompt(frame),
             PromptState::ConfirmRecreateWorkingCopy { .. } => {
                 self.render_confirm_recreate_working_copy_prompt(frame)
             }
@@ -21430,6 +21503,7 @@ mod tests {
             rows,
             vec![
                 "new-agent-tab",
+                "stop-agent-tab",
                 "toggle-always-show-tabs",
                 "toggle-tab-to-agent",
                 "close-tab",

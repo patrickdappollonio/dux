@@ -22,11 +22,12 @@
 //!   with `"removing": true` and no terminals, until the delete's operation
 //!   record finishes. The workspace document never does: the agent left it when
 //!   the delete started.
-//! - `GET /api/v1/sessions` (its live rows) and `GET /api/v1/sessions/:id`
-//!   carry `remote_viewers`: how many browser attachments the agent has, from
-//!   the attachment registry. The workspace document leaves it out, because it
-//!   is pushed on every change and a count that moves with every attach would
-//!   push the whole document each time.
+//! - The live rows of `GET /api/v1/sessions` carry `remote_viewers`: how many
+//!   browser attachments the agent has, from the attachment registry. The
+//!   workspace document leaves it out, because it is pushed on every change
+//!   and a count that moves with every attach would push the whole document
+//!   each time; `GET /api/v1/sessions/:id` leaves it out to keep serving the
+//!   shape the create's replay serves, field for field.
 //!
 //! A nested terminal entry carries a tagged `owner` field. That is additive and it
 //! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
@@ -74,8 +75,7 @@ pub struct SessionWithTerminals {
     removing: bool,
     /// How many browser attachments the agent has across its tabs and its own
     /// terminals, leaving out the terminal UI: set on the live rows of
-    /// `GET /api/v1/sessions` and on `GET /api/v1/sessions/:id`, absent on
-    /// every other answer.
+    /// `GET /api/v1/sessions`, absent on every other answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_viewers: Option<usize>,
 }
@@ -261,11 +261,9 @@ async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> R
     // Project ONLY the requested session, not the whole spine. The outer `None`
     // is a dead engine (503); the inner `None` is an unknown session id (404).
     match state.engine.session(id).await {
-        Some(Some((session, terminals))) => Json(
-            SessionWithTerminals::new(session, terminals)
-                .counting_viewers(state.engine.attachments()),
-        )
-        .into_response(),
+        Some(Some((session, terminals))) => {
+            Json(SessionWithTerminals::new(session, terminals)).into_response()
+        }
         Some(None) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
         None => engine_unavailable(),
     }
@@ -300,7 +298,7 @@ mod tests {
     /// the workspace. The thin list a script reads still names it, marked as
     /// being removed, until the delete's record finishes; the document the
     /// browser reads does not. Every live row counts the browsers attached to
-    /// the agent, leaving out the terminal UI, on the thin reads.
+    /// the agent, leaving out the terminal UI.
     #[tokio::test]
     async fn the_thin_read_lists_agents_being_removed_and_counts_remote_viewers() {
         use dux_core::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
@@ -357,8 +355,6 @@ mod tests {
         assert_eq!(rows[1]["id"], "gone");
         assert_eq!(rows[1]["removing"], true);
         assert_eq!(rows[1]["terminals"], serde_json::json!([]));
-        let shown = get_json(&app, "/api/v1/sessions/live").await;
-        assert_eq!(shown["remote_viewers"], 2, "{shown}");
 
         let document = get_json(&app, "/api/v1/workspace").await;
         let ids: Vec<&str> = document["sessions"]
