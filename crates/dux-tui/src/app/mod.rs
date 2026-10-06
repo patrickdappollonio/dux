@@ -225,6 +225,8 @@ struct ChangedFilesAnswer {
 
 struct DrainedEventMetadata {
     pr_lookup_completion: Option<(String, bool)>,
+    /// A clone's worker answered: its op id, and whether it refused or failed.
+    clone_completion: Option<(String, bool)>,
     checkout_inspect_completion: Option<String>,
     reference_resolution: Option<PrReferenceResolutionAnswer>,
     changed_files_answer: Option<ChangedFilesAnswer>,
@@ -407,6 +409,9 @@ pub struct App {
     /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
     /// and it is spent by the create's own outcome, success or failure.
     pub(crate) create_agent_started_here: bool,
+    /// What the clone form held when it last started a clone, until that
+    /// clone succeeds or another submit replaces it.
+    pub(crate) clone_draft: Option<CloneDraft>,
     /// The macro list's version as the editor last saw it, on open and after each
     /// of its own writes; a save is refused once the list has moved on since.
     pub(crate) macro_editor_version: Option<String>,
@@ -2543,6 +2548,25 @@ pub(crate) enum CloneProjectFocus {
     RandomizedNameCheckbox,
 }
 
+/// The clone form's fields as they were submitted, kept for the clone they
+/// started. When the worker refuses that clone or it fails, the form has long
+/// closed on its busy, so the next open of the form restores these instead of
+/// asking for everything again.
+#[derive(Clone, Debug)]
+pub(crate) struct CloneDraft {
+    /// The clone's status operation, which its worker's answer names.
+    pub(crate) op_id: String,
+    /// The clone was refused or failed, so the next open restores the draft.
+    pub(crate) restorable: bool,
+    pub(crate) address: String,
+    pub(crate) destination: String,
+    pub(crate) destination_edited: bool,
+    pub(crate) start_folder: PathBuf,
+    pub(crate) agent_name: String,
+    pub(crate) randomize_name: bool,
+    pub(crate) randomized_name: Option<String>,
+}
+
 /// What the folder browser is picking a directory for.
 ///
 /// One prompt with a purpose rather than two prompts, because the browsing
@@ -4515,6 +4539,7 @@ impl App {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,

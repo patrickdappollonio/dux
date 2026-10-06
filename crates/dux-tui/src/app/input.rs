@@ -29486,7 +29486,8 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn clone_form_enter_dispatches_the_clone_and_closes_but_a_refusal_keeps_it_open() {
+    fn clone_form_enter_dispatches_and_closes_a_refusal_keeps_it_open_and_a_failed_clone_hands_it_back()
+     {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
         app.execute_command("clone-project".to_string()).unwrap();
@@ -29518,6 +29519,103 @@ cyan = "#00ffff"
         drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
         assert!(!app.engine.is_in_flight(&key), "the clone is still running");
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a failed clone does not reopen the form by itself"
+        );
+
+        // The next open hands back what the failed clone was given.
+        let typed = |app: &App| match &app.prompt {
+            PromptState::CloneProject {
+                address,
+                destination,
+                agent_name,
+                randomize_name,
+                ..
+            } => (
+                address.text.clone(),
+                destination.text.clone(),
+                agent_name.text.clone(),
+                *randomize_name,
+            ),
+            other => panic!("expected the clone form, got {other:?}"),
+        };
+        app.execute_command("clone-project".to_string()).unwrap();
+        let (address, destination, _, _) = typed(&app);
+        assert_eq!(
+            address,
+            format!("{}/no-such-remote", start.path().display())
+        );
+        assert_eq!(
+            destination,
+            format!("{}/no-such-remote", start.path().display())
+        );
+
+        // A fresh submit replaces it: the worker refuses a destination that
+        // is not empty, and the next open has this submit's fields, the
+        // destination still the user's own rather than following the address.
+        let taken = start.path().join("no-such-remote-taken");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("file"), "x").unwrap();
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-taken");
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "named");
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Char(' '));
+        let submitted = typed(&app);
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let key = InFlightKey::Clone(taken.canonicalize().unwrap());
+        drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
+        assert!(!app.engine.is_in_flight(&key), "the clone is still running");
+        app.execute_command("clone-project".to_string()).unwrap();
+        assert_eq!(typed(&app), submitted);
+        type_text(&mut app, "x");
+        assert_eq!(
+            typed(&app).1,
+            format!("{}/no-such-remote-taken", start.path().display())
+        );
+        tap(&mut app, KeyCode::Backspace);
+
+        // A clone that succeeds leaves nothing to hand back. Its worker's
+        // answer is swapped for a success, since a real one goes on to start
+        // an agent's provider.
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let succeeded = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match app.engine.worker_rx.recv_timeout(remaining) {
+                Ok(dux_core::worker::WorkerEvent::RepositoryCloned {
+                    status_op_id,
+                    path,
+                    agent_name,
+                    ..
+                }) => {
+                    break dux_core::worker::WorkerEvent::RepositoryCloned {
+                        status_op_id,
+                        path,
+                        agent_name,
+                        result: Ok(dux_core::clone_project::ClonedRepository {
+                            address: "/srv/remote.git".to_string(),
+                            branch: "main".to_string(),
+                            leading_branch: "main".to_string(),
+                            name_taken: false,
+                        }),
+                    };
+                }
+                Ok(other) => app.engine.worker_tx.send(other).unwrap(),
+                Err(_) => panic!("the clone never answered"),
+            }
+        };
+        app.engine.worker_tx.send(succeeded).unwrap();
+        drain_until(&mut app, |app| {
+            !app.engine.is_in_flight(&key) && !app.engine.is_in_flight(&InFlightKey::CreateAgent)
+        });
+        assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
+        app.execute_command("clone-project".to_string()).unwrap();
+        assert_eq!(typed(&app).0, "");
     }
 
     #[test]

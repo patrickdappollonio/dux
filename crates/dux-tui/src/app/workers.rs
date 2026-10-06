@@ -51,6 +51,21 @@ impl DrainedEventMetadata {
                 } => Some((id.clone(), result.is_ok())),
                 _ => None,
             },
+            clone_completion: match event {
+                WorkerEvent::RepositoryCloned {
+                    status_op_id: Some(id),
+                    result,
+                    ..
+                } => Some((
+                    id.clone(),
+                    matches!(
+                        result,
+                        Err(dux_core::clone_project::CloneOutcome::Refused(_)
+                            | dux_core::clone_project::CloneOutcome::Failed(_))
+                    ),
+                )),
+                _ => None,
+            },
             checkout_inspect_completion: match event {
                 WorkerEvent::NonDefaultBranchCheckoutCompleted {
                     status_op_id: Some(id),
@@ -445,6 +460,26 @@ impl App {
         }
         if let Some(id) = metadata.checkout_inspect_completion {
             self.resolve_checkout_inspect_completion(id, chains_forward);
+        }
+        if let Some((id, refused_or_failed)) = metadata.clone_completion {
+            self.settle_clone_draft(&id, refused_or_failed);
+        }
+    }
+
+    /// A clone this form started has answered: keep its draft for the next
+    /// open when it was refused or failed, and drop it otherwise, since the
+    /// clone is on disk and the same request would only be refused.
+    fn settle_clone_draft(&mut self, op_id: &str, refused_or_failed: bool) {
+        let Some(draft) = self.clone_draft.as_mut() else {
+            return;
+        };
+        if draft.op_id != op_id {
+            return;
+        }
+        if refused_or_failed {
+            draft.restorable = true;
+        } else {
+            self.clone_draft = None;
         }
     }
 

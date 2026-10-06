@@ -962,23 +962,39 @@ impl App {
 
     /// Open the clone form: the destination starts at the add-project browser's
     /// start folder and follows the address until the user edits it, and the
-    /// agent's name starts as the New agent dialog's does.
+    /// agent's name starts as the New agent dialog's does. After a clone this
+    /// form started was refused or failed, it opens on what that clone was
+    /// given instead.
     pub(crate) fn open_clone_project_prompt(&mut self) -> Result<()> {
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        let mut agent_name = TextInput::new().with_char_map(crate::git::agent_name_char_map);
+        if let Some(draft) = self.clone_draft.as_ref().filter(|draft| draft.restorable) {
+            agent_name.set_text(draft.agent_name.clone());
+            self.prompt = PromptState::CloneProject {
+                address: TextInput::with_text(draft.address.clone()),
+                destination: TextInput::with_text(draft.destination.clone()),
+                destination_edited: draft.destination_edited,
+                start_folder: draft.start_folder.clone(),
+                agent_name,
+                randomize_name: draft.randomize_name,
+                randomized_name: draft.randomized_name.clone(),
+                focus: CloneProjectFocus::Address,
+            };
+            return Ok(());
+        }
         let start_folder = dux_core::project_browser::resolve_start_dir(&self.engine.config);
         let randomize_name = self
             .engine
             .config
             .defaults
             .enable_randomized_pet_name_by_default;
-        let mut agent_name = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
         if randomize_name {
             let name = crate::git::docker_style_name();
             agent_name.set_text(name.clone());
             randomized_name = Some(name);
         }
-        self.input_target = InputTarget::None;
-        self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::CloneProject {
             address: TextInput::new(),
             destination: TextInput::with_text(clone_destination_for(&start_folder, "")),
@@ -994,17 +1010,33 @@ impl App {
 
     /// Submit the clone form: dispatch `Command::CloneProject` and close it, or,
     /// when the engine refuses the request up front, keep it open so the
-    /// refusal on the status line can be acted on without retyping.
+    /// refusal on the status line can be acted on without retyping. A clone
+    /// that starts keeps what was typed as its draft, for the form to restore
+    /// should its worker refuse it or git fail.
     pub(crate) fn confirm_clone_project(&mut self) {
         let PromptState::CloneProject {
             address,
             destination,
+            destination_edited,
+            start_folder,
             agent_name,
             randomize_name,
+            randomized_name,
             ..
         } = &self.prompt
         else {
             return;
+        };
+        let draft = CloneDraft {
+            op_id: String::new(),
+            restorable: false,
+            address: address.text.clone(),
+            destination: destination.text.clone(),
+            destination_edited: *destination_edited,
+            start_folder: start_folder.clone(),
+            agent_name: agent_name.text.clone(),
+            randomize_name: *randomize_name,
+            randomized_name: randomized_name.clone(),
         };
         let name = agent_name.text.trim();
         let command = Command::CloneProject {
@@ -1021,6 +1053,15 @@ impl App {
                 );
                 if !refused {
                     self.prompt = PromptState::None;
+                    // The clone's busy carries its op id, which its worker's
+                    // answer names; a fresh submit replaces any earlier draft.
+                    self.clone_draft = match &reaction {
+                        EventReaction::Status(update) => update
+                            .key
+                            .clone()
+                            .map(|op_id| CloneDraft { op_id, ..draft }),
+                        _ => None,
+                    };
                 }
                 self.apply_reaction(reaction);
             }
@@ -5059,6 +5100,7 @@ mod tests {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
