@@ -8372,9 +8372,10 @@ mod tests {
             },
             std::time::Instant::now(),
         );
-        engine
-            .operations
-            .await_key("op-start", &crate::operations::launch_binding_key("s1-slot"));
+        engine.operations.await_key(
+            "op-start",
+            &crate::operations::launch_binding_key("s1-slot"),
+        );
 
         let data = make_failed_data(
             "s1",

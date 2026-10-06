@@ -141,12 +141,18 @@ mod tests {
             ),
             // Refused as it was asked: the running dux answered, and said no.
             (
-                (400, r#"{"message":"Config writer is busy; please retry."}"#.to_string()),
+                (
+                    400,
+                    r#"{"message":"Config writer is busy; please retry."}"#.to_string(),
+                ),
                 String::new(),
                 ReloadAnswer::Refused("Config writer is busy; please retry.".to_string()),
             ),
             (
-                (409, r#"{"message":"another change is in the way"}"#.to_string()),
+                (
+                    409,
+                    r#"{"message":"another change is in the way"}"#.to_string(),
+                ),
                 String::new(),
                 ReloadAnswer::Refused("another change is in the way".to_string()),
             ),
@@ -189,10 +195,10 @@ mod tests {
         let _lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
         let ReloadAnswer::NotReached(message) = ask_to_reload(&lock_path, Duration::from_secs(1))
         else {
-            panic!("a held lock with no socket cannot be asked");
+            panic!("a held lock that names no socket yet cannot be asked");
         };
         assert!(
-            message.contains("is running but does not answer on its control socket"),
+            message.contains("is still starting and has not opened its control socket yet"),
             "{message}"
         );
     }

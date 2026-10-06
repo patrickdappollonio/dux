@@ -149,7 +149,7 @@ for the answer. It then says which of these happened:
   applies the next time it starts." and exits with status 0.
 - dux is running but could not be asked: the change is saved, and `set` prints "The change is
   saved, but the running dux was not asked to reload it:" followed by why (for example that
-  dux is running without a control socket, or does not answer on it), then says dux keeps its
+  dux is running without a control socket, is still starting, or does not answer on it), then says dux keeps its
   current settings until you reload it from the app or restart it. It exits with status 0.
 - dux did not answer in time: `set` waits up to `[cli] wait_timeout_seconds` (10 minutes by
   default) for the reload's answer. If none comes it prints "The change is saved, but the

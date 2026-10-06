@@ -1535,7 +1535,7 @@ port = 3890
         std::fs::write(&paths.config_path, "[server]\nport = 3890\n").expect("seed");
         let said = set(&paths, &["server.port", "4000"], &mut no_secrets()).expect("saved");
         assert!(
-            said.contains("is running but does not answer on its control socket; restart it"),
+            said.contains("is still starting and has not opened its control socket yet"),
             "{said}"
         );
         assert!(

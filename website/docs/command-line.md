@@ -34,7 +34,9 @@ dux isn't running; start it with "dux" or "dux server"
 ```
 
 A dux that is running but cannot be reached says that instead, with its PID, and why
-when dux knows. The usual fix is to restart it.
+when dux knows. The usual fix is to restart it. A dux that has only just started gets up
+to two seconds to open its socket; if it still has not, the command says dux is still
+starting, and trying again in a moment is the fix.
 
 The resources that live in `config.toml` (macros, providers, keys, themes and the global
 environment) do not need dux running; [see below](#resources-kept-in-configtoml).
