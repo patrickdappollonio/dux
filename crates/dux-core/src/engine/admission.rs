@@ -416,6 +416,13 @@ mod tests {
                 (Ok(_), Some(_)) => panic!("{name} went ahead"),
             }
         }
+        // The web's own kill of an agent's processes is refused the same way.
+        let Err(refused) = engine.apply_wire(WireCommand::KillSessionPty {
+            session_id: "s2".to_string(),
+        }) else {
+            panic!("a kill of an agent a browser watches went ahead");
+        };
+        assert!(refused.to_string().contains("192.168.1.5"), "{refused}");
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
         assert!(engine.sessions.iter().any(|s| s.id == "s2"));
         assert!(engine.projects.iter().any(|p| p.id == "p1"));

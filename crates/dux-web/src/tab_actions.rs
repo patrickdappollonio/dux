@@ -176,6 +176,7 @@ async fn delete_tab(
     Path((id, tab)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
@@ -192,6 +193,7 @@ async fn delete_tab(
         OperationKind::TabClose,
         &operation,
         &force,
+        &client,
     )
     .await
     {

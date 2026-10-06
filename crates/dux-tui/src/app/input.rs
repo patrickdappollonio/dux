@@ -8014,7 +8014,7 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
-        let _reservation = match self
+        let reservation = match self
             .engine
             .reserve_destruction(self.engine.agent_scope(&session_id))
         {
@@ -8035,6 +8035,9 @@ impl App {
                 self.set_warning(dux_core::engine::detach_not_running_message(&label));
             }
             dux_core::engine::DetachSessionOutcome::Started { key, busy, .. } => {
+                // The agent shuts down after this returns; nobody attaches to
+                // it until the stop's final lands.
+                reservation.until_final(&key);
                 self.status.set(
                     std::time::Instant::now(),
                     Some(key),
@@ -8386,6 +8389,20 @@ impl App {
             return false;
         }
 
+        // The confirmation is about ending processes, not about cutting
+        // anybody off: refused while somebody else is attached to one of them,
+        // with the list left open and who named.
+        let _reservation = match self
+            .engine
+            .reserve_destruction(self.kill_running_scope(&confirm_prompt.target_ids))
+        {
+            Ok(reservation) => reservation,
+            Err(attached) => {
+                self.prompt = PromptState::KillRunning(confirm_prompt.previous);
+                self.set_error(attached.to_string());
+                return false;
+            }
+        };
         self.prompt = PromptState::None;
         let requested = confirm_prompt.target_ids.len();
         let (agents, terminals) = self.kill_runtime_targets(&confirm_prompt.target_ids);
@@ -8408,9 +8425,23 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
-        if matches!(self.prompt, PromptState::ConfirmQuit { .. }) {
-            self.prompt = PromptState::None;
+        let PromptState::ConfirmQuit { attached, .. } = &mut self.prompt else {
+            return confirm;
+        };
+        if confirm {
+            // Asked again, naming everybody, when somebody attached behind the
+            // open dialog; otherwise nobody can attach to anything from here
+            // until dux has gone.
+            if let Err(now) = self.engine.reserve_quit(attached) {
+                *attached = now.blockers;
+                self.set_warning(
+                    "Another device connected while this was open. Check who is connected now, \
+                     then confirm again to quit.",
+                );
+                return false;
+            }
         }
+        self.prompt = PromptState::None;
         confirm
     }
 
@@ -15940,20 +15971,39 @@ not_a_real_action = ["x"]
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
 
-        app.prompt = PromptState::KillRunning(KillRunningPrompt {
-            runtimes: app.running_runtime_snapshot(),
-            list: SearchableList::new(),
-            selected_ids: [
-                RuntimeTargetId::Agent("session-1".to_string()),
-                RuntimeTargetId::Terminal("term-1".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
-        });
+        let open = |app: &mut App| {
+            app.prompt = PromptState::KillRunning(KillRunningPrompt {
+                runtimes: app.running_runtime_snapshot(),
+                list: SearchableList::new(),
+                selected_ids: [
+                    RuntimeTargetId::Agent("session-1".to_string()),
+                    RuntimeTargetId::Terminal("term-1".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+            });
+            app.open_confirm_kill_running_action(KillRunningAction::Selected)
+                .unwrap();
+        };
 
-        app.open_confirm_kill_running_action(KillRunningAction::Selected)
-            .unwrap();
+        // Refused, naming who, while a browser watches one of the targets;
+        // nothing is stopped and the list stays open.
+        let session_id = app.engine.sessions[0].id.clone();
+        let watching = crate::app::test_support::watch_from_a_browser(&app, "term-1", &session_id);
+        open(&mut app);
+        app.resolve_confirm_kill_running(true);
+        assert!(
+            app.status.text().contains("10.0.0.7"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!app.engine.providers.is_empty());
+        assert!(!app.engine.companion_terminals.is_empty());
+        assert!(matches!(app.prompt, PromptState::KillRunning(_)));
+        crate::app::test_support::stop_watching(&app, watching);
+
+        open(&mut app);
         app.resolve_confirm_kill_running(true);
 
         assert!(app.engine.providers.is_empty());
@@ -24869,6 +24919,39 @@ cyan = "#00ffff"
             }
             _ => panic!("expected quit confirmation"),
         }
+
+        // Another device attaches behind the open dialog: confirming asks
+        // again, naming both, and quits only once nobody new is in the way.
+        app.engine.attachments.register(
+            "second-browser",
+            dux_core::attachments::ConnectionFacts {
+                surface: dux_core::attachments::Surface::Browser,
+                device: Some("Safari".to_string()),
+                address: Some("10.0.0.8".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        app.engine
+            .attachments
+            .attach(
+                "second-browser",
+                dux_core::attachments::Target {
+                    kind: dux_core::attachments::TargetKind::Tab,
+                    id: slot_tab.clone(),
+                    agent: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!app.resolve_confirm_quit(true), "asked again");
+        match &app.prompt {
+            PromptState::ConfirmQuit { attached, .. } => assert_eq!(attached.len(), 2),
+            _ => panic!("the quit confirmation stays open"),
+        }
+        assert!(app.resolve_confirm_quit(true), "nobody new since");
     }
 
     #[test]
@@ -34889,7 +34972,7 @@ cyan = "#00ffff"
         );
 
         // While a browser watches the tab, the close is refused naming who.
-        crate::app::test_support::watch_from_a_browser(&app, &tab_id, &session_id);
+        let watching = crate::app::test_support::watch_from_a_browser(&app, &tab_id, &session_id);
         app.prompt = prompt();
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
@@ -34899,9 +34982,7 @@ cyan = "#00ffff"
             app.status.text()
         );
         assert!(app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)));
-        app.engine
-            .attachments
-            .deregister("browser-tab", dux_core::attachments::Ending::Deliberate);
+        crate::app::test_support::stop_watching(&app, watching);
 
         app.prompt = prompt();
         // Space activates the focused (Close) button.

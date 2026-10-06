@@ -4351,6 +4351,7 @@ impl App {
             attachments: Default::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
+            deferred_policies: Vec::new(),
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
         };

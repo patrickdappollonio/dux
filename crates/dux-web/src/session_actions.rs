@@ -549,6 +549,7 @@ async fn delete_session(
     Query(q): Query<DeleteQuery>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -569,6 +570,7 @@ async fn delete_session(
         OperationKind::AgentDelete,
         &operation,
         &force,
+        &client,
     )
     .await
     {
@@ -700,6 +702,7 @@ async fn reconnect_session(
     Path(id): Path<String>,
     Query(operation): Query<OperationQuery>,
     Query(force_connected): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
     body: Option<Json<ReconnectBody>>,
 ) -> Response {
@@ -722,6 +725,7 @@ async fn reconnect_session(
         OperationKind::AgentStart,
         &operation,
         &force_connected,
+        &client,
     )
     .await
     {
@@ -799,6 +803,7 @@ async fn kill_session(
     Path(id): Path<String>,
     Query(operation): Query<OperationQuery>,
     Query(force_connected): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
     body: Option<Json<KillSessionBody>>,
 ) -> Response {
@@ -819,6 +824,7 @@ async fn kill_session(
         OperationKind::AgentStop,
         &operation,
         &force_connected,
+        &client,
     )
     .await
     {

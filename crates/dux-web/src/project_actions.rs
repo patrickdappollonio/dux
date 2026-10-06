@@ -239,6 +239,7 @@ async fn remove_project(
     Query(q): Query<RemoveProjectQuery>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -261,6 +262,7 @@ async fn remove_project(
         OperationKind::ProjectRemove,
         &operation,
         &force,
+        &client,
     )
     .await
     {

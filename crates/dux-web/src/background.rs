@@ -434,9 +434,19 @@ mod tests {
         path: &std::path::Path,
         uri: &str,
     ) -> std::thread::JoinHandle<Result<String, String>> {
+        request_over_socket_as(path, "GET", uri)
+    }
+
+    /// [`request_over_socket`] with the method `method`.
+    fn request_over_socket_as(
+        path: &std::path::Path,
+        method: &str,
+        uri: &str,
+    ) -> std::thread::JoinHandle<Result<String, String>> {
         use std::io::{Read, Write};
         let path = path.to_path_buf();
         let uri = uri.to_string();
+        let method = method.to_string();
         std::thread::spawn(move || {
             let mut stream = std::os::unix::net::UnixStream::connect(&path)
                 .map_err(|e| format!("connect failed: {e}"))?;
@@ -445,7 +455,7 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             write!(
                 stream,
-                "GET {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\r\n"
+                "{method} {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\r\n"
             )
             .map_err(|e| format!("write failed: {e}"))?;
             let mut response = String::new();
@@ -472,6 +482,27 @@ mod tests {
             .join()
             .expect("the request thread")
             .expect("the request was answered")
+    }
+
+    /// [`serviced_until_answered`], answering also every status the turns
+    /// handed the terminal UI.
+    fn serviced_collecting_statuses(
+        server: &mut BackgroundServer,
+        engine: &mut dux_core::engine::Engine,
+        request: std::thread::JoinHandle<Result<String, String>>,
+    ) -> (String, Vec<dux_core::wire::WireStatus>) {
+        let mut statuses = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !request.is_finished() && std::time::Instant::now() < deadline {
+            statuses.extend(server.service(engine).statuses);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        statuses.extend(server.service(engine).statuses);
+        let answer = request
+            .join()
+            .expect("the request thread")
+            .expect("the request was answered");
+        (answer, statuses)
     }
 
     /// Open a running operation record and start a long wait on it over the
@@ -585,6 +616,23 @@ mod tests {
         );
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
         assert!(answer.contains("\"projects\""), "{answer}");
+        // A change the command line makes raises its status on the terminal UI
+        // too: the turn that answered it hands the final over.
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s-cli"));
+        let (answer, statuses) = serviced_collecting_statuses(
+            &mut plain,
+            &mut engine,
+            request_over_socket_as(&socket, "DELETE", "/api/v1/sessions/s-cli"),
+        );
+        assert!(answer.starts_with("HTTP/1.1 204"), "{answer}");
+        assert!(
+            statuses
+                .iter()
+                .any(|status| status.message.contains("Deleted")),
+            "{statuses:?}"
+        );
         // A command-line wait on an operation answers the record as it stands
         // the moment its core hands over, and the hand-over does not wait it out.
         let wait = waiting_on_an_operation(&engine, &socket, "op-to-background");

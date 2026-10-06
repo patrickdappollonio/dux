@@ -296,7 +296,8 @@ and why rather than reporting a deletion that did not happen.
 ### When somebody else is connected
 
 Deleting an agent, detaching it, force-stopping it, restarting it from scratch, closing a
-tab, closing a terminal and removing a project all end terminals, and somebody else may be
+tab, closing a terminal, removing a project, and starting an agent that would stop another
+agent already working in the same folder all end terminals, and somebody else may be
 looking at one: another browser tab, a phone, or the terminal app. dux refuses the change
 while anybody else is connected to what it would end, and says who: the device, the address
 it connects from (marked unverified when dux cannot vouch for it), whether they are typing

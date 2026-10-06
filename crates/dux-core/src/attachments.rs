@@ -149,6 +149,16 @@ pub struct Scope {
 }
 
 impl Scope {
+    /// Everything `other` covers too.
+    pub fn extend(&mut self, other: Scope) {
+        self.ptys.extend(other.ptys);
+        self.agents.extend(other.agents);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ptys.is_empty() && self.agents.is_empty()
+    }
+
     fn covers(&self, target: &Target) -> bool {
         self.ptys.contains(&target.id)
             || target
@@ -176,6 +186,11 @@ pub enum Life {
     Record(RecordWatch),
     /// Until [`Attachments::release`].
     Released,
+    /// Until a final lands under this status key ([`Attachments::finish_key`]),
+    /// or `until`, whichever comes first: a change with no operation record
+    /// whose work runs past its call (the terminal UI's), ended by the same
+    /// final its spinner is.
+    Key { key: String, until: Instant },
 }
 
 /// One connection in the way of a change.
@@ -243,6 +258,7 @@ impl Reservation {
         match &self.life {
             Life::Record(watch) => watch.is_open(),
             Life::Released => true,
+            Life::Key { until, .. } => Instant::now() < *until,
         }
     }
 }
@@ -289,18 +305,14 @@ impl Attachments {
         });
     }
 
-    /// Forget a connection.
-    ///
-    /// Lost, only the record goes: a terminal socket linked to it ends on its
-    /// own, and what the tab counted as attached to keeps counting. A
-    /// deliberate end takes everything attached through it at once.
+    /// Forget a connection. A terminal socket attached through it is still
+    /// live and stays attached until its own socket ends. Ended on purpose,
+    /// the lost terminals it still counted as attached to end with it; lost,
+    /// they keep their grace.
     pub fn deregister(&self, id: &str, ending: Ending) {
         self.with(|state| {
             state.connections.remove(id);
             if ending == Ending::Deliberate {
-                state
-                    .attachments
-                    .retain(|_, attachment| attachment.connection != id);
                 state.presences.retain(|presence| presence.connection != id);
             }
         });
@@ -475,6 +487,65 @@ impl Attachments {
             state.reservations.insert(id, Reservation { scope, life });
             Ok(id)
         })
+    }
+
+    /// [`Self::reserve`] for a change somebody already agreed to with
+    /// `accepted` in front of them: refused only when somebody else is in the
+    /// way now, with everybody in the way, so the question can be asked again.
+    /// The same connection on the same terminal is the same somebody, whether
+    /// or not it has started or stopped typing since.
+    pub fn reserve_accepting(
+        &self,
+        scope: Scope,
+        requester: Option<&str>,
+        accepted: &[Blocker],
+        life: Life,
+        now: Instant,
+    ) -> Result<u64, Vec<Blocker>> {
+        let same = |a: &Blocker, b: &Blocker| {
+            Blocker {
+                driving: false,
+                ..a.clone()
+            } == Blocker {
+                driving: false,
+                ..b.clone()
+            }
+        };
+        self.with(|state| {
+            let blockers = state.blockers(&scope, requester, now);
+            if blockers
+                .iter()
+                .any(|blocker| !accepted.iter().any(|seen| same(seen, blocker)))
+            {
+                return Err(blockers);
+            }
+            state.prune_reservations();
+            state.next += 1;
+            let id = state.next;
+            state.reservations.insert(id, Reservation { scope, life });
+            Ok(id)
+        })
+    }
+
+    /// Keep reservation `id` until a final lands under `key`, or `until`.
+    pub fn hand_to_key(&self, id: u64, key: &str, until: Instant) {
+        self.with(|state| {
+            if let Some(reservation) = state.reservations.get_mut(&id) {
+                reservation.life = Life::Key {
+                    key: key.to_string(),
+                    until,
+                };
+            }
+        });
+    }
+
+    /// A final landed under `key`: the reservations waiting on it end.
+    pub fn finish_key(&self, key: &str) {
+        self.with(|state| {
+            state.reservations.retain(|_, reservation| {
+                !matches!(&reservation.life, Life::Key { key: waiting, .. } if waiting == key)
+            });
+        });
     }
 
     /// End a reservation.
@@ -681,11 +752,14 @@ mod tests {
     fn only_the_requesting_connection_is_exempt() {
         let attachments = Attachments::default();
         let now = Instant::now();
+        let mut tokens = Vec::new();
         for id in ["e1", "e2"] {
             attachments.register(id, browser("127.0.0.1", "Safari"), None);
-            attachments
-                .attach(id, tab("s1-slot", "s1"), None, None)
-                .unwrap();
+            tokens.push(
+                attachments
+                    .attach(id, tab("s1-slot", "s1"), None, None)
+                    .unwrap(),
+            );
         }
         let own = Policy {
             requester: Some("e1".to_string()),
@@ -696,7 +770,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.len(), 1, "{refused:?}");
 
-        attachments.deregister("e2", Ending::Deliberate);
+        attachments.detach(tokens[1], Ending::Deliberate, now, Duration::ZERO);
         assert!(
             attachments
                 .reserve(agent_scope("s1"), &own, Life::Released, now)
@@ -744,8 +818,13 @@ mod tests {
     #[test]
     fn a_terminal_that_was_being_looked_at_counts_for_the_grace_until_ended_deliberately() {
         type Ends = fn(&Attachments, u64, Instant);
-        let cases: [(&str, Ends, bool); 8] = [
+        let cases: [(&str, Ends, bool); 9] = [
             ("its socket lost", |a, t, at| lose(a, t, at), true),
+            (
+                "its events connection closed while its own socket still streams",
+                |a, _, _| a.deregister("phone", Ending::Deliberate),
+                true,
+            ),
             (
                 "its socket and its events connection lost",
                 |a, t, at| {
@@ -958,6 +1037,33 @@ mod tests {
             attachments
                 .attach("e1", tab("s1-slot", "s1"), None, None)
                 .is_ok()
+        );
+
+        // One handed to a status key instead lasts until that key's final
+        // lands, or, if none ever does, until its ceiling.
+        let keyed = attachments
+            .reserve(agent_scope("s2"), &cli(), Life::Released, now)
+            .unwrap();
+        attachments.hand_to_key(keyed, "op-stop", now + Duration::from_secs(60));
+        assert_eq!(
+            attachments.attach("e1", tab("s2-slot", "s2"), None, None),
+            Err(Reserved)
+        );
+        attachments.finish_key("op-stop");
+        assert!(
+            attachments
+                .attach("e1", tab("s2-slot", "s2"), None, None)
+                .is_ok()
+        );
+        let stranded = attachments
+            .reserve(agent_scope("s3"), &cli(), Life::Released, now)
+            .unwrap();
+        attachments.hand_to_key(stranded, "op-never", now);
+        assert!(
+            attachments
+                .attach("e1", tab("s3-slot", "s3"), None, None)
+                .is_ok(),
+            "past its ceiling"
         );
     }
 

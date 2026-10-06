@@ -71,9 +71,29 @@ impl App {
         self.published_ptys = Some(drawn);
     }
 
+    /// What stopping `targets` from the running-processes list would end:
+    /// an agent target is its first tab, the others the tab or terminal named.
+    pub(super) fn kill_running_scope(
+        &self,
+        targets: &[RuntimeTargetId],
+    ) -> dux_core::attachments::Scope {
+        let mut scope = dux_core::attachments::Scope::default();
+        for target in targets {
+            scope.ptys.insert(match target {
+                RuntimeTargetId::Agent(session_id) => self
+                    .engine
+                    .slot_tab_id_of(SessionIdRef::new(session_id))
+                    .to_string(),
+                RuntimeTargetId::Tab(id) | RuntimeTargetId::Terminal(id) => id.clone(),
+            });
+        }
+        scope
+    }
+
     /// This surface stopped drawing anything: it is leaving the terminal (a
     /// quit, or the flip to the server).
     pub(super) fn release_drawn_attachments(&mut self) {
+        self.engine.attachments.set_terminal_ui(Vec::new(), None);
         self.engine.attachments.deregister(
             TERMINAL_UI_CONNECTION,
             dux_core::attachments::Ending::Deliberate,

@@ -327,6 +327,11 @@ impl axum::extract::FromRequestParts<AppState> for SocketClient {
 }
 
 impl SocketClient {
+    /// The client's address, the verified one when there is one.
+    pub(crate) fn address(&self) -> Option<IpAddr> {
+        self.address
+    }
+
     fn facts(
         &self,
         device: Option<String>,
@@ -2066,10 +2071,11 @@ async fn handle_pty_socket(
         send_close(&sink, provider_gone_close()).await;
         return;
     };
-    // The deadline has its own timer: past it this attachment and its input
-    // rights are revoked whatever the loop below is stuck on.
+    // The deadline has its own timer, started once the receive loop runs:
+    // past it this attachment and its input rights are revoked whatever the
+    // loop is stuck on, and the loop is cancelled.
     let expired = Arc::new(tokio::sync::Notify::new());
-    let _watchdog = QuietWatchdog::spawn(QuietWatch {
+    let quiet_watch = QuietWatch {
         heard: heard.clone(),
         deadline: PONG_DEADLINE,
         attachments: engine.attachments().clone(),
@@ -2080,7 +2086,7 @@ async fn handle_pty_socket(
         bus: Arc::clone(&bus),
         expired: Arc::clone(&expired),
         live_limits: Arc::clone(&live_limits),
-    });
+    };
 
     // Subscribe to the target PTY. An agent subscribe also launches/resumes the
     // provider if it isn't running yet (the same flow the legacy Subscribe uses);
@@ -2256,9 +2262,15 @@ async fn handle_pty_socket(
             live_limits: &live_limits,
             attachment: &attachment,
             heard: &heard,
-            expired: &expired,
         }
-        .run(stream, rx, grid_changes, handshake_grid_seq, socket_auth)
+        .run(
+            stream,
+            rx,
+            grid_changes,
+            handshake_grid_seq,
+            socket_auth,
+            quiet_watch,
+        )
         .await;
     }
 
@@ -2284,21 +2296,51 @@ struct AttachedPtySocket<'a> {
     /// When the peer last sent anything, a pong included; shared with the
     /// attachment registry and the quiet watchdog.
     heard: &'a dux_core::attachments::Heard,
-    /// Fired by the quiet watchdog once it has revoked this attachment.
-    expired: &'a tokio::sync::Notify,
 }
 
 impl AttachedPtySocket<'_> {
     async fn run(
         &self,
-        mut stream: futures_util::stream::SplitStream<WebSocket>,
+        stream: futures_util::stream::SplitStream<WebSocket>,
         rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
+        last_grid_seq: u64,
+        socket_auth: crate::auth::SocketAuth,
+        quiet_watch: QuietWatch,
+    ) {
+        let expired = Arc::clone(&quiet_watch.expired);
+        let _watchdog = start_quiet_watch(quiet_watch);
+        let pty_forwarder = AbortOnDrop(spawn_pty_forwarder(
+            Arc::clone(self.sink),
+            rx,
+            self.engine.shutdown_flag(),
+        ));
+        if until_expired(
+            self.receive(
+                stream,
+                pty_forwarder,
+                grid_changes,
+                last_grid_seq,
+                socket_auth,
+            ),
+            &expired,
+        )
+        .await
+        {
+            self.close_quiet_peer().await;
+        }
+    }
+
+    /// The receive loop, which owns the output forwarder: whatever ends it,
+    /// expiry included, ends the forwarder too.
+    async fn receive(
+        &self,
+        mut stream: futures_util::stream::SplitStream<WebSocket>,
+        mut pty_forwarder: AbortOnDrop,
         mut grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
         mut last_grid_seq: u64,
         mut socket_auth: crate::auth::SocketAuth,
     ) {
-        let mut pty_forwarder =
-            spawn_pty_forwarder(Arc::clone(self.sink), rx, self.engine.shutdown_flag());
         let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
         ping.tick().await;
 
@@ -2313,10 +2355,9 @@ impl AttachedPtySocket<'_> {
                 code = socket_auth.revoked() => {
                     // The forwarder writes output on its own task, so it is
                     // stopped before the close rather than after the loop.
-                    pty_forwarder.abort();
+                    pty_forwarder.0.abort();
                     self.close_for_auth(code).await
                 }
-                _ = self.expired.notified() => self.close_quiet_peer().await,
                 _ = ping.tick() => {
                     if peer_went_quiet(self.heard) {
                         self.close_quiet_peer().await
@@ -2327,7 +2368,7 @@ impl AttachedPtySocket<'_> {
                 change = grid_changes.recv() => {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
-                _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
+                _ = &mut pty_forwarder.0 => self.close_after_forwarder_end().await,
                 next = stream.next() => match next {
                     Some(Ok(message)) => {
                         self.heard.touch();
@@ -2340,8 +2381,6 @@ impl AttachedPtySocket<'_> {
                 break;
             }
         }
-
-        pty_forwarder.abort();
     }
 
     /// A send-only liveness ping. Its failure is how a socket whose peer is gone
@@ -4245,6 +4284,35 @@ impl QuietWatchdog {
     }
 }
 
+/// Start a socket's quiet clock now that its receive loop is running: the
+/// opening (the handshake and a scrollback replay that can take a long time on
+/// a slow link) reads nothing from the peer, so it must not count as silence.
+fn start_quiet_watch(watch: QuietWatch) -> QuietWatchdog {
+    watch.heard.touch();
+    QuietWatchdog::spawn(watch)
+}
+
+/// A task that ends with the future holding it: dropping the handle aborts it,
+/// so a socket cancelled anywhere also stops the task writing to it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Run a socket's loop until it ends or its quiet watchdog has expired it,
+/// whichever comes first, answering whether it expired. Expiry cancels the
+/// whole loop, a send it is parked on included, and with it every guard and
+/// task it owns.
+async fn until_expired<F: std::future::Future>(socket: F, expired: &tokio::sync::Notify) -> bool {
+    tokio::select! {
+        _ = socket => false,
+        _ = expired.notified() => true,
+    }
+}
+
 impl Drop for QuietWatchdog {
     fn drop(&mut self) {
         self.0.abort();
@@ -5431,6 +5499,78 @@ mod tests {
             cleared,
             Event::Resource { ref event, owner: None, .. } if event == "pty.owner"
         ));
+    }
+
+    /// The quiet clock starts when the socket's receive loop does: a socket
+    /// whose opening (a long scrollback replay) took longer than the deadline
+    /// is not revoked the moment its loop begins.
+    #[tokio::test]
+    async fn the_quiet_clock_starts_with_the_receive_loop() {
+        let attachments = dux_core::attachments::Attachments::default();
+        let expired = Arc::new(tokio::sync::Notify::new());
+        let opened_long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(80))
+            .expect("a clock that has run for 80 seconds");
+        let _watchdog = start_quiet_watch(QuietWatch {
+            heard: dux_core::attachments::Heard::at(opened_long_ago),
+            deadline: std::time::Duration::from_millis(300),
+            attachments,
+            token: 1,
+            owners: Arc::new(PtySizeOwners::default()),
+            pty_id: "s1-slot".to_string(),
+            conn_id: 1,
+            bus: Arc::new(EventBus::new()),
+            expired: Arc::clone(&expired),
+            live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), expired.notified())
+                .await
+                .is_err(),
+            "revoked before the loop had a chance to hear anything"
+        );
+    }
+
+    /// Expiry ends the whole socket, whatever it is stuck on: a loop parked
+    /// on a send that never completes is cancelled, and the forwarder task it
+    /// owns is aborted with it, so every guard it holds drops.
+    #[tokio::test]
+    async fn expiry_cancels_a_socket_stuck_on_a_send_and_aborts_its_forwarder() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let forwarder_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = Dropped(Arc::clone(&forwarder_gone));
+        let forwarder = AbortOnDrop(tokio::spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        }));
+        let expired = Arc::new(tokio::sync::Notify::new());
+        let stuck = async move {
+            let _forwarder = forwarder;
+            std::future::pending::<()>().await;
+        };
+        let fire = Arc::clone(&expired);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            fire.notify_one();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            until_expired(stuck, &expired),
+        )
+        .await
+        .expect("expiry ended the socket");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !forwarder_gone.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the forwarder was aborted");
     }
 
     /// The spine-change forwarder maps each [`SpineChange`] onto the matching coarse

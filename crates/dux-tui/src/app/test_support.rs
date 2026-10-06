@@ -232,6 +232,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         attachments: Default::default(),
         dispatch_policy: None,
         deferred_operations: Vec::new(),
+        deferred_policies: Vec::new(),
         created_session_by_op: std::collections::HashMap::new(),
         removal_coordination: Default::default(),
     };
@@ -401,7 +402,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
 /// Panics if no history appears within ~2s.
 /// A browser tab at 10.0.0.7 watching `pty_id`, a terminal of `agent`, as
 /// the attachment registry records one.
-pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) {
+pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) -> u64 {
     use dux_core::attachments::{ConnectionFacts, Surface, Target, TargetKind};
     app.engine.attachments.register(
         "browser-tab",
@@ -426,7 +427,17 @@ pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+}
+
+/// The browser tab [`watch_from_a_browser`] opened closes its terminal.
+pub(crate) fn stop_watching(app: &App, token: u64) {
+    app.engine.attachments.detach(
+        token,
+        dux_core::attachments::Ending::Deliberate,
+        std::time::Instant::now(),
+        std::time::Duration::ZERO,
+    );
 }
 
 pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {

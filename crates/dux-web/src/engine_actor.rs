@@ -90,14 +90,18 @@ impl OperationTicket {
 
 /// A change covered by an operation record, and whether the client asked to
 /// follow it (which decides only the answer's shape).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Followed {
     pub kind: OperationKind,
     pub answered: bool,
+    /// The browser tab asking, exempt from its own attachments: its events
+    /// connection, when the request named one from its own address (see
+    /// `rest_common::exempt_requester`). `None` exempts nobody.
     /// Go ahead even though somebody else is attached to what the change
     /// would end (`force_connected=true` on the route). Only that refusal is
     /// skipped; the reservation and every other check still run.
     pub force_connected: bool,
+    pub requester: Option<String>,
 }
 
 /// Why the engine refused a dispatched change: its sentence, and, when the
@@ -1212,6 +1216,7 @@ impl EngineHandle {
                     kind,
                     answered: true,
                     force_connected: false,
+                    requester: None,
                 }),
             ))
             .await
@@ -1248,6 +1253,7 @@ impl EngineHandle {
                     kind,
                     answered: false,
                     force_connected: false,
+                    requester: None,
                 }),
             ))
             .await
@@ -2663,7 +2669,8 @@ impl EngineService {
                 events_watchers,
                 engine.live_status_keys.clone(),
                 engine.operations.clone(),
-            ),
+            )
+            .ending_reservations_of(engine.attachments.clone()),
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -3194,6 +3201,7 @@ impl EngineService {
             // Retirement is the companion's own decision, made one level up in
             // the `dux` binary: this type only reports what one iteration did.
             retirement: None,
+            statuses: self.status.take_for_terminal(),
         }
     }
 
@@ -3504,6 +3512,14 @@ struct StatusEmitter {
     /// web raises passes through, so it is the completion point for every
     /// worker-run change a client follows (see [`dux_core::operations`]).
     operations: dux_core::operations::Operations,
+    /// The engine's attachment registry: a final also ends the reservations
+    /// waiting on its key (see [`dux_core::attachments::Life::Key`]).
+    attachments: dux_core::attachments::Attachments,
+    /// Statuses kept for the terminal UI's status line, while a terminal UI
+    /// services this emitter (`None` otherwise, so `dux server` keeps none):
+    /// those a change made by a client with no connection here raised for
+    /// every surface, which no browser stands in for.
+    for_terminal: Option<Vec<WireStatus>>,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
     /// concurrent operation (e.g. a rapid retry during commit-msg generation).
@@ -3521,6 +3537,8 @@ impl StatusEmitter {
     ) -> Self {
         Self {
             operations,
+            attachments: dux_core::attachments::Attachments::default(),
+            for_terminal: None,
             tx,
             clear_tx,
             snapshot_tx,
@@ -3537,6 +3555,27 @@ impl StatusEmitter {
             controller: KeyedStatusController::emitting_finals().with_live_keys(live),
             generations: std::collections::HashMap::new(),
         }
+    }
+
+    /// Keep `status` for the terminal UI's status line, when one services
+    /// this emitter.
+    fn keep_for_terminal(&mut self, status: &WireStatus) {
+        if let Some(kept) = self.for_terminal.as_mut() {
+            kept.push(status.clone());
+        }
+    }
+
+    /// The statuses kept for the terminal UI since it last asked, from now on
+    /// keeping them (a terminal UI is servicing this emitter).
+    fn take_for_terminal(&mut self) -> Vec<WireStatus> {
+        std::mem::take(self.for_terminal.get_or_insert_with(Vec::new))
+    }
+
+    /// End the reservations of `attachments` waiting on a key as its final
+    /// lands here.
+    fn ending_reservations_of(mut self, attachments: dux_core::attachments::Attachments) -> Self {
+        self.attachments = attachments;
+        self
     }
 
     /// Upsert the status in the controller (keyed or anonymous), refresh the
@@ -3558,6 +3597,7 @@ impl StatusEmitter {
                 status.segments.as_deref(),
                 Instant::now(),
             );
+            self.attachments.finish_key(key);
         }
         // A status quiet on the web is the command's answer and not a
         // notification: it already rode back to its caller in the outcome, so it
@@ -3634,6 +3674,7 @@ impl StatusEmitter {
         // sentence. A hand-off moved its records to the next key first.
         self.operations
             .finish_by_key(&key, StatusTone::Info, "", None, Instant::now());
+        self.attachments.finish_key(&key);
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
@@ -4122,18 +4163,25 @@ fn handle_apply_wire_request(
     config_disk_ahead: &mut bool,
 ) {
     let mutates_config = cmd.mutates_config_static();
+    // A client with no connection here (the command line) is not a status
+    // surface: what its change raises for every surface reaches the terminal
+    // UI's line too.
+    let for_every_surface = matches!(origin.scope, StatusScope::All);
     // A file a raw save left ahead of memory is taken on before this runs,
     // by the loop that owns the reload (`EngineService::adopt_disk_config`).
     debug_assert!(!(mutates_config && *config_disk_ahead));
-    // Whoever sent this is not the terminal UI: a browser tab when the
-    // request named its live events connection, otherwise a client with no
-    // connection here (the command line).
+    // Whoever sent this is not the terminal UI: a browser tab when the route
+    // vouched for the events connection the request named, otherwise a client
+    // with no connection here (the command line).
     engine.dispatch_policy = Some(dux_core::attachments::Policy {
-        requester: match &origin.scope {
-            StatusScope::Connection(id) => Some(id.clone()),
-            StatusScope::All => None,
-        },
-        force: origin.operation.is_some_and(|f| f.force_connected),
+        requester: origin
+            .operation
+            .as_ref()
+            .and_then(|followed| followed.requester.clone()),
+        force: origin
+            .operation
+            .as_ref()
+            .is_some_and(|followed| followed.force_connected),
     });
     engine.current_origin = origin.scope;
     let result = match origin.operation {
@@ -4163,6 +4211,9 @@ fn handle_apply_wire_request(
     }
     if let Ok(outcome) = &result {
         for status in outcome.status.iter().chain(outcome.settled.iter()) {
+            if for_every_surface && status.scope == StatusScope::All {
+                status_tx.keep_for_terminal(status);
+            }
             let _ = status_tx.send(status.clone());
         }
     }
@@ -6406,6 +6457,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
@@ -6424,6 +6477,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(0)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         }
     }
@@ -6612,6 +6667,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         e.operations.open(
@@ -6672,6 +6729,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         // One keyed Info, one anonymous Info, and a sticky error that must not
@@ -6767,6 +6826,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("del", "error", "Worktree delete failed.").sticky());
@@ -6853,6 +6914,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("create-1", "busy", "Pulling\u{2026}"));
@@ -6896,6 +6959,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         // Drain the initial sends so `rx` only sees the upgrades.

@@ -224,7 +224,9 @@ closing a tab or a terminal, and removing a project are refused while another de
 connected to what they would end, on every surface, and the refusal says who (see
 [When somebody else is connected](/docs/web-agents#when-somebody-else-is-connected)).
 Quitting the terminal app ends every terminal it started, so its quit confirmation opens
-whenever another device is connected to one of them, and names each one.
+whenever another device is connected to one of them, and names each one; if another device
+connects while it is open, confirming asks again with the new list. A change you make from
+the command line shows its outcome on the terminal app's status line too.
 
 Which to reach for:
 

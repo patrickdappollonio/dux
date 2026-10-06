@@ -399,6 +399,23 @@ pub(crate) fn attached_refusal(blockers: &[dux_core::attachments::Blocker]) -> R
         .into_response()
 }
 
+/// The connection a guarded change is exempt from the attachments of: the
+/// browser tab whose events connection the request named, only when that
+/// connection is live and came from the request's own address. Protection
+/// against accidents, not hostile clients (any client can ask to go ahead
+/// over everybody), so a matching address is all it asks for.
+pub(crate) fn exempt_requester(
+    attachments: &dux_core::attachments::Attachments,
+    scope: &StatusScope,
+    address: Option<std::net::IpAddr>,
+    now: std::time::Instant,
+) -> Option<String> {
+    match scope {
+        StatusScope::Connection(id) if attachments.linkable(id, address, now) => Some(id.clone()),
+        _ => None,
+    }
+}
+
 /// Dispatch a change that would end terminals (an agent delete, stop or
 /// forced restart, a tab or terminal close, a project removal), covered by an
 /// operation record of `kind` and followed when the client asked
@@ -412,13 +429,20 @@ pub(crate) async fn dispatch_guarded(
     kind: dux_core::operations::OperationKind,
     operation: &OperationQuery,
     force: &ForceConnectedQuery,
+    client: &crate::server::SocketClient,
 ) -> Result<Result<Guarded, String>, RouteRejection> {
+    let scope = scope_from_headers(headers, &state.connections);
     let followed = crate::engine_actor::Followed {
         kind,
         answered: operation.asked(),
         force_connected: force.force_connected,
+        requester: exempt_requester(
+            state.engine.attachments(),
+            &scope,
+            client.address(),
+            std::time::Instant::now(),
+        ),
     };
-    let scope = scope_from_headers(headers, &state.connections);
     match state
         .engine
         .apply_wire_guarded(command, scope, followed)
@@ -690,6 +714,41 @@ impl IdempotencyCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request names its browser tab's events connection to be exempt from
+    /// that tab's own attachments, and it is only when that connection came
+    /// from the request's own address.
+    #[test]
+    fn a_request_is_its_tabs_own_only_from_the_tabs_address() {
+        let attachments = dux_core::attachments::Attachments::default();
+        attachments.register(
+            "e1",
+            dux_core::attachments::ConnectionFacts {
+                surface: dux_core::attachments::Surface::Browser,
+                device: None,
+                address: Some("10.0.0.1".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        let now = std::time::Instant::now();
+        let tab = StatusScope::Connection("e1".to_string());
+        let at = |address: &str| Some(address.parse().unwrap());
+        assert_eq!(
+            exempt_requester(&attachments, &tab, at("10.0.0.1"), now),
+            Some("e1".to_string())
+        );
+        assert_eq!(
+            exempt_requester(&attachments, &tab, at("10.0.0.2"), now),
+            None
+        );
+        assert_eq!(exempt_requester(&attachments, &tab, None, now), None);
+        assert_eq!(
+            exempt_requester(&attachments, &StatusScope::All, at("10.0.0.1"), now),
+            None
+        );
+    }
 
     fn header_map_with(name: &'static str, value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

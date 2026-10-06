@@ -357,6 +357,10 @@ pub struct Engine {
     /// change has not happened yet, so its record finishes when the drain
     /// runs it, not when it was deferred.
     pub deferred_operations: Vec<Option<String>>,
+    /// Who asked for each of `deferred_commands` (see
+    /// [`Engine::dispatch_policy`]), so a deferred change is judged against
+    /// the attachment guard as the one who asked for it, when it runs.
+    pub deferred_policies: Vec<Option<crate::attachments::Policy>>,
     /// How many commands [`Engine::apply`] has taken since the engine was built.
     ///
     /// Read, never interpreted: the only consumer compares it against the value
@@ -9442,6 +9446,47 @@ mod tests {
             })
             .expect("deferred");
         assert_eq!(engine.deferred_commands.len(), 3);
+        // A project removal a client with no connection here asked for, with
+        // nobody attached. By the time it runs the terminal UI draws one of the
+        // project's agents, so it is judged as that client's change and
+        // refused, not let through as the terminal UI's own.
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project(
+                "p-held",
+                "/tmp/p-held",
+            ));
+        let held = crate::engine::test_support::sample_session("s-held", "p-held", "held");
+        engine.session_store.upsert_session(&held).unwrap();
+        engine.sessions.push(held);
+        engine.dispatch_policy = Some(crate::attachments::Policy::default());
+        engine
+            .apply(Command::RemoveProject {
+                project_id: "p-held".to_string(),
+                project_name: "p-held".to_string(),
+            })
+            .expect("deferred");
+        engine.dispatch_policy = None;
+        assert_eq!(engine.deferred_commands.len(), 4);
+        engine.attachments.register(
+            crate::attachments::TERMINAL_UI_CONNECTION,
+            crate::attachments::ConnectionFacts {
+                surface: crate::attachments::Surface::TerminalUi,
+                device: None,
+                address: None,
+                verified: true,
+                events: false,
+            },
+            None,
+        );
+        engine.attachments.set_terminal_ui(
+            vec![crate::attachments::Target {
+                kind: crate::attachments::TargetKind::Tab,
+                id: "s-held-slot".to_string(),
+                agent: Some("s-held".to_string()),
+            }],
+            None,
+        );
 
         // The surface already posted the completion; drain it through the real
         // worker-event path so the barrier closes and the deferred command drains.
@@ -9450,6 +9495,12 @@ mod tests {
 
         // Deferral folds the reload + the deferred save into one Multi.
         assert!(matches!(reaction, EventReaction::Multi(_)));
+        assert!(
+            crate::wire::wire_statuses_from_reaction(&reaction)
+                .iter()
+                .any(|status| status.message.contains("Someone else is using this")),
+            "the deferred removal was judged as the client that asked for it"
+        );
         assert!(!engine.reloading);
         assert!(engine.reload_guard.is_none(), "barrier must be released");
         assert!(engine.deferred_commands.is_empty());

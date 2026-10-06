@@ -174,6 +174,7 @@ async fn delete_standalone_terminal(
     Path(tid): Path<String>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&tid) {
@@ -183,7 +184,7 @@ async fn delete_standalone_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Standalone) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation, &force).await
+    dispatch_delete(&state, tid, &headers, &operation, &force, &client).await
 }
 
 /// `DELETE /api/v1/sessions/:id/terminals/:tid`: delete a companion terminal,
@@ -193,6 +194,7 @@ async fn delete_terminal(
     Path((id, tid)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) || !id_within_bound(&tid) {
@@ -209,7 +211,7 @@ async fn delete_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Session(&id)) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation, &force).await
+    dispatch_delete(&state, tid, &headers, &operation, &force, &client).await
 }
 
 /// `DELETE /api/v1/projects/:id/terminals/:tid` deletes a project terminal,
@@ -219,6 +221,7 @@ async fn delete_project_terminal(
     Path((id, tid)): Path<(String, String)>,
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) || !id_within_bound(&tid) {
@@ -234,7 +237,7 @@ async fn delete_project_terminal(
         Some(owner) if owner.is_at_route(TerminalRoute::Project(&id)) => {}
         _ => return unknown_terminal(),
     }
-    dispatch_delete(&state, tid, &headers, &operation, &force).await
+    dispatch_delete(&state, tid, &headers, &operation, &force, &client).await
 }
 
 /// Body for the global terminal reorder: the complete set of terminal ids in the
@@ -276,6 +279,7 @@ async fn dispatch_delete(
     headers: &HeaderMap,
     operation: &OperationQuery,
     force: &ForceConnectedQuery,
+    client: &crate::server::SocketClient,
 ) -> Response {
     let command = WireCommand::DeleteTerminal { terminal_id: tid };
     let result = match dispatch_guarded(
@@ -285,6 +289,7 @@ async fn dispatch_delete(
         OperationKind::TerminalClose,
         operation,
         force,
+        client,
     )
     .await
     {
