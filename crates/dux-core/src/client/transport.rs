@@ -675,16 +675,18 @@ mod tests {
             let transport = UnixTransport::new(probe);
             let mut held = Vec::new();
             for _ in 0..8 {
-                held.push(std::os::unix::net::UnixStream::connect(transport.path()).ok());
-                if held.last().unwrap().is_none() {
-                    break;
+                match std::os::unix::net::UnixStream::connect(transport.path()) {
+                    Ok(stream) => held.push(stream),
+                    // macOS refuses a connect to a full queue at once instead
+                    // of waiting, so the queue is full here.
+                    Err(_) => break,
                 }
                 if !transport.answers() {
                     let _ = done.send(false);
                     return;
                 }
             }
-            let _ = done.send(true);
+            let _ = done.send(transport.answers());
         });
         let answered = finished
             .recv_timeout(Duration::from_secs(5))
