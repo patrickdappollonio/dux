@@ -2286,8 +2286,9 @@ mod tests {
     /// A repository whose name is not UTF-8 is still left out of a folder
     /// stage: excluded by its bytes, not skipped because it has no `String`.
     // Linux only: APFS, the macOS file system, refuses a name that is not
-    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
-    // cannot arise on its own disk; the Linux run covers the shared code.
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac. The exclusion
+    // by bytes runs there in
+    // `git::tests::a_repository_whose_name_is_not_utf8_is_excluded_by_its_bytes`.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_repository_with_a_non_utf8_name_is_still_left_out() {

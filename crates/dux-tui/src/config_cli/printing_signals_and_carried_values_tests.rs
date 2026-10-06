@@ -104,8 +104,9 @@ fn get_through_a_dangling_symlink_does_not_claim_a_value_in_use() {
 // Linux only: the stand-in dux is a python process holding the lock, which
 // Linux's /proc/locks names as the holder. macOS has no /proc/locks and
 // trusts a holder only when its process is named dux, which python is not.
-// The sentence for an older dux is covered on every platform by the
-// `reload_sentence` and `password_sentence` tests in `config_cli.rs`.
+// The sentence for an older dux runs on every platform in `config_cli.rs`'s
+// `an_older_dux_is_told_apart_and_never_promised_a_reload` and
+// `the_password_sentence_follows_the_signal_outcome`.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_password_set_beside_an_unsignalled_dux_does_not_claim_browsers_were_signed_out() {

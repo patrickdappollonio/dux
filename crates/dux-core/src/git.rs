@@ -468,6 +468,17 @@ pub fn managed_worktree_status(path: &Path) -> FolderRepoStatus {
 /// directory `--git-dir` succeeds, `--is-bare-repository` prints `false` and
 /// `--show-toplevel` exits 128 (measured); without it that combination falls to
 /// `Indeterminate`, which the fail-open add gate accepts as a project.
+/// A path git printed, from its raw bytes with the line ending trimmed: git
+/// prints path bytes verbatim, so a name that is not UTF-8 keeps its bytes.
+fn path_from_git_output(stdout: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = stdout;
+    while let [rest @ .., b'\n' | b'\r'] = bytes {
+        bytes = rest;
+    }
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
 pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     let run = |args: &[&str]| -> Option<std::process::Output> {
         Command::new("git")
@@ -497,14 +508,9 @@ pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     // fail canonicalization and fall to Indeterminate, which the fail-open add
     // gate accepts.
     let capture_path = |args: &[&str]| -> Option<PathBuf> {
-        use std::os::unix::ffi::OsStrExt;
-        run(args).filter(|out| out.status.success()).map(|out| {
-            let mut bytes = out.stdout.as_slice();
-            while let [rest @ .., b'\n' | b'\r'] = bytes {
-                bytes = rest;
-            }
-            PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-        })
+        run(args)
+            .filter(|out| out.status.success())
+            .map(|out| path_from_git_output(&out.stdout))
     };
     // Rung 2: bare repositories. The bare root is addable; a folder inside a
     // bare repo (objects/, refs/, ...) is git internals and must not be.
@@ -3258,10 +3264,21 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
         });
     }
 
-    // `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
-    // so two distinct non-UTF-8 names can collide onto one lossy `path` and the
-    // client, which keys tree rows by path, would lose one of them. Drop later
-    // duplicates and warn rather than build an escaping scheme.
+    drop_lossy_duplicates(&mut entries);
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(entries)
+}
+
+/// `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
+/// so two distinct non-UTF-8 names can collide onto one lossy `path` and the
+/// client, which keys tree rows by path, would lose one of them. Drop later
+/// duplicates and warn rather than build an escaping scheme.
+fn drop_lossy_duplicates(entries: &mut Vec<DirEntryInfo>) {
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     entries.retain(|e| {
         if seen_paths.insert(e.path.clone()) {
@@ -3274,13 +3291,6 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
             false
         }
     });
-
-    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-    });
-    Ok(entries)
 }
 
 /// The source path a row carries, which is only ever a rename's or a copy's:
@@ -6996,9 +7006,42 @@ mod tests {
         assert!(list_dir(dir.path(), "/etc").is_err());
     }
 
+    /// A repository left out of a stage is named in the pathspec by its own
+    /// bytes, so a name that is not UTF-8 is excluded as it is.
+    #[test]
+    fn a_repository_whose_name_is_not_utf8_is_excluded_by_its_bytes() {
+        assert_eq!(
+            exclude_spec(b"vendor/caf\xe9"),
+            b":(exclude,literal)vendor/caf\xe9".to_vec()
+        );
+    }
+
+    /// The dedupe on its own, from names that are not UTF-8 built in memory,
+    /// so it runs where the file system refuses such names (macOS).
+    #[test]
+    fn two_non_utf8_names_that_read_alike_keep_one_row() {
+        use std::os::unix::ffi::OsStrExt;
+        let row = |raw: &[u8]| {
+            let name = std::ffi::OsStr::from_bytes(raw)
+                .to_string_lossy()
+                .into_owned();
+            DirEntryInfo {
+                path: name.clone(),
+                name,
+                is_dir: false,
+                is_symlink: false,
+                expandable: false,
+            }
+        };
+        let mut entries = vec![row(b"\xff"), row(b"\xfe"), row(b"plain")];
+        drop_lossy_duplicates(&mut entries);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["\u{fffd}", "plain"]);
+    }
+
     // Linux only: APFS, the macOS file system, refuses a name that is not
-    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
-    // cannot arise on its own disk; the Linux run covers the shared code.
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac. The dedupe
+    // runs there in `two_non_utf8_names_that_read_alike_keep_one_row`.
     #[cfg(target_os = "linux")]
     #[test]
     fn list_dir_dedupes_names_that_collide_after_lossy_utf8_conversion() {
@@ -12969,9 +13012,19 @@ mod tests {
         );
     }
 
+    /// The decode `repo_path_kind` reads git's path answers with keeps bytes
+    /// that are not UTF-8, so a repository under such a path still
+    /// canonicalizes. Built in memory, so it runs on macOS too.
+    #[test]
+    fn a_path_git_prints_keeps_bytes_that_are_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = path_from_git_output(b"/base/rep\xffo\r\n");
+        assert_eq!(path.as_os_str().as_bytes(), b"/base/rep\xffo");
+    }
+
     // Linux only: APFS, the macOS file system, refuses a name that is not
-    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
-    // cannot arise on its own disk; the Linux run covers the shared code.
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac. The byte
+    // decode runs there in `a_path_git_prints_keeps_bytes_that_are_not_utf8`.
     #[cfg(target_os = "linux")]
     #[test]
     fn repo_path_kind_classifies_repos_under_non_utf8_paths() {
