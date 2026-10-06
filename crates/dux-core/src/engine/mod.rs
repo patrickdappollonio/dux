@@ -353,13 +353,10 @@ pub struct Engine {
     /// (re-applied) when the reload completes. Constructed empty.
     pub deferred_commands: Vec<Command>,
     /// The operation record each of `deferred_commands` was dispatched under,
-    /// position for position, `None` where no client asked for one. A deferred
-    /// change has not happened yet, so its record finishes when the drain
-    /// runs it, not when it was deferred.
+    /// position for position; it finishes when the drain runs the change.
     pub deferred_operations: Vec<Option<String>>,
-    /// Who asked for each of `deferred_commands` (see
-    /// [`Engine::dispatch_policy`]), so a deferred change is judged against
-    /// the attachment guard as the one who asked for it, when it runs.
+    /// Who asked for each of `deferred_commands`, so the attachment guard judges
+    /// a deferred change as theirs when it runs.
     pub deferred_policies: Vec<Option<crate::attachments::Policy>>,
     /// How many commands [`Engine::apply`] has taken since the engine was built.
     ///
@@ -852,19 +849,16 @@ pub struct Engine {
     /// [`crate::operations`] for the ids and the completion points.
     pub operations: crate::operations::Operations,
 
-    /// The record of the change [`Engine::apply_wire_operation`] is
-    /// dispatching right now, so a fact the change learns before it has a key
-    /// of its own (what an inline delete did to the worktree and the branch)
-    /// reaches that record. `None` outside that call.
+    /// The record of the change [`Engine::apply_wire_operation`] is dispatching
+    /// right now, for facts learned before the change has a key of its own.
     pub operation_in_dispatch: Option<String>,
 
     /// Who is attached to which agent tab and terminal, asked by every change
     /// that would end one. See [`crate::attachments`].
     pub attachments: crate::attachments::Attachments,
 
-    /// Who is asking for the change being dispatched right now, and whether
-    /// they said to go ahead over everybody attached. Set by the web layer
-    /// around each request it dispatches; `None` means the terminal UI asked.
+    /// Who is asking for the change being dispatched right now; set by the web
+    /// layer around each request, and `None` means the terminal UI asked.
     pub dispatch_policy: Option<crate::attachments::Policy>,
 
     /// Maps a create op's opaque id to the session it produced (and when), filled
@@ -6325,10 +6319,8 @@ impl Engine {
     /// state untouched), then the PTY is torn down gracefully and every runtime
     /// map the tab keyed is cleared.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
-        // Mid-deletion the agent's worktree is about to go and every one of its
-        // tabs is already being torn down with it: closing one on its own would
-        // race that teardown, and moving the slot around inside it would be
-        // re-pointing at a tab that is itself about to vanish.
+        // Mid-deletion every tab is already being torn down with the worktree;
+        // closing one on its own would race that teardown.
         if self.closing_sessions.contains(session_id) || self.pending_deletions.contains(session_id)
         {
             // A followed delete behind it is named, so its id can be followed.

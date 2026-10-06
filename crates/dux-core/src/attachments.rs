@@ -51,10 +51,8 @@ use serde::{Deserialize, Serialize};
 use crate::operations::RecordWatch;
 use crate::pty_owners::PtySizeOwners;
 
-/// How long a peer may send nothing at all, not even the pong every browser
-/// answers a ping with, before its connection stops counting: two missed
-/// 30-second pings and some slack. The web server closes such a socket at the
-/// same deadline.
+/// How long a peer may send nothing, not even a pong, before its connection
+/// stops counting: two missed 30-second pings and some slack.
 pub const QUIET_DEADLINE: Duration = Duration::from_secs(75);
 
 /// The terminal UI's connection id. One per process: this process is one
@@ -106,9 +104,8 @@ pub struct ConnectionFacts {
     pub events: bool,
 }
 
-/// When a peer was last heard from. Shared between the socket that hears it
-/// and this registry, which reads it rather than waiting for the socket's own
-/// loop to notice the silence.
+/// When a peer was last heard from, shared with the socket that hears it so the
+/// registry sees silence without waiting for that socket's loop.
 #[derive(Clone, Debug)]
 pub struct Heard(Arc<Mutex<Instant>>);
 
@@ -177,10 +174,8 @@ pub struct Policy {
     pub requester: Option<String>,
     /// Skip the refusal. The reservation is still installed.
     pub force: bool,
-    /// With `force`: go ahead only over these blockers ([`Blocker::key`]),
-    /// the ones a dialog showed the person who said to go ahead. Anybody else
-    /// in the way refuses the change, with everybody, so the dialog can ask
-    /// again. `None` goes ahead over everybody (the command line's flag).
+    /// With `force`: go ahead only over these blockers ([`Blocker::key`]); anybody
+    /// else in the way refuses the change. `None` goes ahead over everybody.
     pub accepted: Option<BTreeSet<String>>,
 }
 
@@ -192,9 +187,7 @@ pub enum Life {
     /// Until [`Attachments::release`].
     Released,
     /// Until a final lands under this status key ([`Attachments::finish_key`]),
-    /// or `until`, whichever comes first: a change with no operation record
-    /// whose work runs past its call (the terminal UI's), ended by the same
-    /// final its spinner is.
+    /// or `until`, whichever comes first.
     Key { key: String, until: Instant },
 }
 
@@ -211,10 +204,8 @@ pub struct Blocker {
 }
 
 impl Blocker {
-    /// Who this is, for saying "go ahead over these and nobody else": the same
-    /// connection on the same terminal has the same key whether or not it has
-    /// started or stopped typing since. A digest of what the blocker already
-    /// shows, so a client learns nothing it did not already have.
+    /// Who this is, stable across typing on and off: a digest of what the blocker
+    /// already shows, so a client learns nothing new from it.
     pub fn key(&self) -> String {
         use sha2::{Digest, Sha256};
         let identity = serde_json::json!([
@@ -394,10 +385,8 @@ impl Attachments {
         });
     }
 
-    /// Forget a connection. A terminal socket attached through it is still
-    /// live and stays attached until its own socket ends. Ended on purpose,
-    /// the lost terminals it still counted as attached to end with it; lost,
-    /// they keep their grace.
+    /// Forget a connection; its live terminal sockets stay attached. Ended on
+    /// purpose, its lost terminals end with it; lost, they keep their grace.
     pub fn deregister(&self, id: &str, ending: Ending) {
         self.with(|state| {
             state.connections.remove(id);
@@ -407,9 +396,8 @@ impl Attachments {
         });
     }
 
-    /// Whether a terminal socket from `address` may count as part of the
-    /// events connection `id`: one that is live, is an events connection, and
-    /// came from the same address.
+    /// Whether a terminal socket from `address` may count as part of the live
+    /// events connection `id` from the same address.
     pub fn linkable(&self, id: &str, address: Option<IpAddr>, now: Instant) -> bool {
         self.with(|state| {
             state.connections.get(id).is_some_and(|connection| {
@@ -470,9 +458,8 @@ impl Attachments {
         });
     }
 
-    /// The attachment ended. Lost while its page was being looked at, it keeps
-    /// counting until `grace` after its last viewed beat; ended deliberately,
-    /// nothing is left.
+    /// The attachment ended. Lost while its page was looked at, it counts until
+    /// `grace` after its last viewed beat; ended deliberately, nothing is left.
     pub fn detach(&self, token: u64, ending: Ending, now: Instant, grace: Duration) {
         self.with(|state| {
             let Some(attachment) = state.attachments.remove(&token) else {
@@ -494,10 +481,7 @@ impl Attachments {
     }
 
     /// A tab's new events connection `new` takes over what its lost one `old`
-    /// still counts as attached to, so the tab is not in its own way and its
-    /// next attach ends it.
-    ///
-    /// Only from a connection that is gone: a live one keeps what it has.
+    /// still counts, so the tab is not in its own way; a live `old` keeps it.
     pub fn inherit(&self, old: &str, new: &str) {
         self.with(|state| {
             if state.connections.contains_key(old) {
@@ -511,9 +495,8 @@ impl Attachments {
         });
     }
 
-    /// Replace everything the terminal UI is attached to with `targets`,
-    /// skipping any a change is ending. `pty_conn` is the terminal UI's id in
-    /// the PTY ownership record while it has one.
+    /// Replace everything the terminal UI is attached to with `targets`, skipping
+    /// any a change is ending; `pty_conn` is its id in the PTY ownership record.
     pub fn set_terminal_ui(&self, targets: Vec<Target>, pty_conn: Option<u64>) {
         self.with(|state| {
             state
@@ -545,9 +528,8 @@ impl Attachments {
         });
     }
 
-    /// The connections that are up, oldest first, each with what it is
-    /// attached to. One that has gone quiet past [`QUIET_DEADLINE`] is not
-    /// listed, as it does not block either.
+    /// The connections that are up, oldest first, with what each is attached to;
+    /// one quiet past [`QUIET_DEADLINE`] is left out.
     pub fn connections(&self, now: Instant) -> Vec<ConnectionView> {
         self.with(|state| state.connections(now))
     }
@@ -557,9 +539,8 @@ impl Attachments {
         self.with(|state| state.blockers(scope, exempt, now))
     }
 
-    /// How many browser connections are attached to `scope` at `now`, a
-    /// presence the grace keeps included: the people a change to it would
-    /// cut off, each counted once however many of its terminals they stream.
+    /// How many browser connections a change to `scope` would cut off at `now`,
+    /// graced presences included, each counted once.
     pub fn remote_viewers(&self, scope: &Scope, now: Instant) -> usize {
         self.with(|state| {
             let browsers: BTreeSet<String> = state
@@ -572,11 +553,12 @@ impl Attachments {
         })
     }
 
-    /// In one step: refuse a change to `scope` with the connections in its
-    /// way, unless there are none or the policy forces it, and otherwise
-    /// refuse every new attachment to `scope` for `life`. A forced change also
-    /// ends every lost terminal still counted in `scope`. The id is what
-    /// [`Self::release`] takes.
+    /// In one locked step, reserve `scope` against new attachments for `life`,
+    /// ending the lost terminals still counted there; the id is what [`Self::release`] takes.
+    ///
+    /// # Errors
+    ///
+    /// The connections in the way, unless there are none or the policy forces it.
     pub fn reserve(
         &self,
         scope: Scope,
@@ -608,11 +590,8 @@ impl Attachments {
         })
     }
 
-    /// [`Self::reserve`] for a change somebody already agreed to with
-    /// `accepted` in front of them: refused only when somebody else is in the
-    /// way now, with everybody in the way, so the question can be asked again.
-    /// The same connection on the same terminal is the same somebody, whether
-    /// or not it has started or stopped typing since.
+    /// [`Self::reserve`] for a change agreed to over `accepted`: refused, with
+    /// everybody in the way, only when somebody outside `accepted` is in the way.
     pub fn reserve_accepting(
         &self,
         scope: Scope,
@@ -719,9 +698,8 @@ impl State {
             };
             if !scope.covers(&attachment.target)
                 || exempted(&attachment.connection)
-                // Quiet and not being looked at: a dead peer. One that was
-                // being looked at keeps counting; its socket's watchdog ends
-                // it as lost, with the grace.
+                // Quiet and not looked at is a dead peer; a looked-at one keeps
+                // counting until its socket's watchdog ends it as lost.
                 || (attachment.viewed_at.is_none()
                     && attachment
                         .heard

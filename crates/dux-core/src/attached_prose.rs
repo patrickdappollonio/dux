@@ -9,9 +9,8 @@
 use crate::attachments::{Surface, TargetKind};
 use crate::prose::Prose;
 
-/// One attachment in the way, with every name already resolved by the
-/// surface showing it: the device's short label, the tab's or terminal's
-/// label, and the agent's.
+/// One attachment in the way, with every name already resolved by the surface
+/// showing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachedEntry {
     /// The device's short label, or `None` when it could not be read.

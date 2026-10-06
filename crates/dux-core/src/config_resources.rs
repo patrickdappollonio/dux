@@ -26,9 +26,8 @@ pub struct ConfigFile {
     pub config: Config,
 }
 
-/// Read `config_path` as every surface loads it. A missing file is the
-/// defaults; a file dux cannot load is the load's own error, which never
-/// quotes a value from the file.
+/// Read `config_path` as every surface loads it; a missing file is the defaults,
+/// and the error never quotes a value from the file.
 pub fn read(config_path: &Path) -> Result<ConfigFile, String> {
     let fail = |problem| {
         crate::config::ConfigLoadError {
@@ -53,9 +52,8 @@ pub fn read(config_path: &Path) -> Result<ConfigFile, String> {
     }
 }
 
-/// `name`, an entry of the user-named table `table`, as a listing prints it,
-/// and whether it is hidden. `raw` is the file it came from, or empty when
-/// the entry came from a running dux, which then names no line.
+/// `name`, an entry of the user-named table `table`, as a listing prints it, and
+/// whether it is hidden; `raw` is the file it came from, empty for a running dux.
 pub fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
     let segments = [table.to_string(), name.to_string()];
     if crate::config::name_is_hidden(raw, &segments) {
@@ -65,10 +63,8 @@ pub fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
     }
 }
 
-/// A global environment variable's name as a sentence names it: the name
-/// itself when it is a variable name, else the placeholder for its line in
-/// `raw` (or for no line when `raw` is empty), so a token typed or pasted
-/// where a name goes is never repeated.
+/// A global environment variable's name as a sentence names it: a name that is
+/// no variable name is replaced by its line's placeholder.
 pub fn env_label(raw: &str, name: &str) -> String {
     shown_name(raw, "env", name).0
 }
@@ -95,10 +91,8 @@ pub fn unknown_env_var(name: &str) -> String {
     }
 }
 
-/// A request path as the access log may print it: the name in
-/// `/api/v1/global-env/{name}` or `/api/v1/macros/{name}` is replaced by
-/// `(name not shown)` when it breaks its table's rule, since such a name may
-/// be a token pasted where a name goes. Every other path is unchanged.
+/// A request path as the access log may print it: a macro or global environment
+/// name that breaks its table's rule is replaced by `(name not shown)`.
 pub fn logged_path(path: &str) -> std::borrow::Cow<'_, str> {
     for (prefix, table) in [
         ("/api/v1/global-env/", "env"),
@@ -305,8 +299,7 @@ pub fn themes(paths: &DuxPaths, current: &str) -> Vec<ThemeItem> {
 // ---------------------------------------------------------------------------
 
 /// What a missing config.toml means to an edit: refused while a dux may be
-/// running, since a fresh default file would drop its settings the moment
-/// it reloaded; otherwise the documented default, as a first start writes.
+/// running, whose next reload would drop its settings; otherwise the default.
 fn missing_file(paths: &DuxPaths) -> crate::config_write::MissingConfig<'static> {
     let lock_path = paths.lock_path.clone();
     let config_path = paths.config_path.clone();

@@ -343,15 +343,8 @@ pub fn tailscaled_detectable(
             .is_some_and(|path| answers(std::path::Path::new(&path)))
 }
 
-/// Whether a daemon answers on the socket at `path`: one non-blocking
-/// connect, which a local socket answers at once, so it needs no timeout. Only
-/// "refused" (a file left behind by a daemon that is gone, or not a socket at
-/// all, which macOS answers with "not a socket"), and "not found" mean nobody
-/// is there; counting the leftover would keep dux refusing forever. Everything
-/// else counts as something there that dux cannot ask: connected, a full
-/// accept queue (`EAGAIN` on Linux; macOS refuses it, so there it reads as
-/// nobody and the process check stands in), a connect still in progress, a
-/// permission refused, and any other error.
+/// Whether a daemon answers on the socket at `path`, by one non-blocking connect.
+/// Only a refusal or a missing file means nobody, so a leftover file never counts.
 fn socket_answers(path: &std::path::Path) -> bool {
     let Ok(address) = socket2::SockAddr::unix(path) else {
         return false;

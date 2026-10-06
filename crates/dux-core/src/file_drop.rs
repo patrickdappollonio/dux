@@ -1626,9 +1626,8 @@ fn read_process_cwd(pid: u32) -> Option<PathBuf> {
     path_from_nul_terminated(bytes)
 }
 
-/// The path in a NUL-terminated buffer the kernel filled, as its exact bytes:
-/// nothing decodes, escapes or replaces them. `None` for an empty or
-/// unterminated buffer.
+/// The path in a NUL-terminated buffer the kernel filled, as its exact bytes;
+/// `None` for an empty or unterminated buffer.
 #[cfg(any(target_os = "macos", test))]
 fn path_from_nul_terminated(bytes: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;

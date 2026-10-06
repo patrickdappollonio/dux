@@ -157,11 +157,8 @@ fn flock_holder_in(table: &str, major: u32, minor: u32, inode: u64) -> Option<u3
     None
 }
 
-/// The portable answer: try a non-blocking SHARED lock. Taking it means
-/// nobody holds the exclusive one, so nobody is running (it is released at
-/// once; a dux starting in that same instant would see the lock as taken and
-/// say so, which is the cost of this fallback). Failing to take it means a
-/// dux holds it; its PID is then read from the file.
+/// The portable answer: a non-blocking shared lock, released at once. Taken,
+/// nobody runs; refused, a dux holds it and its PID is read from the file.
 fn holder_by_probe(lock_path: &Path) -> Holder {
     use rustix::fs::{FlockOperation, flock};
     let file = match std::fs::File::open(lock_path) {

@@ -22,17 +22,14 @@ use crate::statusline::{QuietSurfaces, StatusScope, StatusTone};
 /// read or construct it.
 static NEXT_STATUS_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Mint a fresh opaque correlation id for one status operation. Used by
-/// [`status_op`] and by the operation registry, which takes its ids from the
-/// same counter so a record id can never name another change's status.
+/// Mint a fresh opaque correlation id for one status operation; operation
+/// record ids share the counter, so one never names another change's status.
 pub(crate) fn next_status_id() -> String {
     format!("op-{}", NEXT_STATUS_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Whether `key` came from [`next_status_id`], and so names one operation and
-/// nothing else. Several keyed statuses use a key of their own that every
-/// change of a kind shares (a stop's per-agent key, a tab launch's per-tab
-/// key), and an operation record cannot be named after one of those.
+/// Whether `key` came from [`next_status_id`], and so names one operation, not
+/// a key every change of a kind shares.
 pub(crate) fn is_minted_status_id(key: &str) -> bool {
     key.strip_prefix("op-")
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))

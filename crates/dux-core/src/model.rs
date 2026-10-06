@@ -306,10 +306,8 @@ pub enum BranchKeptReason {
     /// provenance default stood. Carries the provenance so the sentence can
     /// say which kind of "predates" it was.
     NotDuxs(BranchProvenance),
-    /// The person asked to keep the branch: an unticked box in a delete
-    /// dialog, or `--keep-branch` on the command line, so the sentence names
-    /// the choice and not the box. Reachable for a branch dux created too,
-    /// which is exactly the case the provenance sentence cannot describe.
+    /// The person asked to keep the branch, in a delete dialog or with
+    /// `--keep-branch`, even one dux created.
     UserDeclined,
 }
 

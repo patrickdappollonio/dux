@@ -2459,9 +2459,8 @@ fn macro_value(entry: &crate::config::MacroEntry) -> Value {
     Value::InlineTable(inline)
 }
 
-/// Add the macro `name` to `[macros]` at its end, or replace it where it
-/// stands. A macro written as its own `[macros.<name>]` section keeps that
-/// form, and every comment around it stays.
+/// Add the macro `name` at the end of `[macros]`, or replace it where it stands,
+/// keeping its form and every comment around it.
 pub fn set_macro(doc: &mut DocumentMut, name: &str, entry: &crate::config::MacroEntry) {
     let table = ensure_table(doc, "macros");
     match table.get_mut(name) {

@@ -462,12 +462,6 @@ pub fn managed_worktree_status(path: &Path) -> FolderRepoStatus {
     }
 }
 
-/// Classify `path` per [`RepoPathKind`] using plumbing only.
-///
-/// The `--is-inside-git-dir` rung exists because inside a normal repo's `.git`
-/// directory `--git-dir` succeeds, `--is-bare-repository` prints `false` and
-/// `--show-toplevel` exits 128 (measured); without it that combination falls to
-/// `Indeterminate`, which the fail-open add gate accepts as a project.
 /// A path git printed, from its raw bytes with the line ending trimmed: git
 /// prints path bytes verbatim, so a name that is not UTF-8 keeps its bytes.
 fn path_from_git_output(stdout: &[u8]) -> PathBuf {
@@ -479,6 +473,12 @@ fn path_from_git_output(stdout: &[u8]) -> PathBuf {
     PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
 }
 
+/// Classify `path` per [`RepoPathKind`] using plumbing only.
+///
+/// The `--is-inside-git-dir` rung exists because inside a normal repo's `.git`
+/// directory `--git-dir` succeeds, `--is-bare-repository` prints `false` and
+/// `--show-toplevel` exits 128 (measured); without it that combination falls to
+/// `Indeterminate`, which the fail-open add gate accepts as a project.
 pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     let run = |args: &[&str]| -> Option<std::process::Output> {
         Command::new("git")
@@ -3274,10 +3274,8 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
     Ok(entries)
 }
 
-/// `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
-/// so two distinct non-UTF-8 names can collide onto one lossy `path` and the
-/// client, which keys tree rows by path, would lose one of them. Drop later
-/// duplicates and warn rather than build an escaping scheme.
+/// Drop later entries whose lossy path repeats an earlier one: two non-UTF-8
+/// names can collide there, and the client keys tree rows by path.
 fn drop_lossy_duplicates(entries: &mut Vec<DirEntryInfo>) {
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     entries.retain(|e| {

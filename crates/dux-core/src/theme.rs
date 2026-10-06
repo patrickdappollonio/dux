@@ -47,10 +47,8 @@ pub struct ThemeListing {
     pub source: ThemeSource,
 }
 
-/// Enumerate every theme reachable from the dux runtime: the bundled
-/// `dux-dark`, the opaline built-ins, and any TOML files the user has
-/// dropped in `<config_dir>/themes/`. Sorted with `dux-dark` first, then
-/// user themes, then built-ins alphabetically, for predictable scrolling.
+/// Every theme reachable from the dux runtime: the bundled `dux-dark` first,
+/// then the user's `<config_dir>/themes/` files, then opaline's built-ins.
 pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
     let mut themes = Vec::new();
 
@@ -71,10 +69,8 @@ pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
                 }
                 let stem = path.file_stem()?.to_str()?.to_string();
                 if stem == DEFAULT_THEME_NAME {
-                    // dux-dark stays the bundled entry; a user file with the
-                    // same name still loads first via the terminal UI's
-                    // loader, but we don't show two "dux-dark" rows in the
-                    // picker.
+                    // One `dux-dark` row: a user file of that name still loads
+                    // first through the terminal UI's loader.
                     return None;
                 }
                 Some(ThemeListing {
@@ -92,9 +88,8 @@ pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
         .into_iter()
         .filter(|info| info.builtin)
         .map(|info| ThemeListing {
-            // Match the opaline TOML filenames (underscored) for the
-            // user-facing id; the terminal UI's loader reverses the
-            // conversion before calling opaline.
+            // Opaline's underscored file names; the terminal UI's loader
+            // reverses this before calling opaline.
             id: info.name.replace('-', "_"),
             display_name: info.display_name.clone(),
             source: ThemeSource::Opaline,

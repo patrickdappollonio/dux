@@ -65,9 +65,8 @@ pub struct BootstrapView {
     /// web session is authenticated). A config reload that changes `[macros]`
     /// rebuilds this, delivered by a `config.changed` refetch.
     pub macros: Vec<MacroView>,
-    /// The version of `macros` ([`crate::wire::macros_version`]). The macro
-    /// editor sends it back on its whole-list save, which is refused when the
-    /// list changed in the meantime instead of overwriting that change.
+    /// The version of `macros` ([`crate::wire::macros_version`]), sent back on a
+    /// whole-list save so a list changed since is refused, not overwritten.
     pub macros_version: String,
     /// Web-surface welcome-screen tips, from the shared `dux_core::welcome` list.
     pub welcome_tips: Vec<String>,

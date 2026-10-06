@@ -67,9 +67,8 @@ impl std::error::Error for LogError {}
 #[derive(Debug, PartialEq, Eq)]
 pub struct LogRead {
     pub lines: Vec<String>,
-    /// Where a later read picks up: `<generation>:<line>`. The generation names
-    /// the file (it changes when the log rotates), the line counts the
-    /// complete lines of that file the answer has read to.
+    /// Where a later read picks up: `<generation>:<line>`, the file (renamed by a
+    /// rotation) and the complete lines of it read so far.
     pub cursor: String,
     /// A sentence when the answer is not the whole of what was asked for: it
     /// was cut at the cap, or a rotation may have taken lines out of reach.
@@ -139,11 +138,8 @@ fn scan(file: &std::fs::File, want: &Want) -> std::io::Result<Scan> {
     })
 }
 
-/// Names a file for as long as it is the same one: its inode and a hash of its
-/// first complete line, so a rotation changes it and an inode number the file
-/// system hands out again does not make an old cursor look current. A file
-/// with no complete line yet has none worth naming, and a cursor into it is at
-/// line 0, which loses nothing whatever the file becomes.
+/// Names a file for as long as it is the same one, so neither a rotation nor a
+/// reused inode number makes an old cursor look current.
 fn generation(file: &std::fs::File) -> std::io::Result<String> {
     let mut head = [0u8; 512];
     let read = file.read_at(&mut head, 0)?;
@@ -174,14 +170,11 @@ fn capped_note(cap: usize) -> String {
     )
 }
 
-/// Read the log at `path`: the lines after the cursor `since`, or with none
-/// the last `tail`, at most `cap` of them, and a follower that carries on from
-/// the end of what the current file held.
+/// Read the log at `path`: at most `cap` lines after the cursor `since` (else the
+/// last `tail`), and a follower that carries on from the end of the current file.
 ///
-/// A cursor from before a rotation reads on in the kept copy (`path` with
-/// `.1` on it, while it has not been compressed) and then the new file; with
-/// that copy gone, it reads the new file from its start and says lines may have
-/// been skipped. A file that does not exist yet reads as empty.
+/// A cursor from before a rotation reads on in the uncompressed kept copy, or,
+/// with it gone, from the new file's start with a note; a missing file is empty.
 pub fn open_log(
     path: &Path,
     since: Option<&str>,
@@ -334,13 +327,8 @@ fn kept_copy(
     }))
 }
 
-/// Reads `server.log` from where it left off: first the last lines, then
-/// whatever was appended. It keeps the file it is reading open, so when a
-/// rotation moves that file away it finishes the old file's remaining bytes
-/// first and only then switches to the file the name now means, starting it
-/// from its first line. Two rotations inside one poll (over 10 MiB written in
-/// 200 ms at the default size) lose the file in between; that is accepted.
-/// A link where the file should be ends the following ([`Self::refused`]).
+/// Reads `server.log` from where it left off, finishing a rotated-away file
+/// before the new one; two rotations inside one poll lose the file in between.
 pub struct FileFollower {
     path: PathBuf,
     file: Option<std::fs::File>,

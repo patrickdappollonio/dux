@@ -101,9 +101,8 @@ pub struct MacroEntry {
     pub surface: MacroSurface,
 }
 
-/// One macro as a change asks for it, checked the way every surface checks
-/// it: the name trimmed and not empty, some text, and a surface dux knows.
-/// Returns the name as it is saved, with its entry.
+/// One macro as a change asks for it, checked the way every surface checks it;
+/// returns the name as it is saved, with its entry.
 pub fn checked_macro(
     name: &str,
     text: String,
@@ -124,9 +123,8 @@ pub fn checked_macro(
     Ok((name, MacroEntry { text, surface }))
 }
 
-/// Whether `name` may be set to `value` in the global environment, by the
-/// rule a project's env lines follow. The value may be a secret, so a
-/// refusal never quotes it.
+/// Whether `name` may be set to `value` in the global environment, by the rule
+/// a project's env lines follow. A refusal never quotes the value.
 pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
     // A name that is no variable name may be a token pasted where a name
     // goes, so it is never repeated either.
@@ -360,10 +358,8 @@ pub const DEFAULT_HEARTBEAT_DEADLINE_SECONDS: u32 = 30;
 /// far shorter than forever.
 pub const DEFAULT_PTY_SEND_TIMEOUT_SECONDS: u32 = 60;
 
-/// Default for `[server] operation_unknown_after_seconds`: how long a change a
-/// client asked about may run before its record reads as unknown. Equal to the
-/// status line's [`crate::statusline::BUSY_LIVE_CEILING`], the point past which
-/// a spinner is no longer believed either.
+/// Default for `[server] operation_unknown_after_seconds`: the status line's
+/// [`crate::statusline::BUSY_LIVE_CEILING`], past which a spinner is not believed either.
 pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
 
 /// Default for `[server] operation_retention_seconds`: how long a finished
@@ -371,8 +367,7 @@ pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
 pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
 
 /// Default for `[server] presence_grace_seconds`: how long a browser tab keeps
-/// protecting a terminal it was looking at after that terminal's connection
-/// was lost (a phone in a pocket).
+/// protecting a terminal it was looking at after that connection was lost.
 pub const DEFAULT_PRESENCE_GRACE_SECONDS: u64 = 300;
 
 /// Default cap on concurrent `/files/tree` directory listings (see
@@ -707,9 +702,8 @@ pub struct TailscaleModeReport {
 }
 
 impl TailscaleModeOutcome {
-    /// Whether the change did not do what was asked: the mode saved, but the
-    /// listener could not follow it. A later request replacing this one, or
-    /// nothing serving, is not a failure.
+    /// Whether the mode saved but the listener could not follow it; being
+    /// replaced by a later request, or nothing serving, is not a failure.
     pub fn failed(self) -> bool {
         matches!(
             self,
@@ -935,10 +929,7 @@ pub struct ServerConfig {
     /// Whether the server logs a per-request access line (method, path, status,
     /// latency) to its console: `dux server`'s stdout, and the log viewer of the
     /// `start-web-server` flip. The `/healthz` probe is always skipped.
-    /// Default true. The access log is never written to `dux.log`; it goes to the
-    /// console and to `server.log` (the background server, which prints nothing
-    /// over the terminal UI, writes only the file), and the `start-web-server`
-    /// flip shows the same lines in its log viewer.
+    /// Default true. Also written to `server.log`, never to `dux.log`.
     pub access_log: bool,
     /// How many lines the `start-web-server` flip's log viewer keeps for
     /// scrolling back. Older lines are dropped once it is full. `dux server`
@@ -950,21 +941,17 @@ pub struct ServerConfig {
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
     /// starts.
     pub log_viewer_lines: usize,
-    /// Where the server's own log is written: the same lines `dux server` prints,
-    /// kept by all three ways of serving, so the log of a server that ran with no
-    /// terminal in front of it can still be read. A relative path is resolved from
-    /// the config folder; an empty one is read as the default. Default
-    /// `server.log`. `dux.log` keeps the debugging trail and is unaffected. Read
-    /// when a serve starts.
+    /// Where every way of serving writes the server's own log: relative to the
+    /// config folder, empty for the default. Default `server.log`. Read when a
+    /// serve starts.
     pub log_path: String,
     /// Size in bytes the server log may reach before dux rotates it, with the same
     /// whole-line and `0 = never rotate` rules as `[logging] max_bytes`. Default
     /// 10 MiB. Read when a serve starts.
     pub log_max_bytes: u64,
     /// How many rotated copies of the server log to keep, numbered `server.log.1`
-    /// upwards; the oldest is deleted. `0` rotates and discards. Read through
-    /// [`effective_log_keep`], so values above [`MAX_LOG_KEEP`] are clamped.
-    /// Default 5. Read when a serve starts.
+    /// upwards; `0` rotates and discards, and values above [`MAX_LOG_KEEP`] are
+    /// clamped. Default 5. Read when a serve starts.
     pub log_keep: u32,
     /// Whether a rotated server log is gzipped to `server.log.N.gz` in the
     /// background. Default true. Read when a serve starts.
@@ -994,12 +981,10 @@ pub struct ServerConfig {
     /// is covered by the take-over card until somebody presses that card's
     /// button.
     pub serve_while_tui: bool,
-    /// Where dux serves its API to command-line clients on this machine: a Unix
-    /// socket only this user can open. A relative path is read from the config
-    /// folder, an absolute one is used as is. Bound once when dux starts, by the
-    /// dux holding `dux.lock`, so a change applies the next time dux starts. A
-    /// path longer than the system allows (103 bytes on macOS, 107 on Linux)
-    /// starts dux without the socket and says why. Default `"dux.sock"`.
+    /// The owner-only Unix socket dux serves its API on to local command-line
+    /// clients, relative to the config folder. Bound once at start by the dux
+    /// holding `dux.lock`; a path past the system limit starts dux without it.
+    /// Default `"dux.sock"`.
     pub control_socket: String,
     /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
     /// the status/changed-files event stream every browser tab opens. Once this
@@ -1176,23 +1161,16 @@ pub struct ServerConfig {
     /// it then retries forever. Read live, so a config reload applies to the
     /// next connection with no restart.
     pub pty_send_timeout_seconds: u32,
-    /// How long, in seconds, a change a client is waiting on may run before
-    /// its operation record reads `unknown`. Default 1800. The record stays
-    /// open and still finishes with the real outcome; this never ends a change
-    /// or calls it failed. Read when the change starts, so a config reload
-    /// applies to the changes started after it.
+    /// How long, in seconds, a change may run before its operation record reads
+    /// `unknown`; the record still finishes with the real outcome. Default 1800.
+    /// Read when the change starts.
     pub operation_unknown_after_seconds: u64,
-    /// How long, in seconds, a finished change's operation record can still
-    /// be read by its id. Default 1800. Read when the change starts, like
-    /// `operation_unknown_after_seconds`.
+    /// How long, in seconds, a finished change's operation record can still be
+    /// read by its id. Default 1800. Read when the change starts.
     pub operation_retention_seconds: u64,
-    /// How long, in seconds, a browser tab still counts as attached to a
-    /// terminal whose connection was lost (not closed) while the tab was
-    /// showing it, counted from the last beat that said it was being looked
-    /// at, whether or not the tab's own connection is still up. A deliberate
-    /// end (a clean close, a sign-out, the tab attaching elsewhere, a forced
-    /// change) ends it at once. Default 300. Read when the connection is lost,
-    /// so a config reload applies to the next one.
+    /// How long, in seconds, a browser tab still counts as attached to a terminal
+    /// whose connection was lost (not closed) while it was looked at, from its last
+    /// viewed beat. Default 300. Read when the connection is lost.
     pub presence_grace_seconds: u64,
     /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
     /// section refuses the whole config rather than resetting to "no
@@ -1254,39 +1232,8 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
     prev.log_viewer_lines != next.log_viewer_lines
 }
 
-/// True when a config reload changed a `[server]` setting that is read once, as
-/// a listener binds and its router is built. Both surfaces call this on every
-/// reload (before the config swap) so each can warn that a restart is needed; a
-/// reload that only touched, say, `[ui]` theme settings leaves every compared
-/// field equal and triggers no warning.
-///
-/// Settings deliberately absent from the comparison, each because a restart
-/// warning there would be false:
-///
-/// - `access_log` and `search_index_max_files`: the routes read these off shared
-///   cells a reload writes, so the change has already taken effect.
-/// - `allowed_hosts`: the Host guard reads the list from the same live cells, so
-///   a reload that edits it applies to the running listener.
-/// - The `tailscale` mode: a live switch. A reload hands the new mode to the
-///   running serve, which stops or starts the watcher, binds or drops the leg, and
-///   moves the Host guard's Tailscale-literal rule with it.
-/// - The browser-side reconnect settings (`replay_wait_seconds`,
-///   `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
-///   `reconnect_attempt_timeout_seconds`, `changes_request_timeout_seconds`,
-///   `heartbeat_seconds`, `heartbeat_deadline_seconds`): nothing on the server
-///   reads them. They ride
-///   the bootstrap document, which every client refetches on a config reload, so a
-///   change retimes every open tab live.
-/// - `pty_send_timeout_seconds`: read on the server, but read live at the moment a
-///   terminal connection opens, so the next connection already has the new value.
-/// - `operation_unknown_after_seconds` and `operation_retention_seconds`: read as
-///   each change starts, so the next one already has the new values.
-/// - `presence_grace_seconds`: read as each terminal connection is lost.
-///
-/// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
-/// are built once in `build_app` and never resized on reload, and the tab caps are
-/// frozen into `RouterParams`. The deprecated `bind` field is migrated into
-/// `host`/`port` on load, so a change to it surfaces through those fields.
+/// True when a config reload changed a `[server]` setting read once, as a
+/// listener binds and its router is built; settings a running serve reads live are left out.
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     !server_bind_setting_names(prev, next).is_empty()
 }
@@ -1317,10 +1264,8 @@ pub fn server_bind_setting_names(prev: &ServerConfig, next: &ServerConfig) -> Ve
             "max_websocket_tabs_per_agent",
             prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent,
         ),
-        // The file-drop caps are frozen into RouterParams at bind time and the
-        // routes enforce that frozen copy, while the viewmodel projects the
-        // reloaded value live. Without these rows a reload silently leaves the
-        // browser believing a cap the server no longer enforces.
+        // The routes enforce a bind-time copy of the file-drop caps while the
+        // browser sees the reloaded value, so a change to them needs a restart.
         (
             "file_drop_max_bytes",
             prev.file_drop_max_bytes != next.file_drop_max_bytes,
@@ -2506,10 +2451,8 @@ pub struct DuxPaths {
     /// Path to the lockfile that enforces a single dux instance per
     /// config directory. Contains the PID of the holder.
     pub lock_path: PathBuf,
-    /// Where the control socket is bound: `[server] control_socket` resolved
-    /// against the config folder. [`DuxPaths::discover`] fills in the default,
-    /// and a start that has read the config replaces it through
-    /// [`DuxPaths::with_control_socket`].
+    /// Where the control socket is bound: the default until a start that read the
+    /// config replaces it through [`DuxPaths::with_control_socket`].
     pub socket_path: PathBuf,
 }
 
@@ -9426,6 +9369,31 @@ mod server_restart_split_tests {
         let prev = server();
         let mut next = prev.clone();
         next.color = "never".to_string();
+        // A restart warning for a setting the running serve already reads live
+        // would be false. `access_log` and `search_index_max_files` sit in shared
+        // cells a reload writes; `allowed_hosts` feeds the Host guard live; the
+        // `tailscale` mode is handed to the running serve; the browser reconnect
+        // settings ride the bootstrap document every tab refetches on a reload;
+        // `pty_send_timeout_seconds` is read as each terminal connection opens, the
+        // operation timings as each change starts, and `presence_grace_seconds` as
+        // each terminal connection is lost. The WebSocket caps, by contrast, are
+        // built into the router once, and the deprecated `bind` arrives through
+        // `host` and `port`.
+        next.access_log = !next.access_log;
+        next.search_index_max_files += 1;
+        next.allowed_hosts.push("dux.example".to_string());
+        next.tailscale = "no".to_string();
+        next.replay_wait_seconds += 1;
+        next.reconnect_backoff_cap_seconds += 1;
+        next.reconnect_attempts += 1;
+        next.reconnect_attempt_timeout_seconds += 1;
+        next.changes_request_timeout_seconds += 1;
+        next.heartbeat_seconds += 1;
+        next.heartbeat_deadline_seconds += 1;
+        next.pty_send_timeout_seconds += 1;
+        next.operation_unknown_after_seconds += 1;
+        next.operation_retention_seconds += 1;
+        next.presence_grace_seconds += 1;
 
         assert!(!server_bind_settings_changed(&prev, &next));
         assert!(server_console_settings_changed(&prev, &next));
