@@ -50,14 +50,22 @@ async fn get_operation(
         return unknown_operation();
     }
     let deadline = wait_deadline(Instant::now(), query.wait_seconds);
+    // The core serving this request is handing the engine over: answer the
+    // record as it stands rather than hold the reply into a teardown. The
+    // client polls again by id and reaches the next core.
+    let mut handing_over = state.hand_over.subscribe();
     loop {
         let Some(view) = state.engine.operations().view(&id, Instant::now()) else {
             return unknown_operation();
         };
-        if view.state.is_final() || Instant::now() >= deadline {
+        if view.state.is_final() || Instant::now() >= deadline || *handing_over.borrow_and_update()
+        {
             return Json(view).into_response();
         }
-        tokio::time::sleep(POLL).await;
+        tokio::select! {
+            _ = tokio::time::sleep(POLL) => {}
+            _ = handing_over.changed() => {}
+        }
     }
 }
 

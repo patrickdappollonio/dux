@@ -204,9 +204,13 @@ impl BackgroundServer {
     }
 
     /// Stop serving, first letting the control socket finish the requests it
-    /// already accepted, servicing `engine` meanwhile (bounded). A connection
-    /// that arrives from then on waits in the socket's backlog for the next
-    /// core, so moving between cores loses no command-line request.
+    /// already accepted, servicing `engine` meanwhile. A connection that
+    /// arrives from then on waits in the socket's backlog for the next core.
+    ///
+    /// An operation wait answers at once when this begins. Any other request
+    /// held open across a hand-over has [`HAND_OVER_BOUND`] to finish and is
+    /// cut past it; the command line never sends one, because every change it
+    /// makes answers with an operation id within the call and is then polled.
     pub fn hand_over(mut self, engine: &mut Engine) -> Option<anyhow::Error> {
         self.core.stop_control_socket();
         let deadline = std::time::Instant::now() + HAND_OVER_BOUND;
@@ -470,6 +474,45 @@ mod tests {
             .expect("the request was answered")
     }
 
+    /// Open a running operation record and start a long wait on it over the
+    /// socket, the way the command line polls a change it made, then let the
+    /// wait reach the core that serves it.
+    fn waiting_on_an_operation(
+        engine: &dux_core::engine::Engine,
+        socket: &std::path::Path,
+        id: &str,
+    ) -> std::thread::JoinHandle<Result<String, String>> {
+        engine.operations.open(
+            id,
+            dux_core::operations::OperationKind::TabClose,
+            dux_core::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(600),
+                retention: std::time::Duration::from_secs(600),
+            },
+            std::time::Instant::now(),
+        );
+        let wait = request_over_socket(socket, &format!("/api/v1/operations/{id}?wait_seconds=25"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        wait
+    }
+
+    /// Hand `core` over, and say how long that took and what the operation
+    /// wait in flight on it answered.
+    fn handed_over_with_a_wait_in_flight(
+        core: BackgroundServer,
+        engine: &mut dux_core::engine::Engine,
+        wait: std::thread::JoinHandle<Result<String, String>>,
+    ) -> (std::time::Duration, String) {
+        let started = std::time::Instant::now();
+        assert!(core.hand_over(engine).is_none());
+        let took = started.elapsed();
+        let answer = wait
+            .join()
+            .expect("the wait thread")
+            .expect("the wait was answered");
+        (took, answer)
+    }
+
     fn socket_inode(path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         std::fs::symlink_metadata(path).expect("the socket").ino()
@@ -542,7 +585,13 @@ mod tests {
         );
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
         assert!(answer.contains("\"projects\""), "{answer}");
-        assert!(plain.hand_over(&mut engine).is_none());
+        // A command-line wait on an operation answers the record as it stands
+        // the moment its core hands over, and the hand-over does not wait it out.
+        let wait = waiting_on_an_operation(&engine, &socket, "op-to-background");
+        let (took, answer) = handed_over_with_a_wait_in_flight(plain, &mut engine, wait);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert!(answer.contains("\"running\""), "{answer}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
         let waiting = request_over_socket(&socket, "/api/v1/workspace");
         engine.config.server.access_log = true;
 
@@ -575,10 +624,10 @@ mod tests {
             Some(tmp.path().join("server.log")),
             "the serve says which file it opened"
         );
-        assert!(
-            server.hand_over(&mut engine).is_none(),
-            "a clean stop records no failure"
-        );
+        let wait = waiting_on_an_operation(&engine, &socket, "op-to-plain");
+        let (took, answer) = handed_over_with_a_wait_in_flight(server, &mut engine, wait);
+        assert!(answer.contains("\"running\""), "{answer}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
         assert!(
             healthz(first_addr).is_err(),
             "the stopped serve must not still be accepting on {first_addr}"
@@ -590,7 +639,11 @@ mod tests {
         let answer = serviced_until_answered(&mut plain, &mut engine, waiting);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
         assert_eq!(socket_inode(&socket), bound, "the same bound socket");
-        assert!(plain.hand_over(&mut engine).is_none());
+        // The terminal UI's run ending hands its core over the same way.
+        let wait = waiting_on_an_operation(&engine, &socket, "op-at-the-end");
+        let (took, answer) = handed_over_with_a_wait_in_flight(plain, &mut engine, wait);
+        assert!(answer.contains("\"running\""), "{answer}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
 
         // Toggling back on builds a fresh app rather than reviving the old one.
         engine.config.server.access_log = false;

@@ -164,6 +164,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
         None
     );
     let bound = socket_inode(&socket);
+    let operations = engine.operations.clone();
     let before_the_flip = request_over_socket(&socket, "/api/v1/workspace");
 
     // Create a live companion terminal BEFORE serving so we can prove the
@@ -271,8 +272,36 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     }
     assert!(saw_connected, "never received a connected frame");
 
+    // A command-line wait on an operation, in flight as the flip hands back,
+    // answers the record as it stands at once instead of being waited out.
+    operations.open(
+        "op-across-the-flip",
+        dux_core::operations::OperationKind::TabClose,
+        dux_core::operations::OperationPolicy {
+            unknown_after: Duration::from_secs(600),
+            retention: Duration::from_secs(600),
+        },
+        std::time::Instant::now(),
+    );
+    let wait = request_over_socket(
+        &socket,
+        "/api/v1/operations/op-across-the-flip?wait_seconds=25",
+    );
+    std::thread::sleep(Duration::from_millis(300));
+
     // Ask the status-screen tick to flip back to the TUI.
+    let handed_back = std::time::Instant::now();
     stop.store(true, Ordering::SeqCst);
+    let answer = wait
+        .join()
+        .unwrap()
+        .expect("the wait is answered as the flip hands back");
+    assert!(answer.contains("\"running\""), "{answer}");
+    assert!(
+        handed_back.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        handed_back.elapsed()
+    );
 
     // The serve thread should return promptly with the engine intact.
     let (exit, survived, after_the_flip) = result_rx

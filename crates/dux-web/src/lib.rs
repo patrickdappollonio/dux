@@ -2282,6 +2282,9 @@ pub(crate) struct ServeCore {
     installed_signal_handlers: bool,
     /// The control socket's serve task, when this core serves the socket.
     control: Option<ControlLeg>,
+    /// Flipped when this core starts handing the engine over, so the operation
+    /// waits its router holds answer at once (see `AppState::hand_over`).
+    hand_over: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// One core's serve task over its clone of the control socket, with a stop
@@ -2421,6 +2424,7 @@ impl ServeCore {
         // path uses. Its watch is the graceful-shutdown lane every serve task and
         // the sweep await; a dying listener flips it via `record_failure`.
         let shutdown = ServeShutdown::new(mode_control.watched());
+        let hand_over = Arc::new(tokio::sync::watch::Sender::new(false));
 
         // Build ONE app, shared across listeners (the router is a cheap
         // `Arc`-backed service). `build_app` constructs the `ChangesService`,
@@ -2432,6 +2436,7 @@ impl ServeCore {
                 handle.clone(),
                 axum::Router::new(),
                 router_params(config, console.clone(), access_log, bound_ips, hooks)
+                    .with_hand_over(Arc::clone(&hand_over))
                     .with_live_tailscale_host_literals(mode_control.host_literals())
                     .with_live_own_magicdns_name(mode_control.own_magicdns_name())
                     .with_live_exposure(mode_control.exposure())
@@ -2572,6 +2577,7 @@ impl ServeCore {
             supervisor: Some(supervisor),
             installed_signal_handlers,
             control,
+            hand_over,
         })
     }
 
@@ -2595,6 +2601,7 @@ impl ServeCore {
             Arc::new(AtomicBool::new(false)),
         );
         let shutdown = ServeShutdown::new(mode_control.watched());
+        let hand_over = Arc::new(tokio::sync::watch::Sender::new(false));
         let guard = runtime.enter();
         let app = server::build_app(
             handle,
@@ -2605,7 +2612,8 @@ impl ServeCore {
                 false,
                 Vec::new(),
                 BackgroundHooks::default(),
-            ),
+            )
+            .with_hand_over(Arc::clone(&hand_over)),
         );
         let control = ControlLeg::spawn(app, control_socket, &shutdown);
         drop(guard);
@@ -2616,13 +2624,21 @@ impl ServeCore {
             supervisor: None,
             installed_signal_handlers: false,
             control,
+            hand_over,
         })
     }
 
     /// Stop accepting on the control socket, leaving the requests already
     /// accepted to finish. Connections that arrive from now on wait in the
     /// socket's backlog for the next core.
+    ///
+    /// This is where a hand-over begins, so every operation wait this core's
+    /// router holds answers now with the record as it stands. Anything else
+    /// still held open (a request that is not an operation wait) has the
+    /// owner's bound to finish, and is cut past it; the command line sends
+    /// every change with `operation=1` and polls, so it never holds one.
     pub(crate) fn stop_control_socket(&self) {
+        self.hand_over.send_replace(true);
         if let Some(control) = &self.control {
             let _ = control.stop.send(true);
         }
@@ -2691,6 +2707,7 @@ impl ServeCore {
     /// watcher and take the operator's escape hatch with it.
     pub(crate) fn wind_down(&mut self, shutdown_flag: &Arc<AtomicBool>) {
         shutdown_flag.store(true, Ordering::SeqCst);
+        self.hand_over.send_replace(true);
 
         // Trigger graceful axum shutdown and wait (bounded) for the supervisor to
         // reap every leg. `trigger` fans out over the leg registry, so a Tailscale
@@ -2903,6 +2920,9 @@ pub fn serve_with_engine(
             if core.control_socket_drained() {
                 return LoopControl::Exit;
             }
+            // Operation waits answered as the socket stopped; anything else
+            // still open gets this bound and is cut past it. The command line
+            // never holds such a request: it polls operations by id.
             draining_until = Some(std::time::Instant::now() + SERVER_JOIN_TIMEOUT);
             LoopControl::Continue
         },

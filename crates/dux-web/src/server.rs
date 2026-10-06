@@ -158,6 +158,10 @@ pub struct AppState {
     /// password checks. Every request passes its layer; every open socket
     /// holds a watch on it (see [`crate::auth`]).
     pub auth: Arc<crate::auth::AuthState>,
+    /// Flips to `true` when the core serving this router starts handing the
+    /// engine over to the next one. A long wait on an operation record answers
+    /// at once when it does, so a hand-over never waits it out or cuts it.
+    pub hand_over: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -411,6 +415,9 @@ pub struct RouterParams {
     /// anything connects. `None` for every serve path but the background one,
     /// which is the only one with a terminal UI beside it to show the count on.
     pub(crate) connections_gauge: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// The hand-over signal of the core that serves this router (see
+    /// [`AppState::hand_over`]). A router nobody hands over gets its own.
+    pub(crate) hand_over: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
 impl RouterParams {
@@ -453,6 +460,7 @@ impl RouterParams {
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
             connections_gauge: None,
+            hand_over: None,
         }
     }
 
@@ -462,6 +470,15 @@ impl RouterParams {
     /// Only the background serve calls this, for the same reason as
     /// [`Self::with_ownership_publisher`]: it is the one path with a second surface
     /// that has somewhere to show the number.
+    /// Answer the router's operation waits when `hand_over` flips.
+    pub(crate) fn with_hand_over(
+        mut self,
+        hand_over: Arc<tokio::sync::watch::Sender<bool>>,
+    ) -> Self {
+        self.hand_over = Some(hand_over);
+        self
+    }
+
     pub(crate) fn with_connections_gauge(
         mut self,
         gauge: Arc<std::sync::atomic::AtomicUsize>,
@@ -872,6 +889,10 @@ pub fn build_app(
         tailscale_mode: params.tailscale_mode_control.clone(),
         tailscale_forced_no: params.tailscale_forced_no,
         auth,
+        hand_over: params
+            .hand_over
+            .clone()
+            .unwrap_or_else(|| Arc::new(tokio::sync::watch::Sender::new(false))),
     };
 
     // Every route sits behind the auth layer added below. `extra_gated` is
