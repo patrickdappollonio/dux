@@ -9,7 +9,12 @@ import {
   refreshAuthStatus,
   subscribeAuth,
 } from "./authGate"
-import { sanitizeAgentName } from "./agentName"
+import {
+  draftAfterRandomizeOff,
+  generatedNameAfterEdit,
+  sanitizeAgentName,
+} from "./agentName"
+import { cloneDirName } from "./cloneDirName"
 import { git } from "./git"
 import {
   projectsApi,
@@ -148,6 +153,7 @@ import {
   writeTheaterMemory,
 } from "./theater"
 import type {
+  AcceptedOperation,
   BranchChoiceView,
   BranchWarningView,
   InspectKind,
@@ -162,7 +168,7 @@ import type {
   StartupLogEntry,
   TerminalView,
 } from "./types"
-import { workspaceProjectId } from "@/lib/agentWorkspace"
+import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Who a companion terminal belongs to, defined in `lib/terminalOwner.ts`
 // alongside the exhaustive switches that consume it and re-exported here for
@@ -274,6 +280,36 @@ export interface DiscardTarget {
 export type CreateFocusScope =
   | { kind: "project"; projectId: string }
   | { kind: "standalone" }
+  // A clone makes its project and then its agent, so there is no project to
+  // name yet: the agent is recognized as the one called `agentName` (any, when
+  // the dialog left it to the server) in a project this tab had not seen.
+  // `opId` is the clone's own operation while it runs, which is what keeps the
+  // token armed for as long as a big repository takes; null before the 202
+  // names it and after the clone hands over to the agent's own create.
+  | {
+      kind: "clone"
+      knownProjectIds: string[]
+      agentName: string | null
+      opId: string | null
+    }
+
+/** The clone dialog's form. Null while the dialog is closed. */
+export interface CloneProjectForm {
+  url: string
+  path: string
+  /** Whether the user has typed in the destination, after which the address
+   * stops choosing it. */
+  pathEdited: boolean
+  /** The folder the destination defaults into, once the server has answered. */
+  startFolder: string | null
+  name: string
+  randomize: boolean
+  generatedName: string | null
+  namePending: boolean
+  submitting: boolean
+  /** The sentence a refused submit came back with. */
+  error: string | null
+}
 
 // The changed-files request state machine for the selected session, and the one
 // source of changed-files data in the app.
@@ -474,6 +510,7 @@ export interface DuxState {
     location: "local" | "remote"
   } | null
   addProjectOpen: boolean
+  cloneProject: CloneProjectForm | null
   /** The standalone-agent folder picker. It shares the `browse*` slice with the
    * add-project picker, which is right: only one folder picker is open at a
    * time, and the browsing itself is the same act. What differs is what
@@ -1027,6 +1064,7 @@ let state: DuxState = {
   forceReconnectTarget: null,
   existingBranchTarget: null,
   addProjectOpen: false,
+  cloneProject: null,
   standaloneAgentPickerOpen: false,
   addProjectIntent: "add",
   browsePath: "",
@@ -1182,7 +1220,29 @@ eventsSocket.subscribe(["sessions", "projects", "config"])
 // does, so the registration is never retired.
 registerPageLifecycle(eventsSocket)
 
+// What a clone's own operation tells the focus token. Anything but a busy under
+// its key is the operation's final: the clone stopped short, so no agent is
+// coming and the token goes. A cleared key is the hand-over to the agent's
+// create, whose own final is a different key, so the token now waits out the
+// usual window for the agent to appear.
+function followCloneOperation(key: string | null | undefined, ended: boolean): void {
+  const pending = state.pendingCreateFocus
+  if (!key || pending?.scope.kind !== "clone" || pending.scope.opId !== key) return
+  if (ended) {
+    setState({ pendingCreateFocus: null })
+    return
+  }
+  setState({
+    pendingCreateFocus: {
+      ...pending,
+      scope: { ...pending.scope, opId: null },
+      armedAt: Date.now(),
+    },
+  })
+}
+
 function handleStatusEvent(event: EventsServerMessage): void {
+  if (event.tone !== "busy") followCloneOperation(event.key, true)
   if (event.tone === "error") setState({ ...clearPendingClientIntent() })
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
   showStatusToast(
@@ -1231,6 +1291,7 @@ function routeEvent(event: EventsServerMessage): void {
       handleStatusEvent(event)
       return
     case "status_cleared":
+      followCloneOperation(event.key, false)
       dismissNotification(event.key ?? ANON_TOAST_ID)
       return
     case "config.changed":
@@ -2110,6 +2171,30 @@ function navigateAfterVanish(
 // keep a stale token armed to grab a later, unrelated session.
 const CREATE_FOCUS_TTL_MS = 90_000
 
+// A running clone keeps its token armed for as long as the operation lives, but
+// not forever: the engine turns any busy still open at 30 minutes into a
+// warning, so a token alive well past that is orphaned (its final was missed).
+const CLONE_FOCUS_CEILING_MS = 60 * 60_000
+
+// Whether an armed token has outlived its window. A clone with a running
+// operation is bounded by the ceiling instead of the usual window.
+function createFocusExpired(
+  pending: NonNullable<DuxState["pendingCreateFocus"]>,
+  now: number,
+): boolean {
+  const age = now - pending.armedAt
+  const scope = pending.scope
+  switch (scope.kind) {
+    case "project":
+    case "standalone":
+      return age > CREATE_FOCUS_TTL_MS
+    case "clone":
+      return age > (scope.opId !== null ? CLONE_FOCUS_CEILING_MS : CREATE_FOCUS_TTL_MS)
+    default:
+      return assertNever(scope)
+  }
+}
+
 // Snapshot the session ids that exist now and arm auto-focus for an agent this
 // client is creating. Call it immediately before dispatching the create.
 // Re-arming supersedes any earlier create whose agent never arrived. The scope
@@ -2143,6 +2228,14 @@ function sessionInCreateScope(
     // was handed and may answer with a different string than the one typed.
     case "standalone":
       return projectId === null
+    // A project the tab had not seen when the clone started is the clone's,
+    // whatever spelling of the destination the server settled on.
+    case "clone":
+      return (
+        projectId !== null &&
+        !scope.knownProjectIds.includes(projectId) &&
+        (scope.agentName === null || sessionLabel(session) === scope.agentName)
+      )
     default:
       return assertNever(scope)
   }
@@ -2159,7 +2252,7 @@ function focusNewlyCreatedSession(spine: Spine): void {
   // Expire a stale token rather than letting it focus an unrelated session that
   // appears long after the create it was armed for (a silently-failed create, or
   // one that never completed). Disarm and bail.
-  if (Date.now() - pending.armedAt > CREATE_FOCUS_TTL_MS) {
+  if (createFocusExpired(pending, Date.now())) {
     setState({ pendingCreateFocus: null })
     return
   }
@@ -4946,6 +5039,167 @@ export function closeAddProject(): void {
   })
 }
 
+// The clone dialog's destination while the user has not typed one: the start
+// folder plus the folder the address would clone into, or nothing until both
+// are known.
+function defaultCloneDestination(url: string, startFolder: string | null): string {
+  const name = cloneDirName(url)
+  if (startFolder === null || name === null) return ""
+  return `${startFolder.replace(/\/+$/, "")}/${name}`
+}
+
+// Write the form, refreshing the destination the address chooses and retiring
+// a refusal, since whatever the user just changed is the answer to it.
+function patchCloneProject(patch: Partial<CloneProjectForm>): void {
+  const form = state.cloneProject
+  if (!form) return
+  const next = { ...form, ...patch, error: null }
+  if (!next.pathEdited) {
+    next.path = defaultCloneDestination(next.url, next.startFolder)
+  }
+  setState({ cloneProject: next })
+}
+
+export function openCloneProject(): void {
+  const randomize = state.bootstrap?.randomize_agent_names_by_default ?? false
+  setState({
+    cloneProject: {
+      url: "",
+      path: "",
+      pathEdited: false,
+      startFolder: null,
+      name: "",
+      randomize,
+      generatedName: null,
+      namePending: randomize,
+      submitting: false,
+      error: null,
+    },
+  })
+  if (randomize) requestCloneAgentName()
+  // The destination defaults into the server's configured start folder. A
+  // failed read leaves it unknown and the destination to be typed, which the
+  // server checks like any other, so there is nothing to toast.
+  browseApi
+    .browse(null)
+    .then((res) => {
+      if (state.cloneProject && state.cloneProject.startFolder === null) {
+        patchCloneProject({ startFolder: res.path })
+      }
+    })
+    .catch(() => {})
+}
+
+export function closeCloneProject(): void {
+  if (state.cloneProject) setState({ cloneProject: null })
+}
+
+export function setCloneProjectUrl(raw: string): void {
+  patchCloneProject({ url: raw })
+}
+
+export function setCloneProjectPath(raw: string): void {
+  patchCloneProject({ path: raw, pathEdited: true })
+}
+
+export function setCloneProjectName(raw: string): void {
+  const form = state.cloneProject
+  if (!form) return
+  const name = sanitizeAgentName(raw)
+  patchCloneProject({
+    name,
+    generatedName: generatedNameAfterEdit(name, form.generatedName),
+  })
+}
+
+// The pet-name preview for the clone dialog; a reply that lands after the box
+// was unchecked or the dialog closed is dropped, and a failure stops the
+// spinner so a name can be typed by hand.
+function requestCloneAgentName(): void {
+  browseApi
+    .agentName()
+    .then((res) => {
+      if (state.cloneProject?.randomize) {
+        patchCloneProject({
+          name: res.name,
+          generatedName: res.name,
+          namePending: false,
+        })
+      }
+    })
+    .catch(() => {
+      if (state.cloneProject) patchCloneProject({ namePending: false })
+    })
+}
+
+export function toggleCloneProjectRandomize(): void {
+  const form = state.cloneProject
+  if (!form) return
+  if (!form.randomize) {
+    patchCloneProject({ randomize: true, namePending: true })
+    requestCloneAgentName()
+    return
+  }
+  patchCloneProject({
+    randomize: false,
+    name: draftAfterRandomizeOff(form.name, form.generatedName),
+    generatedName: null,
+    namePending: false,
+  })
+}
+
+// Ask the server to clone the address into the destination and start the agent.
+// The token is armed before the request so a clone that finishes ahead of its
+// own reply cannot be missed; a refusal disarms it and keeps the dialog open
+// with the sentence, and the 202 closes the dialog and hands the token the
+// operation to follow.
+export function submitCloneProject(): void {
+  const form = state.cloneProject
+  if (!form || form.submitting) return
+  const url = form.url.trim()
+  const path = form.path.trim()
+  const name = form.name.trim()
+  if (url === "" || path === "") return
+  patchCloneProject({ submitting: true })
+  armCreateFocus({
+    kind: "clone",
+    knownProjectIds: (state.spine?.projects ?? []).map((p) => p.id),
+    agentName: name === "" ? null : name,
+    opId: null,
+  })
+  projectsApi
+    .create({
+      path,
+      clone_url: url,
+      agent_name: name,
+      random_name: form.randomize,
+    })
+    .then((accepted) => {
+      const opId = (accepted as AcceptedOperation | undefined)?.op_id ?? null
+      const pending = state.pendingCreateFocus
+      if (opId && pending?.scope.kind === "clone" && pending.scope.opId === null) {
+        setState({
+          pendingCreateFocus: { ...pending, scope: { ...pending.scope, opId } },
+        })
+      }
+      closeCloneProject()
+    })
+    .catch((e) => {
+      if (state.pendingCreateFocus?.scope.kind === "clone") {
+        setState({ pendingCreateFocus: null })
+      }
+      const current = state.cloneProject
+      if (!current) return
+      setState({
+        cloneProject: {
+          ...current,
+          submitting: false,
+          error: e instanceof Error ? e.message : "Could not start the clone.",
+        },
+      })
+    })
+}
+
 export function browseDir(path: string | null): void {
   // Navigating away abandons any pending/resolved branch inspection so a late
   // reply for the old selection can't resurface in the new directory.
@@ -5485,8 +5739,7 @@ export function setCreateAgentPrInput(raw: string): void {
 // generated name clears the remembered name so a later uncheck keeps the edits.
 export function setCreateAgentDraft(raw: string): void {
   const draft = sanitizeAgentName(raw)
-  const generated =
-    draft === state.createAgentGeneratedName ? state.createAgentGeneratedName : null
+  const generated = generatedNameAfterEdit(draft, state.createAgentGeneratedName)
   setState({
     createAgentDraft: draft,
     createAgentGeneratedName: generated,
@@ -5512,10 +5765,12 @@ export function toggleCreateAgentRandomize(): void {
     })
     requestAgentName()
   } else {
-    const keepText = state.createAgentDraft !== state.createAgentGeneratedName
     setState({
       createAgentRandomize: false,
-      createAgentDraft: keepText ? state.createAgentDraft : "",
+      createAgentDraft: draftAfterRandomizeOff(
+        state.createAgentDraft,
+        state.createAgentGeneratedName,
+      ),
       createAgentGeneratedName: null,
       // Unchecking abandons any in-flight request; its reply is dropped
       // (randomize is false by then), so stop the spinner now.

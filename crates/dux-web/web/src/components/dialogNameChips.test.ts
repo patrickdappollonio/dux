@@ -243,6 +243,7 @@ describe("every name a modal shows is the shared chip", () => {
     // Found by the prose import, not by a list.
     expect(names).toContain("lib/addProjectWarning.ts")
     expect(names).toContain("components/createAgentDialogView.ts")
+    expect(names).toContain("components/CloneProjectDialog.tsx")
     // Who a guarded dialog names, and the sentences it names them in.
     expect(names).toContain("components/AttachedSection.tsx")
     expect(names).toContain("lib/attached.ts")

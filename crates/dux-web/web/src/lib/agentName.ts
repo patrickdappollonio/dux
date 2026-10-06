@@ -47,3 +47,26 @@ export function isValidAgentName(name: string): boolean {
   }
   return true
 }
+
+/**
+ * The generated-name bookkeeping both name dialogs share. Typing a name keeps
+ * the remembered generated one only while the text still equals it, so a later
+ * uncheck can tell a name the user wrote from one dux filled in.
+ */
+export function generatedNameAfterEdit(
+  draft: string,
+  generated: string | null,
+): string | null {
+  return draft === generated ? generated : null
+}
+
+/**
+ * What the name field holds after the pet-name box is unchecked: cleared when
+ * it still holds the generated name, untouched when the user has edited it.
+ */
+export function draftAfterRandomizeOff(
+  draft: string,
+  generated: string | null,
+): string {
+  return draft === generated ? "" : draft
+}

@@ -1,6 +1,7 @@
 import type * as React from "react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
+import { CloneProjectDialog } from "@/components/CloneProjectDialog"
 import { StandaloneAgentDialog } from "@/components/StandaloneAgentDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
 import { AgentInfoDialog } from "@/components/AgentInfoDialog"
@@ -122,6 +123,7 @@ function GlobalOverlays() {
       <AgentEnvDialog />
       <StartupLogsDialog />
       <AddProjectDialog />
+      <CloneProjectDialog />
       <StandaloneAgentDialog />
       <WorktreesDialog />
       <RemoveProjectDialog />

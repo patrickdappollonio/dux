@@ -11,6 +11,7 @@ const openReleaseNotes = vi.fn()
 const openAddProject = vi.fn()
 const openProjects = vi.fn()
 const openAddProjectForInit = vi.fn()
+const openCloneProject = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
 const createStandaloneTerminal = vi.fn()
@@ -29,6 +30,7 @@ vi.mock("@/lib/store", () => ({
   openAddProject: () => openAddProject(),
   openProjects: () => openProjects(),
   openAddProjectForInit: () => openAddProjectForInit(),
+  openCloneProject: () => openCloneProject(),
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
@@ -208,6 +210,7 @@ describe("appMenuModel", () => {
       "new-agent-from-pr",
       "new-agent-from-worktree",
       "add-project-picker",
+      "clone-repository",
       "init-repository",
       // Both first-load entries open the shared dialog.
       "welcome-screen",
@@ -319,6 +322,8 @@ describe("appMenuModel", () => {
     expect(openNewAgentPicker).toHaveBeenCalledWith("from_worktree")
     run("add-project-picker")
     expect(openAddProject).toHaveBeenCalledOnce()
+    run("clone-repository")
+    expect(openCloneProject).toHaveBeenCalledOnce()
     run("init-repository")
     expect(openAddProjectForInit).toHaveBeenCalledOnce()
 

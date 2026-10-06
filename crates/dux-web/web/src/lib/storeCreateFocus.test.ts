@@ -15,12 +15,12 @@ import type { Spine } from "./workspaceApi"
 // standalone agent names the folder it lives in. The two spellings mirror the
 // wire, where the workspace is tagged rather than flat.
 type TestSession =
-  | { id: string; project_id: string }
+  | { id: string; project_id: string; title?: string }
   | { id: string; folder: string }
 
-function makeSpine(sessions: TestSession[]): Spine {
+function makeSpine(sessions: TestSession[], projectIds: string[] = []): Spine {
   return {
-    projects: [],
+    projects: projectIds.map((id) => ({ id, name: id, path: `/p/${id}` })) as Spine["projects"],
     sessions: sessions.map((s) =>
       "folder" in s
         ? {
@@ -47,7 +47,7 @@ let spineBody: Spine = makeSpine([])
 // for position, and that is what a creation is supposed to move.
 let fakeLocation = { host: "localhost:0", pathname: "/", search: "", hash: "" }
 
-const fetchMock = vi.fn(async (url: string) => {
+const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   if (u.includes("/api/v1/workspace")) {
     return {
@@ -55,6 +55,24 @@ const fetchMock = vi.fn(async (url: string) => {
       status: 200,
       json: async () => spineBody,
       text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.endsWith("/api/v1/browse")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ path: "/home/u", entries: [] }),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.endsWith("/api/v1/projects") && init?.method === "POST") {
+    return {
+      ok: true,
+      status: 202,
+      json: async () => ({ op_id: "op-clone" }),
+      text: async () => JSON.stringify({ op_id: "op-clone" }),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -123,9 +141,10 @@ async function loadStore() {
 async function pushSpine(
   mod: Awaited<ReturnType<typeof loadStore>>,
   sessions: TestSession[],
+  projectIds: string[] = [],
 ): Promise<void> {
   const prev = mod.getSnapshot().spine
-  spineBody = makeSpine(sessions)
+  spineBody = makeSpine(sessions, projectIds)
   mod.eventsSocket.onEvent({ event: "sessions.changed" })
   await vi.waitFor(() => {
     expect(mod.getSnapshot().spine).not.toBe(prev)
@@ -424,4 +443,98 @@ describe("auto-focus the agent this client created", () => {
     expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
   })
 
+})
+
+describe("auto-focus the agent a clone starts", () => {
+  // Arm a clone the way the dialog does: open it, fill it, submit, and wait for
+  // the 202 to hand back the operation the token then follows.
+  async function startClone(
+    mod: Awaited<ReturnType<typeof loadStore>>,
+    agentName: string,
+  ) {
+    mod.openCloneProject()
+    mod.setCloneProjectUrl("https://example.com/owner/repo.git")
+    mod.setCloneProjectPath("/home/u/repo")
+    mod.setCloneProjectName(agentName)
+    mod.submitCloneProject()
+    await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).toBeNull())
+  }
+
+  it("selects the agent of that name in the project that was not there before", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", title: "fixer" }], ["p1"])
+    await startClone(mod, "fixer")
+    // The same name in a project that already existed is not ours, and neither
+    // is another name in the new project.
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p1", title: "fixer" },
+        { id: "s2", project_id: "p2", title: "other" },
+      ],
+      ["p1", "p2"],
+    )
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p1", title: "fixer" },
+        { id: "s2", project_id: "p2", title: "other" },
+        { id: "s3", project_id: "p2", title: "fixer" },
+      ],
+      ["p1", "p2"],
+    )
+    expect(mod.getSnapshot().selectedSessionId).toBe("s3")
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+  })
+
+  it("stays armed past the usual window while the clone runs", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    const realNow = Date.now()
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 10 * 60_000)
+    await pushSpine(mod, [{ id: "s1", project_id: "p2", title: "other" }], ["p2"])
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p2", title: "other" },
+        { id: "s2", project_id: "p2", title: "fixer" },
+      ],
+      ["p2"],
+    )
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    vi.restoreAllMocks()
+  })
+
+  it("gives up when the clone's own operation ends with a refusal", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    mod.eventsSocket.onEvent({
+      event: "status",
+      key: "op-clone",
+      tone: "error",
+      message: "The remote could not be reached.",
+    })
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+  })
+
+  it("keeps waiting for the agent after the clone hands over, for the usual window", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    // Dismissing the hand-over's toast animates it out, which a bare node
+    // environment has no frame loop for.
+    vi.stubGlobal("requestAnimationFrame", () => 0)
+    mod.eventsSocket.onEvent({ event: "status", key: "op-clone", tone: "busy", message: "Cloning" })
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+    mod.eventsSocket.onEvent({ event: "status_cleared", key: "op-clone" })
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+
+    const realNow = Date.now()
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 91_000)
+    await pushSpine(mod, [{ id: "s1", project_id: "p2", title: "fixer" }], ["p2"])
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+    vi.restoreAllMocks()
+  })
 })
