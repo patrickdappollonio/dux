@@ -1566,8 +1566,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # with nothing using it. Signing in from the command line gives that\n\
                  # machine a token instead of a browser session, so daily use never asks\n\
                  # for the password again; a token nobody uses for this many days stops\n\
-                 # working on its own. A password change or a command-line sign-out ends\n\
-                 # every token at once. At least 1. Default 30.",
+                 # working on its own. A password change ends every token at once; a\n\
+                 # command-line sign-out ends only the token it was sent with.\n\
+                 # At least 1. Default 30.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.cli_token_idle_days),
         },
