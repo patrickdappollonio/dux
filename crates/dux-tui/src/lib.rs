@@ -82,8 +82,6 @@ pub fn run(
 
     if args.first().map(|s| s.as_str()) == Some("config") {
         let config_args = &args[1..];
-        let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
-
         let _lock = lock_for_config_subcommand(config_args, &paths)?;
 
         cli::run(config_args, &paths)?;

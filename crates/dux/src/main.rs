@@ -198,6 +198,18 @@ fn create_config_root(paths: &dux_core::config::DuxPaths) -> Result<()> {
     Ok(())
 }
 
+fn init_server_logger(
+    logging: &dux_core::config::LoggingConfig,
+    paths: &dux_core::config::DuxPaths,
+) {
+    dux_core::logger::init(logging, paths);
+    // The folder was tightened before the log existed, so any warning that
+    // raised (a symlinked folder, a mode dux could not change) was dropped.
+    // Tightening is idempotent, so running it again raises the same warning
+    // into the log that is open now.
+    dux_core::file_modes::restrict_to_owner_best_effort(&paths.root, "directory");
+}
+
 fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let parsed = match parse_server_args(args) {
         ParsedServerArgs::HelpRequested => {
@@ -234,7 +246,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.
     // OnceLock::set is idempotent, so it is safe if the TUI already initialized it (flip).
-    dux_core::logger::init(&config.logging, &paths);
+    init_server_logger(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 
     // Detected up front to feed the Tailscale leg of the bind plan; blocking is fine
@@ -492,6 +504,27 @@ mod tests {
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
         }
+    }
+
+    #[test]
+    fn a_symlinked_config_folder_warning_reaches_the_log_of_a_server_start() {
+        let parent = std::env::temp_dir().join(format!("dux-server-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let target = parent.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let paths = paths_in(&link);
+
+        create_config_root(&paths).unwrap();
+        init_server_logger(&dux_core::config::LoggingConfig::default(), &paths);
+
+        let log = std::fs::read_to_string(target.join("dux.log")).unwrap();
+        let _ = std::fs::remove_dir_all(&parent);
+        assert!(
+            log.contains("is a symlink, so its permissions were left alone"),
+            "the symlink warning was lost before the logger opened:\n{log}"
+        );
     }
 
     #[test]
