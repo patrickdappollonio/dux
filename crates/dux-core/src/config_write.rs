@@ -2003,6 +2003,14 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     // --- [editor] ---
     patch_table_str(doc, "editor", "default", &config.editor.default);
 
+    // --- [cli] ---
+    patch_table_u64(
+        doc,
+        "cli",
+        "wait_timeout_seconds",
+        config.cli.wait_timeout_seconds,
+    );
+
     // --- [server] ---
     // The deprecated `bind` field is migrated away on load and is never
     // re-emitted here, so a patch/recover/plain write produces the new

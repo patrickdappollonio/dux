@@ -19,6 +19,7 @@ pub mod bounded_command;
 pub mod browser;
 pub mod changes_status;
 pub mod checkout_move;
+pub mod client;
 pub mod config;
 pub mod config_auth;
 pub mod config_effective;

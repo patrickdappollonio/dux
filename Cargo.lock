@@ -1114,6 +1114,7 @@ dependencies = [
  "dux-core",
  "dux-tui",
  "dux-web",
+ "serde_json",
 ]
 
 [[package]]

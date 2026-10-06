@@ -743,6 +743,20 @@ impl SecretSource for TerminalSecrets {
     }
 }
 
+/// A password for `dux remote login`: piped in with `from_stdin` (refused on
+/// a terminal, which would show it), else asked for once on the terminal
+/// without echo. With neither a pipe asked for nor a terminal, it is refused.
+pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> {
+    use std::io::IsTerminal;
+    if from_stdin {
+        return TerminalSecrets.read_stdin();
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        bail!("there is no terminal to ask for the password on; pipe it in and add --stdin");
+    }
+    prompt_hidden(label, None)
+}
+
 /// `--stdin` reads a pipe. On a terminal it would read what is typed with
 /// the terminal echoing it, so it is refused in favour of the hidden prompt.
 fn refuse_terminal_stdin(stdin_is_terminal: bool) -> Result<()> {

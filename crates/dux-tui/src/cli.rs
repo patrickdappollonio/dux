@@ -260,6 +260,7 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
         );
     }
     remove_file_with_message(&paths.root.join("remotes.toml"))?;
+    remove_file_with_message(&paths.root.join("remotes.toml.lock"))?;
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
 
@@ -2682,6 +2683,7 @@ mod tests {
             "logs/web-custom.log.2.gz",
             "logs/web-custom.log.3.gz.4242.tmp",
             "remotes.toml",
+            "remotes.toml.lock",
         ] {
             harness.write_log(name);
         }
@@ -2700,6 +2702,7 @@ mod tests {
             "logs/web-custom.log.2.gz",
             "logs/web-custom.log.3.gz.4242.tmp",
             "remotes.toml",
+            "remotes.toml.lock",
         ] {
             assert!(!harness.paths.root.join(name).exists(), "{name} is removed");
         }

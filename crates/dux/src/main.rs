@@ -1,3 +1,4 @@
+mod client_commands;
 mod commands;
 mod companion;
 
@@ -15,13 +16,32 @@ fn main() -> Result<()> {
     // included, so it is recognised before clap sees the line.
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if let Some(config) = commands::split_config(&raw) {
-        if let Err(message) = commands::check_config_target(config.remote.as_deref(), config.local)
-        {
+        let selection = client_commands::Selection {
+            remote: config.remote,
+            local: config.local,
+        };
+        let remote = dux_core::config::DuxPaths::discover()
+            .map_err(|error| {
+                dux_core::client::CliError::new(
+                    dux_core::client::Exit::Failed,
+                    format!("{error:#}"),
+                )
+            })
+            .and_then(|paths| selection.remote_name(&paths));
+        let remote = match remote {
+            Ok(remote) => remote,
+            Err(error) => client_commands::finish(Err(error)),
+        };
+        if let Err(message) = commands::check_config_target(remote.as_deref(), selection.local) {
             usage_error(&message);
         }
         return dux_tui::run_config(&config.args);
     }
     let cli = commands::Cli::parse();
+    let selection = client_commands::Selection {
+        remote: cli.remote.clone(),
+        local: cli.local,
+    };
     match cli.command {
         None => run_tui_with_flip(),
         Some(commands::Command::Server(server)) => {
@@ -42,6 +62,12 @@ fn main() -> Result<()> {
         // Every well-formed `config` line was split off above; clap only
         // reaches here for one that names both global flags, which it refuses.
         Some(commands::Command::Config(_)) => not_built(),
+        Some(commands::Command::Remote(remote)) => {
+            client_commands::finish(client_commands::remote(remote.command, &selection))
+        }
+        Some(commands::Command::Operations(operations)) => client_commands::finish_with_code(
+            client_commands::operations(operations.command, &selection),
+        ),
         Some(_) => not_built(),
     }
 }

@@ -3752,7 +3752,8 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         "one process is one run, whatever is serving it"
     );
 
-    // The documented shape, exactly: two keys, both non-empty strings.
+    // The documented shape, exactly: two non-empty strings and the API's
+    // version, which the command line checks.
     let mut keys: Vec<&str> = first
         .as_object()
         .expect("a JSON object")
@@ -3760,9 +3761,10 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         .map(|k| k.as_str())
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["process", "version"]);
+    assert_eq!(keys, vec!["api", "process", "version"]);
     assert!(!first["process"].as_str().unwrap().is_empty());
     assert!(!first["version"].as_str().unwrap().is_empty());
+    assert_eq!(first["api"], 1);
 }
 
 /// The exact key set of a terminal entry on the documented thin reads, and of

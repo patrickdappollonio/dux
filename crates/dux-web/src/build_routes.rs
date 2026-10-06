@@ -11,7 +11,9 @@
 //!
 //! Deliberately narrow: this identifies the server run, and must not grow into a
 //! schema or data-shape version. The interface ships inside the server binary, so
-//! a shape change cannot reach a client without a restart this already catches.
+//! a shape change cannot reach a browser without a restart this already catches.
+//! The one exception is `api`, the REST API's version, for the command line: it
+//! ships in a separate binary, possibly another version on another machine.
 //!
 //! Always 200: it answers from process-local data with no engine round-trip, so
 //! it is available while the engine is still coming up, which is exactly when a
@@ -27,9 +29,9 @@ use serde::Serialize;
 
 use crate::server::AppState;
 
-/// What this server reports about itself. Both fields together are the identity
-/// the client compares; either one moving means "not the server this tab loaded
-/// against".
+/// What this server reports about itself. `version` and `process` together are
+/// the identity the browser compares; either one moving means "not the server
+/// this tab loaded against".
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BuildIdentity {
     /// The binary's display version, the same string shown under the logo
@@ -39,6 +41,10 @@ pub struct BuildIdentity {
     /// life of the process, so it is stable across every request a client makes
     /// and different on the other side of a restart.
     pub process: String,
+    /// The version of the REST API, which the command line checks against
+    /// its own before anything else. The browser ignores it: its code ships
+    /// in this binary.
+    pub api: u64,
 }
 
 /// This process's run id, minted once per process: a per-request value would make
@@ -52,6 +58,7 @@ pub fn build_identity() -> &'static BuildIdentity {
         std::sync::LazyLock::new(|| BuildIdentity {
             version: dux_core::display_version().to_string(),
             process: PROCESS_ID.clone(),
+            api: dux_core::client::API_VERSION,
         });
     &IDENTITY
 }
@@ -102,11 +109,11 @@ mod tests {
         assert_eq!(build_identity().version, dux_core::display_version());
     }
 
-    /// The wire shape is exactly two keys, and no more. The client compares the
-    /// whole document, so a field added here changes what every open tab believes
-    /// about the server.
+    /// The wire shape is exactly these three keys, and no more. The browser
+    /// compares the version and the run, and the command line refuses a dux
+    /// whose `api` differs from its own.
     #[test]
-    fn the_body_carries_exactly_version_and_process() {
+    fn the_body_carries_exactly_version_process_and_api_one() {
         let json = serde_json::to_value(build_identity()).unwrap();
         let mut keys: Vec<&str> = json
             .as_object()
@@ -115,6 +122,7 @@ mod tests {
             .map(|k| k.as_str())
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["process", "version"]);
+        assert_eq!(keys, vec!["api", "process", "version"]);
+        assert_eq!(json["api"], 1);
     }
 }
