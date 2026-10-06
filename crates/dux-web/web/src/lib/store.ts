@@ -426,6 +426,11 @@ export interface DuxState {
   globalEnvDraft: Record<string, string> | null
   globalEnvConflict: string | null
   globalEnvEpoch: number
+  // Which opening of the dialog is on screen, so a refusal that answers after
+  // the dialog was opened again leaves that newer edit alone; the refused
+  // table is kept here instead.
+  globalEnvSession: number
+  globalEnvRejected: Record<string, string> | null
   projectSettingsTarget: string | null
   // The agent (session) whose startup-command / project-env editor is open, or
   // null. Both edit the agent's PROJECT (env and startup command are
@@ -642,6 +647,10 @@ export interface DuxState {
   // Bumped whenever the draft is reseeded under an open dialog, so the editor
   // remounts with it.
   macrosDraftEpoch: number
+  // Which opening of the editor is on screen, as `globalEnvSession` is, and
+  // the edits of an earlier save refused under a newer one.
+  macrosEditSession: number
+  macrosRejected: MacroView[] | null
   // Which screen the mobile shell is showing. DERIVED from the route, never kept
   // independently of it: no focused target is home, a focused target is the
   // terminal screen, and the changes screen is a `/changes` suffix on the
@@ -1002,6 +1011,8 @@ let state: DuxState = {
   globalEnvDraft: null,
   globalEnvConflict: null,
   globalEnvEpoch: 0,
+  globalEnvSession: 0,
+  globalEnvRejected: null,
   projectSettingsTarget: null,
   agentStartupCommandTarget: null,
   agentEnvTarget: null,
@@ -1062,6 +1073,8 @@ let state: DuxState = {
   macrosDraftVersion: null,
   macrosConflict: null,
   macrosDraftEpoch: 0,
+  macrosEditSession: 0,
+  macrosRejected: null,
   mobileScreen: "home",
   routeNotFound: null,
   pendingAgentOrder: null,
@@ -4555,6 +4568,8 @@ export function openGlobalEnv(): void {
     globalEnvVersion: state.bootstrap?.global_env_version ?? null,
     globalEnvDraft: null,
     globalEnvConflict: null,
+    globalEnvRejected: null,
+    globalEnvSession: state.globalEnvSession + 1,
   })
 }
 
@@ -4567,14 +4582,24 @@ export function closeGlobalEnv(): void {
 // and the refusal on it, so nothing typed is lost.
 export function saveGlobalEnv(env: Record<string, string>): void {
   const version = state.globalEnvVersion
+  const session = state.globalEnvSession
   configApi.persistGlobalEnv(env, version ?? undefined).catch((e) => {
     if (e instanceof SetChangedError) {
+      if (state.globalEnvOpen && state.globalEnvSession !== session) {
+        // The dialog was opened again since: leave that edit as it is.
+        setState({
+          globalEnvRejected: env,
+          globalEnvConflict: earlierSaveRefused("global environment"),
+        })
+        return
+      }
       setState({
         globalEnvOpen: true,
         globalEnvVersion: version,
         globalEnvDraft: env,
         globalEnvConflict: e.message,
         globalEnvEpoch: state.globalEnvEpoch + 1,
+        globalEnvSession: state.globalEnvSession + 1,
       })
       return
     }
@@ -4593,6 +4618,7 @@ export function reloadGlobalEnvDraft(): Promise<void> {
         globalEnvVersion: b.global_env_version ?? null,
         globalEnvDraft: null,
         globalEnvConflict: null,
+        globalEnvRejected: null,
         globalEnvEpoch: state.globalEnvEpoch + 1,
       }),
     )
@@ -5860,11 +5886,20 @@ export function openMacrosDialog(): void {
     macrosDraft: macros.map((m) => ({ ...m })),
     macrosDraftVersion: state.bootstrap?.macros_version ?? null,
     macrosConflict: null,
+    macrosRejected: null,
+    macrosEditSession: state.macrosEditSession + 1,
   })
 }
 
 export function closeMacrosDialog(): void {
   setState({ macrosDialogOpen: false, macrosDraft: [], macrosConflict: null })
+}
+
+/// The notice for a whole-set save refused after its dialog was opened again:
+/// the edit on screen is a newer one, so the refused edits are kept aside
+/// rather than put back over it.
+function earlierSaveRefused(what: string): string {
+  return `An earlier save of the ${what} was not written: it changed after that save's dialog read it. What you are editing now is untouched. Reload to see the change.`
 }
 
 /// Drop the refused edits and reseed the editor from the server's list as it
@@ -5876,6 +5911,7 @@ export function reloadMacrosDraft(): Promise<void> {
         macrosDraft: b.macros.map((m) => ({ ...m })),
         macrosDraftVersion: b.macros_version ?? null,
         macrosConflict: null,
+        macrosRejected: null,
         macrosDraftEpoch: state.macrosDraftEpoch + 1,
       }),
     )
@@ -5905,14 +5941,24 @@ export function saveMacros(macros: MacroView[]): void {
     return
   }
   const version = state.macrosDraftVersion
+  const session = state.macrosEditSession
   configApi.updateMacros(macros, version ?? undefined).catch((e) => {
     if (e instanceof SetChangedError) {
+      if (state.macrosDialogOpen && state.macrosEditSession !== session) {
+        // The editor was opened again since: leave that edit as it is.
+        setState({
+          macrosRejected: macros.map((m) => ({ ...m })),
+          macrosConflict: earlierSaveRefused("macro list"),
+        })
+        return
+      }
       setState({
         macrosDialogOpen: true,
         macrosDraft: macros.map((m) => ({ ...m })),
         macrosDraftVersion: version,
         macrosConflict: e.message,
         macrosDraftEpoch: state.macrosDraftEpoch + 1,
+        macrosEditSession: state.macrosEditSession + 1,
       })
       return
     }
@@ -5932,16 +5978,22 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
     notifyError("Macros aren't loaded yet. Try again in a moment.")
     return Promise.resolve(false)
   }
+  const session = state.macrosEditSession
   return configApi
     .updateMacros(macros, state.macrosDraftVersion ?? undefined)
     .then((version) => {
-      // This dialog's own save moved the list on; its next save is based on it.
-      setState({ macrosDraftVersion: version ?? null })
+      // This dialog's own save moved the list on; its next save is based on
+      // it, unless the editor has been opened again since.
+      if (state.macrosEditSession === session) {
+        setState({ macrosDraftVersion: version ?? null })
+      }
       return true
     })
     .catch((e) => {
       if (e instanceof SetChangedError) {
-        setState({ macrosConflict: e.message })
+        if (state.macrosEditSession === session) {
+          setState({ macrosConflict: e.message })
+        }
         return false
       }
       notifyError(

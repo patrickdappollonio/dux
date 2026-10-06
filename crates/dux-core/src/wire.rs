@@ -34,6 +34,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::command::ConfigSetChange;
 use crate::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyView, BeginDeleteSessionOutcome, CloseTabOutcome,
     Command, Engine, EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceView,
@@ -1752,7 +1753,6 @@ impl Engine {
             Self::dispatch_agent_command,
             Self::dispatch_preference_command,
             Self::dispatch_pull_request_command,
-            Self::dispatch_config_entry_command,
         ] {
             match dispatch(self, pending)? {
                 WireDispatch::Handled(outcome) => return Ok(*outcome),
@@ -1989,106 +1989,6 @@ impl Engine {
             }
             other => Ok(WireDispatch::Unhandled(other)),
         }
-    }
-
-    /// Answer the commands that change one macro or one global environment
-    /// variable. Each builds the whole set with its one change and saves it
-    /// through the same command a whole-set save runs, so validation and the
-    /// write are shared; only the sentence it answers with is its own.
-    fn dispatch_config_entry_command(
-        &mut self,
-        command: WireCommand,
-    ) -> anyhow::Result<WireDispatch> {
-        let (core, done) = match command {
-            WireCommand::SetMacro {
-                name,
-                text,
-                surface,
-            } => {
-                let name = name.trim().to_string();
-                let entry = WireMacroEntry {
-                    name: name.clone(),
-                    text,
-                    surface,
-                };
-                let mut entries = self.macro_entries();
-                match entries.iter_mut().find(|existing| existing.name == name) {
-                    Some(existing) => *existing = entry,
-                    None => entries.push(entry),
-                }
-                (
-                    Self::update_macros_command(entries)?,
-                    crate::status_text!["Saved macro ", q(name), "."],
-                )
-            }
-            WireCommand::RemoveMacro { name } => {
-                let mut entries = self.macro_entries();
-                let before = entries.len();
-                entries.retain(|existing| existing.name != name);
-                if entries.len() == before {
-                    anyhow::bail!("unknown macro \"{name}\"");
-                }
-                (
-                    Self::update_macros_command(entries)?,
-                    crate::status_text!["Removed macro ", q(name), "."],
-                )
-            }
-            WireCommand::SetGlobalEnvVar { name, value } => {
-                if !crate::config::is_valid_env_name(&name) {
-                    anyhow::bail!(
-                        "\"{name}\" is not a valid environment variable name: use letters, \
-                         digits and underscores, not starting with a digit."
-                    );
-                }
-                let mut env = self.config.env.clone();
-                env.insert(name.clone(), value);
-                (
-                    Command::PersistGlobalEnv { env },
-                    crate::status_text![
-                        "Saved global environment variable ",
-                        q(name),
-                        ". New agents and terminals receive it unless a project overrides it."
-                    ],
-                )
-            }
-            WireCommand::RemoveGlobalEnvVar { name } => {
-                let mut env = self.config.env.clone();
-                if env.remove(&name).is_none() {
-                    anyhow::bail!("unknown global environment variable \"{name}\"");
-                }
-                (
-                    Command::PersistGlobalEnv { env },
-                    crate::status_text!["Removed global environment variable ", q(name), "."],
-                )
-            }
-            other => return Ok(WireDispatch::Unhandled(other)),
-        };
-        let reaction = self.apply(core)?;
-        // The save's own sentence counts the whole set; a success says which
-        // entry changed instead, and a failure keeps the save's words.
-        let status = match wire_status_from_reaction(&reaction) {
-            Some(status) if status.tone == "info" => {
-                WireStatus::from_update(&StatusUpdate::info(done))
-            }
-            other => other.unwrap_or_else(|| WireStatus::from_update(&StatusUpdate::info(done))),
-        };
-        Ok(WireDispatch::handled(WireCommandOutcome::with_status(
-            status,
-        )))
-    }
-
-    /// The macro list as a whole-list save carries it.
-    fn macro_entries(&self) -> Vec<WireMacroEntry> {
-        self.config
-            .macros
-            .entries
-            .iter()
-            .map(|(name, entry)| WireMacroEntry {
-                name: name.clone(),
-                text: entry.text.clone(),
-                surface: entry.surface.as_config_str().to_string(),
-            })
-            .collect()
     }
 
     /// Answer the commands that change which pull request an agent's branch
@@ -5193,10 +5093,10 @@ impl Engine {
                 delete_branch,
             },
             WireCommand::PersistGlobalEnv { env, version } => {
-                if version.is_some_and(|read| read != global_env_version(&self.config.env)) {
-                    return Err(StaleSet::GlobalEnv.into());
-                }
-                Command::PersistGlobalEnv { env }
+                Command::ChangeConfigSet(ConfigSetChange::ReplaceEnv {
+                    env,
+                    read_at: version,
+                })
             }
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
@@ -5254,13 +5154,9 @@ impl Engine {
             | WireCommand::RecreateWorkingCopy { .. }
             | WireCommand::CloseAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. }
-            | WireCommand::SetLastFocusedTab { .. }
-            | WireCommand::SetMacro { .. }
-            | WireCommand::RemoveMacro { .. }
-            | WireCommand::SetGlobalEnvVar { .. }
-            | WireCommand::RemoveGlobalEnvVar { .. } => {
+            | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/change-agent-tab-provider/set-last-focused-tab/set-macro/remove-macro/set-global-env-var/remove-global-env-var are handled in apply_wire before wire_to_command"
+                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -5279,10 +5175,60 @@ impl Engine {
             }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
             WireCommand::UpdateMacros { entries, version } => {
-                if version.is_some_and(|read| read != macros_version(&self.config.macros)) {
-                    return Err(StaleSet::Macros.into());
+                let Command::UpdateMacros { macros } = Self::update_macros_command(entries)? else {
+                    unreachable!("update_macros_command builds an UpdateMacros")
+                };
+                Command::ChangeConfigSet(ConfigSetChange::ReplaceMacros {
+                    macros,
+                    read_at: version,
+                })
+            }
+            // One entry: what it asks for is checked here, on the request
+            // alone; what it does to the set is decided when it runs, against
+            // the config as it is then (a reload may have deferred it).
+            WireCommand::SetMacro {
+                name,
+                text,
+                surface,
+            } => {
+                let Command::UpdateMacros { macros } =
+                    Self::update_macros_command(vec![WireMacroEntry {
+                        name,
+                        text,
+                        surface,
+                    }])?
+                else {
+                    unreachable!("update_macros_command builds an UpdateMacros")
+                };
+                let (name, entry) = macros
+                    .entries
+                    .into_iter()
+                    .next()
+                    .expect("one entry in, one entry out");
+                Command::ChangeConfigSet(ConfigSetChange::SetMacro { name, entry })
+            }
+            WireCommand::RemoveMacro { name } => {
+                Command::ChangeConfigSet(ConfigSetChange::RemoveMacro { name })
+            }
+            WireCommand::SetGlobalEnvVar { name, value } => {
+                if !crate::config::is_valid_env_name(&name) {
+                    anyhow::bail!(
+                        "\"{name}\" is not a valid environment variable name: use letters, \
+                         digits and underscores, not starting with a digit."
+                    );
                 }
-                Self::update_macros_command(entries)?
+                // The rule a project's env lines follow. The value is a secret,
+                // so the refusal never quotes it.
+                if value.contains('\0') || crate::config::expand_env_vars(&value).is_none() {
+                    anyhow::bail!(
+                        "The value for \"{name}\" was not saved: it holds a NUL byte or a \
+                         $NAME reference that is not a valid variable name."
+                    );
+                }
+                Command::ChangeConfigSet(ConfigSetChange::SetEnvVar { name, value })
+            }
+            WireCommand::RemoveGlobalEnvVar { name } => {
+                Command::ChangeConfigSet(ConfigSetChange::RemoveEnvVar { name })
             }
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }
@@ -14068,15 +14014,16 @@ mod tests {
             })
             .expect("reconstruct");
         match cmd {
-            Command::UpdateMacros { macros } => {
+            Command::ChangeConfigSet(ConfigSetChange::ReplaceMacros { macros, read_at }) => {
                 let names: Vec<&String> = macros.entries.keys().collect();
                 assert_eq!(names, vec!["zebra", "alpha"]);
                 assert_eq!(
                     macros.entries["alpha"].surface,
                     crate::config::MacroSurface::Terminal
                 );
+                assert_eq!(read_at, None);
             }
-            _ => panic!("expected Command::UpdateMacros"),
+            _ => panic!("expected the whole-list replacement"),
         }
     }
 

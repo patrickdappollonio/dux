@@ -284,7 +284,7 @@ async fn change_one_entry(
             Err(e) => config_refusal(e),
         };
     }
-    match state.engine.apply_wire_scoped(cmd, scope).await {
+    match state.engine.apply_wire_recorded(cmd, scope, kind).await {
         Ok(outcome) => Json(SetVersion {
             version: outcome.version,
         })
@@ -1062,7 +1062,19 @@ mod tests {
     /// the call.
     #[tokio::test]
     async fn the_per_entry_routes_change_one_entry_and_answer_an_operation_when_asked() {
-        let (_tmp, app) = router_no_auth();
+        // A macro written by hand with spaces around its name: a change to
+        // another macro leaves it exactly as it is.
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine.config.macros.entries.insert(
+            " padded ".to_string(),
+            dux_core::config::MacroEntry {
+                text: "by hand".to_string(),
+                surface: dux_core::config::MacroSurface::Agent,
+            },
+        );
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
         let (status, record) = answer(
             &app,
             json_req(
@@ -1099,7 +1111,10 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(record["kind"], "macro.remove");
         assert_eq!(record["state"], "succeeded");
-        assert_eq!(bootstrap(&app).await["macros"], serde_json::json!([]));
+        assert_eq!(
+            bootstrap(&app).await["macros"],
+            serde_json::json!([{"name": " padded ", "text": "by hand", "surface": "agent"}])
+        );
         let (status, _) = answer(&app, json_req("DELETE", "/api/v1/macros/Review%20it", "")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -1125,6 +1140,23 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "not a variable name");
+        for bad in ["nul\u{0}inside", "${1UNCLOSED}"] {
+            let body = serde_json::json!({ "value": bad }).to_string();
+            let (status, refusal) =
+                answer(&app, json_req("PUT", "/api/v1/global-env/BAD_VALUE", &body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {refusal}");
+            assert!(
+                !refusal.to_string().contains("inside")
+                    && !refusal.to_string().contains("UNCLOSED"),
+                "a refused value is never echoed: {refusal}"
+            );
+        }
+        assert!(
+            bootstrap(&app).await["global_env"]
+                .get("BAD_VALUE")
+                .is_none(),
+            "a refused value is not kept"
+        );
         let (status, record) = answer(
             &app,
             json_req("DELETE", "/api/v1/global-env/API_KEY?operation=1", ""),

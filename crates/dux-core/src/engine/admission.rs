@@ -68,13 +68,24 @@ impl Engine {
     /// close, and a macro or environment save.
     pub(crate) fn check_command(&self, command: &super::Command) -> Result<(), InTheWay> {
         use super::Command;
+        use super::command::ConfigSetChange;
         let admission = match command {
             Command::BeginDeleteSession { session_id, .. } => self.agent_admission(session_id),
             Command::RemoveProject { project_id, .. }
             | Command::DeleteProject { project_id, .. } => self.project_admission(project_id),
             Command::DeleteTerminal { terminal_id } => self.terminal_admission(terminal_id),
-            Command::UpdateMacros { .. } => Self::whole(InFlightKey::MacroList),
-            Command::PersistGlobalEnv { .. } => Self::whole(InFlightKey::GlobalEnv),
+            Command::UpdateMacros { .. }
+            | Command::ChangeConfigSet(
+                ConfigSetChange::ReplaceMacros { .. }
+                | ConfigSetChange::SetMacro { .. }
+                | ConfigSetChange::RemoveMacro { .. },
+            ) => Self::whole(InFlightKey::MacroList),
+            Command::PersistGlobalEnv { .. }
+            | Command::ChangeConfigSet(
+                ConfigSetChange::ReplaceEnv { .. }
+                | ConfigSetChange::SetEnvVar { .. }
+                | ConfigSetChange::RemoveEnvVar { .. },
+            ) => Self::whole(InFlightKey::GlobalEnv),
             _ => return Ok(()),
         };
         self.check_admission(&admission)

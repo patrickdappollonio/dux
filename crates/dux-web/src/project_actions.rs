@@ -168,7 +168,11 @@ async fn add_project(
 
     let outcome = match state
         .engine
-        .apply_wire_scoped(cmd, scope_from_headers(&headers, &state.connections))
+        .apply_wire_recorded(
+            cmd,
+            scope_from_headers(&headers, &state.connections),
+            OperationKind::ProjectAdd,
+        )
         .await
     {
         Ok(outcome) => outcome,
@@ -262,7 +266,11 @@ async fn remove_project(
     delete_wire_response(
         state
             .engine
-            .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
+            .apply_wire_recorded(
+                command,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::ProjectRemove,
+            )
             .await,
     )
 }

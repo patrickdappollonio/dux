@@ -63,6 +63,10 @@
 //!
 //! # Admission
 //!
+//! A route opens a record for every change it covers, whether or not the
+//! client asked to follow it (`Engine::apply_wire_recorded` when it did not,
+//! which leaves the statuses and the answer exactly as they were).
+//!
 //! An open record also holds the admission keys of what its change is
 //! changing ([`Operations::admit`], decided by `crate::engine::admission`),
 //! so a second change to the same thing is refused with an [`InTheWay`]
@@ -811,6 +815,16 @@ impl IdSnapshot {
     }
 }
 
+/// How [`crate::engine::Engine::settle_operation`] may treat a record: take
+/// the key its change minted as the record's id (`may_rekey`, only before
+/// anybody was told the id), and put the record's id on a final that had no
+/// key (`stamp_key`, only when the client asked to follow it).
+#[derive(Clone, Copy)]
+struct Settle {
+    may_rekey: bool,
+    stamp_key: bool,
+}
+
 /// The key a dispatched command's work is still running under, if it is: the
 /// create op it minted, or the key of the busy it answered with.
 fn running_key(outcome: &crate::wire::WireCommandOutcome) -> Option<String> {
@@ -927,6 +941,28 @@ impl crate::engine::Engine {
         command: crate::wire::WireCommand,
         kind: OperationKind,
     ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
+        self.apply_wire_followed(command, kind, true)
+    }
+
+    /// [`Self::apply_wire_operation`] for a change nobody asked to follow: it
+    /// opens a record all the same, so what it changes is held for as long as
+    /// it runs, but the statuses it raises are left exactly as they would be
+    /// without one (no record id is put on a final that had no key), so the
+    /// answer and the events a client sees do not change.
+    pub fn apply_wire_recorded(
+        &mut self,
+        command: crate::wire::WireCommand,
+        kind: OperationKind,
+    ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
+        self.apply_wire_followed(command, kind, false)
+    }
+
+    fn apply_wire_followed(
+        &mut self,
+        command: crate::wire::WireCommand,
+        kind: OperationKind,
+        stamp_key: bool,
+    ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
         let now = Instant::now();
         let provisional = mint_operation_id();
         self.open_operation(&provisional, kind);
@@ -963,7 +999,10 @@ impl crate::engine::Engine {
                 running_key(&outcome),
                 outcome.status.as_mut(),
                 settled.as_ref(),
-                true,
+                Settle {
+                    may_rekey: true,
+                    stamp_key,
+                },
                 now,
             )
         };
@@ -1003,7 +1042,17 @@ impl crate::engine::Engine {
                     .and_then(|s| s.key.clone());
                 // The client already holds the id, so a key the run mints is
                 // waited on rather than taken as the id.
-                self.settle_operation(&id, running, status.as_mut(), settled.as_ref(), false, now);
+                self.settle_operation(
+                    &id,
+                    running,
+                    status.as_mut(),
+                    settled.as_ref(),
+                    Settle {
+                        may_rekey: false,
+                        stamp_key: true,
+                    },
+                    now,
+                );
             }
             Err(error) => {
                 self.operations
@@ -1017,15 +1066,18 @@ impl crate::engine::Engine {
     /// `running` (a key minted for it alone becomes its id when `may_rekey`,
     /// any other key is waited on), ended at once by a final the change
     /// already reached (`settled`), or ended on the status it answered with,
-    /// which carries the record's id as its key when it had none. Answers the
-    /// record's id.
+    /// which carries the record's id as its key when it had none and
+    /// `stamp_key` asks for it. Answers the record's id.
     fn settle_operation(
         &self,
         provisional: &str,
         running: Option<String>,
         status: Option<&mut crate::wire::WireStatus>,
         settled: Option<&crate::wire::WireStatus>,
-        may_rekey: bool,
+        Settle {
+            may_rekey,
+            stamp_key,
+        }: Settle,
         now: Instant,
     ) -> String {
         match running {
@@ -1051,7 +1103,7 @@ impl crate::engine::Engine {
             None => {
                 match status {
                     Some(status) => {
-                        if status.key.is_none() {
+                        if stamp_key && status.key.is_none() {
                             status.key = Some(provisional.to_string());
                         }
                         self.operations.finish(

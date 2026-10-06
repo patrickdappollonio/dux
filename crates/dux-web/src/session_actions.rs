@@ -277,7 +277,7 @@ async fn dispatch_create(
     } else {
         state
             .engine
-            .apply_wire_scoped(body.into_wire(), scope)
+            .apply_wire_recorded(body.into_wire(), scope, OperationKind::AgentCreate)
             .await
     }
     .map_err(|e| {
@@ -574,7 +574,11 @@ async fn delete_session(
     delete_wire_response(
         state
             .engine
-            .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
+            .apply_wire_recorded(
+                command,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::AgentDelete,
+            )
             .await,
     )
 }
@@ -722,7 +726,11 @@ async fn reconnect_session(
             Err(e) => refusal(e, StatusCode::BAD_REQUEST),
         };
     }
-    match state.engine.apply_wire_scoped(command, scope).await {
+    match state
+        .engine
+        .apply_wire_recorded(command, scope, OperationKind::AgentStart)
+        .await
+    {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
@@ -808,7 +816,7 @@ async fn kill_session(
     } else {
         state
             .engine
-            .apply_wire_scoped(command, scope)
+            .apply_wire_recorded(command, scope, OperationKind::AgentStop)
             .await
             .map(|_| None)
     };
@@ -1152,6 +1160,68 @@ mod tests {
             let body = String::from_utf8_lossy(&body);
             assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}: {body}");
             assert!(body.contains(holder), "{method} {uri}: {body}");
+        }
+    }
+
+    /// A covered change a client did not ask to follow still opens an
+    /// operation record, so whatever it changes is held for as long as it
+    /// runs; its answer is the one the route has always given.
+    #[tokio::test]
+    async fn an_unfollowed_change_keeps_its_answer_and_still_opens_a_record() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s1"));
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s2"));
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let operations = handle.operations().clone();
+        let app = crate::server::router(handle);
+
+        let mut expected_records = 0;
+        for (method, uri, body, status, answer) in [
+            (
+                "DELETE",
+                "/api/v1/sessions/s1",
+                "",
+                StatusCode::NO_CONTENT,
+                "",
+            ),
+            ("POST", "/api/v1/sessions/s2/kill", "", StatusCode::OK, ""),
+            (
+                "PUT",
+                "/api/v1/macros/greet",
+                r#"{"text":"hi","surface":"agent"}"#,
+                StatusCode::OK,
+                "",
+            ),
+        ] {
+            let mut request = Request::builder().method(method).uri(uri);
+            if !body.is_empty() {
+                request = request.header("content-type", "application/json");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), status, "{method} {uri}");
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            if !answer.is_empty() {
+                assert_eq!(String::from_utf8_lossy(&bytes), answer, "{method} {uri}");
+            }
+            expected_records += 1;
+            assert_eq!(
+                operations.len(),
+                expected_records,
+                "{method} {uri} opened a record"
+            );
         }
     }
 

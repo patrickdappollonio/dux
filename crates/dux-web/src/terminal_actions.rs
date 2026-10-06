@@ -285,7 +285,11 @@ async fn dispatch_delete(
             Err(e) => refusal(e, StatusCode::BAD_REQUEST),
         };
     }
-    match state.engine.apply_wire_scoped(command, scope).await {
+    match state
+        .engine
+        .apply_wire_recorded(command, scope, OperationKind::TerminalClose)
+        .await
+    {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
@@ -299,13 +303,13 @@ fn terminal_ticket(
     Option<OperationTicket>,
     Option<std::sync::Arc<std::sync::OnceLock<dux_core::operations::OperationView>>>,
 ) {
-    let ticket = operation
+    // Recorded whether or not the client follows it; the answer is the record
+    // only when it asked.
+    let ticket = OperationTicket::new(OperationKind::TerminalCreate);
+    let followed = operation
         .asked()
-        .then(|| OperationTicket::new(OperationKind::TerminalCreate));
-    let followed = ticket
-        .as_ref()
-        .map(|ticket| std::sync::Arc::clone(&ticket.record));
-    (ticket, followed)
+        .then(|| std::sync::Arc::clone(&ticket.record));
+    (Some(ticket), followed)
 }
 
 fn unknown_terminal() -> Response {

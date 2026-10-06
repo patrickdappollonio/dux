@@ -109,10 +109,11 @@ async fn create_tab(
         return resp.into_response();
     }
     let provider = body.and_then(|b| b.0.provider);
-    let ticket = operation
-        .asked()
-        .then(|| OperationTicket::new(OperationKind::TabCreate));
-    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    // Recorded whether or not the client follows it; the answer is the
+    // record only when it asked.
+    let ticket = OperationTicket::new(OperationKind::TabCreate);
+    let followed = operation.asked().then(|| Arc::clone(&ticket.record));
+    let ticket = Some(ticket);
     match state
         .engine
         .create_agent_tab(id.clone(), provider, ticket)
@@ -193,7 +194,7 @@ async fn delete_tab(
     } else {
         state
             .engine
-            .apply_wire_scoped(command, scope)
+            .apply_wire_recorded(command, scope, OperationKind::TabClose)
             .await
             .map(|outcome| (outcome, None))
     };
@@ -233,10 +234,10 @@ async fn start_tab(
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
         return *resp;
     }
-    let ticket = operation
-        .asked()
-        .then(|| OperationTicket::new(OperationKind::TabStart));
-    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    // Recorded whether or not the client follows it, as a tab create is.
+    let ticket = OperationTicket::new(OperationKind::TabStart);
+    let followed = operation.asked().then(|| Arc::clone(&ticket.record));
+    let ticket = Some(ticket);
     match state.engine.start_agent_tab(tab, ticket).await {
         Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),

@@ -37,6 +37,8 @@ let failMacrosPut = false
 let bootstrapMacrosVersion: string | undefined
 // When set, the macros PUT answers the 409 a list that changed since is given.
 let staleMacrosPut = false
+// When set, the macros PUT waits for this promise before answering.
+let holdMacrosPut: Promise<void> | null = null
 // The version a successful macros PUT answers with, absent unless set.
 let savedMacrosVersion: string | undefined
 
@@ -82,6 +84,7 @@ const fetchMock = vi.fn(async (url: string) => {
   }
   // The macro editor persists via a REST PUT.
   if (u.includes("/api/v1/macros")) {
+    if (holdMacrosPut) await holdMacrosPut
     if (staleMacrosPut) {
       const body = JSON.stringify({
         error: "changed",
@@ -143,6 +146,7 @@ beforeEach(() => {
   failMacrosPut = false
   bootstrapMacrosVersion = undefined
   staleMacrosPut = false
+  holdMacrosPut = null
   savedMacrosVersion = undefined
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
@@ -392,6 +396,30 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosConflict).toBeNull()
     expect(mod.getSnapshot().macrosDraft).toEqual(bootstrapMacros)
     expect(mod.getSnapshot().macrosDraftVersion).toBe("v2")
+
+    // A refusal that answers after the user has opened the editor again
+    // belongs to the earlier save: the editing session now open keeps its
+    // draft, the refused edits are kept aside, and the notice says so.
+    mod.closeMacrosDialog()
+    staleMacrosPut = true
+    let answer = () => {}
+    holdMacrosPut = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    mod.openMacrosDialog()
+    const refused: MacroView[] = [{ name: "Old", text: "earlier", surface: "both" }]
+    mod.saveMacros(refused)
+    mod.openMacrosDialog()
+    const current = mod.getSnapshot().macrosDraft
+    const epoch = mod.getSnapshot().macrosDraftEpoch
+    answer()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().macrosConflict).not.toBeNull()
+    })
+    expect(mod.getSnapshot().macrosConflict).toContain("earlier save")
+    expect(mod.getSnapshot().macrosDraft).toBe(current)
+    expect(mod.getSnapshot().macrosDraftEpoch).toBe(epoch)
+    expect(mod.getSnapshot().macrosRejected).toEqual(refused)
   })
 
   it("persistMacroOrder PUTs the reordered entries, keeps the dialog open, resolves true", async () => {

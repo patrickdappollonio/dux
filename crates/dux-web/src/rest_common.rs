@@ -25,7 +25,10 @@
 //! terminal create and close, and the one-entry macro and global environment
 //! changes then answer at once with [`operation_accepted`], and the outcome is
 //! read from `GET /api/v1/operations/{id}` (see [`crate::operation_routes`]).
-//! Refusals answer exactly as they do without it.
+//! Refusals answer exactly as they do without it. Asked or not, each of those
+//! changes opens a record (`EngineHandle::apply_wire_recorded` when it was
+//! not asked), so what it changes is held for as long as it runs; the flag
+//! decides only what the route answers.
 //!
 //! Every one of those changes, asked with `?operation=1` or not, is refused
 //! with a `409` and a sentence naming the operation in the way while another
