@@ -53,13 +53,17 @@ pub(crate) async fn control_socket_routes(request: Request, next: Next) -> Respo
     if crate::auth::provenance::over_control_socket(&request)
         && !served_on_control_socket(request.uri().path())
     {
-        return (
-            StatusCode::NOT_FOUND,
-            "this route is not served on the control socket",
-        )
-            .into_response();
+        return not_on_control_socket();
     }
     next.run(request).await
+}
+
+fn not_on_control_socket() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "this route is not served on the control socket",
+    )
+        .into_response()
 }
 
 /// What answers a request no route matched, on every listener.
@@ -72,11 +76,7 @@ pub(crate) async fn fallback(request: Request) -> Response {
             .into_response();
     }
     if crate::auth::provenance::over_control_socket(&request) {
-        return (
-            StatusCode::NOT_FOUND,
-            "this route is not served on the control socket",
-        )
-            .into_response();
+        return not_on_control_socket();
     }
     let (parts, _) = request.into_parts();
     crate::web_assets::static_handler(parts.uri, parts.headers).await

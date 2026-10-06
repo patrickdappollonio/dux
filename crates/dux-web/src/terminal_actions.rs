@@ -27,7 +27,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use dux_core::model::TerminalRoute;
-use dux_core::operations::OperationKind;
+use dux_core::operations::{OperationKind, OperationView};
 use dux_core::wire::WireCommand;
 
 use crate::engine_actor::OperationTicket;
@@ -37,6 +37,7 @@ use crate::rest_common::{
     refusal, scope_from_headers, ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
+use std::sync::{Arc, OnceLock};
 
 /// The companion-terminal routes. Session terminals nest under
 /// `/sessions/:id` and project terminals under `/projects/:id`, so the owner is
@@ -315,14 +316,12 @@ fn terminal_ticket(
     operation: &OperationQuery,
 ) -> (
     Option<OperationTicket>,
-    Option<std::sync::Arc<std::sync::OnceLock<dux_core::operations::OperationView>>>,
+    Option<Arc<OnceLock<OperationView>>>,
 ) {
     // Recorded whether or not the client follows it; the answer is the record
     // only when it asked.
     let ticket = OperationTicket::new(OperationKind::TerminalCreate);
-    let followed = operation
-        .asked()
-        .then(|| std::sync::Arc::clone(&ticket.record));
+    let followed = operation.asked().then(|| Arc::clone(&ticket.record));
     (Some(ticket), followed)
 }
 

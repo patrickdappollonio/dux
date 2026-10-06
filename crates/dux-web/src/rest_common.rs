@@ -434,11 +434,12 @@ pub(crate) async fn dispatch_guarded(
     client: &crate::server::SocketClient,
 ) -> Result<Result<Guarded, String>, RouteRejection> {
     let scope = scope_from_headers(headers, &state.connections);
+    let (force_connected, accepted_connected) = force.decision();
     let followed = crate::engine_actor::Followed {
         kind,
         answered: operation.asked(),
-        force_connected: force.decision().0,
-        accepted_connected: force.decision().1,
+        force_connected,
+        accepted_connected,
         requester: exempt_requester(
             state.engine.attachments(),
             &scope,
