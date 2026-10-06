@@ -737,7 +737,9 @@ impl Engine {
                 );
                 // A worker that never started cleared the in-flight key; the
                 // create's own bookkeeping goes with it.
-                if !self.is_in_flight(&InFlightKey::CreateAgent) {
+                if self.is_in_flight(&InFlightKey::CreateAgent) {
+                    self.operations.set_create_guard(&op_id);
+                } else {
                     self.note_create_finished(&op_id);
                 }
                 Ok(reaction)

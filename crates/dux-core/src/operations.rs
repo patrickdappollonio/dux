@@ -499,6 +499,8 @@ struct Registry {
     /// Reloads whose owner has spoken but whose listener changes have not all
     /// ended: their epoch, state and sentence.
     held_reloads: Vec<(u64, OperationState, String)>,
+    /// The status key of the create holding the one-create-at-a-time guard.
+    create_guard: Option<String>,
 }
 
 impl Registry {
@@ -691,13 +693,30 @@ impl Operations {
         })
     }
 
-    /// The id of the earliest-started open record of `kind`, if there is one.
-    pub fn earliest_open_of(&self, kind: OperationKind) -> Option<String> {
+    /// Note that the create the engine started under the status key `key` holds
+    /// the one-create-at-a-time guard, until [`Self::clear_create_guard`].
+    pub fn set_create_guard(&self, key: &str) {
+        self.with(|registry| registry.create_guard = Some(key.to_string()));
+    }
+
+    /// The guard's create ended.
+    pub fn clear_create_guard(&self) {
+        self.with(|registry| registry.create_guard = None);
+    }
+
+    /// The id of the open record following the create that holds the guard,
+    /// or `None` when nothing holds it or no record follows that create (one a
+    /// terminal UI started has none).
+    pub fn create_guard_record(&self) -> Option<String> {
         self.with(|registry| {
+            let key = registry.create_guard.as_deref()?;
             registry
                 .records
                 .iter()
-                .filter(|(_, record)| record.end.is_none() && record.kind == kind)
+                .filter(|(id, record)| {
+                    record.end.is_none()
+                        && (id.as_str() == key || record.awaiting.as_deref() == Some(key))
+                })
                 .min_by_key(|(_, record)| record.started)
                 .map(|(id, _)| id.clone())
         })
@@ -1724,32 +1743,30 @@ mod tests {
     }
 
     #[test]
-    fn the_earliest_open_record_of_a_kind_is_found_until_it_finishes() {
+    fn the_create_guard_names_the_record_that_owns_it_not_the_oldest_create() {
         let ops = Operations::default();
         let t0 = Instant::now();
-        assert_eq!(ops.earliest_open_of(OperationKind::AgentCreate), None);
-        ops.open("op-stop", OperationKind::AgentStop, POLICY, t0);
+        assert_eq!(ops.create_guard_record(), None);
+        // An older create-kind record that does not own the guard.
+        ops.open("op-older", OperationKind::AgentCreate, POLICY, t0);
         ops.open(
-            "op-b",
-            OperationKind::AgentCreate,
-            POLICY,
-            t0 + std::time::Duration::from_secs(2),
-        );
-        ops.open(
-            "op-a",
+            "op-lookup",
             OperationKind::AgentCreate,
             POLICY,
             t0 + std::time::Duration::from_secs(1),
         );
-        assert_eq!(
-            ops.earliest_open_of(OperationKind::AgentCreate).as_deref(),
-            Some("op-a")
-        );
-        ops.finish("op-a", StatusTone::Info, "Done.", None, t0);
-        assert_eq!(
-            ops.earliest_open_of(OperationKind::AgentCreate).as_deref(),
-            Some("op-b")
-        );
+        ops.hand_off("op-lookup", "op-create");
+        ops.set_create_guard("op-create");
+        // The record waiting on the guard's operation is the one named.
+        assert_eq!(ops.create_guard_record().as_deref(), Some("op-lookup"));
+
+        // An operation no record follows names nothing.
+        ops.set_create_guard("op-tui");
+        assert_eq!(ops.create_guard_record(), None);
+
+        ops.set_create_guard("op-create");
+        ops.clear_create_guard();
+        assert_eq!(ops.create_guard_record(), None);
     }
 
     #[test]

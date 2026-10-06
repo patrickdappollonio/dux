@@ -102,16 +102,18 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<OperationRecord, CliError> {
-        self.try_change(method, path, body)
+        self.try_change(method, path, body, None)
             .map_err(|refused| refused.error)
     }
 
-    /// [`Self::change`], keeping the operation a refusal names.
+    /// [`Self::change`], keeping the operation a refusal names, and giving the request
+    /// only `timeout` to answer.
     pub fn try_change(
         &self,
         method: Method,
         path: &str,
         body: Option<serde_json::Value>,
+        timeout: Option<Duration>,
     ) -> Result<OperationRecord, Refused> {
         let separator = if path.contains('?') { '&' } else { '?' };
         let reply = self.send(Request {
@@ -119,7 +121,7 @@ impl Client {
             path: format!("{path}{separator}operation=1"),
             body: body.map(|json| json.to_string().into_bytes()),
             bearer: None,
-            timeout: None,
+            timeout,
         })?;
         if reply.status != 202 {
             let operation = serde_json::from_slice::<serde_json::Value>(&reply.body)
@@ -162,7 +164,33 @@ impl Client {
         timeout: Duration,
     ) -> Result<OperationRecord, CliError> {
         let started = Instant::now();
-        let deadline = started + timeout;
+        self.wait_loop(record, started, started + timeout, false)
+    }
+
+    /// Wait for somebody else's operation `id`, until `deadline`, as [`Self::wait`] does, except
+    /// that an id the dux no longer knows has finished and been forgotten (it counts as an
+    /// outcome), and a server error is read again within the time rather than ending the wait.
+    pub fn wait_for_other(&self, id: &str, deadline: Instant) -> Result<(), CliError> {
+        let stand_in = OperationRecord {
+            id: id.to_string(),
+            kind: String::new(),
+            state: RecordState::Running,
+            message: String::new(),
+            created: Vec::new(),
+            removed: Vec::new(),
+            parts: Vec::new(),
+        };
+        self.wait_loop(stand_in, Instant::now(), deadline, true)
+            .map(|_| ())
+    }
+
+    fn wait_loop(
+        &self,
+        record: OperationRecord,
+        started: Instant,
+        deadline: Instant,
+        other: bool,
+    ) -> Result<OperationRecord, CliError> {
         let mut record = record;
         loop {
             if record.state.is_final() {
@@ -188,6 +216,10 @@ impl Client {
                     if wait == 0 && !record.state.is_final() {
                         std::thread::sleep(RETRY_PAUSE.min(left));
                     }
+                }
+                Ok(reply) if other && reply.status == 404 => return Ok(record),
+                Ok(reply) if other && reply.status >= 500 => {
+                    std::thread::sleep(RETRY_PAUSE.min(left));
                 }
                 Ok(reply) if reply.status == 404 => {
                     return Err(CliError::new(

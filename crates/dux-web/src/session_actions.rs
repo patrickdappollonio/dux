@@ -305,10 +305,7 @@ async fn dispatch_create(
 /// caller that did not ask to follow, gets the bare sentence.
 fn followed_refusal(state: &AppState, status: StatusCode, message: String) -> Response {
     if message == dux_core::operations::CREATE_IN_FLIGHT_REFUSAL
-        && let Some(operation) = state
-            .engine
-            .operations()
-            .earliest_open_of(OperationKind::AgentCreate)
+        && let Some(operation) = state.engine.operations().create_guard_record()
     {
         return (
             status,
@@ -1530,7 +1527,10 @@ mod tests {
     async fn a_create_refused_for_another_create_names_its_operation_only_when_following() {
         let (_tmp, mut engine) = engine_with_project_and_branch("feature-x");
         engine.mark_in_flight(dux_core::engine::InFlightKey::CreateAgent);
+        // An older create-kind record (a pull-request lookup, say) does not own the guard.
+        engine.open_operation("op-older", dux_core::operations::OperationKind::AgentCreate);
         engine.open_operation("op-first", dux_core::operations::OperationKind::AgentCreate);
+        engine.operations.set_create_guard("op-first");
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         let app = crate::server::router(handle);
         let body = serde_json::json!({ "kind": "new", "project_id": "p1", "name": "fresh" });
@@ -1555,6 +1555,11 @@ mod tests {
     async fn a_followed_create_refused_with_no_create_record_names_no_operation() {
         let (_tmp, mut engine) = engine_with_project_and_branch("feature-x");
         engine.mark_in_flight(dux_core::engine::InFlightKey::CreateAgent);
+        // An open create-kind record that does not own the guard is not named.
+        engine.open_operation(
+            "op-lookup",
+            dux_core::operations::OperationKind::AgentCreate,
+        );
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         let app = crate::server::router(handle);
         let body = serde_json::json!({ "kind": "new", "project_id": "p1", "name": "fresh" });
