@@ -4239,7 +4239,9 @@ mod tests {
         console.flush();
         let written = std::fs::read_to_string(dir.path().join("logs/web.log")).unwrap();
         let line = written.lines().next().expect("one line");
-        assert_eq!(&line[9..], "error listener lost", "{written}");
+        let (stamp, rest) = line.split_once(' ').expect("a dated line");
+        chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+        assert_eq!(&rest[9..], "error listener lost", "{written}");
     }
 
     /// A log dux cannot open costs the file, not the serve.

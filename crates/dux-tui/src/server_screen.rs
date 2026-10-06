@@ -1143,14 +1143,21 @@ const FOLLOW_INTERVAL: Duration = Duration::from_millis(200);
 const TAIL_CHUNK: u64 = 64 * 1024;
 
 /// Reads `server.log` from where it left off: first the last lines, then
-/// whatever was appended. Follows the file across a rotation by noticing the
-/// name now means another file (or a shorter one) and starting that one over.
+/// whatever was appended. It keeps the file it is reading open, so when a
+/// rotation moves that file away it finishes the old file's remaining bytes
+/// first and only then switches to the file the name now means, starting it
+/// from its first line.
 struct FileFollower {
     path: std::path::PathBuf,
-    identity: Option<(u64, u64)>,
+    file: Option<std::fs::File>,
     position: u64,
     /// The bytes of a line the writer has not finished.
     partial: Vec<u8>,
+}
+
+fn identity_of(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
 }
 
 impl FileFollower {
@@ -1158,10 +1165,9 @@ impl FileFollower {
     /// exist yet is followed from its first byte once it does.
     fn start(path: std::path::PathBuf, last: usize) -> (Self, Vec<String>) {
         use std::io::{Read, Seek, SeekFrom};
-        use std::os::unix::fs::MetadataExt;
         let mut follower = Self {
             path,
-            identity: None,
+            file: None,
             position: 0,
             partial: Vec::new(),
         };
@@ -1171,7 +1177,6 @@ impl FileFollower {
         let Ok(meta) = file.metadata() else {
             return (follower, Vec::new());
         };
-        follower.identity = Some((meta.dev(), meta.ino()));
         let length = meta.len();
         let mut start = length;
         let mut bytes: Vec<u8> = Vec::new();
@@ -1199,30 +1204,28 @@ impl FileFollower {
             .rposition(|b| *b == b'\n')
             .map_or(0, |newline| newline + 1);
         follower.position = length.saturating_sub((bytes.len() - complete) as u64);
+        follower.file = Some(file);
         let mut lines = split_lines(&bytes[..complete]);
         let excess = lines.len().saturating_sub(last);
         lines.drain(..excess);
         (follower, lines)
     }
 
-    /// The complete lines written since the last look.
-    fn poll(&mut self) -> Vec<String> {
+    /// Read what the held file has past `position`, restarting it if it shrank.
+    fn read_held(&mut self) {
         use std::io::{Read, Seek, SeekFrom};
-        use std::os::unix::fs::MetadataExt;
-        let Ok(mut file) = std::fs::File::open(&self.path) else {
-            return Vec::new();
+        let Some(file) = self.file.as_mut() else {
+            return;
         };
         let Ok(meta) = file.metadata() else {
-            return Vec::new();
+            return;
         };
-        let identity = (meta.dev(), meta.ino());
-        if self.identity != Some(identity) || meta.len() < self.position {
-            self.identity = Some(identity);
+        if meta.len() < self.position {
             self.position = 0;
             self.partial.clear();
         }
         if meta.len() == self.position || file.seek(SeekFrom::Start(self.position)).is_err() {
-            return Vec::new();
+            return;
         }
         let mut fresh = Vec::new();
         if file
@@ -1230,10 +1233,14 @@ impl FileFollower {
             .read_to_end(&mut fresh)
             .is_err()
         {
-            return Vec::new();
+            return;
         }
         self.position += fresh.len() as u64;
         self.partial.extend_from_slice(&fresh);
+    }
+
+    /// The complete lines in `partial`, which keeps the unfinished tail.
+    fn take_lines(&mut self) -> Vec<String> {
         let complete = self
             .partial
             .iter()
@@ -1241,6 +1248,33 @@ impl FileFollower {
             .map_or(0, |newline| newline + 1);
         let lines = split_lines(&self.partial[..complete]);
         self.partial.drain(..complete);
+        lines
+    }
+
+    /// The complete lines written since the last look.
+    fn poll(&mut self) -> Vec<String> {
+        // The file in hand first, to its end, so nothing written before a
+        // rotation is lost to it.
+        self.read_held();
+        let mut lines = self.take_lines();
+        // Then the name: another file under it means a rotation.
+        let renamed = std::fs::File::open(&self.path).ok().filter(|opened| {
+            let current = opened.metadata().ok().map(|meta| identity_of(&meta));
+            let held = self
+                .file
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .map(|meta| identity_of(&meta));
+            current.is_some() && current != held
+        });
+        if let Some(next) = renamed {
+            self.file = Some(next);
+            self.position = 0;
+            // A line the old file never finished has no ending to wait for.
+            self.partial.clear();
+            self.read_held();
+            lines.extend(self.take_lines());
+        }
         lines
     }
 }
@@ -1717,9 +1751,15 @@ mod tests {
         let path = dir.path().join("server.log");
         std::fs::write(&path, "old one\nold two\n").unwrap();
         let (mut follower, _) = FileFollower::start(path.clone(), 10);
+        // A line written just before the rotation is still shown.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"last before rotation\n").unwrap();
         std::fs::rename(&path, dir.path().join("server.log.1")).unwrap();
         std::fs::write(&path, "fresh\n").unwrap();
-        assert_eq!(follower.poll(), ["fresh"]);
+        assert_eq!(follower.poll(), ["last before rotation", "fresh"]);
     }
 
     /// A log that does not exist yet is followed from its first byte once it

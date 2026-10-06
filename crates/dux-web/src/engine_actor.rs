@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::config::{server_bind_settings_changed, server_log_viewer_settings_changed};
+use dux_core::config::{
+    server_bind_settings_changed, server_log_file_settings_changed,
+    server_log_viewer_settings_changed,
+};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -511,6 +514,7 @@ fn server_restart_warning_copy(
     surface: ServeSurface,
 ) -> Option<String> {
     let background = surface == ServeSurface::Background;
+    let log_sentence: String;
     let mut sentences: Vec<&str> = Vec::new();
     if server_bind_settings_changed(prev, next) {
         sentences.push(
@@ -533,6 +537,23 @@ fn server_restart_warning_copy(
             "The [server] log_viewer_lines setting changed; the log viewer is sized when \
              start-web-server starts, so it applies the next time you run it.",
         );
+    }
+    if server_log_file_settings_changed(prev, next) {
+        let changed: Vec<&str> = [
+            ("log_path", prev.log_path != next.log_path),
+            ("log_max_bytes", prev.log_max_bytes != next.log_max_bytes),
+            ("log_keep", prev.log_keep != next.log_keep),
+            ("log_compress", prev.log_compress != next.log_compress),
+        ]
+        .into_iter()
+        .filter_map(|(name, moved)| moved.then_some(name))
+        .collect();
+        log_sentence = format!(
+            "The [server] {} setting changed; server.log is opened when a server starts, \
+             so it applies the next time one starts.",
+            changed.join(", ")
+        );
+        sentences.push(&log_sentence);
     }
     // Not in background mode: that serve never draws QR codes.
     if prev.qr_codes != next.qr_codes && !background {
@@ -6483,7 +6504,7 @@ mod tests {
     }
 
     #[test]
-    fn a_qr_codes_change_says_it_applies_when_either_serving_mode_next_starts() {
+    fn a_change_to_a_setting_read_when_serving_starts_says_it_applies_then() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.qr_codes = false;
@@ -6501,6 +6522,31 @@ mod tests {
             None,
             "the background server never draws QR codes, so it has nothing to say"
         );
+
+        // The server log is opened when a serve starts, in every way of serving.
+        for (setting, change) in [
+            (
+                "log_path",
+                (|c: &mut dux_core::config::ServerConfig| c.log_path = "x.log".into())
+                    as fn(&mut dux_core::config::ServerConfig),
+            ),
+            ("log_max_bytes", |c| c.log_max_bytes += 1),
+            ("log_keep", |c| c.log_keep += 1),
+            ("log_compress", |c| c.log_compress = !c.log_compress),
+        ] {
+            let mut next = prev.clone();
+            change(&mut next);
+            assert!(server_restart_settings_changed(&prev, &next), "{setting}");
+            for surface in [
+                ServeSurface::DuxServer,
+                ServeSurface::Flip,
+                ServeSurface::Background,
+            ] {
+                let copy = server_restart_warning_copy(&prev, &next, surface).expect("a warning");
+                assert!(copy.contains(setting), "{setting} on {surface:?}: {copy}");
+                assert!(copy.contains("server.log"), "{copy}");
+            }
+        }
     }
 
     #[test]

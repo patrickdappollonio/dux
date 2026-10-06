@@ -399,6 +399,9 @@ The rest tune presentation and limits:
 > stays quiet, because nothing it can start reads the setting. `qr_codes` is the same,
 > read when `dux server` or the start-web-server flip starts serving.
 >
+> The four `log_*` keys (`server.log`) are read when any server starts. A reload that
+> changes one says so and tells you it applies the next time a server starts.
+>
 > The exceptions are `allowed_hosts`, `access_log`, `search_index_max_files`,
 > `pty_send_timeout_seconds` and the seven browser timing settings (`replay_wait_seconds`,
 > `reconnect_backoff_cap_seconds`, `reconnect_attempts`,

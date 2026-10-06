@@ -579,7 +579,15 @@ async fn the_flip_logs_what_dux_server_prints() {
     // `server.log` holds the same lines in the plain spelling `dux server`
     // prints with color off.
     let file = std::fs::read_to_string(&server_log_path).expect("server.log");
-    let file_lines: Vec<&str> = file.lines().collect();
+    // Each line leads with the full date and time, in `dux.log`'s format.
+    let file_lines: Vec<&str> = file
+        .lines()
+        .map(|line| {
+            let (stamp, rest) = line.split_once(' ').expect("a dated line");
+            chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+            rest
+        })
+        .collect();
     let file_stamped = |rest: &str| {
         file_lines
             .iter()

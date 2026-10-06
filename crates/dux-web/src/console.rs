@@ -256,6 +256,9 @@ struct ConsoleInner {
     /// `server.log`. Every line that reaches the console is also written here,
     /// whatever else the console does with it.
     file: Option<Arc<ServerLog>>,
+    /// The full date and time that leads each line written to `server.log`, in
+    /// the format `dux.log` uses. The terminal and the flip keep the short clock.
+    stamp: Clock,
     clock: Clock,
     /// Where warning and error lines are ALSO written, in their plain spelling:
     /// stderr, for `dux server` when its stdout went to a file or pipe while
@@ -344,6 +347,7 @@ impl Console {
             sink: Sink::Writer(LineWriter::spawn(writer, bound, color, "stdout")),
             capture: None,
             file: None,
+            stamp: now_rfc3339,
             clock,
             echo: None,
             qr_codes: std::sync::atomic::AtomicBool::new(false),
@@ -357,6 +361,7 @@ impl Console {
             sink: Sink::Noop,
             capture: None,
             file: None,
+            stamp: now_rfc3339,
             clock: now_hms,
             echo: None,
             qr_codes: std::sync::atomic::AtomicBool::new(false),
@@ -386,7 +391,7 @@ impl Console {
         if let Some(inner) = Arc::get_mut(&mut console.0) {
             inner.clock = fixed_test_clock;
         }
-        console
+        console.with_fixed_stamp()
     }
 
     /// The flip's console: prints nothing (the status screen owns the terminal)
@@ -400,6 +405,7 @@ impl Console {
             sink: Sink::Noop,
             capture: Some(ring),
             file: None,
+            stamp: now_rfc3339,
             clock,
             echo: None,
             qr_codes: std::sync::atomic::AtomicBool::new(false),
@@ -417,7 +423,8 @@ impl Console {
             Box::new(buf.clone()),
             WRITER_CHANNEL_BOUND,
             fixed_test_clock,
-        );
+        )
+        .with_fixed_stamp();
         let tx = console.writer_tx();
         (console, TestSink { buf, tx })
     }
@@ -426,7 +433,7 @@ impl Console {
     /// [`Self::test_capture`], so the two can be compared line for line.
     #[cfg(test)]
     pub(crate) fn test_ring_capture(ring: ActivityRing) -> Self {
-        Self::capture_with_clock(ring, fixed_test_clock)
+        Self::capture_with_clock(ring, fixed_test_clock).with_fixed_stamp()
     }
 
     /// A console whose writer is stuck for good, as on a pipe nobody reads.
@@ -487,7 +494,7 @@ impl Console {
     /// Write one line to `server.log`, if this console keeps one.
     fn write_to_file(&self, line: &LogLine) {
         if let Some(file) = &self.0.file {
-            file.write_line(&line.render(false));
+            file.write_line(&format!("{} {}", (self.0.stamp)(), line.render(false)));
         }
     }
 
@@ -516,6 +523,11 @@ impl Console {
     /// printed this line there.
     fn line_echoed(&self, line: LogLine, echo: bool) {
         self.write_to_file(&line);
+        self.deliver(line, echo);
+    }
+
+    /// Everything [`Self::line_echoed`] does except the file.
+    fn deliver(&self, line: LogLine, echo: bool) {
         if let Sink::Writer(writer) = &self.0.sink {
             writer.send(&line, self.0.clock);
             if echo {
@@ -647,8 +659,9 @@ impl Console {
             0 => terminal_columns().saturating_sub(VIEWER_CHROME),
             pinned => pinned,
         };
+        // A drawing for the screen, so it stays out of `server.log`.
         for line in dux_core::serve_log::qr_lines(&(self.0.clock)(), urls, columns) {
-            self.line(line);
+            self.deliver(line, true);
         }
     }
 
@@ -734,6 +747,11 @@ fn writer_loop(mut writer: Box<dyn Write + Send>, rx: std::sync::mpsc::Receiver<
     }
 }
 
+/// The full timestamp `dux.log` leads its lines with.
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 /// Current wall-clock time as `HH:MM:SS`. Wall-clock, not a tick counter, per the
 /// project's animation/refresh tenet.
 fn now_hms() -> String {
@@ -743,6 +761,22 @@ fn now_hms() -> String {
 #[cfg(test)]
 fn fixed_test_clock() -> String {
     "12:00:00".to_string()
+}
+
+#[cfg(test)]
+fn fixed_test_stamp() -> String {
+    "2026-10-06T12:00:00+00:00".to_string()
+}
+
+#[cfg(test)]
+impl Console {
+    /// This console with its file stamp pinned. Only while building.
+    fn with_fixed_stamp(mut self) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.0) {
+            inner.stamp = fixed_test_stamp;
+        }
+        self
+    }
 }
 
 // ── Test-only shared buffer sink ─────────────────────────────────────────────
@@ -1084,23 +1118,6 @@ mod tests {
     fn a_colored_stdout_console_and_the_capture_record_the_same_text() {
         let (stdout, sink) = Console::test_capture(true);
         let ring = ActivityRing::new(100);
-        let capture = Console::test_ring_capture(ring.clone());
-        for console in [&stdout, &capture] {
-            console.banner(&sample_banner());
-            console.client_connected(ip("10.0.0.1"));
-            console.access("GET", "/", 404, 1);
-            console.error("broken");
-        }
-        let printed: Vec<String> = sink.contents().lines().map(strip_ansi).collect();
-        assert_eq!(printed, ring_texts(&ring));
-    }
-
-    /// `server.log` gets the lines `dux server` prints with color off, whichever
-    /// console wrote them: one that also prints, the flip's that also captures,
-    /// and the background server's that does only this.
-    #[test]
-    fn every_console_writes_the_plain_lines_dux_server_prints_to_the_server_log() {
-        let (stdout, sink) = Console::test_capture(false);
         let dir = tempfile::tempdir().unwrap();
         let log_in = |name: &str| {
             let server = dux_core::config::ServerConfig {
@@ -1110,27 +1127,33 @@ mod tests {
             let paths = test_paths(dir.path());
             Arc::new(dux_core::logger::open_server_log(&server, &paths).unwrap())
         };
+        // The same lines also go to `server.log` whichever console wrote them:
+        // one that prints, the flip's that captures, and the background server's
+        // that does only this.
+        let capture = Console::test_ring_capture(ring.clone()).with_server_log(log_in("flip.log"));
         let printing = Console::test_capture(false)
             .0
             .with_server_log(log_in("printing.log"));
-        let capturing = Console::test_ring_capture(ActivityRing::new(100))
-            .with_server_log(log_in("capturing.log"));
         let file_only = Console::test_file_only(log_in("file-only.log"));
-        for console in [&stdout, &printing, &capturing, &file_only] {
+        for console in [&stdout, &capture, &printing, &file_only] {
             console.banner(&sample_banner());
             console.client_connected(ip("10.0.0.1"));
             console.access("GET", "/", 404, 1);
             console.error("broken");
         }
+        let printed: Vec<String> = sink.contents().lines().map(strip_ansi).collect();
+        assert_eq!(printed, ring_texts(&ring));
+
+        // The file spells each line the way `dux server` prints it without color,
+        // led by the full date and time `dux.log` uses.
         let expected = [
-            "dux v0.1.0  plain HTTP",
-            "  -> Local: http://127.0.0.1:8080",
-            "12:00:00 info client connected from 10.0.0.1",
-            "12:00:00 GET / 404 1ms",
-            "12:00:00 error broken",
+            "2026-10-06T12:00:00+00:00 dux v0.1.0  plain HTTP",
+            "2026-10-06T12:00:00+00:00   -> Local: http://127.0.0.1:8080",
+            "2026-10-06T12:00:00+00:00 12:00:00 info client connected from 10.0.0.1",
+            "2026-10-06T12:00:00+00:00 12:00:00 GET / 404 1ms",
+            "2026-10-06T12:00:00+00:00 12:00:00 error broken",
         ];
-        assert_eq!(sink.contents().lines().collect::<Vec<_>>(), expected);
-        for name in ["printing.log", "capturing.log", "file-only.log"] {
+        for name in ["flip.log", "printing.log", "file-only.log"] {
             let written = std::fs::read_to_string(dir.path().join(name)).unwrap();
             assert_eq!(written.lines().collect::<Vec<_>>(), expected, "{name}");
         }
@@ -1145,7 +1168,14 @@ mod tests {
     fn qr_codes_and_tailnet_rows_reach_both_surfaces_as_the_same_lines() {
         let (stdout, sink) = Console::test_capture(true);
         let ring = ActivityRing::new(200);
-        let capture = Console::test_ring_capture(ring.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let server = dux_core::config::ServerConfig {
+            log_path: dir.path().join("qr.log").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let log =
+            Arc::new(dux_core::logger::open_server_log(&server, &test_paths(dir.path())).unwrap());
+        let capture = Console::test_ring_capture(ring.clone()).with_server_log(log);
         let rows = vec![dux_core::serve_log::ListenerRow {
             label: "Tailscale (HTTPS, tailscale serve)".to_string(),
             url: QR_NAME.to_string(),
@@ -1164,6 +1194,15 @@ mod tests {
                 .any(|l| l.contains("Tailscale (HTTPS, tailscale serve)"))
         );
         assert!(printed.iter().any(|l| l.contains('█') || l.contains('▀')));
+
+        // The codes are a drawing for the screen: the file keeps the address row
+        // and none of the blocks.
+        let file = std::fs::read_to_string(dir.path().join("qr.log")).unwrap();
+        assert!(
+            file.contains("Tailscale (HTTPS, tailscale serve)"),
+            "{file}"
+        );
+        assert!(!file.contains('█') && !file.contains('▀'), "{file}");
     }
 
     #[test]

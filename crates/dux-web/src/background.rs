@@ -424,7 +424,11 @@ mod tests {
         let log = std::fs::read_to_string(tmp.path().join("server.log")).expect("server.log");
         let page_requests: Vec<&str> = log
             .lines()
-            .filter(|line| line.len() > 9 && line[9..].starts_with("GET /api/v1/build 200 "))
+            .filter(|line| {
+                let (stamp, rest) = line.split_once(' ').expect("a dated line");
+                chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+                rest.len() > 9 && rest[9..].starts_with("GET /api/v1/build 200 ")
+            })
             .collect();
         assert_eq!(page_requests.len(), 1, "{log}");
         assert!(!log.contains("/healthz"), "{log}");

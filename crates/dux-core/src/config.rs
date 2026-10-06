@@ -1098,6 +1098,16 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
     server_bind_settings_changed(prev, next)
         || server_console_settings_changed(prev, next)
         || server_log_viewer_settings_changed(prev, next)
+        || server_log_file_settings_changed(prev, next)
+}
+
+/// True when a config reload changed a setting of `server.log`, which is opened
+/// when a serve starts, in every way of serving.
+pub fn server_log_file_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    prev.log_path != next.log_path
+        || prev.log_max_bytes != next.log_max_bytes
+        || prev.log_keep != next.log_keep
+        || prev.log_compress != next.log_compress
 }
 
 /// True when a config reload changed a `[server]` setting read once, as the
