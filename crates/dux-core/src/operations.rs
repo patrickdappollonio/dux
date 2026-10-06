@@ -1244,6 +1244,15 @@ impl crate::engine::Engine {
         self.operation_in_dispatch = Some(id.clone());
         let result = self.apply(command);
         self.operation_in_dispatch = None;
+        // Held back again behind a reload this drain started: nothing has
+        // happened yet, so the record waits for the drain that runs it.
+        if self
+            .deferred_operations
+            .iter()
+            .any(|op| op.as_deref() == Some(id.as_str()))
+        {
+            return result;
+        }
         match &result {
             Ok(reaction) => {
                 self.operations
