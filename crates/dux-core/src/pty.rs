@@ -6112,9 +6112,66 @@ mod tests {
         );
     }
 
+    /// A shell that exits at once, reaped and with its reader finished. The
+    /// reader thread has returned by then, so a test can set the client back to
+    /// "no end of input yet" or hand it a reader that never ends, and stand in
+    /// for a grandchild holding the PTY open on a platform where no grandchild
+    /// can (macOS revokes the terminal when its session leader exits).
+    fn reaped_and_drained_client() -> PtyClient {
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() || !client.is_exited() {
+            assert!(Instant::now() < deadline, "the shell did not end in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if let Some(reader) = client.reader_thread.take() {
+            reader.join().expect("the reader finished");
+        }
+        client
+    }
+
+    /// `a_reaped_child_is_not_live_even_while_its_pty_stays_open` with the
+    /// open PTY stood in for, so it runs on every platform.
+    #[test]
+    fn a_reaped_child_is_not_live_while_its_reader_has_not_ended() {
+        let client = reaped_and_drained_client();
+        client.exited.store(false, Ordering::Release);
+        assert!(!client.is_exited(), "no end of input, as the test set it");
+        assert!(
+            !client.is_live(),
+            "a reaped child is not running, whatever is still holding the PTY open"
+        );
+    }
+
+    /// `dropping_a_pty_never_waits_on_a_disowned_job_holding_it_open` with the
+    /// job stood in for by a reader that does not end until the test says so,
+    /// so it runs on every platform.
+    #[test]
+    fn dropping_a_pty_never_waits_on_a_reader_that_has_not_ended() {
+        let mut client = reaped_and_drained_client();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        client.reader_thread = Some(thread::spawn(move || {
+            let _ = held.recv();
+        }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = tx.send(());
+        });
+        let dropped = rx.recv_timeout(Duration::from_secs(5));
+        let _ = release.send(());
+        assert!(
+            dropped.is_ok(),
+            "dropping the client must not wait on a reader that has not ended"
+        );
+    }
+
     // Linux only: macOS revokes a terminal when its session leader exits, so
     // no job can hold it open past the shell and the reader reaches end of
-    // input with the reap. The state this test builds cannot arise there.
+    // input with the reap. The predicate runs on macOS in
+    // `a_reaped_child_is_not_live_while_its_reader_has_not_ended`.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_reaped_child_is_not_live_even_while_its_pty_stays_open() {
@@ -8034,7 +8091,8 @@ mod tests {
     /// as the job runs: the engine thread, frozen.
     // Linux only: macOS revokes a terminal when its session leader exits, so
     // no job can hold it open past the shell and the reader reaches end of
-    // input with the reap. The state this test builds cannot arise there.
+    // input with the reap. The drop not waiting runs on macOS in
+    // `dropping_a_pty_never_waits_on_a_reader_that_has_not_ended`.
     #[cfg(target_os = "linux")]
     #[test]
     fn dropping_a_pty_never_waits_on_a_disowned_job_holding_it_open() {
