@@ -232,7 +232,10 @@ impl Client {
                     ));
                 }
                 Ok(reply) => return Err(self.refusal(&reply)),
-                Err(error @ super::transport::TransportError::Refused(_)) => {
+                Err(
+                    error @ (super::transport::TransportError::Refused(_)
+                    | super::transport::TransportError::NotOwner(_)),
+                ) => {
                     return Err(self.no_reply(&error));
                 }
                 Err(_) => std::thread::sleep(

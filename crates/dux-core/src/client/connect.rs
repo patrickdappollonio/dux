@@ -207,6 +207,7 @@ impl Client {
     pub fn no_reply(&self, error: &TransportError) -> CliError {
         match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why.clone()),
+            TransportError::NotOwner(why) => CliError::new(Exit::NotRunning, why.clone()),
             _ => CliError::new(
                 Exit::NotRunning,
                 format!("{} does not answer: {error}", self.target),
@@ -542,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dux_speaking_another_api_is_refused_naming_both_versions() {
+    fn a_dux_speaking_another_api_or_run_by_another_user_is_refused() {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, |_| {
@@ -568,6 +569,20 @@ mod tests {
             "{}",
             error.message
         );
+
+        // A socket whose other end is not this user is sent nothing at all.
+        let before = _fake.seen().len();
+        let other = crate::control_socket::current_uid() + 1;
+        super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(Some(other)));
+        let error = connect(&Target::Local, &dir.path().join("dux.lock")).unwrap_err();
+        super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(None));
+        assert_eq!(error.exit, Exit::NotRunning);
+        assert!(
+            error.message.contains("belongs to another user"),
+            "{}",
+            error.message
+        );
+        assert_eq!(_fake.seen().len(), before, "nothing was sent");
     }
 
     #[test]
