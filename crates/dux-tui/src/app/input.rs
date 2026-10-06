@@ -6174,6 +6174,18 @@ impl App {
             ));
             return;
         }
+        if self
+            .macro_editor_version
+            .as_ref()
+            .is_some_and(|seen| *seen != dux_core::wire::macros_version(&self.engine.config.macros))
+        {
+            self.set_warning(
+                "The macro list changed since this editor opened (a browser or the command \
+                 line changed it), so nothing was saved. Your text is still here: copy what \
+                 you need, then close the macro editor and open it again to see the change.",
+            );
+            return;
+        }
 
         // If renaming, drop the old entry so the rename does not duplicate it.
         if let Some(ref old_name) = old_id
@@ -6211,6 +6223,9 @@ impl App {
             entries.push((name.clone(), text, surface));
         }
         entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        // This save moved the list on; the editor's next one is based on it.
+        self.macro_editor_version =
+            Some(dux_core::wire::macros_version(&self.engine.config.macros));
 
         if let Err(err) = self
             .engine
@@ -6281,6 +6296,8 @@ impl App {
         if *selected > 0 && *selected >= entries.len() {
             *selected = entries.len().saturating_sub(1);
         }
+        self.macro_editor_version =
+            Some(dux_core::wire::macros_version(&self.engine.config.macros));
 
         if let Err(err) = self
             .engine
@@ -7987,6 +8004,13 @@ impl App {
         if !confirm {
             return false;
         }
+        if let Err(in_the_way) = self
+            .engine
+            .check_admission(&self.engine.agent_admission(&session_id))
+        {
+            self.set_error(in_the_way.to_string());
+            return false;
+        }
         match self.engine.begin_detach_session(&session_id) {
             // The row went between opening the dialog and answering it.
             dux_core::engine::DetachSessionOutcome::UnknownSession => {
@@ -8251,6 +8275,14 @@ impl App {
         };
         self.prompt = PromptState::None;
         if !confirm {
+            return false;
+        }
+        if let Err(in_the_way) = self.engine.check_admission(
+            &self
+                .engine
+                .tab_admission(&session_id, TabId::new(tab_id.clone())),
+        ) {
+            self.set_error(in_the_way.to_string());
             return false;
         }
         // Read both names off the PRE-close strip, which is the strip the
@@ -33290,6 +33322,56 @@ cyan = "#00ffff"
             !macro_editing_is_open(&app),
             "Cancel returns to the macro list"
         );
+
+        // The editor's own save moved the list on, so a second save of its
+        // own still goes through. (The list re-sorted on save; point it back
+        // at the same macro.)
+        let select_greet = |app: &mut App| {
+            if let PromptState::EditMacros {
+                entries, selected, ..
+            } = &mut app.prompt
+            {
+                *selected = entries.iter().position(|(n, _, _)| n == "greet").unwrap();
+            }
+        };
+        select_greet(&mut app);
+        open_macro_editor_on_body(&mut app);
+        type_chars(&mut app, "!");
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        set_macro_focus(&mut app, MacroEditFocus::Save);
+        app.handle_key(key(KeyCode::Enter)).expect("activate Save");
+        assert_eq!(macro_text(&app, "greet").as_deref(), Some("hello there!"));
+
+        // Another surface changes the list while the editor is open: the save
+        // is refused, the edit stays open with the typed text, and the line
+        // says how to see the change.
+        app.engine.config.macros.entries.insert(
+            "deploy".to_string(),
+            crate::config::MacroEntry {
+                text: "ship it".to_string(),
+                surface: crate::config::MacroSurface::Terminal,
+            },
+        );
+        select_greet(&mut app);
+        open_macro_editor_on_body(&mut app);
+        type_chars(&mut app, " late");
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        set_macro_focus(&mut app, MacroEditFocus::Save);
+        app.handle_key(key(KeyCode::Enter)).expect("activate Save");
+
+        assert_eq!(
+            macro_text(&app, "greet").as_deref(),
+            Some("hello there!"),
+            "a refused save writes nothing"
+        );
+        assert!(macro_editing_is_open(&app), "the editor stays open");
+        assert!(
+            macro_edit(&app).text_input.text.ends_with(" late"),
+            "the typed text is kept"
+        );
+        let line = app.status.text();
+        assert!(line.contains("changed since"), "{line}");
+        assert!(line.contains("open it again"), "{line}");
     }
 
     #[test]
@@ -34735,14 +34817,46 @@ cyan = "#00ffff"
             .providers
             .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
         app.set_focused_tab(&session_id, &tab_id);
-
-        app.prompt = PromptState::ConfirmCloseTab {
+        let prompt = || PromptState::ConfirmCloseTab {
             session_id: session_id.clone(),
             tab_id: tab_id.clone(),
             provider_label: "Codex".to_string(),
             promoted_label: None,
             focus: ConfirmFocus::Confirm,
         };
+
+        // While another surface's change holds the agent, the close is
+        // refused and the line names that operation.
+        app.engine
+            .open_operation("op-held", dux_core::operations::OperationKind::AgentStop);
+        app.engine
+            .operations
+            .admit(
+                Some("op-held"),
+                &[],
+                &[dux_core::operations::Hold::exclusive(
+                    dux_core::engine::InFlightKey::Agent(session_id.clone()),
+                )],
+            )
+            .unwrap();
+        app.prompt = prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+        assert!(
+            app.status.text().contains("op-held"),
+            "{}",
+            app.status.text()
+        );
+        assert!(app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)));
+        app.engine.operations.finish(
+            "op-held",
+            dux_core::statusline::StatusTone::Info,
+            "",
+            None,
+            std::time::Instant::now(),
+        );
+
+        app.prompt = prompt();
         // Space activates the focused (Close) button.
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");

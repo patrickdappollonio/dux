@@ -579,3 +579,42 @@ fn the_manager_lists_an_agent_held_worktree_a_terminal_uses_with_the_terminal() 
         terminal.client.force_terminate();
     }
 }
+
+/// A delete that removes the worktree runs on after it answers. Until its
+/// record finishes, a second delete of the same agent, followed or not, is
+/// refused with the first one's id, and a refused one leaves no record.
+#[test]
+fn a_second_delete_of_an_agent_being_removed_is_refused_with_the_first_operations_id() {
+    use crate::operations::OperationKind;
+    use crate::wire::WireCommand;
+    let (mut engine, _tmp) = test_engine();
+    engine.projects.push(sample_project("p1", "/tmp/p1"));
+    let session = sample_session("s1", "p1", "feat");
+    engine.session_store.upsert_session(&session).unwrap();
+    engine.sessions.push(session);
+    let delete = || WireCommand::DeleteSession {
+        session_id: "s1".to_string(),
+        delete_worktree: true,
+        delete_branch: Some(true),
+    };
+
+    let first = engine
+        .apply_wire_operation(delete(), OperationKind::AgentDelete)
+        .expect("the first delete starts");
+    let first_id = first.operation_id.expect("an operation id");
+
+    let unfollowed = engine
+        .apply_wire(delete())
+        .expect_err("a second delete is refused");
+    assert!(unfollowed.to_string().contains(&first_id), "{unfollowed}");
+
+    let followed = engine
+        .apply_wire_operation(delete(), OperationKind::AgentDelete)
+        .expect_err("a second followed delete is refused");
+    assert!(followed.to_string().contains(&first_id), "{followed}");
+    assert_eq!(
+        engine.operations.len(),
+        1,
+        "the refused delete left no record"
+    );
+}

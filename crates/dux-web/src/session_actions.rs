@@ -51,7 +51,7 @@ use crate::rest_common::{
     Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, OperationQuery,
     await_new_session, await_session_for_op, create_failed, delete_operation_response,
     delete_wire_response, id_within_bound, idempotency_key, operation_accepted, outcome_is_error,
-    require_configured_provider, scope_from_headers, unknown_session,
+    refusal, require_configured_provider, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -277,10 +277,17 @@ async fn dispatch_create(
     } else {
         state
             .engine
-            .apply_wire_scoped(body.into_wire(), scope)
+            .apply_wire_recorded(body.into_wire(), scope, OperationKind::AgentCreate)
             .await
     }
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    .map_err(|e| {
+        let status = if dux_core::operations::is_in_the_way(&e) {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (status, e)
+    })?;
     if outcome_is_error(&outcome) {
         let msg = outcome
             .status
@@ -567,7 +574,11 @@ async fn delete_session(
     delete_wire_response(
         state
             .engine
-            .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
+            .apply_wire_recorded(
+                command,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::AgentDelete,
+            )
             .await,
     )
 }
@@ -712,12 +723,16 @@ async fn reconnect_session(
             .await
         {
             Ok((_, op)) => operation_accepted(&op),
-            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            Err(e) => refusal(e, StatusCode::BAD_REQUEST),
         };
     }
-    match state.engine.apply_wire_scoped(command, scope).await {
+    match state
+        .engine
+        .apply_wire_recorded(command, scope, OperationKind::AgentStart)
+        .await
+    {
         Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -801,7 +816,7 @@ async fn kill_session(
     } else {
         state
             .engine
-            .apply_wire_scoped(command, scope)
+            .apply_wire_recorded(command, scope, OperationKind::AgentStop)
             .await
             .map(|_| None)
     };
@@ -811,7 +826,7 @@ async fn kill_session(
         // The engine returns "unknown session: …" when the row is gone (e.g. a
         // concurrent delete); surface that as 404, not a generic 400.
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -1086,6 +1101,128 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    /// While a followed change holds an agent, every other change to it, or
+    /// to a tab or a terminal inside it, is a 409 naming that operation, and
+    /// so is a change to an agent a delete has already taken off the list,
+    /// rather than the 404 of an agent that never existed.
+    #[tokio::test]
+    async fn a_change_to_an_agent_another_change_holds_is_a_409_naming_it() {
+        use dux_core::engine::InFlightKey;
+        use dux_core::operations::{Hold, OperationKind};
+
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s1"));
+        for (record, agent, kind) in [
+            ("op-h", "s1", OperationKind::AgentStop),
+            ("op-g", "ghost", OperationKind::AgentDelete),
+        ] {
+            engine.open_operation(record, kind);
+            engine
+                .operations
+                .admit(
+                    Some(record),
+                    &[],
+                    &[Hold::exclusive(InFlightKey::Agent(agent.to_string()))],
+                )
+                .unwrap();
+        }
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        for (method, uri, holder) in [
+            ("DELETE", "/api/v1/sessions/s1", "op-h"),
+            ("DELETE", "/api/v1/sessions/s1?operation=1", "op-h"),
+            ("POST", "/api/v1/sessions/s1/kill", "op-h"),
+            ("POST", "/api/v1/sessions/s1/reconnect", "op-h"),
+            ("POST", "/api/v1/sessions/s1/tabs", "op-h"),
+            ("POST", "/api/v1/sessions/s1/tabs/s1-slot/start", "op-h"),
+            ("POST", "/api/v1/sessions/s1/terminals?operation=1", "op-h"),
+            ("DELETE", "/api/v1/sessions/ghost", "op-g"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}: {body}");
+            assert!(body.contains(holder), "{method} {uri}: {body}");
+        }
+    }
+
+    /// A covered change a client did not ask to follow still opens an
+    /// operation record, so whatever it changes is held for as long as it
+    /// runs; its answer is the one the route has always given.
+    #[tokio::test]
+    async fn an_unfollowed_change_keeps_its_answer_and_still_opens_a_record() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s1"));
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s2"));
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let operations = handle.operations().clone();
+        let app = crate::server::router(handle);
+
+        let mut expected_records = 0;
+        for (method, uri, body, status, answer) in [
+            (
+                "DELETE",
+                "/api/v1/sessions/s1",
+                "",
+                StatusCode::NO_CONTENT,
+                "",
+            ),
+            ("POST", "/api/v1/sessions/s2/kill", "", StatusCode::OK, ""),
+            (
+                "PUT",
+                "/api/v1/macros/greet",
+                r#"{"text":"hi","surface":"agent"}"#,
+                StatusCode::OK,
+                "",
+            ),
+        ] {
+            let mut request = Request::builder().method(method).uri(uri);
+            if !body.is_empty() {
+                request = request.header("content-type", "application/json");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), status, "{method} {uri}");
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            if !answer.is_empty() {
+                assert_eq!(String::from_utf8_lossy(&bytes), answer, "{method} {uri}");
+            }
+            expected_records += 1;
+            assert_eq!(
+                operations.len(),
+                expected_records,
+                "{method} {uri} opened a record"
+            );
+        }
     }
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) {

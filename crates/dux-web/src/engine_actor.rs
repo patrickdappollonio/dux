@@ -88,6 +88,14 @@ impl OperationTicket {
     }
 }
 
+/// A change covered by an operation record, and whether the client asked to
+/// follow it (which decides only the answer's shape).
+#[derive(Clone, Copy, Debug)]
+pub struct Followed {
+    pub kind: OperationKind,
+    pub answered: bool,
+}
+
 /// What a route says when the engine made a followed change and handed back no
 /// record. The engine opens the record before the change and sets it before it
 /// replies, so this means something broke between the two.
@@ -104,11 +112,13 @@ pub enum EngineRequest {
         /// resets it to [`StatusScope::All`] after, so a web operation's toasts
         /// reach only the originating connection. `All` is the broadcast default.
         StatusScope,
-        /// Set when a client asked to follow this command as an operation: the
-        /// actor then dispatches it through
-        /// [`dux_core::engine::Engine::apply_wire_operation`], and the reply
-        /// carries the record's id.
-        Option<OperationKind>,
+        /// Set for a change a route covers with an operation record: the
+        /// actor dispatches it through
+        /// [`dux_core::engine::Engine::apply_wire_operation`] when the client
+        /// asked to follow it, and the reply carries the record's id, or
+        /// through [`dux_core::engine::Engine::apply_wire_recorded`] when it
+        /// did not, which records and holds it but answers as it always has.
+        Option<Followed>,
     ),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
@@ -1151,7 +1161,15 @@ impl EngineHandle {
     ) -> Result<(WireCommandOutcome, OperationView), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::ApplyWire(command, tx, origin, Some(kind)))
+            .send(EngineRequest::ApplyWire(
+                command,
+                tx,
+                origin,
+                Some(Followed {
+                    kind,
+                    answered: true,
+                }),
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         let outcome = rx.await.map_err(|_| "engine reply dropped".to_string())??;
@@ -1161,6 +1179,32 @@ impl EngineHandle {
             .map(|record| *record)
             .ok_or_else(|| MISSING_OPERATION_RECORD.to_string())?;
         Ok((outcome, record))
+    }
+
+    /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), for a change a
+    /// route covers with an operation record although the client did not ask
+    /// to follow it: the record is kept and holds what the change changes,
+    /// and the outcome is the one `apply_wire_scoped` would have answered.
+    pub async fn apply_wire_recorded(
+        &self,
+        command: WireCommand,
+        origin: StatusScope,
+        kind: OperationKind,
+    ) -> Result<WireCommandOutcome, String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::ApplyWire(
+                command,
+                tx,
+                origin,
+                Some(Followed {
+                    kind,
+                    answered: false,
+                }),
+            ))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
     /// The engine's operation registry.
@@ -3981,7 +4025,7 @@ fn handle_pty_resize(
 /// operation.
 struct WireOrigin {
     scope: StatusScope,
-    operation: Option<OperationKind>,
+    operation: Option<Followed>,
 }
 
 fn handle_apply_wire_request(
@@ -3999,7 +4043,14 @@ fn handle_apply_wire_request(
     debug_assert!(!(mutates_config && *config_disk_ahead));
     engine.current_origin = origin.scope;
     let result = match origin.operation {
-        Some(kind) => engine.apply_wire_operation(cmd, kind),
+        Some(Followed {
+            kind,
+            answered: true,
+        }) => engine.apply_wire_operation(cmd, kind),
+        Some(Followed {
+            kind,
+            answered: false,
+        }) => engine.apply_wire_recorded(cmd, kind),
         None => engine.apply_wire(cmd),
     }
     .map_err(|e| e.to_string());
@@ -4211,19 +4262,22 @@ fn handle_request(
         EngineRequest::CreateTerminal(session_id, ticket, reply) => {
             // Headless spawn: seed a default 24x80 and let the first attaching
             // client resize the PTY to its real viewport.
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_companion_terminal(&session_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateProjectTerminal(project_id, ticket, reply) => {
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Project(project_id.clone());
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_project_terminal(&project_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateStandaloneTerminal(ticket, reply) => {
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Standalone;
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_standalone_terminal(24, 80)
             });
             let _ = reply.send(res);
@@ -4246,12 +4300,26 @@ fn handle_request(
             if let Some(ticket) = &ticket {
                 engine.open_operation(&ticket.id, ticket.kind);
             }
-            let res = create_agent_tab_inner(engine, &session_id, provider);
+            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
+            let res = engine
+                .admit(
+                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
+                    &engine.inside_admission(&owner),
+                )
+                .map_err(|e| e.to_string())
+                .and_then(|()| create_agent_tab_inner(engine, &session_id, provider));
             if let Some(ticket) = &ticket {
                 match &res {
                     // The tab exists now; whether it came up is its launch's to
-                    // say, so the record waits for that report.
+                    // say, so the record waits for that report, holding the
+                    // tab until then.
                     Ok((tab_id, _)) => {
+                        engine.operations.hold(
+                            &ticket.id,
+                            dux_core::operations::Hold::exclusive(
+                                dux_core::engine::InFlightKey::Tab(TabId::new(tab_id.clone())),
+                            ),
+                        );
                         engine.operations.note(
                             &ticket.id,
                             dux_core::operations::OperationNotes {
@@ -4274,13 +4342,21 @@ fn handle_request(
             if let Some(ticket) = &ticket {
                 engine.open_operation(&ticket.id, ticket.kind);
             }
+            // Refused while another change holds the tab or its agent.
+            let admitted = match engine.owning_session_for_tab(&tab_id) {
+                Some(session_id) => engine.admit(
+                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
+                    &engine.tab_admission(&session_id, TabId::new(tab_id.clone())),
+                ),
+                None => Ok(()),
+            };
             // Already running is success, not a second launch: the card can be
             // pressed from a page whose spine has not caught up yet.
             let running = engine.providers.contains_key(TabIdRef::new(&tab_id));
-            let res = if running {
-                Ok(())
-            } else {
-                launch_agent(engine, &tab_id)
+            let res = match admitted {
+                Err(in_the_way) => Err(in_the_way.to_string()),
+                Ok(()) if running => Ok(()),
+                Ok(()) => launch_agent(engine, &tab_id),
             };
             if let Some(ticket) = &ticket {
                 match &res {
@@ -4720,6 +4796,21 @@ fn handle_subscribe(
         let _ = reply.send(Err(last_run_failed_refusal()));
         return;
     }
+    // Nor a tab another change still holds, or whose agent it holds: a stop
+    // in flight must not be undone by a page that happens to have the pane
+    // open. Joining a launch already running starts nothing new, so that is
+    // not asked; the change that holds the tab drives its own launch.
+    let launching = engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+        tab_id.clone(),
+    )));
+    if !launching
+        && let Some(session_id) = engine.owning_session_for_tab(&tab_id)
+        && let Err(in_the_way) =
+            engine.check_admission(&engine.tab_admission(&session_id, TabId::new(tab_id.clone())))
+    {
+        let _ = reply.send(Err(in_the_way.to_string()));
+        return;
+    }
     match launch_agent(engine, &tab_id) {
         Ok(()) => pending.push(PendingSubscribe {
             tab_id: TabId::new(tab_id),
@@ -4740,13 +4831,21 @@ fn handle_subscribe(
 /// it, since a terminal is created whole inside the call and raises no status.
 fn create_terminal_operation(
     engine: &mut Engine,
+    owner: dux_core::model::TerminalOwner,
     ticket: Option<OperationTicket>,
     create: impl FnOnce(&mut Engine) -> anyhow::Result<(String, String)>,
 ) -> Result<(String, String), String> {
     if let Some(ticket) = &ticket {
         engine.open_operation(&ticket.id, ticket.kind);
     }
-    let res = create(engine).map_err(|e| e.to_string());
+    // Refused while another change holds the agent or project it opens in.
+    let admitted = engine.admit(
+        ticket.as_ref().map(|ticket| ticket.id.as_str()),
+        &engine.inside_admission(&owner),
+    );
+    let res = admitted
+        .map_err(|e| e.to_string())
+        .and_then(|()| create(engine).map_err(|e| e.to_string()));
     if let Some(ticket) = &ticket {
         match &res {
             Ok((terminal_id, _)) => {
@@ -5501,7 +5600,7 @@ mod tests {
     /// do-not-retry rule and carries no room for a reason, so the sentence rides
     /// the keyed status controller and reaches the browser as a toast.
     #[test]
-    fn subscribing_does_not_relaunch_a_tab_whose_last_run_failed() {
+    fn subscribing_does_not_launch_a_failed_tab_or_one_another_change_holds() {
         let (_tmp, paths) = temp_paths();
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -5570,6 +5669,40 @@ mod tests {
                 err.contains("Start it explicitly"),
                 "the refusal must name the way forward: {err}"
             ),
+        }
+
+        // A tab whose agent another surface's followed change holds (here a
+        // stop) is not launched by a passive attach either, and the refusal
+        // names that operation.
+        engine.clear_tab_run_failure(slot.as_ref_id());
+        engine.open_operation("op-held", OperationKind::AgentStop);
+        engine
+            .operations
+            .admit(
+                Some("op-held"),
+                &[],
+                &[dux_core::operations::Hold::exclusive(
+                    dux_core::engine::InFlightKey::Agent("s1".to_string()),
+                )],
+            )
+            .unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle_subscribe(
+            &mut engine,
+            &mut pending,
+            &mut last_pr,
+            &mut status,
+            slot.as_str().to_string(),
+            tx,
+        );
+        assert!(pending.is_empty(), "no launch may be waited on");
+        assert!(
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(slot.clone())),
+            "no launch may be dispatched under another change's hold"
+        );
+        match rx.blocking_recv().expect("a reply") {
+            Ok(_) => panic!("subscribing a held tab must be refused"),
+            Err(err) => assert!(err.contains("op-held"), "{err}"),
         }
     }
 
@@ -8724,7 +8857,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("API".to_string(), "k".to_string());
         handle
-            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .apply_wire(WireCommand::PersistGlobalEnv { env, version: None })
             .await
             .expect("save");
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
@@ -8760,7 +8893,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("API".to_string(), "k".to_string());
         handle
-            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .apply_wire(WireCommand::PersistGlobalEnv { env, version: None })
             .await
             .expect("the command adopts the file and applies");
         let after = handle.read_raw_config().await.expect("read").content;
@@ -8809,7 +8942,7 @@ mod tests {
         let env = || {
             let mut env = std::collections::BTreeMap::new();
             env.insert("API".to_string(), "k".to_string());
-            WireCommand::PersistGlobalEnv { env }
+            WireCommand::PersistGlobalEnv { env, version: None }
         };
         let refused = handle.apply_wire(env()).await;
         let message = refused.expect_err("a file dux server refuses is not adopted");

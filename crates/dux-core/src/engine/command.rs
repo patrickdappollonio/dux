@@ -266,6 +266,12 @@ pub enum Command {
     /// model; a multi-writer setup would need read-modify-merge.
     UpdateMacros { macros: crate::config::MacrosConfig },
 
+    /// A change to the macro list or the global environment a client asked
+    /// for, kept as what was asked rather than as the set it would produce,
+    /// so a change a config reload deferred runs against the config as it is
+    /// when it finally runs. See [`ConfigSetChange`].
+    ChangeConfigSet(ConfigSetChange),
+
     /// Point the changed-files watch at a session's worktree, or clear it with
     /// `None`. Keeps git off the engine actor thread: resolving the session,
     /// setting `watched_worktree` and `watched_session_id` and emptying the
@@ -424,6 +430,34 @@ fn discard_message(
     }
 }
 
+/// What a client asked of the macro list or the global environment.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigSetChange {
+    /// Replace the whole list; `read_at` is the
+    /// [`crate::wire::macros_version`] it was based on, refused with
+    /// [`crate::wire::StaleSet::Macros`] when the list has moved since.
+    ReplaceMacros {
+        macros: crate::config::MacrosConfig,
+        read_at: Option<String>,
+    },
+    /// Add one macro, or replace it in place; every other macro stays as it is.
+    SetMacro {
+        name: String,
+        entry: crate::config::MacroEntry,
+    },
+    /// Remove one macro; an unknown name is an error.
+    RemoveMacro { name: String },
+    /// Replace the whole table, with the same `read_at` rule.
+    ReplaceEnv {
+        env: std::collections::BTreeMap<String, String>,
+        read_at: Option<String>,
+    },
+    /// Set one variable; every other stays as it is.
+    SetEnvVar { name: String, value: String },
+    /// Remove one variable; an unknown name is an error.
+    RemoveEnvVar { name: String },
+}
+
 impl Engine {
     /// Single dispatch point for every engine-affecting operation, whether the
     /// `Command` came from a key event or off the wire. Returns an
@@ -434,6 +468,9 @@ impl Engine {
         // reader only asks whether anything happened this iteration. Counted at
         // the top so an early return cannot skip it.
         self.command_applies = self.command_applies.wrapping_add(1);
+        // Refused while a change another surface follows holds what this one
+        // would change. Checked only: a command has no record to hold with.
+        self.check_command(&command)?;
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands, so it re-applies against the fresh
         // config instead of racing it.
@@ -1193,6 +1230,8 @@ impl Engine {
 
             Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
+            Command::ChangeConfigSet(change) => self.apply_config_set_change(change),
+
             Command::UpdateMacros { macros } => {
                 // Keep and report, never roll back: the new macros go live so
                 // the ViewModel reflects them, and a failed write is reported as
@@ -1223,6 +1262,89 @@ impl Engine {
                 Ok(EventReaction::Nothing)
             }
         }
+    }
+
+    /// Resolve a [`ConfigSetChange`] against the config as it is now and save
+    /// the result through the whole-set command, so the write, its rollback
+    /// rules and its failure sentences are shared. A one-entry change answers
+    /// with a sentence about that entry instead of the count of the set.
+    fn apply_config_set_change(
+        &mut self,
+        change: ConfigSetChange,
+    ) -> anyhow::Result<EventReaction> {
+        use crate::wire::{StaleSet, global_env_version, macros_version};
+        let (save, done) = match change {
+            ConfigSetChange::ReplaceMacros { macros, read_at } => {
+                if read_at.is_some_and(|read| read != macros_version(&self.config.macros)) {
+                    return Err(StaleSet::Macros.into());
+                }
+                (Command::UpdateMacros { macros }, None)
+            }
+            ConfigSetChange::ReplaceEnv { env, read_at } => {
+                if read_at.is_some_and(|read| read != global_env_version(&self.config.env)) {
+                    return Err(StaleSet::GlobalEnv.into());
+                }
+                (Command::PersistGlobalEnv { env }, None)
+            }
+            ConfigSetChange::SetMacro { name, entry } => {
+                let mut macros = self.config.macros.clone();
+                match macros.entries.get_mut(&name) {
+                    Some(existing) => *existing = entry,
+                    None => {
+                        macros.entries.insert(name.clone(), entry);
+                    }
+                }
+                (
+                    Command::UpdateMacros { macros },
+                    Some(crate::status_text!["Saved macro ", q(name), "."]),
+                )
+            }
+            ConfigSetChange::RemoveMacro { name } => {
+                let mut macros = self.config.macros.clone();
+                if macros.entries.shift_remove(&name).is_none() {
+                    anyhow::bail!("unknown macro \"{name}\"");
+                }
+                (
+                    Command::UpdateMacros { macros },
+                    Some(crate::status_text!["Removed macro ", q(name), "."]),
+                )
+            }
+            ConfigSetChange::SetEnvVar { name, value } => {
+                let mut env = self.config.env.clone();
+                env.insert(name.clone(), value);
+                (
+                    Command::PersistGlobalEnv { env },
+                    Some(crate::status_text![
+                        "Saved global environment variable ",
+                        q(name),
+                        ". New agents and terminals receive it unless a project overrides it."
+                    ]),
+                )
+            }
+            ConfigSetChange::RemoveEnvVar { name } => {
+                let mut env = self.config.env.clone();
+                if env.remove(&name).is_none() {
+                    anyhow::bail!("unknown global environment variable \"{name}\"");
+                }
+                (
+                    Command::PersistGlobalEnv { env },
+                    Some(crate::status_text![
+                        "Removed global environment variable ",
+                        q(name),
+                        "."
+                    ]),
+                )
+            }
+        };
+        let reaction = self.apply(save)?;
+        Ok(match (done, reaction) {
+            (Some(done), EventReaction::Status(status))
+                if status.tone == crate::statusline::StatusTone::Info =>
+            {
+                EventReaction::Status(StatusUpdate::info(done))
+            }
+            (_, reaction) => reaction,
+        })
     }
 
     fn dispatch_pull(
@@ -1340,6 +1462,27 @@ impl Engine {
                     "An agent in ",
                     q(project_name),
                     " is still being removed. Try again in a moment."
+                ],
+            )));
+        }
+        // Removing the project removes its agents' records, so an agent still
+        // coming up in it would come up with no record behind it.
+        if self.project_has_launching_tab(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(
+                crate::status_text![
+                    "Cannot remove project ",
+                    q(project_name),
+                    " while an agent tab is still launching. Wait a moment, then try again."
+                ],
+            )));
+        }
+        if self.project_has_create_in_flight(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(
+                crate::status_text![
+                    "Cannot remove project ",
+                    q(project_name),
+                    " while an agent is being created in it. \
+                 Wait for the create to finish, then try again."
                 ],
             )));
         }
@@ -2186,6 +2329,107 @@ mod tests {
             vec!["p2"],
             "only the removed project is gone",
         );
+    }
+
+    #[test]
+    fn removing_a_project_is_refused_while_one_of_its_agents_launches_or_is_being_created() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let try_remove = |engine: &mut Engine| {
+            engine.apply(Command::RemoveProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+        };
+        let remove = |engine: &mut Engine| try_remove(engine).expect("the command answers");
+        let still_there = |engine: &Engine| {
+            engine.projects.iter().any(|p| p.id == "p1")
+                && engine.sessions.iter().any(|s| s.id == "s1")
+        };
+
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+        let reaction = remove(&mut engine);
+        let EventReaction::Status(status) = reaction else {
+            panic!("a refusal status")
+        };
+        assert_eq!(status.tone, StatusTone::Error);
+        assert!(status.message.contains("launching"), "{}", status.message);
+        assert!(still_there(&engine));
+        engine.clear_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+
+        engine.note_create_started("op-c", Some("p1"));
+        let reaction = remove(&mut engine);
+        let EventReaction::Status(status) = reaction else {
+            panic!("a refusal status")
+        };
+        assert_eq!(status.tone, StatusTone::Error);
+        assert!(
+            status.message.contains("being created"),
+            "{}",
+            status.message
+        );
+        assert!(still_there(&engine));
+
+        // With a followed create behind it, the refusal names that operation.
+        let policy = crate::operations::OperationPolicy {
+            unknown_after: std::time::Duration::from_secs(60),
+            retention: std::time::Duration::from_secs(60),
+        };
+        engine.operations.open(
+            "op-c",
+            crate::operations::OperationKind::AgentCreate,
+            policy,
+            std::time::Instant::now(),
+        );
+        engine
+            .operations
+            .admit(
+                Some("op-c"),
+                &[],
+                &[crate::operations::Hold::shared(InFlightKey::Project(
+                    "p1".to_string(),
+                ))],
+            )
+            .unwrap();
+        let Err(refused) = try_remove(&mut engine) else {
+            panic!("refused")
+        };
+        assert!(refused.to_string().contains("op-c"), "{refused}");
+        engine.note_create_finished("op-c");
+        engine.operations.finish(
+            "op-c",
+            StatusTone::Info,
+            "",
+            None,
+            std::time::Instant::now(),
+        );
+
+        // And a followed start of the launching tab.
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+        engine.operations.open(
+            "op-start",
+            crate::operations::OperationKind::AgentStart,
+            policy,
+            std::time::Instant::now(),
+        );
+        engine
+            .operations
+            .admit(
+                Some("op-start"),
+                &[],
+                &[crate::operations::Hold::exclusive(InFlightKey::Agent(
+                    "s1".to_string(),
+                ))],
+            )
+            .unwrap();
+        let Err(refused) = try_remove(&mut engine) else {
+            panic!("refused")
+        };
+        assert!(refused.to_string().contains("op-start"), "{refused}");
+        assert!(still_there(&engine));
     }
 
     #[test]

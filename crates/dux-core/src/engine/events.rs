@@ -7998,6 +7998,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         engine.sessions.push(sample_session("s2", "p1", "feat2"));
+        engine.open_operation("op-1", crate::operations::OperationKind::AgentCreate);
 
         // Recording an op→session pair makes it resolvable by op id.
         engine.record_created_session("op-1".to_string(), "s1".to_string());
@@ -8005,6 +8006,15 @@ mod tests {
             engine.created_session_for_op("op-1"),
             Some("s1".to_string())
         );
+        // A followed create holds the agent it made until its record finishes.
+        let refused = engine
+            .apply_wire(crate::wire::WireCommand::DeleteSession {
+                session_id: "s1".to_string(),
+                delete_worktree: false,
+                delete_branch: None,
+            })
+            .expect_err("the create still holds its agent");
+        assert!(refused.to_string().contains("op-1"), "{refused}");
         assert_eq!(engine.created_session_for_op("missing"), None);
 
         // An entry whose session no longer exists is pruned on the next insert,

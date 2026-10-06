@@ -54,11 +54,27 @@
 //! | `DELETE /sessions/{id}/tabs/{tab}` | inside the call |
 //! | `POST /sessions/{id}/tabs/{tab}/start` | inside the call when the tab already runs, else its launch report |
 //! | `POST` and `DELETE` on the three terminal addresses | inside the call |
+//! | `PUT` and `DELETE` on `/macros/{name}` and `/global-env/{name}` | inside the call |
 //!
 //! A record still running past its policy's `unknown_after` reads as
 //! [`OperationState::Unknown`] but stays open, and finishes with the real
 //! outcome whenever the work ends. Nothing here ever finishes a record on a
 //! timer.
+//!
+//! # Admission
+//!
+//! A route opens a record for every change it covers, whether or not the
+//! client asked to follow it (`Engine::apply_wire_recorded` when it did not,
+//! which leaves the statuses and the answer exactly as they were).
+//!
+//! An open record also holds the admission keys of what its change is
+//! changing ([`Operations::admit`], decided by `crate::engine::admission`),
+//! so a second change to the same thing is refused with an [`InTheWay`]
+//! naming this record, for exactly as long as the record runs. Finishing the
+//! record is what releases them; there is no other release to forget. An
+//! agent delete also keeps the agent as it looked when the delete started
+//! ([`Operations::removing_agents`]), so a client's list can still show it,
+//! as being removed, after it has left the workspace.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -94,6 +110,111 @@ pub enum OperationKind {
     TerminalCreate,
     #[serde(rename = "terminal.close")]
     TerminalClose,
+    #[serde(rename = "macro.set")]
+    MacroSet,
+    #[serde(rename = "macro.remove")]
+    MacroRemove,
+    #[serde(rename = "env.set")]
+    EnvSet,
+    #[serde(rename = "env.remove")]
+    EnvRemove,
+}
+
+impl OperationKind {
+    /// What dux is doing while a record of this kind runs, as a refusal names
+    /// it: "dux is still {this}".
+    pub fn running_phrase(self) -> &'static str {
+        match self {
+            Self::ProjectAdd => "adding a project",
+            Self::ProjectRemove => "removing a project",
+            Self::AgentCreate => "creating an agent",
+            Self::AgentDelete => "deleting an agent",
+            Self::AgentStop => "stopping an agent",
+            Self::AgentStart => "starting an agent",
+            Self::TabCreate => "opening a tab",
+            Self::TabClose => "closing a tab",
+            Self::TabStart => "starting a tab",
+            Self::TerminalCreate => "opening a terminal",
+            Self::TerminalClose => "closing a terminal",
+            Self::MacroSet => "saving a macro",
+            Self::MacroRemove => "removing a macro",
+            Self::EnvSet => "saving a global environment variable",
+            Self::EnvRemove => "removing a global environment variable",
+        }
+    }
+}
+
+/// How a record holds an admission key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldMode {
+    /// Nothing else may change the thing while this is held.
+    Exclusive,
+    /// Other shared holds may sit beside this one; an exclusive one may not.
+    /// An agent create holds its project this way, so two creates in one
+    /// project never refuse each other while a project removal waits for both.
+    Shared,
+}
+
+/// One admission key and how it is held or wanted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hold {
+    pub key: crate::engine::InFlightKey,
+    pub mode: HoldMode,
+}
+
+impl Hold {
+    pub fn exclusive(key: crate::engine::InFlightKey) -> Self {
+        Self {
+            key,
+            mode: HoldMode::Exclusive,
+        }
+    }
+
+    pub fn shared(key: crate::engine::InFlightKey) -> Self {
+        Self {
+            key,
+            mode: HoldMode::Shared,
+        }
+    }
+
+    fn conflicts_with(&self, other: &Hold) -> bool {
+        self.key == other.key
+            && (self.mode == HoldMode::Exclusive || other.mode == HoldMode::Exclusive)
+    }
+}
+
+/// A change refused because an operation still running holds what it wants.
+/// Its sentence names that operation and its id, which a client can follow at
+/// `GET /api/v1/operations/{id}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InTheWay {
+    pub id: String,
+    pub kind: OperationKind,
+}
+
+/// How every [`InTheWay`] sentence starts, so a route can tell this refusal
+/// from the others an engine error carries (see [`is_in_the_way`]).
+const IN_THE_WAY_LEAD: &str = "Another change is still running here";
+
+impl std::fmt::Display for InTheWay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{IN_THE_WAY_LEAD}: dux is still {} (operation {}), so it did not start this one. \
+             Try again once that operation finishes.",
+            self.kind.running_phrase(),
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for InTheWay {}
+
+/// Whether an engine error's text is an [`InTheWay`] refusal. The engine
+/// actor hands errors to the routes as text, so this is how a route answers
+/// `409` for it rather than the `400` an invalid request gets.
+pub fn is_in_the_way(message: &str) -> bool {
+    message.starts_with(IN_THE_WAY_LEAD)
 }
 
 /// Where a record stands.
@@ -291,6 +412,13 @@ struct Record {
     awaiting: Option<String>,
     notes: OperationNotes,
     end: Option<End>,
+    /// The admission keys this record holds. Read only while `end` is `None`,
+    /// so finishing the record is what releases them.
+    holds: Vec<Hold>,
+    /// The agent an agent delete is removing, as it looked when the delete
+    /// started: the agent leaves the workspace at once, and this is how a
+    /// client's list still shows it, as being removed, while the record runs.
+    removing: Option<Box<crate::viewmodel::SessionView>>,
 }
 
 #[derive(Default)]
@@ -357,9 +485,109 @@ impl Operations {
                     awaiting: Some(id.to_string()),
                     notes: OperationNotes::default(),
                     end: None,
+                    holds: Vec::new(),
+                    removing: None,
                 },
             );
         });
+    }
+
+    /// Admit a change that wants `wants`: refused, naming the operation in the
+    /// way, when another open record holds any of them in a conflicting mode;
+    /// otherwise `takes` joins the holds of `record` (the change's own record,
+    /// when it has one), all under one lock, so two changes cannot both be
+    /// admitted to the same thing. A change with no record of its own passes
+    /// `None` and holds nothing past its call.
+    ///
+    /// When several records are in the way, the one that started first is
+    /// named.
+    pub fn admit(
+        &self,
+        record: Option<&str>,
+        wants: &[Hold],
+        takes: &[Hold],
+    ) -> Result<(), InTheWay> {
+        self.with(|registry| {
+            let blocker = registry
+                .records
+                .iter()
+                .filter(|(id, held)| held.end.is_none() && Some(id.as_str()) != record)
+                .filter(|(_, held)| {
+                    held.holds
+                        .iter()
+                        .any(|hold| wants.iter().any(|want| want.conflicts_with(hold)))
+                })
+                .min_by_key(|(_, held)| held.started);
+            if let Some((id, held)) = blocker {
+                return Err(InTheWay {
+                    id: id.clone(),
+                    kind: held.kind,
+                });
+            }
+            if let Some(own) = record.and_then(|id| registry.records.get_mut(id))
+                && own.end.is_none()
+            {
+                own.holds.extend_from_slice(takes);
+            }
+            Ok(())
+        })
+    }
+
+    /// Add `hold` to the records waiting on `key`, or to the record whose id it
+    /// is: a change that made a thing holds it from then on, as
+    /// [`Self::note`] records that it made it.
+    pub fn hold(&self, key: &str, hold: Hold) {
+        self.with(|registry| {
+            for (id, record) in registry.records.iter_mut() {
+                if record.end.is_none()
+                    && (id.as_str() == key || record.awaiting.as_deref() == Some(key))
+                    && !record.holds.contains(&hold)
+                {
+                    record.holds.push(hold.clone());
+                }
+            }
+        });
+    }
+
+    /// Keep `view` on record `id` as the agent it is removing.
+    pub fn set_removing(&self, id: &str, view: crate::viewmodel::SessionView) {
+        self.with(|registry| {
+            if let Some(record) = registry.records.get_mut(id) {
+                record.removing = Some(Box::new(view));
+            }
+        });
+    }
+
+    /// The agents an open record is still removing, oldest change first.
+    pub fn removing_agents(&self) -> Vec<crate::viewmodel::SessionView> {
+        self.with(|registry| {
+            let mut open: Vec<&Record> = registry
+                .records
+                .values()
+                .filter(|record| record.end.is_none() && record.removing.is_some())
+                .collect();
+            open.sort_by_key(|record| record.started);
+            open.into_iter()
+                .filter_map(|record| record.removing.as_deref().cloned())
+                .collect()
+        })
+    }
+
+    /// The open record holding `key` in any mode, if one does.
+    pub fn holder_of(&self, key: &crate::engine::InFlightKey) -> Option<InTheWay> {
+        self.with(|registry| {
+            registry
+                .records
+                .iter()
+                .filter(|(_, record)| {
+                    record.end.is_none() && record.holds.iter().any(|hold| &hold.key == key)
+                })
+                .min_by_key(|(_, record)| record.started)
+                .map(|(id, record)| InTheWay {
+                    id: id.clone(),
+                    kind: record.kind,
+                })
+        })
     }
 
     /// Forget a record whose change was refused before it started.
@@ -587,6 +815,16 @@ impl IdSnapshot {
     }
 }
 
+/// How [`crate::engine::Engine::settle_operation`] may treat a record: take
+/// the key its change minted as the record's id (`may_rekey`, only before
+/// anybody was told the id), and put the record's id on a final that had no
+/// key (`stamp_key`, only when the client asked to follow it).
+#[derive(Clone, Copy)]
+struct Settle {
+    may_rekey: bool,
+    stamp_key: bool,
+}
+
 /// The key a dispatched command's work is still running under, if it is: the
 /// create op it minted, or the key of the busy it answered with.
 fn running_key(outcome: &crate::wire::WireCommandOutcome) -> Option<String> {
@@ -703,9 +941,36 @@ impl crate::engine::Engine {
         command: crate::wire::WireCommand,
         kind: OperationKind,
     ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
+        self.apply_wire_followed(command, kind, true)
+    }
+
+    /// [`Self::apply_wire_operation`] for a change nobody asked to follow: it
+    /// opens a record all the same, so what it changes is held for as long as
+    /// it runs, but the statuses it raises are left exactly as they would be
+    /// without one (no record id is put on a final that had no key), so the
+    /// answer and the events a client sees do not change.
+    pub fn apply_wire_recorded(
+        &mut self,
+        command: crate::wire::WireCommand,
+        kind: OperationKind,
+    ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
+        self.apply_wire_followed(command, kind, false)
+    }
+
+    fn apply_wire_followed(
+        &mut self,
+        command: crate::wire::WireCommand,
+        kind: OperationKind,
+        stamp_key: bool,
+    ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
         let now = Instant::now();
         let provisional = mint_operation_id();
         self.open_operation(&provisional, kind);
+        if let crate::wire::WireCommand::DeleteSession { session_id, .. } = &command
+            && let Some(view) = self.session_view(session_id)
+        {
+            self.operations.set_removing(&provisional, view);
+        }
         let before = IdSnapshot::of(self);
         self.operation_in_dispatch = Some(provisional.clone());
         let result = self.apply_wire(command);
@@ -734,7 +999,10 @@ impl crate::engine::Engine {
                 running_key(&outcome),
                 outcome.status.as_mut(),
                 settled.as_ref(),
-                true,
+                Settle {
+                    may_rekey: true,
+                    stamp_key,
+                },
                 now,
             )
         };
@@ -774,7 +1042,17 @@ impl crate::engine::Engine {
                     .and_then(|s| s.key.clone());
                 // The client already holds the id, so a key the run mints is
                 // waited on rather than taken as the id.
-                self.settle_operation(&id, running, status.as_mut(), settled.as_ref(), false, now);
+                self.settle_operation(
+                    &id,
+                    running,
+                    status.as_mut(),
+                    settled.as_ref(),
+                    Settle {
+                        may_rekey: false,
+                        stamp_key: true,
+                    },
+                    now,
+                );
             }
             Err(error) => {
                 self.operations
@@ -788,15 +1066,18 @@ impl crate::engine::Engine {
     /// `running` (a key minted for it alone becomes its id when `may_rekey`,
     /// any other key is waited on), ended at once by a final the change
     /// already reached (`settled`), or ended on the status it answered with,
-    /// which carries the record's id as its key when it had none. Answers the
-    /// record's id.
+    /// which carries the record's id as its key when it had none and
+    /// `stamp_key` asks for it. Answers the record's id.
     fn settle_operation(
         &self,
         provisional: &str,
         running: Option<String>,
         status: Option<&mut crate::wire::WireStatus>,
         settled: Option<&crate::wire::WireStatus>,
-        may_rekey: bool,
+        Settle {
+            may_rekey,
+            stamp_key,
+        }: Settle,
         now: Instant,
     ) -> String {
         match running {
@@ -822,7 +1103,7 @@ impl crate::engine::Engine {
             None => {
                 match status {
                     Some(status) => {
-                        if status.key.is_none() {
+                        if stamp_key && status.key.is_none() {
                             status.key = Some(provisional.to_string());
                         }
                         self.operations.finish(
@@ -1135,6 +1416,116 @@ mod tests {
     }
 
     #[test]
+    fn a_held_key_refuses_only_the_changes_it_conflicts_with() {
+        use crate::engine::InFlightKey;
+        let agent = |id: &str| InFlightKey::Agent(id.to_string());
+        let project = |id: &str| InFlightKey::Project(id.to_string());
+        let cases: Vec<(&str, Hold, Hold, bool)> = vec![
+            (
+                "the same agent, both exclusive",
+                Hold::exclusive(agent("s1")),
+                Hold::exclusive(agent("s1")),
+                true,
+            ),
+            (
+                "a change inside an agent another change holds",
+                Hold::exclusive(agent("s1")),
+                Hold::shared(agent("s1")),
+                true,
+            ),
+            (
+                "another agent",
+                Hold::exclusive(agent("s1")),
+                Hold::exclusive(agent("s2")),
+                false,
+            ),
+            (
+                "two creates in one project",
+                Hold::shared(project("p1")),
+                Hold::shared(project("p1")),
+                false,
+            ),
+            (
+                "a project removal while a create holds the project",
+                Hold::shared(project("p1")),
+                Hold::exclusive(project("p1")),
+                true,
+            ),
+            (
+                "the macro list",
+                Hold::exclusive(InFlightKey::MacroList),
+                Hold::exclusive(InFlightKey::MacroList),
+                true,
+            ),
+            (
+                "the macro list beside the environment",
+                Hold::exclusive(InFlightKey::MacroList),
+                Hold::exclusive(InFlightKey::GlobalEnv),
+                false,
+            ),
+        ];
+        for (name, held, wanted, refused) in cases {
+            let ops = Operations::default();
+            let t0 = Instant::now();
+            ops.open("op-1", OperationKind::AgentDelete, POLICY, t0);
+            ops.admit(Some("op-1"), &[], std::slice::from_ref(&held))
+                .expect("nothing else is running");
+            let answer = ops.admit(None, std::slice::from_ref(&wanted), &[]);
+            assert_eq!(answer.is_err(), refused, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_operation_in_the_way_until_it_finishes() {
+        use crate::engine::InFlightKey;
+        let ops = Operations::default();
+        let t0 = Instant::now();
+        let key = InFlightKey::Agent("s1".to_string());
+        ops.open("op-7", OperationKind::AgentDelete, POLICY, t0);
+        ops.admit(Some("op-7"), &[], &[Hold::exclusive(key.clone())])
+            .unwrap();
+
+        // A second change wanting the agent, from a record of its own.
+        ops.open("op-8", OperationKind::AgentStop, POLICY, t0);
+        let refusal = ops
+            .admit(Some("op-8"), &[Hold::exclusive(key.clone())], &[])
+            .expect_err("the delete holds the agent");
+        assert_eq!(refusal.id, "op-7");
+        let sentence = refusal.to_string();
+        assert!(sentence.contains("op-7"), "{sentence}");
+        assert!(sentence.contains("deleting an agent"), "{sentence}");
+
+        ops.finish("op-7", StatusTone::Info, "Deleted.", None, t0);
+        assert!(
+            ops.admit(None, &[Hold::exclusive(key)], &[]).is_ok(),
+            "a finished record holds nothing"
+        );
+    }
+
+    #[test]
+    fn a_hold_given_by_key_reaches_the_record_waiting_on_it() {
+        use crate::engine::InFlightKey;
+        let ops = Operations::default();
+        let t0 = Instant::now();
+        ops.open("op-lookup", OperationKind::AgentCreate, POLICY, t0);
+        ops.hand_off("op-lookup", "op-create");
+
+        ops.hold(
+            "op-create",
+            Hold::exclusive(InFlightKey::Agent("s9".to_string())),
+        );
+
+        let refusal = ops
+            .admit(
+                None,
+                &[Hold::exclusive(InFlightKey::Agent("s9".to_string()))],
+                &[],
+            )
+            .expect_err("the create holds the agent it made");
+        assert_eq!(refusal.id, "op-lookup");
+    }
+
+    #[test]
     fn a_record_finishes_once() {
         let ops = Operations::default();
         let t0 = Instant::now();
@@ -1312,6 +1703,16 @@ mod tests {
             let running = engine.operations.view(&id, Instant::now()).unwrap();
             assert_eq!(running.state, OperationState::Running);
             assert_eq!(running.removed, vec!["s1".to_string()]);
+            // Gone from the agents at once, and listed as being removed for as
+            // long as the record runs.
+            assert!(engine.sessions.iter().all(|s| s.id != "s1"));
+            let removing: Vec<String> = engine
+                .operations
+                .removing_agents()
+                .into_iter()
+                .map(|view| view.id)
+                .collect();
+            assert_eq!(removing, vec!["s1".to_string()]);
 
             let _ =
                 engine.drive_delete_followup(&crate::engine::EventReaction::WorktreeRemoveFailed {
@@ -1335,6 +1736,18 @@ mod tests {
                         reason: None,
                     },
                 ]
+            );
+
+            engine.operations.finish_by_key(
+                &id,
+                StatusTone::Error,
+                "not a working tree",
+                None,
+                Instant::now(),
+            );
+            assert!(
+                engine.operations.removing_agents().is_empty(),
+                "a finished delete is no longer removing anything"
             );
         }
     }

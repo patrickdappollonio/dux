@@ -12,6 +12,11 @@
 //!   on the owner. Moving terminals to a flat collection changed what the BROWSER
 //!   receives and deliberately not these, so they re-nest each owner's terminals
 //!   through [`SessionWithTerminals`] and [`ProjectWithTerminals`].
+//! - `GET /api/v1/sessions` also lists, after the live agents, each agent a
+//!   followed delete is still removing, as it looked when the delete started,
+//!   with `"removing": true` and no terminals, until the delete's operation
+//!   record finishes. The workspace document never does: the agent left it when
+//!   the delete started.
 //!
 //! A nested terminal entry carries a tagged `owner` field. That is additive and it
 //! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
@@ -52,11 +57,20 @@ pub struct SessionWithTerminals {
     #[serde(flatten)]
     session: SessionView,
     terminals: Vec<TerminalView>,
+    /// Set only on `GET /api/v1/sessions`, for an agent whose delete is still
+    /// running: it has left the workspace, and stays listed, marked, until the
+    /// delete's operation record finishes. Absent on every other row.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    removing: bool,
 }
 
 impl SessionWithTerminals {
     pub fn new(session: SessionView, terminals: Vec<TerminalView>) -> Self {
-        Self { session, terminals }
+        Self {
+            session,
+            terminals,
+            removing: false,
+        }
     }
 }
 
@@ -168,6 +182,22 @@ async fn get_sessions(State(state): State<AppState>) -> Response {
                     SessionWithTerminals::new(session, terminals)
                 })
                 .collect();
+            // The agents a delete is still removing, after the live ones. An
+            // agent that is somehow still live is listed once, as live.
+            let removing: Vec<SessionWithTerminals> = state
+                .engine
+                .operations()
+                .removing_agents()
+                .into_iter()
+                .filter(|gone| !sessions.iter().any(|live| live.session.id == gone.id))
+                .map(|session| SessionWithTerminals {
+                    session,
+                    terminals: Vec::new(),
+                    removing: true,
+                })
+                .collect();
+            let mut sessions = sessions;
+            sessions.extend(removing);
             Json(sessions).into_response()
         }
         None => engine_unavailable(),
@@ -188,5 +218,66 @@ async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> R
         }
         Some(None) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
         None => engine_unavailable(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use dux_core::operations::OperationKind;
+    use dux_core::statusline::StatusTone;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn get_json(app: &Router, uri: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// An agent whose delete is still removing its worktree has already left
+    /// the workspace. The thin list a script reads still names it, marked as
+    /// being removed, until the delete's record finishes; the document the
+    /// browser reads does not.
+    #[tokio::test]
+    async fn an_agent_still_being_removed_is_listed_as_removing_on_the_thin_read_only() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("gone"));
+        let view = engine.session_view("gone").expect("a view of the agent");
+        engine.sessions.clear();
+        engine.open_operation("op-d", OperationKind::AgentDelete);
+        engine.operations.set_removing("op-d", view);
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle.clone());
+
+        let listed = get_json(&app, "/api/v1/sessions").await;
+        let rows = listed.as_array().expect("an array");
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["id"], "gone");
+        assert_eq!(rows[0]["removing"], true);
+        assert_eq!(rows[0]["terminals"], serde_json::json!([]));
+
+        let document = get_json(&app, "/api/v1/workspace").await;
+        assert_eq!(document["sessions"], serde_json::json!([]), "{document}");
+
+        handle
+            .operations()
+            .finish("op-d", StatusTone::Info, "Deleted.", None, Instant::now());
+        let listed = get_json(&app, "/api/v1/sessions").await;
+        assert_eq!(listed, serde_json::json!([]));
     }
 }

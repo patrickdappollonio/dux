@@ -33,7 +33,7 @@ import { discardConfirmation, discardOutcome } from "./discardOutcome"
 import { terminalsApi } from "./terminalsApi"
 import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
-import { ConfigChangedError, configApi } from "./configApi"
+import { ConfigChangedError, SetChangedError, configApi } from "./configApi"
 import { setConnectionId } from "./connection"
 import {
   fetchServerIdentity,
@@ -417,6 +417,20 @@ export interface DuxState {
   // every discard (it's destructive); the web mirrors that.
   discardTarget: DiscardTarget | null
   globalEnvOpen: boolean
+  // The global environment dialog's stale-save state, the macro editor's
+  // shape: the `global_env_version` the open dialog read, the edit a refused
+  // save brought back (null: seed from the bootstrap), the server's sentence
+  // while a refusal is on screen, and a counter that remounts the form when
+  // its seed changes.
+  globalEnvVersion: string | null
+  globalEnvDraft: Record<string, string> | null
+  globalEnvConflict: string | null
+  globalEnvEpoch: number
+  // Which opening of the dialog is on screen, so a refusal that answers after
+  // the dialog was opened again leaves that newer edit alone; the refused
+  // table is kept here instead.
+  globalEnvSession: number
+  globalEnvRejected: Record<string, string> | null
   projectSettingsTarget: string | null
   // The agent (session) whose startup-command / project-env editor is open, or
   // null. Both edit the agent's PROJECT (env and startup command are
@@ -624,6 +638,19 @@ export interface DuxState {
   // there is no set-state-in-effect. Empty draft when closed.
   macrosDialogOpen: boolean
   macrosDraft: MacroView[]
+  // The `macros_version` the draft was read at, sent back with every save so
+  // a list that changed since (a `dux macros add`, another browser) is refused
+  // rather than overwritten. Moves on with each save this dialog makes.
+  macrosDraftVersion: string | null
+  // The server's sentence while a refused save's notice is on screen.
+  macrosConflict: string | null
+  // Bumped whenever the draft is reseeded under an open dialog, so the editor
+  // remounts with it.
+  macrosDraftEpoch: number
+  // Which opening of the editor is on screen, as `globalEnvSession` is, and
+  // the edits of an earlier save refused under a newer one.
+  macrosEditSession: number
+  macrosRejected: MacroView[] | null
   // Which screen the mobile shell is showing. DERIVED from the route, never kept
   // independently of it: no focused target is home, a focused target is the
   // terminal screen, and the changes screen is a `/changes` suffix on the
@@ -980,6 +1007,12 @@ let state: DuxState = {
   startedDormantTabs: [],
   discardTarget: null,
   globalEnvOpen: false,
+  globalEnvVersion: null,
+  globalEnvDraft: null,
+  globalEnvConflict: null,
+  globalEnvEpoch: 0,
+  globalEnvSession: 0,
+  globalEnvRejected: null,
   projectSettingsTarget: null,
   agentStartupCommandTarget: null,
   agentEnvTarget: null,
@@ -1037,6 +1070,11 @@ let state: DuxState = {
   firstLoadDismissed: false,
   macrosDialogOpen: false,
   macrosDraft: [],
+  macrosDraftVersion: null,
+  macrosConflict: null,
+  macrosDraftEpoch: 0,
+  macrosEditSession: 0,
+  macrosRejected: null,
   mobileScreen: "home",
   routeNotFound: null,
   pendingAgentOrder: null,
@@ -1612,6 +1650,17 @@ function loadBootstrap(): void {
       // first boot that stays empty) is visible in the console rather than silent.
       console.warn("[dux] bootstrap fetch failed; will retry on reconnect", err)
     })
+}
+
+// Fetch the bootstrap document now and fold it in, under the same newest-wins
+// rule as `loadBootstrap`, answering the document itself for a caller that
+// reseeds from it. Unlike `loadBootstrap`, a failure reaches the caller.
+function refetchBootstrap(): Promise<Bootstrap> {
+  const seq = ++loadBootstrapSeq
+  return fetchBootstrap().then((b) => {
+    if (seq === loadBootstrapSeq) applyBootstrap(b)
+    return b
+  })
 }
 
 function reconcileConfirmedOverride<T>(
@@ -4514,21 +4563,74 @@ export function reconnectSession(sessionId: string, force: boolean): void {
 }
 
 export function openGlobalEnv(): void {
-  setState({ globalEnvOpen: true })
+  setState({
+    globalEnvOpen: true,
+    globalEnvVersion: state.bootstrap?.global_env_version ?? null,
+    globalEnvDraft: null,
+    globalEnvConflict: null,
+    globalEnvRejected: null,
+    globalEnvSession: state.globalEnvSession + 1,
+  })
 }
 
 export function closeGlobalEnv(): void {
-  setState({ globalEnvOpen: false })
+  setState({ globalEnvOpen: false, globalEnvDraft: null, globalEnvConflict: null })
 }
 
+// The dialog closes as it saves. A save the server refuses because the table
+// changed since the dialog read it brings the dialog back with these edits
+// and the refusal on it, so nothing typed is lost.
 export function saveGlobalEnv(env: Record<string, string>): void {
-  configApi
-    .persistGlobalEnv(env)
-    .catch((e) =>
-      notifyError(
-        e instanceof Error ? e.message : "Could not save the global environment.",
-      ),
+  const version = state.globalEnvVersion
+  const session = state.globalEnvSession
+  configApi.persistGlobalEnv(env, version ?? undefined).catch((e) => {
+    if (e instanceof SetChangedError) {
+      if (state.globalEnvOpen && state.globalEnvSession !== session) {
+        // The dialog was opened again since: leave that edit as it is.
+        setState({
+          globalEnvRejected: env,
+          globalEnvConflict: earlierSaveRefused("global environment"),
+        })
+        return
+      }
+      setState({
+        globalEnvOpen: true,
+        globalEnvVersion: version,
+        globalEnvDraft: env,
+        globalEnvConflict: e.message,
+        globalEnvEpoch: state.globalEnvEpoch + 1,
+        globalEnvSession: state.globalEnvSession + 1,
+      })
+      return
+    }
+    notifyError(
+      e instanceof Error ? e.message : "Could not save the global environment.",
     )
+  })
+}
+
+/// Drop the refused edits and reseed the dialog from the server's table as
+/// it is now.
+export function reloadGlobalEnvDraft(): Promise<void> {
+  return refetchBootstrap()
+    .then((b) =>
+      setState({
+        globalEnvVersion: b.global_env_version ?? null,
+        globalEnvDraft: null,
+        globalEnvConflict: null,
+        globalEnvRejected: null,
+        globalEnvEpoch: state.globalEnvEpoch + 1,
+      }),
+    )
+    .catch(() =>
+      notifyError("Could not reload the global environment. Try again in a moment."),
+    )
+}
+
+/// Close the refusal and keep the edits; the next save still meets the
+/// changed table until the dialog reloads it.
+export function dismissGlobalEnvConflict(): void {
+  setState({ globalEnvConflict: null })
 }
 
 export function openProjectSettings(projectId: string): void {
@@ -5782,18 +5884,53 @@ export function openMacrosDialog(): void {
   setState({
     macrosDialogOpen: true,
     macrosDraft: macros.map((m) => ({ ...m })),
+    macrosDraftVersion: state.bootstrap?.macros_version ?? null,
+    macrosConflict: null,
+    macrosRejected: null,
+    macrosEditSession: state.macrosEditSession + 1,
   })
 }
 
 export function closeMacrosDialog(): void {
-  setState({ macrosDialogOpen: false, macrosDraft: [] })
+  setState({ macrosDialogOpen: false, macrosDraft: [], macrosConflict: null })
+}
+
+/// The notice for a whole-set save refused after its dialog was opened again:
+/// the edit on screen is a newer one, so the refused edits are kept aside
+/// rather than put back over it.
+function earlierSaveRefused(what: string): string {
+  return `An earlier save of the ${what} was not written: it changed after that save's dialog read it. What you are editing now is untouched. Reload to see the change.`
+}
+
+/// Drop the refused edits and reseed the editor from the server's list as it
+/// is now.
+export function reloadMacrosDraft(): Promise<void> {
+  return refetchBootstrap()
+    .then((b) =>
+      setState({
+        macrosDraft: b.macros.map((m) => ({ ...m })),
+        macrosDraftVersion: b.macros_version ?? null,
+        macrosConflict: null,
+        macrosRejected: null,
+        macrosDraftEpoch: state.macrosDraftEpoch + 1,
+      }),
+    )
+    .catch(() => notifyError("Could not reload the macros. Try again in a moment."))
+}
+
+/// Close the refusal and keep the edits; the next save still meets the
+/// changed list until the editor reloads it.
+export function dismissMacrosConflict(): void {
+  setState({ macrosConflict: null })
 }
 
 // Persist the draft wholesale via `update_macros`. The server validates
 // (empty/duplicate names, empty text, unknown surface) and reports the outcome
 // on the status lane; a config reload emits `config.changed`, refetching
 // `bootstrap.macros`. The dialog closes optimistically; a rejection surfaces as
-// an error toast, and reopening re-seeds from the (unchanged) bootstrap.
+// an error toast, and reopening re-seeds from the (unchanged) bootstrap. A
+// save refused because the list changed since the dialog read it brings the
+// dialog back with these edits and the refusal on it instead.
 export function saveMacros(macros: MacroView[]): void {
   // `update_macros` is a WHOLESALE replace of the entire `[macros]` map. Before
   // the bootstrap document has loaded, `openMacrosDialog` seeded an EMPTY draft,
@@ -5803,11 +5940,30 @@ export function saveMacros(macros: MacroView[]): void {
     notifyError("Macros aren't loaded yet. Try again in a moment.")
     return
   }
-  configApi
-    .updateMacros(macros)
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not save the macros."),
-    )
+  const version = state.macrosDraftVersion
+  const session = state.macrosEditSession
+  configApi.updateMacros(macros, version ?? undefined).catch((e) => {
+    if (e instanceof SetChangedError) {
+      if (state.macrosDialogOpen && state.macrosEditSession !== session) {
+        // The editor was opened again since: leave that edit as it is.
+        setState({
+          macrosRejected: macros.map((m) => ({ ...m })),
+          macrosConflict: earlierSaveRefused("macro list"),
+        })
+        return
+      }
+      setState({
+        macrosDialogOpen: true,
+        macrosDraft: macros.map((m) => ({ ...m })),
+        macrosDraftVersion: version,
+        macrosConflict: e.message,
+        macrosDraftEpoch: state.macrosDraftEpoch + 1,
+        macrosEditSession: state.macrosEditSession + 1,
+      })
+      return
+    }
+    notifyError(e instanceof Error ? e.message : "Could not save the macros.")
+  })
   closeMacrosDialog()
 }
 
@@ -5822,10 +5978,24 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
     notifyError("Macros aren't loaded yet. Try again in a moment.")
     return Promise.resolve(false)
   }
+  const session = state.macrosEditSession
   return configApi
-    .updateMacros(macros)
-    .then(() => true)
+    .updateMacros(macros, state.macrosDraftVersion ?? undefined)
+    .then((version) => {
+      // This dialog's own save moved the list on; its next save is based on
+      // it, unless the editor has been opened again since.
+      if (state.macrosEditSession === session) {
+        setState({ macrosDraftVersion: version ?? null })
+      }
+      return true
+    })
     .catch((e) => {
+      if (e instanceof SetChangedError) {
+        if (state.macrosEditSession === session) {
+          setState({ macrosConflict: e.message })
+        }
+        return false
+      }
       notifyError(
         e instanceof Error ? e.message : "Could not reorder the macros.",
       )

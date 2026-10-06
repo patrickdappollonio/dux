@@ -1348,6 +1348,14 @@ impl App {
     /// picker's single-provider skip and its Apply branch, so the status copy and
     /// focus behavior cannot drift between them.
     fn spawn_tab_with_provider(&mut self, session_id: &str, provider: ProviderKind) {
+        let owner = TerminalOwner::Session(session_id.to_string());
+        if let Err(in_the_way) = self
+            .engine
+            .check_admission(&self.engine.inside_admission(&owner))
+        {
+            self.set_error(in_the_way.to_string());
+            return;
+        }
         let pty_size = self.pty_size_for_launch();
         match self.engine.create_tab(session_id, provider, pty_size) {
             Ok(tab_id) => {
@@ -1539,6 +1547,22 @@ impl App {
         // either. See `launch_claims_its_pty`.
         let tab_id = super::pty_ownership::launch_claims_its_pty(&request.kind)
             .then(|| request.tab_id.clone());
+        // A start somebody asked for here is refused while another surface's
+        // change holds the tab or its agent. The startup sweep and a create's
+        // own launch are not starts of something that already exists.
+        if matches!(
+            request.kind,
+            AgentLaunchKind::Reconnect { .. }
+                | AgentLaunchKind::ForceReconnect { .. }
+                | AgentLaunchKind::Tab { .. }
+        ) && let Err(in_the_way) = self.engine.check_admission(
+            &self
+                .engine
+                .tab_admission(&request.session.id, request.tab_id.clone()),
+        ) {
+            self.set_error(in_the_way.to_string());
+            return false;
+        }
         let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         }) {
@@ -1629,6 +1653,14 @@ impl App {
         // identity label, and the monotonic `sort_order` stamp are single-sourced
         // with the web. A hand-rolled insert misses the identity label and makes
         // the default drag order nondeterministic (HashMap iteration order).
+        if let Err(in_the_way) = self.engine.check_admission(
+            &self
+                .engine
+                .inside_admission(&TerminalOwner::Session(session.id.clone())),
+        ) {
+            self.set_error(in_the_way.to_string());
+            return Ok(());
+        }
         let (rows, cols) = self.pty_size_for_launch();
         let terminal_id = match self
             .engine
@@ -1659,6 +1691,14 @@ impl App {
         }
         // Shared core creator (see `show_companion_terminal`): single-sources the
         // id, the "Terminal N" label, and the deterministic `sort_order`.
+        if let Err(in_the_way) = self.engine.check_admission(
+            &self
+                .engine
+                .inside_admission(&TerminalOwner::Project(project.id.clone())),
+        ) {
+            self.set_error(in_the_way.to_string());
+            return Ok(());
+        }
         let (rows, cols) = self.pty_size_for_launch();
         let terminal_id = match self.engine.create_project_terminal(&project.id, rows, cols) {
             Ok((id, _label)) => id,
@@ -1787,6 +1827,14 @@ impl App {
         };
 
         // Shared core creator (see `show_companion_terminal`).
+        if let Err(in_the_way) = self.engine.check_admission(
+            &self
+                .engine
+                .inside_admission(&TerminalOwner::Session(session.id.clone())),
+        ) {
+            self.set_error(in_the_way.to_string());
+            return Ok(());
+        }
         let (rows, cols) = self.pty_size_for_launch();
         let terminal_id = match self
             .engine
@@ -4851,6 +4899,7 @@ mod tests {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
             grid_generation: 0,
@@ -8764,14 +8813,101 @@ mod tests {
     /// Confirming reaches the shared engine teardown: the provider leaves for
     /// the terminating set (SIGTERM, not a drop), the row goes Detached at once,
     /// and a keyed spinner explains the wait until the reaper replaces it.
+    /// Hold agent `session_id` from another surface: a followed stop, as a
+    /// browser or the command line would leave it, open as `op-held`.
+    fn hold_agent_elsewhere(app: &mut App, session_id: &str) {
+        app.engine
+            .open_operation("op-held", dux_core::operations::OperationKind::AgentStop);
+        app.engine
+            .operations
+            .admit(
+                Some("op-held"),
+                &[],
+                &[dux_core::operations::Hold::exclusive(
+                    dux_core::engine::InFlightKey::Agent(session_id.to_string()),
+                )],
+            )
+            .unwrap();
+    }
+
+    fn release_agent_elsewhere(app: &mut App) {
+        app.engine.operations.finish(
+            "op-held",
+            dux_core::statusline::StatusTone::Info,
+            "",
+            None,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// Adding a tab or a terminal to an agent, or starting it, is refused,
+    /// naming the operation, while another surface's change holds the agent.
+    #[test]
+    fn a_tab_a_terminal_or_a_start_is_refused_while_another_surface_holds_the_agent() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        hold_agent_elsewhere(&mut app, "s1");
+        let tabs = app.engine.agent_tabs.len();
+        let terminals = app.engine.companion_terminals.len();
+
+        app.spawn_tab_with_provider("s1", ProviderKind::new("claude"));
+        assert!(
+            app.status.text().contains("op-held"),
+            "{}",
+            app.status.text()
+        );
+        assert_eq!(app.engine.agent_tabs.len(), tabs, "no tab was added");
+
+        app.set_info("cleared");
+        app.show_companion_terminal().expect("answers");
+        assert!(
+            app.status.text().contains("op-held"),
+            "{}",
+            app.status.text()
+        );
+        assert_eq!(
+            app.engine.companion_terminals.len(),
+            terminals,
+            "no terminal was opened"
+        );
+
+        app.set_info("cleared");
+        let request = app.agent_launch_request(
+            app.engine.sessions[0].clone(),
+            false,
+            AgentLaunchKind::Reconnect {
+                status_message: "Starting".into(),
+            },
+        );
+        assert!(!app.dispatch_agent_launch(request), "nothing launched");
+        assert!(
+            app.status.text().contains("op-held"),
+            "{}",
+            app.status.text()
+        );
+    }
+
     #[test]
     fn detach_agent_confirm_asks_the_engine_and_raises_the_keyed_busy() {
         let session = make_session("s1", "claude", "/tmp/wt/a");
         let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
         app.selected_left = 1;
         mark_active(&mut app, "s1");
-        app.confirm_detach_selected_session().expect("dispatch");
 
+        // Refused, saying which operation, while another surface holds it.
+        hold_agent_elsewhere(&mut app, "s1");
+        app.confirm_detach_selected_session().expect("dispatch");
+        app.resolve_confirm_detach_agent(true);
+        assert!(
+            app.status.text().contains("op-held"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!app.engine.providers.is_empty(), "nothing was stopped");
+        release_agent_elsewhere(&mut app);
+
+        app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(

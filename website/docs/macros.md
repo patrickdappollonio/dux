@@ -160,6 +160,11 @@ order:
 - The trash button stages a deletion and asks you to confirm inline.
 - **Save** writes the whole list at once; **Cancel** discards your changes.
 
+If the list changed somewhere else while the dialog was open (another browser, or a
+script), Save is refused and nothing is written, so the other change is not lost. The
+dialog keeps your edits and offers to reload the list, which drops them, or to keep
+editing so you can copy what you need first.
+
 ## Adding macros directly in config
 
 You can manage macros entirely by hand. Open `config.toml` (`dux config path` locates

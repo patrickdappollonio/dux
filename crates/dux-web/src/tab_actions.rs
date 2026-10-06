@@ -40,8 +40,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
-    unknown_session,
+    OperationQuery, id_within_bound, operation_accepted, refusal, scope_from_headers,
+    ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
 use std::sync::Arc;
@@ -109,10 +109,11 @@ async fn create_tab(
         return resp.into_response();
     }
     let provider = body.and_then(|b| b.0.provider);
-    let ticket = operation
-        .asked()
-        .then(|| OperationTicket::new(OperationKind::TabCreate));
-    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    // Recorded whether or not the client follows it; the answer is the
+    // record only when it asked.
+    let ticket = OperationTicket::new(OperationKind::TabCreate);
+    let followed = operation.asked().then(|| Arc::clone(&ticket.record));
+    let ticket = Some(ticket);
     match state
         .engine
         .create_agent_tab(id.clone(), provider, ticket)
@@ -128,7 +129,7 @@ async fn create_tab(
             )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -193,7 +194,7 @@ async fn delete_tab(
     } else {
         state
             .engine
-            .apply_wire_scoped(command, scope)
+            .apply_wire_recorded(command, scope, OperationKind::TabClose)
             .await
             .map(|outcome| (outcome, None))
     };
@@ -218,7 +219,7 @@ async fn delete_tab(
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
         Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -233,14 +234,14 @@ async fn start_tab(
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
         return *resp;
     }
-    let ticket = operation
-        .asked()
-        .then(|| OperationTicket::new(OperationKind::TabStart));
-    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    // Recorded whether or not the client follows it, as a tab create is.
+    let ticket = OperationTicket::new(OperationKind::TabStart);
+    let followed = operation.asked().then(|| Arc::clone(&ticket.record));
+    let ticket = Some(ticket);
     match state.engine.start_agent_tab(tab, ticket).await {
         Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 

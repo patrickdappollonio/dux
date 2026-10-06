@@ -4,6 +4,7 @@
 //! embeds it and calls it directly, and the web server reaches it through its
 //! engine actor.
 
+mod admission;
 pub mod command;
 mod companion;
 pub mod config_saver;
@@ -71,6 +72,7 @@ pub(crate) mod test_support;
 mod worktree_removal_race_tests;
 
 pub use crate::destructive::DestructiveCheck;
+pub use admission::Admission;
 pub use command::{COMMIT_EMPTY_MESSAGE, COMMIT_NOTHING_STAGED, Command};
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
@@ -2098,6 +2100,12 @@ impl Engine {
                 ..Default::default()
             },
         );
+        // ...and holds it from now until the create finishes, so nothing else
+        // changes the agent while it is still coming up.
+        self.operations.hold(
+            &op_id,
+            crate::operations::Hold::exclusive(InFlightKey::Agent(session_id.clone())),
+        );
         map.insert(op_id, (session_id, now));
     }
 
@@ -2128,6 +2136,7 @@ impl Engine {
             cmd,
             Command::PersistGlobalEnv { .. }
                 | Command::UpdateMacros { .. }
+                | Command::ChangeConfigSet(..)
                 | Command::PersistProject { .. }
                 | Command::RemoveProject { .. }
                 | Command::DeleteProject { .. }
@@ -6247,12 +6256,6 @@ impl Engine {
         session_id: &SessionIdRef,
         outgoing_tab_id: &TabIdRef,
     ) -> anyhow::Result<TabId> {
-        // Mid-deletion the agent's worktree is about to go and every one of its
-        // tabs is already being torn down; moving the slot around inside it
-        // would be re-pointing at a tab that is itself about to vanish.
-        if self.closing_sessions.contains(session_id.as_str()) {
-            anyhow::bail!("this agent is being deleted; its tabs cannot hand the slot around");
-        }
         let (new_slot, provider) = self
             .successor_slot_tab(session_id)
             .map(|t| (TabId::new(t.id.clone()), t.provider.clone()))
@@ -6307,6 +6310,21 @@ impl Engine {
     /// state untouched), then the PTY is torn down gracefully and every runtime
     /// map the tab keyed is cleared.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
+        // Mid-deletion the agent's worktree is about to go and every one of its
+        // tabs is already being torn down with it: closing one on its own would
+        // race that teardown, and moving the slot around inside it would be
+        // re-pointing at a tab that is itself about to vanish.
+        if self.closing_sessions.contains(session_id) || self.pending_deletions.contains(session_id)
+        {
+            // A followed delete behind it is named, so its id can be followed.
+            if let Some(in_the_way) = self
+                .operations
+                .holder_of(&InFlightKey::Agent(session_id.to_string()))
+            {
+                return Err(in_the_way.into());
+            }
+            anyhow::bail!("this agent is being deleted, and its tabs go with it");
+        }
         // Transport-facing: two path segments arrive as bare strings, which is
         // exactly the pair a caller can swap unnoticed. Named here, at the door.
         //
@@ -9366,6 +9384,15 @@ mod tests {
         // can prove the reloaded config actually landed (the reloaded config
         // must DIFFER from the initial one, not both be `Config::default()`).
         engine.config.defaults.provider = "claude".to_string();
+        // A macro the file the reload reads no longer has.
+        engine.config.macros.entries.insert(
+            "old".to_string(),
+            crate::config::MacroEntry {
+                text: "gone after the reload".to_string(),
+                surface: crate::config::MacroSurface::Both,
+            },
+        );
+        let read_before_the_reload = crate::wire::macros_version(&engine.config.macros);
 
         // Drive a REAL `ReloadConfig`: the engine opens the barrier and the
         // surface posts a `ConfigReloadReady` carrying the codex-marked config.
@@ -9382,6 +9409,28 @@ mod tests {
             .apply(Command::PersistGlobalEnv { env })
             .expect("apply");
         assert_eq!(engine.deferred_commands.len(), 1);
+        // A one-macro change and a whole-list save read before the reload are
+        // deferred too. Each runs against the config the reload brought: the
+        // one macro joins it, and the whole-list save, based on a list that
+        // has changed since, is refused.
+        engine
+            .apply_wire(crate::wire::WireCommand::SetMacro {
+                name: "b".to_string(),
+                text: "added during the reload".to_string(),
+                surface: "both".to_string(),
+            })
+            .expect("deferred");
+        engine
+            .apply_wire(crate::wire::WireCommand::UpdateMacros {
+                entries: vec![crate::wire::WireMacroEntry {
+                    name: "x".to_string(),
+                    text: "a stale whole list".to_string(),
+                    surface: "both".to_string(),
+                }],
+                version: Some(read_before_the_reload),
+            })
+            .expect("deferred");
+        assert_eq!(engine.deferred_commands.len(), 3);
 
         // The surface already posted the completion; drain it through the real
         // worker-event path so the barrier closes and the deferred command drains.
@@ -9428,6 +9477,12 @@ mod tests {
         );
         // …and the reloaded provider must still be present after that re-apply.
         assert_eq!(engine.config.defaults.provider, "codex");
+        let macros: Vec<&String> = engine.config.macros.entries.keys().collect();
+        assert_eq!(
+            macros,
+            vec!["b"],
+            "the one macro joined the reloaded list, and the stale save changed nothing"
+        );
 
         // The deferred env save also landed on disk (the LAST write wins).
         engine.config_writer.flush();
@@ -11999,7 +12054,7 @@ mod tab_ops_tests {
     }
 
     #[test]
-    fn close_tab_refuses_to_promote_while_the_agent_is_being_deleted() {
+    fn close_tab_refuses_any_tab_while_the_agent_is_being_deleted() {
         let (mut engine, _tmp) = test_engine();
         agent_with_tabs(&mut engine, &[("t2", "codex")]);
         engine.closing_sessions.insert("s1".to_string());
@@ -12010,6 +12065,37 @@ mod tab_ops_tests {
         assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
         assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
+
+        // An extra tab is refused the same way: the delete takes it with it.
+        let err = engine.close_tab("s1", "t2").unwrap_err();
+
+        assert!(err.to_string().contains("being deleted"), "err: {err}");
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
+
+        // Once the removal worker runs, the agent is in `pending_deletions`
+        // alone, and the close is still refused.
+        engine.closing_sessions.remove("s1");
+        engine.pending_deletions.insert("s1".to_string());
+        let err = engine.close_tab("s1", "t2").unwrap_err();
+        assert!(err.to_string().contains("being deleted"), "err: {err}");
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
+
+        // With a followed delete behind it, the refusal names that operation.
+        engine.open_operation("op-del", crate::operations::OperationKind::AgentDelete);
+        engine
+            .operations
+            .admit(
+                Some("op-del"),
+                &[],
+                &[crate::operations::Hold::exclusive(InFlightKey::Agent(
+                    "s1".to_string(),
+                ))],
+            )
+            .unwrap();
+        let err = engine.close_tab("s1", "t2").unwrap_err();
+        assert!(err.to_string().contains("op-del"), "err: {err}");
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
     }
 
     #[test]

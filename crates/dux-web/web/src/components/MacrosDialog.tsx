@@ -14,7 +14,7 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable"
-import { ListPlus, Pencil, Trash2 } from "lucide-react"
+import { ListPlus, Pencil, Trash2, TriangleAlert } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
@@ -51,7 +51,9 @@ import {
 } from "@/lib/macros"
 import {
   closeMacrosDialog,
+  dismissMacrosConflict,
   persistMacroOrder,
+  reloadMacrosDraft,
   saveMacros,
   useDux,
 } from "@/lib/store"
@@ -76,7 +78,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
   // The bootstrap document holds the authoritative macro list. Until it loads,
   // the draft was seeded empty, so a wholesale save would wipe the server's
   // macros: disable Save in that window (the store also refuses it defensively).
-  const { bootstrap } = useDux()
+  const { bootstrap, macrosConflict } = useDux()
   const [macros, setMacros] = useState<MacroView[]>(() =>
     initial.map((m) => ({ ...m })),
   )
@@ -195,6 +197,8 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
         <p className="text-xs text-destructive">{validationError}</p>
       ) : null}
 
+      {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
+
       {/* Misclick-safe spacing between the list/add controls and the footer. */}
       <div className="h-1" />
       <DialogFooter>
@@ -209,6 +213,32 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
         </Button>
       </DialogFooter>
     </DialogContent>
+  )
+}
+
+// A save the server refused because the list changed after the dialog read it.
+// A choice, not an error, as in the config editor: reloading throws these
+// edits away, so "Keep editing" has focus and the reload is styled as the
+// destructive one.
+function StaleSaveNotice({ message }: { message: string }) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
+    >
+      <div className="flex items-start gap-2">
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+        <span>{message}</span>
+      </div>
+      <div className="flex justify-end gap-3">
+        <Button variant="outline" autoFocus onClick={dismissMacrosConflict}>
+          Keep editing
+        </Button>
+        <Button variant="destructive" onClick={() => void reloadMacrosDraft()}>
+          Reload macros
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -417,7 +447,7 @@ function MacroForm({
 }
 
 export function MacrosDialog() {
-  const { macrosDialogOpen, macrosDraft } = useDux()
+  const { macrosDialogOpen, macrosDraft, macrosDraftEpoch } = useDux()
 
   return (
     <Dialog
@@ -426,7 +456,9 @@ export function MacrosDialog() {
         if (!o) closeMacrosDialog()
       }}
     >
-      {macrosDialogOpen && <MacrosEditor initial={macrosDraft} />}
+      {macrosDialogOpen && (
+        <MacrosEditor key={macrosDraftEpoch} initial={macrosDraft} />
+      )}
     </Dialog>
   )
 }
