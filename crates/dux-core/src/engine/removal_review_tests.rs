@@ -82,6 +82,7 @@ fn the_manager_refuses_a_worktree_a_new_agent_is_being_created_in() {
                 use_existing_branch: false,
                 pull_before_create: false,
                 copy_uncommitted_changes: false,
+                cloned: None,
             }),
             busy_message: "Creating\u{2026}".to_string().into(),
             term_size: (80, 24),

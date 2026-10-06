@@ -40,15 +40,23 @@ impl CloneProcesses {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn register(&self, group: i32) -> u64 {
+    /// Start a clone with `start` and record its process group, under the
+    /// lock [`Self::stop_all`] takes: a quit that begins while a clone starts
+    /// waits for it to be recorded (as long as starting a process takes) and
+    /// kills it, and once a quit has begun nothing starts.
+    pub(crate) fn spawn(
+        &self,
+        start: impl FnOnce() -> std::io::Result<std::process::Child>,
+    ) -> Result<(std::process::Child, u64), SpawnRefused> {
         let mut state = self.lock();
+        if state.stopping {
+            return Err(SpawnRefused::Stopping);
+        }
+        let child = start().map_err(SpawnRefused::Failed)?;
         state.next += 1;
         let token = state.next;
-        state.running.insert(token, group);
-        if state.stopping {
-            kill_group(group);
-        }
-        token
+        state.running.insert(token, child.id() as i32);
+        Ok((child, token))
     }
 
     /// Forget the clone behind `token`; whether dux stopped it.
@@ -66,6 +74,15 @@ impl CloneProcesses {
             kill_group(*group);
         }
     }
+}
+
+/// Why [`CloneProcesses::spawn`] started nothing.
+#[derive(Debug)]
+pub(crate) enum SpawnRefused {
+    /// dux is quitting.
+    Stopping,
+    /// The process could not start.
+    Failed(std::io::Error),
 }
 
 fn kill_group(group: i32) {
@@ -107,18 +124,26 @@ pub(crate) fn clone_repository_with_env(
     // `--origin origin` pins the remote's name against a user's
     // `clone.defaultRemoteName`, and `--progress` keeps stderr moving while
     // the clone works, which is what the stall clock watches.
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    // Nothing may ask for an answer, whatever the inherited environment says:
+    // no terminal prompt, an askpass for git and for ssh that fails at once,
+    // and no interactive credential helper. A helper that answers without
+    // asking (a stored token, a keychain) still works.
     command
+        .args(["-c", "credential.interactive=false"])
         .args(["clone", "--progress", "--origin", "origin", "--"])
         .arg(url)
         .arg(dest)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "false")
+        .env("SSH_ASKPASS", "false")
         .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("GCM_INTERACTIVE", "never")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    for (key, value) in env {
-        command.env(key, value);
-    }
     // SAFETY: `setsid` is async-signal-safe and touches no Rust state. A new
     // session has no controlling terminal, so ssh cannot open `/dev/tty` to
     // ask for a passphrase or a host key, and it is a process group of its
@@ -129,11 +154,16 @@ pub(crate) fn clone_repository_with_env(
             Ok(())
         });
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| CloneError::Failed(format!("couldn't run git: {error}")))?;
+    let (mut child, token) =
+        processes
+            .spawn(|| command.spawn())
+            .map_err(|refused| match refused {
+                SpawnRefused::Stopping => CloneError::Stopped,
+                SpawnRefused::Failed(error) => {
+                    CloneError::Failed(format!("couldn't run git: {error}"))
+                }
+            })?;
     let group = child.id() as i32;
-    let token = processes.register(group);
 
     // Every chunk git writes is progress. Read on a thread of its own and handed
     // over a channel, so the stall clock can wait on it with a bound.
@@ -391,6 +421,123 @@ mod tests {
             rustix::process::getpgrp().as_raw_nonzero().get(),
             "the clone ran in dux's own process group"
         );
+    }
+
+    /// A credential prompt is never launched: git's own and ssh's askpass fail
+    /// at once, and git does not ask interactively, even when the environment
+    /// dux inherited names askpass programs that would wait for an answer.
+    #[test]
+    fn no_askpass_program_is_ever_waited_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hang = tmp.path().join("hang");
+        std::fs::write(&hang, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hang = hang.to_string_lossy().into_owned();
+        let ssh = fake_ssh(
+            tmp.path(),
+            "printf 'protocol=https\\nhost=example.invalid\\n\\n' \
+             | git -c credential.helper= credential fill >/dev/null 2>&1\n\
+             \"$SSH_ASKPASS\" 'Password:' </dev/null >/dev/null 2>&1\n\
+             echo 'ssh: nothing to ask with' >&2\n\
+             exit 255",
+        );
+        let started = Instant::now();
+
+        let result = clone_repository_with_env(
+            "ssh://example.invalid/repo.git",
+            &tmp.path().join("clone"),
+            Duration::from_secs(30),
+            &CloneProcesses::default(),
+            &[
+                ("GIT_SSH_COMMAND", &ssh),
+                ("GIT_ASKPASS", &hang),
+                ("SSH_ASKPASS", &hang),
+            ],
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "an askpass was waited on: {result:?}"
+        );
+        let Err(CloneError::Failed(message)) = result else {
+            panic!("expected a failure, got {result:?}");
+        };
+        assert!(message.contains("nothing to ask with"), "{message}");
+    }
+
+    #[test]
+    fn a_clone_that_keeps_printing_progress_is_never_stalled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh(
+            tmp.path(),
+            "for i in 1 2 3 4 5 6 7 8; do echo \"remote: still working $i\" >&2; sleep 0.3; done\n\
+             echo 'ssh: done talking' >&2\n\
+             exit 255",
+        );
+
+        let result = clone_repository_with_env(
+            "ssh://example.invalid/repo.git",
+            &tmp.path().join("clone"),
+            Duration::from_secs(1),
+            &CloneProcesses::default(),
+            &[("GIT_SSH_COMMAND", &ssh)],
+        );
+
+        let Err(CloneError::Failed(message)) = result else {
+            panic!("a clone printing progress was stopped: {result:?}");
+        };
+        assert!(message.contains("done talking"), "{message}");
+    }
+
+    /// A clone starting while dux begins to quit is killed before the quit
+    /// moves on, and once it has begun none starts at all.
+    #[test]
+    fn quitting_waits_for_a_starting_clone_and_refuses_later_ones() {
+        use std::os::unix::process::CommandExt as _;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let processes = CloneProcesses::default();
+        let pid = Arc::new(AtomicU32::new(0));
+        let starting = {
+            let processes = processes.clone();
+            let pid = Arc::clone(&pid);
+            std::thread::spawn(move || {
+                processes.spawn(|| {
+                    let child = std::process::Command::new("sleep")
+                        .arg("30")
+                        .process_group(0)
+                        .spawn()?;
+                    pid.store(child.id(), Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(600));
+                    Ok(child)
+                })
+            })
+        };
+        while pid.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        processes.stop_all();
+
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let mut alive = true;
+        while alive && Instant::now() < deadline {
+            alive = crate::file_drop::process_can_answer(pid.load(Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !alive,
+            "the quit moved on before the starting clone was killed"
+        );
+        if let Ok((mut child, _)) = starting.join().unwrap() {
+            let _ = child.wait();
+        }
+        let mut started = false;
+        let late = processes.spawn(|| {
+            started = true;
+            std::process::Command::new("true").spawn()
+        });
+        assert!(matches!(late, Err(SpawnRefused::Stopping)), "{late:?}");
+        assert!(!started, "a clone started after the quit began");
     }
 
     #[test]

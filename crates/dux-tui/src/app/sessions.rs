@@ -508,6 +508,7 @@ impl App {
                 .config
                 .defaults
                 .copy_uncommitted_changes_by_default,
+            cloned: None,
         })
     }
 
@@ -9381,6 +9382,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: true,
                 copy_uncommitted_changes: false,
+                cloned: None,
             },
             "Creating an agent...".to_string(),
         )
@@ -9805,6 +9807,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: true,
                 copy_uncommitted_changes: false,
+                cloned: None,
             },
             "Creating an agent...".to_string(),
         )

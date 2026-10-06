@@ -1300,6 +1300,7 @@ mod tests {
                     use_existing_branch: false,
                     pull_before_create: false,
                     copy_uncommitted_changes: false,
+                    cloned: None,
                 }),
                 busy_message: "Creating\u{2026}".to_string().into(),
                 term_size: (80, 24),

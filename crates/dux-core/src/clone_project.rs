@@ -113,9 +113,12 @@ pub fn prepare_clone(
         crate::git::docker_style_name()
     };
     let destination = destination_identity(&request.path, home)?;
+    // Both sides canonicalized, so a project saved under another spelling of
+    // the folder (through a symbolic link, say) still matches.
+    let destination_text = destination.to_string_lossy();
     if projects
         .iter()
-        .any(|project| Path::new(project) == destination)
+        .any(|project| crate::project_browser::same_directory(project, &destination_text))
     {
         return Err(crate::status_text![
             n(destination.display()),
@@ -179,6 +182,35 @@ pub struct ClonedRepository {
     pub name_taken: bool,
 }
 
+/// What a clone's first agent create carries about the clone, so it refuses
+/// an existing branch and its failure says what the clone already did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClonedFor {
+    /// The address, with any user and token removed.
+    pub address: String,
+    pub path: PathBuf,
+    pub project_name: String,
+    pub agent_name: String,
+}
+
+impl ClonedFor {
+    /// `reason` the agent is missing, after what the clone did.
+    pub fn agent_missing(&self, reason: StatusText) -> StatusText {
+        crate::status_text![
+            "Cloned ",
+            n(self.address),
+            " into ",
+            n(self.path.display()),
+            " and added project ",
+            q(self.project_name),
+            ", but didn't create agent ",
+            q(self.agent_name),
+            ": ",
+            reason
+        ]
+    }
+}
+
 /// A clone ready to be added as a project, as the follow-up receives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClonedProject {
@@ -214,7 +246,6 @@ pub fn run_clone_job(job: CloneJob, worker_tx: &Sender<WorkerEvent>) {
 fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
     let address = redact_remote_userinfo(&job.url);
     let dest = &job.destination;
-    check_destination(dest).map_err(CloneOutcome::Refused)?;
     let parent = dest.parent().unwrap_or(dest);
     if !crate::git::is_valid_branch_name(parent, &job.agent_name) {
         return Err(CloneOutcome::Refused(crate::status_text![
@@ -223,14 +254,16 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
             " as a branch name, so it can't name the agent. Pick another name."
         ]));
     }
+    let claim = claim_destination(dest).map_err(CloneOutcome::Refused)?;
     crate::logger::info(&format!("cloning {address} into {}", dest.display()));
-    crate::git::clone_repository(&job.url, dest, job.stall, &job.processes).map_err(|error| {
+    if let Err(error) = crate::git::clone_repository(&job.url, dest, job.stall, &job.processes) {
         crate::logger::error(&format!(
             "clone of {address} into {} failed: {error:?}",
             dest.display()
         ));
-        CloneOutcome::Failed(clone_failure(&address, dest, &error))
-    })?;
+        claim.release_unused();
+        return Err(CloneOutcome::Failed(clone_failure(&address, dest, &error)));
+    }
     match crate::git::repo_commit_state(dest) {
         crate::git::CommitState::Born => {}
         _ if crate::git::has_remote_tracking_refs(dest) => {
@@ -271,6 +304,56 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         branch,
         leading_branch,
         name_taken,
+    })
+}
+
+/// The destination a clone goes into, and whether dux made it.
+#[derive(Debug)]
+pub struct DestinationClaim {
+    path: PathBuf,
+    created: bool,
+}
+
+impl DestinationClaim {
+    /// Give the destination back after a clone that did not finish: the
+    /// folder dux made goes, but only while it is still empty (a partial clone
+    /// stays for the user to look at), and a folder dux did not make is never
+    /// touched. `remove_dir` removes only an empty directory and never follows
+    /// a symbolic link.
+    pub fn release_unused(self) {
+        if self.created {
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
+
+/// Claim `dest` for a clone, right before git runs. A missing destination is
+/// created here with one `mkdir`, which fails if anything (a link included)
+/// appeared there, so git clones into a folder nobody else put in place. An
+/// existing one must still be an empty folder and not a symbolic link; the
+/// moment between this look and git starting is accepted, as anyone who can
+/// race it can already run commands as the user.
+pub fn claim_destination(dest: &Path) -> Result<DestinationClaim, StatusText> {
+    match std::fs::create_dir(dest) {
+        Ok(()) => {
+            return Ok(DestinationClaim {
+                path: dest.to_path_buf(),
+                created: true,
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(crate::status_text![
+                "Couldn't create ",
+                n(dest.display()),
+                format!(" to clone into: {error}.")
+            ]);
+        }
+    }
+    check_destination(dest)?;
+    Ok(DestinationClaim {
+        path: dest.to_path_buf(),
+        created: false,
     })
 }
 
@@ -349,8 +432,9 @@ fn clone_failure(address: &str, dest: &Path, error: &crate::git::CloneError) -> 
 /// Written out rather than parsed with `url::Url`, which would re-spell the
 /// address it hands back and cannot find an address inside a sentence: the
 /// authority after `://` ends at the first `/`, `?` or `#` (or, inside a
-/// sentence, a space or a quote), and whatever it holds up to its last `@` is
-/// the user and password.
+/// sentence, a space), and whatever it holds up to its last `@` is the user
+/// and password, whatever characters those hold: a quote or an apostrophe in a
+/// token is still the token.
 pub fn redact_remote_userinfo(text: &str) -> String {
     let mut redacted = String::with_capacity(text.len());
     let mut rest = text;
@@ -359,9 +443,7 @@ pub fn redact_remote_userinfo(text: &str) -> String {
         redacted.push_str(&rest[..authority_start]);
         let after = &rest[authority_start..];
         let authority_len = after
-            .find(|c: char| {
-                matches!(c, '/' | '?' | '#' | '\'' | '"' | '`' | '<' | '>') || c.is_whitespace()
-            })
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
             .unwrap_or(after.len());
         let authority = &after[..authority_len];
         match authority.rfind('@') {
@@ -418,6 +500,36 @@ mod tests {
         }
     }
 
+    /// dux creates a missing destination itself, so nothing can appear there
+    /// between the check and git, and after a clone that did not finish it
+    /// removes only that folder, and only while it is empty.
+    #[test]
+    fn a_clone_claims_a_missing_destination_and_gives_back_only_its_own_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+        let made = root.join("made");
+        let claim = claim_destination(&made).expect("a missing destination is claimed");
+        assert!(made.is_dir(), "dux did not create the destination");
+        claim.release_unused();
+        assert!(!made.exists(), "the empty folder dux made was left behind");
+
+        let partial = root.join("partial");
+        let claim = claim_destination(&partial).unwrap();
+        std::fs::write(partial.join("half-cloned"), "x").unwrap();
+        claim.release_unused();
+        assert!(
+            partial.join("half-cloned").exists(),
+            "a folder with content went"
+        );
+
+        let users = root.join("users");
+        std::fs::create_dir(&users).unwrap();
+        let claim = claim_destination(&users).expect("an empty folder is used as is");
+        claim.release_unused();
+        assert!(users.is_dir(), "a folder dux did not make was removed");
+    }
+
     #[test]
     fn a_leading_tilde_in_the_destination_is_the_home_folder() {
         let tmp = tempfile::tempdir().unwrap();
@@ -472,6 +584,26 @@ mod tests {
                 "git@github.com:owner/repo.git",
             ),
             ("a local path", "/srv/git/repo.git", "/srv/git/repo.git"),
+            (
+                "an apostrophe in the token",
+                "https://alice:tok'en@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            (
+                "a quote and a colon in the password",
+                "https://alice:p\"w:d@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            (
+                "an apostrophe in a token git quotes",
+                "fatal: unable to access 'https://alice:tok'en@example.invalid/x/': 403",
+                "fatal: unable to access 'https://example.invalid/x/': 403",
+            ),
+            (
+                "a quoted address with no path",
+                "fatal: 'https://alice:tok@example.invalid' failed",
+                "fatal: 'https://example.invalid' failed",
+            ),
         ] {
             assert_eq!(redact_remote_userinfo(text), hidden, "{what}");
         }

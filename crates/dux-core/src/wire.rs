@@ -5012,6 +5012,7 @@ impl Engine {
             pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
             copy_uncommitted_changes: copy_uncommitted_changes
                 .unwrap_or(self.config.defaults.copy_uncommitted_changes_by_default),
+            cloned: None,
         };
         Ok(Command::DispatchCreateAgentRequest {
             request: Box::new(request),
@@ -9830,6 +9831,15 @@ mod tests {
     /// follow-up that adds the project and dispatches the agent, and, when one
     /// was dispatched, the create to its end.
     fn drive_clone_chain(engine: &mut Engine) -> WebFollowupStatuses {
+        drive_clone_chain_with(engine, |_| {})
+    }
+
+    /// [`drive_clone_chain`], letting `edit` change the worker's reaction
+    /// before the follow-up runs, to stand in for the world moving between them.
+    fn drive_clone_chain_with(
+        engine: &mut Engine,
+        edit: impl FnOnce(&mut EventReaction),
+    ) -> WebFollowupStatuses {
         // Whatever an earlier agent still reports is processed on the way, as a
         // surface would.
         let event = loop {
@@ -9842,7 +9852,8 @@ mod tests {
             }
             engine.process_worker_event(event);
         };
-        let reaction = engine.process_worker_event(event);
+        let mut reaction = engine.process_worker_event(event);
+        edit(&mut reaction);
         let mut chain = engine.drive_clone_followup(&reaction);
         chain
             .statuses
@@ -10141,6 +10152,30 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(crate::git::is_valid_agent_name(names[0]), "{names:?}");
+
+        // An agent that cannot start after the clone and the add: the one
+        // final says the clone is on disk, the project was added, and why the
+        // agent is missing.
+        let provider = engine.config.default_provider();
+        engine
+            .config
+            .providers
+            .commands
+            .get_mut(provider.as_str())
+            .expect("the default provider is configured")
+            .command = "no-such-provider".to_string();
+        let broken = std::fs::canonicalize(tmp.path()).unwrap().join("broken");
+        engine
+            .apply_wire(clone_command(&remote, &broken, "stuck-agent"))
+            .expect("dispatch the clone");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert_eq!(ended[0].tone, "error", "{}", ended[0].message);
+        for needle in ["Cloned", "added project \"broken\"", "\"stuck-agent\""] {
+            assert!(ended[0].message.contains(needle), "{}", ended[0].message);
+        }
+        assert!(engine.projects.iter().any(|p| Path::new(&p.path) == broken));
     }
 
     #[test]
@@ -10524,6 +10559,10 @@ mod tests {
         std::fs::create_dir(root.join("empty")).unwrap();
         std::os::unix::fs::symlink(root.join("empty"), &linked).unwrap();
         let project = root.join("project");
+        let spelled = root.join("spelled");
+        std::fs::create_dir(&spelled).unwrap();
+        std::fs::write(spelled.join("README"), "x").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("alias")).unwrap();
         let request = |url: &str, path: &Path, name: Option<&str>| WireCommand::CloneProject {
             url: url.to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -10582,6 +10621,12 @@ mod tests {
                 &project,
                 &["already a project"],
             ),
+            (
+                "a destination that is a project saved under another spelling",
+                request(&url, &spelled, Some("a")),
+                &spelled,
+                &["already a project"],
+            ),
         ];
         for (what, command, untouched, needles) in cases {
             let (mut engine, _engine_dir) = test_engine();
@@ -10590,6 +10635,12 @@ mod tests {
                 .push(crate::engine::test_support::sample_project(
                     "p1",
                     &project.to_string_lossy(),
+                ));
+            engine
+                .projects
+                .push(crate::engine::test_support::sample_project(
+                    "p2",
+                    &root.join("alias/spelled").to_string_lossy(),
                 ));
             // Refused at once, or by the worker before it runs git.
             let sentence = match engine.apply_wire(command) {
@@ -10606,7 +10657,7 @@ mod tests {
                 assert!(sentence.contains(needle), "{what}: {sentence}");
             }
             assert!(!untouched.join(".git").exists(), "{what}: git ran");
-            assert_eq!(engine.projects.len(), 1, "{what}");
+            assert_eq!(engine.projects.len(), 2, "{what}");
             assert!(engine.clones.pending.is_empty(), "{what}");
         }
     }
@@ -10653,7 +10704,16 @@ mod tests {
             engine
                 .apply_wire(clone_command(&remote, &dest, "agent"))
                 .expect("dispatch the clone");
+            assert_eq!(
+                engine.worktree_ops().holders(&dest),
+                vec![crate::worktree_ops::WorktreeOpKind::CloneRepository],
+                "{what}: the clone does not hold its destination"
+            );
             let chain = drive_clone_chain(&mut engine);
+            assert!(
+                engine.worktree_ops().holders(&dest).is_empty(),
+                "{what}: the clone still holds its destination"
+            );
             let finals = finals(&chain);
             assert_eq!(finals.len(), 1, "{what}: {finals:?}");
             assert_eq!(finals[0].tone, tone, "{what}: {}", finals[0].message);
@@ -10671,6 +10731,30 @@ mod tests {
             assert!(engine.projects.is_empty(), "{what}");
             assert!(engine.sessions.is_empty(), "{what}");
         }
+
+        // A worker that panicked sends the failure its guard builds; that frees
+        // the destination the same way.
+        let (mut engine, _engine_dir) = test_engine();
+        let dest = root.join("dest-panicked");
+        let key = InFlightKey::Clone(dest.clone());
+        assert!(engine.mark_in_flight(key.clone()));
+        engine
+            .hold_path_for_in_flight(
+                &key,
+                &dest,
+                crate::worktree_ops::WorktreeOpKind::CloneRepository,
+            )
+            .unwrap();
+        engine.process_worker_event(WorkerEvent::RepositoryCloned {
+            status_op_id: None,
+            path: dest.clone(),
+            agent_name: "agent".to_string(),
+            result: Err(crate::clone_project::CloneOutcome::Failed(
+                "the worker stopped".into(),
+            )),
+        });
+        assert!(engine.worktree_ops().holders(&dest).is_empty());
+        assert!(!engine.is_in_flight(&key));
     }
 
     #[test]
@@ -10698,6 +10782,30 @@ mod tests {
             assert_eq!(engine.projects.len(), 1, "{name}");
             assert!(engine.sessions.is_empty(), "{name}");
         }
+
+        // A branch that appears in the clone after the clone's own look is
+        // refused by the create itself, never attached to, in the clone's words.
+        let (mut engine, _engine_dir) = test_engine();
+        let dest = root.join("dest-late");
+        engine
+            .apply_wire(clone_command(&remote, &dest, "feature"))
+            .expect("dispatch the clone");
+        let chain = drive_clone_chain_with(&mut engine, |reaction| {
+            if let EventReaction::AddProjectAfterClone(done) = reaction {
+                done.cloned.name_taken = false;
+            }
+        });
+        let finals = finals(&chain);
+        assert_eq!(finals.len(), 1, "{finals:?}");
+        assert_eq!(finals[0].tone, "error", "{}", finals[0].message);
+        for needle in ["Cloned", "\"feature\"", "already exists", "New agent"] {
+            assert!(finals[0].message.contains(needle), "{}", finals[0].message);
+        }
+        assert_eq!(engine.projects.len(), 1);
+        assert!(
+            engine.sessions.is_empty(),
+            "the create attached to the branch"
+        );
     }
 
     #[test]

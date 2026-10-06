@@ -360,6 +360,10 @@ pub enum CreateAgentRequest {
         use_existing_branch: bool,
         pull_before_create: bool,
         copy_uncommitted_changes: bool,
+        /// Set for the first agent of a clone dux just made: the agent must
+        /// start a fresh branch (one that already exists is refused, never
+        /// attached to), and a create that fails says what the clone did.
+        cloned: Option<crate::clone_project::ClonedFor>,
     },
     PullRequest {
         project: Project,

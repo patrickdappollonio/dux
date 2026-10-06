@@ -649,8 +649,18 @@ impl Engine {
                 // correlates the dispatch busy, every progress re-emit and the
                 // final the launch-ready and launch-failed handlers resolve from
                 // a `CreateLaunchOutcome`, so both surfaces word it identically.
+                // A clone's first agent: a create that fails says what the
+                // clone already did, which is on disk and in the workspace.
+                let cloned = match request.as_ref() {
+                    crate::worker::CreateAgentRequest::NewProject { cloned, .. } => cloned.clone(),
+                    _ => None,
+                };
+                let after_clone = move |message: crate::status_text::StatusText| match &cloned {
+                    Some(cloned) => cloned.agent_missing(message),
+                    None => message,
+                };
                 let op = crate::engine::status_op(busy_message)
-                    .resolve_in_handler(|o: &crate::engine::CreateLaunchOutcome| {
+                    .resolve_in_handler(move |o: &crate::engine::CreateLaunchOutcome| {
                         use crate::engine::{CreateLaunchOutcome, Final};
                         match o {
                             CreateLaunchOutcome::Committed {
@@ -695,10 +705,13 @@ impl Engine {
                                 // Sticky: the worktree exists but its session row
                                 // does not, so dux forgets it on restart and the
                                 // user is left the directory to clean up.
-                                Final::error(format!("Failed to persist session: {error}")).sticky()
+                                Final::error(after_clone(
+                                    format!("Failed to persist session: {error}").into(),
+                                ))
+                                .sticky()
                             }
                             CreateLaunchOutcome::Failed { message } => {
-                                Final::error(message.clone())
+                                Final::error(after_clone(message.clone()))
                             }
                         }
                     })

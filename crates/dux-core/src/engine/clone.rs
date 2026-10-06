@@ -180,18 +180,13 @@ impl Engine {
                 .into_reaction();
         };
         let agent = &done.agent_name;
-        let not_created = |reason: StatusText| {
-            CloneOutcome::Kept(crate::status_text![
-                "Cloned ",
-                n(address),
-                " and added project ",
-                q(project.name),
-                ", but didn't create agent ",
-                q(agent),
-                ": ",
-                reason
-            ])
+        let cloned = crate::clone_project::ClonedFor {
+            address: address.clone(),
+            path: done.path.clone(),
+            project_name: project.name.clone(),
+            agent_name: agent.clone(),
         };
+        let not_created = |reason: StatusText| CloneOutcome::Kept(cloned.agent_missing(reason));
         if done.cloned.name_taken {
             let kept = not_created(
                 "a branch with that name already exists in the clone. Pick another name, or \
@@ -209,6 +204,7 @@ impl Engine {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: Some(cloned.clone()),
         };
         let busy_message = crate::status_text![
             "Creating agent ",

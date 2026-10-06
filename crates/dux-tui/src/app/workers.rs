@@ -3767,6 +3767,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: true,
                 copy_uncommitted_changes: false,
+                cloned: None,
             },
             paths,
             dux_core::test_provider::harmless_config(),

@@ -833,6 +833,7 @@ fn the_use_existing_branch_dialog_chips_the_branch() {
         use_existing_branch: false,
         pull_before_create: false,
         copy_uncommitted_changes: false,
+        cloned: None,
     };
     let buf = open(
         &mut app,

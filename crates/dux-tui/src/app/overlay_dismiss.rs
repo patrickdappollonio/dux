@@ -644,6 +644,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: false,
                 copy_uncommitted_changes: false,
+                cloned: None,
             },
             input: TextInput::with_text("half-typed-name".to_string()),
             randomize_name: false,

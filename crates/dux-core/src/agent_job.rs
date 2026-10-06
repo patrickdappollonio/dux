@@ -299,12 +299,14 @@ impl CreatePlanContext<'_> {
                 use_existing_branch,
                 pull_before_create,
                 copy_uncommitted_changes,
+                cloned,
             } => self.plan_new_project(
                 project,
                 custom_name,
                 use_existing_branch,
                 pull_before_create,
                 copy_uncommitted_changes,
+                cloned.is_some(),
             ),
             CreateAgentRequest::PullRequest {
                 project,
@@ -493,6 +495,7 @@ impl CreatePlanContext<'_> {
         use_existing_branch: bool,
         pull_before_create: bool,
         copy_uncommitted_changes: bool,
+        require_fresh_branch: bool,
     ) -> Option<ManagedCreatePlan> {
         let repo_path = PathBuf::from(&project.path);
         let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
@@ -505,8 +508,17 @@ impl CreatePlanContext<'_> {
         }
         let title = custom_name.clone();
         let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
-        let attach_existing =
-            use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+        let existing = git::branch_exists(&repo_path, &resolved_name).is_some();
+        // A clone's first agent starts a branch of its own; one that appeared
+        // since the clone looked is refused, never attached to.
+        if require_fresh_branch && existing {
+            self.send_failure(
+                "a branch with that name already exists in the clone. Pick another name, or \
+                 use New agent, which offers to attach to that branch.",
+            );
+            return None;
+        }
+        let attach_existing = use_existing_branch || existing;
         if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
             self.send_failure(crate::status_text!["Cannot create agent for ", q(project.name), ": the repository at ", n(repo_path.display()), " has no commits yet. Create an initial commit (for example with git commit --allow-empty -m \"Initial commit\"), then try again."]);
             return None;
@@ -2251,6 +2263,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         drive_create_job(repo.path(), request)
     }
@@ -2327,6 +2340,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: false,
                 copy_uncommitted_changes: false,
+                cloned: None,
             },
         );
 
@@ -2603,6 +2617,7 @@ mod tests {
             use_existing_branch: true,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
@@ -2626,6 +2641,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
@@ -3827,6 +3843,7 @@ mod tests {
             use_existing_branch: true,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
 
         let run = drive_create_job_run(repo.path(), request);
@@ -3855,6 +3872,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
 
         let run = drive_create_job_run(repo.path(), request);
@@ -3905,6 +3923,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create,
             copy_uncommitted_changes,
+            cloned: None,
         }
     }
 
@@ -3928,6 +3947,7 @@ mod tests {
             use_existing_branch: true,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), attach);
         assert!(run.failure.is_none(), "creation must succeed");
@@ -4039,6 +4059,7 @@ mod tests {
                 use_existing_branch: false,
                 pull_before_create: false,
                 copy_uncommitted_changes: true,
+                cloned: None,
             },
         );
         assert!(run.failure.is_none(), "creation must succeed");
@@ -4186,6 +4207,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: true,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none(), "creation must succeed");
@@ -4221,6 +4243,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: true,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none(), "creation must succeed");
@@ -4284,6 +4307,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: true,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
 
@@ -4523,6 +4547,7 @@ mod tests {
             use_existing_branch: true,
             pull_before_create: false,
             copy_uncommitted_changes: true,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none());
@@ -4543,6 +4568,7 @@ mod tests {
             use_existing_branch: true,
             pull_before_create: false,
             copy_uncommitted_changes: true,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none());
@@ -4600,6 +4626,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: true,
+            cloned: None,
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(
@@ -4648,6 +4675,7 @@ mod tests {
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
+            cloned: None,
         };
         let reactions = drive_create_through_engine(&mut engine, request);
         let failed = create_final(&reactions);
