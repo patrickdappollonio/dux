@@ -1372,6 +1372,29 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.pty_send_timeout_seconds as usize),
         },
         ConfigEntry::Field {
+            key: "operation_unknown_after_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a change a client is waiting on (deleting an agent, creating\n\
+                 # one, removing a project) may keep running before dux reports its outcome\n\
+                 # as unknown. This never stops the change and never calls it failed: the\n\
+                 # change keeps running, and once it ends its real outcome replaces\n\
+                 # unknown. Default 1800 (30 minutes).\n\
+                 # A config reload applies this to the changes started after it.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.operation_unknown_after_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "operation_retention_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long dux keeps the outcome of a finished change so a client can still\n\
+                 # look it up. After this the outcome is forgotten, and asking about it says\n\
+                 # dux knows no such change. Outcomes live in memory only, so a restart\n\
+                 # forgets them all. Default 1800 (30 minutes).\n\
+                 # A config reload applies this to the changes started after it.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.operation_retention_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "tree_list_max_concurrency",
             comment: Some(CommentSource::Static(
                 "# Maximum number of /files/tree directory listings the web editor may run\n\

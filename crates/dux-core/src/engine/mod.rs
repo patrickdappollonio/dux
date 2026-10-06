@@ -348,6 +348,11 @@ pub struct Engine {
     /// Config-mutating commands that arrived while `reloading` was set. Drained
     /// (re-applied) when the reload completes. Constructed empty.
     pub deferred_commands: Vec<Command>,
+    /// The operation record each of `deferred_commands` was dispatched under,
+    /// position for position, `None` where no client asked for one. A deferred
+    /// change has not happened yet, so its record finishes when the drain
+    /// runs it, not when it was deferred.
+    pub deferred_operations: Vec<Option<String>>,
     /// How many commands [`Engine::apply`] has taken since the engine was built.
     ///
     /// Read, never interpreted: the only consumer compares it against the value
@@ -834,6 +839,16 @@ pub struct Engine {
     /// session). `None` for every non-create command and for the from-PR create
     /// (whose create op is minted later, inside the PR-lookup followup).
     pub last_created_op_id: Option<String>,
+
+    /// What a client that asked for a change can learn about how it ended. See
+    /// [`crate::operations`] for the ids and the completion points.
+    pub operations: crate::operations::Operations,
+
+    /// The record of the change [`Engine::apply_wire_operation`] is
+    /// dispatching right now, so a fact the change learns before it has a key
+    /// of its own (what an inline delete did to the worktree and the branch)
+    /// reaches that record. `None` outside that call.
+    pub operation_in_dispatch: Option<String>,
 
     /// Maps a create op's opaque id to the session it produced (and when), filled
     /// in the launch-ready Create branch once the worker-minted session lands. A
@@ -2074,6 +2089,15 @@ impl Engine {
             now.saturating_duration_since(*at) < CREATED_SESSION_TTL
                 && sessions.iter().any(|s| &s.id == sid)
         });
+        // The create's operation record, when a client asked for one, names
+        // the agent the create made before its final lands.
+        self.operations.note(
+            &op_id,
+            crate::operations::OperationNotes {
+                created: vec![session_id.clone()],
+                ..Default::default()
+            },
+        );
         map.insert(op_id, (session_id, now));
     }
 
@@ -2117,6 +2141,7 @@ impl Engine {
     /// engine actor call this exactly once per tick, and they never run at the
     /// same time.
     pub fn poll_pty_activity(&mut self) {
+        self.prune_operations();
         let now = Instant::now();
         // `providers` (and therefore `pty_activity`) is keyed by TAB id, not
         // session id. An agent's own key is whatever `AgentSession::slot_tab_id`
@@ -9411,6 +9436,47 @@ mod tests {
                 .unwrap()
                 .contains("API = \"k\"")
         );
+
+        // A change a client follows that is deferred by a reload is not over
+        // when it is deferred: its record stays open until the drain runs it,
+        // and then ends on what that run did.
+        engine
+            .apply(Command::PersistProject {
+                action: Box::new(crate::worker::ProjectPersistenceAction::Add {
+                    project: crate::engine::test_support::sample_project("p9", "/tmp/p9"),
+                    status_message: "added".to_string().into(),
+                }),
+                status_op_id: None,
+            })
+            .expect("register the project the reload keeps");
+        engine.config_writer.flush();
+        engine.apply(Command::ReloadConfig).expect("second reload");
+        assert!(engine.reloading);
+        let outcome = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::RemoveProject {
+                    project_id: "p9".to_string(),
+                },
+                crate::operations::OperationKind::ProjectRemove,
+            )
+            .expect("the removal is accepted and deferred");
+        let id = outcome.operation_id.expect("an operation id");
+        let now = std::time::Instant::now;
+        assert_eq!(
+            engine.operations.view(&id, now()).unwrap().state,
+            crate::operations::OperationState::Running,
+            "a deferred change has not happened yet"
+        );
+        let event = engine.worker_rx.recv().expect("reload completion");
+        let _ = engine.process_worker_event(event);
+        let record = engine.operations.view(&id, now()).unwrap();
+        assert_eq!(record.state, crate::operations::OperationState::Succeeded);
+        assert_eq!(record.removed, vec!["p9".to_string()]);
+        assert!(
+            record.message.starts_with("Removed project "),
+            "{}",
+            record.message
+        );
     }
 
     /// A test `ConfigSurface` whose `reload` reports a validation FAILURE (posts an
@@ -12057,6 +12123,51 @@ mod tab_ops_tests {
                 .contains_key(TabIdRef::new("s1-slot")),
             "a tab nothing can ask about again must not leave a verdict behind"
         );
+
+        // The same race for a SLOT launch (a start of the agent's first tab):
+        // the failure is reported by agent, not by tab, and by the time it
+        // lands a promotion has made another tab the slot. The record that
+        // follows the tab that failed ends; the one following the promoted
+        // tab's own launch is not touched.
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        let stale = engine.sessions[0].clone();
+        let request = engine.build_tab_launch_request(
+            TabId::new("s1-slot"),
+            Some(ProviderKind::new("claude")),
+            stale,
+            false,
+            (24, 80),
+            AgentLaunchKind::Reconnect {
+                status_message: "x".into(),
+            },
+        );
+        let policy = crate::operations::OperationPolicy {
+            unknown_after: std::time::Duration::from_secs(60),
+            retention: std::time::Duration::from_secs(60),
+        };
+        let now = std::time::Instant::now;
+        for (id, tab) in [("op-slot", "s1-slot"), ("op-t2", "t2")] {
+            engine.operations.open(
+                id,
+                crate::operations::OperationKind::TabStart,
+                policy,
+                now(),
+            );
+            engine
+                .operations
+                .await_key(id, &crate::operations::launch_binding_key(tab));
+        }
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        let (outcome, _) = engine.process_agent_launch_failed(AgentLaunchFailedData {
+            request,
+            message: "boom".to_string(),
+        });
+        let _ = engine
+            .drive_web_launch_followup(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
+        let state = |id: &str| engine.operations.view(id, now()).unwrap().state;
+        assert_eq!(state("op-slot"), crate::operations::OperationState::Failed);
+        assert_eq!(state("op-t2"), crate::operations::OperationState::Running);
     }
 
     #[test]
@@ -12081,11 +12192,42 @@ mod tab_ops_tests {
             },
         );
 
+        let now = std::time::Instant::now;
+        engine.operations.open(
+            "op-t2",
+            crate::operations::OperationKind::TabCreate,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            now(),
+        );
+        engine.operations.note(
+            "op-t2",
+            crate::operations::OperationNotes {
+                created: vec!["t2".to_string()],
+                ..Default::default()
+            },
+        );
+        engine
+            .operations
+            .await_key("op-t2", &crate::operations::launch_binding_key("t2"));
+
         engine.close_tab("s1", "s1-slot").expect("promotion");
         let (outcome, _) = engine.process_agent_launch_failed(AgentLaunchFailedData {
             request,
             message: "boom".to_string(),
         });
+        let reaction = EventReaction::AgentLaunchFailedView(Box::new(outcome));
+        let _ = engine.drive_web_launch_followup(&reaction);
+        let EventReaction::AgentLaunchFailedView(outcome) = reaction else {
+            unreachable!("built just above")
+        };
+        let outcome = *outcome;
+        // The tab was created and is still there; only its launch failed.
+        let record = engine.operations.view("op-t2", now()).unwrap();
+        assert_eq!(record.state, crate::operations::OperationState::Partial);
+        assert_eq!(record.created, vec!["t2".to_string()]);
 
         assert!(
             matches!(outcome, AgentLaunchFailedOutcome::Tab { ref tab_id, .. } if tab_id == "t2"),

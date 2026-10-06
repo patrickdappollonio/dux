@@ -439,6 +439,8 @@ impl Engine {
         // config instead of racing it.
         if self.reloading && Self::is_config_mutating(&command) {
             self.deferred_commands.push(command);
+            self.deferred_operations
+                .push(self.operation_in_dispatch.clone());
             return Ok(EventReaction::Nothing);
         }
         match command {
@@ -1048,6 +1050,7 @@ impl Engine {
                         .any(|c| matches!(c, Command::ReloadConfig))
                     {
                         self.deferred_commands.push(Command::ReloadConfig);
+                        self.deferred_operations.push(None);
                     }
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already running; another runs right after it, so \
@@ -1342,6 +1345,26 @@ impl Engine {
         }
         let was_real = self.projects.iter().any(|project| project.id == project_id);
         let removed = self.session_store.remove_project_records(project_id)?;
+        // What became of each worktree, decided here: kept on disk.
+        let kept: Vec<crate::operations::OperationPart> = self
+            .sessions
+            .iter()
+            .filter(|session| removed.contains(&session.id))
+            .filter_map(|session| session.workspace.as_managed())
+            .map(|managed| crate::operations::OperationPart {
+                part: crate::operations::PartKind::Worktree,
+                subject: managed.worktree_path.clone(),
+                outcome: crate::operations::PartOutcome::Kept,
+                reason: None,
+            })
+            .collect();
+        self.note_operation(
+            None,
+            crate::operations::OperationNotes {
+                parts: kept,
+                ..Default::default()
+            },
+        );
         for session_id in &removed {
             self.finish_delete_session_memory(session_id);
         }

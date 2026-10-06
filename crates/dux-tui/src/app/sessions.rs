@@ -4781,6 +4781,9 @@ mod tests {
             pending_web_launch_ops: std::collections::HashMap::new(),
             live_status_keys: Default::default(),
             last_created_op_id: None,
+            operations: Default::default(),
+            operation_in_dispatch: None,
+            deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };
@@ -5128,6 +5131,9 @@ mod tests {
             pending_web_launch_ops: std::collections::HashMap::new(),
             live_status_keys: Default::default(),
             last_created_op_id: None,
+            operations: Default::default(),
+            operation_in_dispatch: None,
+            deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };
