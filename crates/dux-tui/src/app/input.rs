@@ -29393,7 +29393,11 @@ cyan = "#00ffff"
         assert_eq!(destination, format!("{}/", start.path().display()));
         assert_eq!(focus, CloneProjectFocus::Address);
 
-        type_text(&mut app, "git@github.com:acme/widget.git");
+        app.handle_paste("git@github.com:acme/wid");
+        let (_, destination, _, _) = clone_prompt_fields(&app);
+        assert_eq!(destination, format!("{}/wid", start.path().display()));
+
+        type_text(&mut app, "get.git");
         let (address, destination, _, _) = clone_prompt_fields(&app);
         assert_eq!(address, "git@github.com:acme/widget.git");
         assert_eq!(destination, format!("{}/widget", start.path().display()));
@@ -29423,6 +29427,26 @@ cyan = "#00ffff"
     fn clone_form_tab_order_and_space_on_the_checkbox() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
+
+        // With random names on by default the box starts ticked and the name
+        // filled.
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
+        app.execute_command("clone-project".to_string()).unwrap();
+        let PromptState::CloneProject {
+            randomize_name,
+            agent_name,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the clone form, got {:?}", app.prompt);
+        };
+        assert!(*randomize_name);
+        assert!(!agent_name.text.is_empty());
+        tap(&mut app, KeyCode::Esc);
+
         app.engine
             .config
             .defaults
