@@ -47,9 +47,15 @@ pub fn ask_to_reload(lock_path: &Path, wait: Duration) -> ReloadAnswer {
         }
         Err(error) => return ReloadAnswer::NotReached(error.message),
     };
-    let ended = client
-        .change(Method::Post, "/api/v1/config/reload", None)
-        .and_then(|record| client.wait(record, wait));
+    let started = match client.change(Method::Post, "/api/v1/config/reload", None) {
+        Ok(record) => record,
+        // The running dux answered and turned the reload down.
+        Err(error) if matches!(error.exit, Exit::Refused | Exit::Failed) => {
+            return ReloadAnswer::Refused(error.message);
+        }
+        Err(error) => return ReloadAnswer::NotReached(error.message),
+    };
+    let ended = client.wait(started, wait);
     match ended {
         Ok(record) => {
             let message = record.message;
@@ -84,11 +90,20 @@ mod tests {
     /// A stand-in dux holding the lock and answering on its socket: the
     /// reload request gets a running record, and reading it gets `outcome`.
     fn running_dux(dir: &Path, outcome: String) -> (FakeDux, crate::lockfile::SingleInstanceLock) {
+        running_dux_answering(dir, (202, record("running", "")), outcome)
+    }
+
+    /// [`running_dux`], answering the reload request itself with `asked`.
+    fn running_dux_answering(
+        dir: &Path,
+        asked: (u16, String),
+        outcome: String,
+    ) -> (FakeDux, crate::lockfile::SingleInstanceLock) {
         let socket = dir.join("dux.sock");
         let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
             "/api/v1/build" => Reply::json(200, BUILD),
             path if path.starts_with("/api/v1/operations/op-9") => Reply::json(200, &outcome),
-            "/api/v1/config/reload?operation=1" => Reply::json(202, &record("running", "")),
+            "/api/v1/config/reload?operation=1" => Reply::json(asked.0, &asked.1),
             _ => Reply::json(404, "{}"),
         });
         let lock_path = dir.join("dux.lock");
@@ -107,23 +122,38 @@ mod tests {
 
     #[test]
     fn the_running_duxs_own_outcome_is_what_comes_back() {
+        let accepted = || (202, record("running", ""));
         let cases = [
             (
+                accepted(),
                 record("succeeded", "Configuration reloaded."),
                 ReloadAnswer::Applied("Configuration reloaded.".to_string()),
             ),
             (
+                accepted(),
                 record("partial", "One step failed."),
                 ReloadAnswer::PartlyApplied("One step failed.".to_string()),
             ),
             (
+                accepted(),
                 record("failed", "Config reload failed: bad toml"),
                 ReloadAnswer::Refused("Config reload failed: bad toml".to_string()),
             ),
+            // Refused as it was asked: the running dux answered, and said no.
+            (
+                (400, r#"{"message":"Config writer is busy; please retry."}"#.to_string()),
+                String::new(),
+                ReloadAnswer::Refused("Config writer is busy; please retry.".to_string()),
+            ),
+            (
+                (409, r#"{"message":"another change is in the way"}"#.to_string()),
+                String::new(),
+                ReloadAnswer::Refused("another change is in the way".to_string()),
+            ),
         ];
-        for (outcome, expected) in cases {
+        for (asked, outcome, expected) in cases {
             let dir = private_dir();
-            let (fake, _lock) = running_dux(dir.path(), outcome);
+            let (fake, _lock) = running_dux_answering(dir.path(), asked, outcome);
             let answer = ask_to_reload(&dir.path().join("dux.lock"), Duration::from_secs(10));
             assert_eq!(answer, expected);
             assert!(
