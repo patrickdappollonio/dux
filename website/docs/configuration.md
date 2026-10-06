@@ -146,12 +146,14 @@ change, a block after failed logins), never by dux saving its other settings.
 > run while another dux is running, and it is all or nothing. First it stops what dux itself
 > started and left running in those worktrees (a startup command's dev server, or a job a
 > terminal left working in one, say), giving each the same grace period as a delete before
-> forcing it. If anything dux started still runs afterwards (one that would not stop, or
-> anything a standalone agent started, which dux never stops), the reset deletes nothing:
-> not the config, not the database, not a worktree. It lists each program and its folder and
-> exits with status 1. Stop what is listed and run the reset again. A folder a standalone
-> agent runs in is never touched. Once the reset does delete, it keeps the record that you
-> have seen the welcome screen, so the screen does not open again on the next start.
+> forcing it. That includes what a standalone agent started, wherever it works. If anything
+> dux started still runs afterwards, or dux cannot tell whether something does (it cannot
+> read the database, the list of what it started, or the process list), the reset deletes
+> nothing: not the config, not the database, not a worktree. It says why, lists each program
+> and its folder, and exits with status 1. Stop what is listed and run the reset again. A
+> folder a standalone agent runs in is never removed. Once the reset does delete, it keeps
+> the record that you have seen the welcome screen, so the screen does not open again on
+> the next start.
 
 ### What `dux config diff` shows, and what it holds back
 

@@ -168,15 +168,34 @@ impl ResetLeftover {
 }
 
 /// Why `reset --all` deleted nothing: programs dux started that are still
-/// running, each with the folder it works in. Carried as the command's error,
-/// so it is printed once and the exit code is 1.
-#[derive(Debug)]
+/// running (each with the folder it works in), or a check whose answer dux
+/// could not get, which counts the same because it cannot know nothing runs.
+/// Carried as the command's error, so it is printed once and the exit code is 1.
+#[derive(Debug, Default)]
 struct ResetRefused {
     running: Vec<ResetLeftover>,
+    unknown: Option<String>,
+}
+
+impl ResetRefused {
+    fn unknown(reason: impl std::fmt::Display) -> Self {
+        Self {
+            running: Vec::new(),
+            unknown: Some(format!(
+                "could not check which programs are still running: {reason}"
+            )),
+        }
+    }
 }
 
 impl std::fmt::Display for ResetRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(reason) = &self.unknown {
+            return write!(
+                f,
+                "dux config reset --all deleted nothing: {reason}. Fix that and run the reset                  again, or delete the files yourself."
+            );
+        }
         write!(
             f,
             "dux config reset --all deleted nothing: {} that dux started still runs. Stop what \
@@ -836,9 +855,13 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                     // the same set decides whose processes end: nothing
                     // working in a folder that is kept is touched.
                     let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
-                    let running = end_recorded_processes(paths, &store, &removing);
+                    let running = end_recorded_processes(paths, &store, &removing)?;
                     if !running.is_empty() {
-                        return Err(ResetRefused { running }.into());
+                        return Err(ResetRefused {
+                            running,
+                            ..Default::default()
+                        }
+                        .into());
                     }
                     let mut removed = 0usize;
                     for session in &sessions {
@@ -854,11 +877,17 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                     println!("{}", removed_worktrees_line(removed));
                 }
                 Err(error) => {
-                    eprintln!("warning: could not load sessions from database: {error}");
+                    return Err(ResetRefused::unknown(format_args!(
+                        "the sessions could not be loaded from the database: {error}"
+                    ))
+                    .into());
                 }
             },
             Err(error) => {
-                eprintln!("warning: could not open session database: {error}");
+                return Err(ResetRefused::unknown(format_args!(
+                    "the session database could not be opened: {error}"
+                ))
+                .into());
             }
         }
     }
@@ -891,6 +920,12 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
         }
     }
     Ok(leftovers)
+}
+
+/// Why the process list cannot be trusted, when it cannot. dux itself is
+/// always in it, so an empty list means it was not read, not that nothing runs.
+fn process_list_problem(rows: usize) -> Option<String> {
+    (rows == 0).then(|| "the process list could not be read".to_string())
 }
 
 /// The release whose welcome screen was last seen, read before the database
@@ -971,26 +1006,32 @@ fn reset_grace(paths: &DuxPaths) -> std::time::Duration {
 ///   rest of the session, working elsewhere, is left alone;
 /// - a process whose working directory cannot be read keeps the folder its
 ///   session started in, and is never killed on a guess;
-/// - a standalone agent's processes are never ended.
+/// - a standalone agent's processes are ended too, wherever they work, since
+///   the reset only runs once everything dux started has stopped; its folder is
+///   still never removed.
 ///
-/// Answers each folder that must be kept because something there still runs
-/// (one that would not stop, or a standalone agent's), with why.
+/// Answers each program still running afterwards (one that would not stop, or
+/// whose location could not be read), with why. Refuses outright when what dux
+/// recorded, or the process list, cannot be read.
 fn end_recorded_processes(
     paths: &DuxPaths,
     store: &SessionStore,
     removing: &[PathBuf],
-) -> Vec<ResetLeftover> {
+) -> std::result::Result<Vec<ResetLeftover>, ResetRefused> {
     use dux_core::process_sessions as ps;
-    let stored = match store.load_process_registry() {
-        Ok(stored) => stored,
-        Err(error) => {
-            eprintln!(
-                "warning: could not read the processes dux recorded starting, so none was \
-                 ended before the reset: {error}"
-            );
-            return Vec::new();
-        }
-    };
+    let stored = store
+        .load_process_registry()
+        .map_err(|error| ResetRefused::unknown(format_args!("{error}")))?;
+    let recorded: Vec<_> = stored
+        .into_iter()
+        .filter(|entry| entry.session.is_this_boot())
+        .collect();
+    if recorded.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(problem) = process_list_problem(ps::read_process_table().len()) {
+        return Err(ResetRefused::unknown(problem));
+    }
     let grace = reset_grace(paths);
     // In or under a folder the reset removes.
     let under_root = |dir: &Path| {
@@ -998,28 +1039,26 @@ fn end_recorded_processes(
             .iter()
             .any(|folder| dux_core::worktree_ops::folder_contains(folder, dir))
     };
+    let anywhere = |_: &Path| true;
     let mut kept: Vec<ResetLeftover> = Vec::new();
-    for entry in stored
-        .into_iter()
-        .filter(|entry| entry.session.is_this_boot())
-    {
-        // Only processes WORKING in a folder the reset removes are ended,
-        // whatever folder their session started in: a job that moved into a
-        // folder the reset keeps (a project's repository) is the user's and
-        // is left running. This is deliberately unlike deleting an agent,
-        // which ends that agent's own sessions whole because the user asked
-        // for the agent to go; a reset carries no such intent toward a job
-        // working elsewhere.
-        let found = ps::session_processes_where(
-            entry.session,
-            &entry.folder,
-            &entry.survivors,
-            &under_root,
-        );
+    for entry in recorded {
+        // A managed agent's processes are ended only where they WORK in a
+        // folder the reset removes, whatever folder their session started in:
+        // a job that moved into a folder the reset keeps (a project's
+        // repository) is the user's and is left running. A standalone agent's
+        // are ended wherever they are: the agent goes with the database, and
+        // its programs must not outlive it.
+        let touches: &dyn Fn(&Path) -> bool = if entry.standalone {
+            &anywhere
+        } else {
+            &under_root
+        };
+        let found =
+            ps::session_processes_where(entry.session, &entry.folder, &entry.survivors, touches);
         if found.inside.is_empty() && found.unknown.is_empty() {
             continue;
         }
-        // Where to keep and report: where its processes work.
+        // Where to report: where its processes work.
         let working_in = || {
             let read = dux_core::file_drop::process_cwds(
                 &found.inside.iter().map(|row| row.pid).collect::<Vec<_>>(),
@@ -1027,39 +1066,23 @@ fn end_recorded_processes(
             found
                 .inside
                 .iter()
-                .find_map(|row| {
-                    read.found
-                        .get(&row.pid)
-                        .filter(|cwd| under_root(cwd))
-                        .cloned()
-                })
+                .find_map(|row| read.found.get(&row.pid).filter(|cwd| touches(cwd)).cloned())
                 .unwrap_or_else(|| entry.folder.clone())
         };
         // A process whose working directory cannot be read may be standing in
-        // the folder its session started in: that folder is kept, and the
-        // process is never killed on a guess.
+        // the folder its session started in: it is never killed on a guess,
+        // and while it runs nothing can be deleted.
         if !found.unknown.is_empty() {
             kept.push(ResetLeftover {
                 path: entry.folder.clone(),
                 reason: format!(
-                    "dux could not read where {} that it started there is working, so it kept \
-                     the folder rather than stop a process that may be elsewhere",
+                    "dux could not read where {} that it started there is working, so it did \
+                     not stop it",
                     ps::describe(&found.unknown)
                 ),
             });
         }
         if found.inside.is_empty() {
-            continue;
-        }
-        if entry.standalone {
-            kept.push(ResetLeftover {
-                path: working_in(),
-                reason: format!(
-                    "a standalone agent's process dux started is working there ({}), and dux \
-                     never stops one",
-                    ps::describe(&found.inside)
-                ),
-            });
             continue;
         }
         let path = working_in();
@@ -1071,7 +1094,7 @@ fn end_recorded_processes(
             });
         }
     }
-    kept
+    Ok(kept)
 }
 
 /// Clear the managed worktrees root entry by entry, leaving every entry that
@@ -1738,21 +1761,22 @@ mod tests {
         );
     }
 
-    /// A process a standalone agent's run left in a managed folder is never
-    /// ended by a reset, so the reset deletes nothing at all and lists the
-    /// process and its folder.
+    /// A process a standalone agent's run left running is stopped like every
+    /// other recorded one, and the reset then goes on; the agent's folder is
+    /// the user's and stays.
     #[test]
-    fn a_factory_reset_deletes_nothing_while_a_recorded_standalone_process_runs() {
+    fn a_factory_reset_stops_a_recorded_standalone_process_and_keeps_its_folder() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
-            root: tmp.path().to_path_buf(),
-            config_path: tmp.path().join("config.toml"),
-            sessions_db_path: tmp.path().join("sessions.sqlite3"),
-            worktrees_root: tmp.path().join("worktrees"),
-            lock_path: tmp.path().join("dux.lock"),
+            root: tmp.path().join("dux"),
+            config_path: tmp.path().join("dux").join("config.toml"),
+            sessions_db_path: tmp.path().join("dux").join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("dux").join("worktrees"),
+            lock_path: tmp.path().join("dux").join("dux.lock"),
         };
-        let folder = paths.worktrees_root.join("loose");
+        fs::create_dir_all(&paths.root).expect("root");
+        let folder = tmp.path().join("my-notes");
         fs::create_dir_all(&folder).expect("folder");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&folder);
@@ -1785,24 +1809,48 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        fs::write(&paths.config_path, "# user config\n").expect("config");
-        let other = paths.worktrees_root.join("other");
-        fs::create_dir_all(&other).expect("other folder");
-
-        let refusal = run_reset(&paths, true).expect_err("the reset refuses");
+        run_reset(&paths, true).expect("reset");
 
         assert!(
-            job.0.try_wait().expect("try_wait").is_none(),
-            "the standalone agent's process is left running"
+            job.0.try_wait().expect("try_wait").is_some(),
+            "the standalone agent's process was stopped"
         );
         assert!(folder.exists(), "its folder is kept");
-        assert!(other.exists(), "so is every other folder");
-        assert!(paths.config_path.exists(), "and the config");
-        assert!(paths.sessions_db_path.exists(), "and the database");
+        assert!(!paths.sessions_db_path.exists(), "the database goes");
+    }
+
+    /// If dux cannot read what it recorded starting, it cannot know nothing is
+    /// running, so the reset deletes nothing and says why.
+    #[test]
+    fn a_factory_reset_deletes_nothing_when_the_recorded_programs_cannot_be_read() {
+        let harness = ResetHarness::new();
+        harness.write_config_with_log_path("logs/custom.log");
+        let worktree = harness.create_session("agent-1");
+        let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
+        store.replace_process_registry(&[]).expect("registry row");
+        drop(store);
+        let conn = rusqlite::Connection::open(&harness.paths.sessions_db_path).expect("raw");
+        conn.execute("update process_registry set body = x'ff' where id = 1", [])
+            .expect("make the body unreadable as text");
+        drop(conn);
+
+        let refusal = run_reset(&harness.paths, true).expect_err("the reset refuses");
+
         let message = format!("{refusal:#}");
-        assert!(message.contains(&folder.display().to_string()), "{message}");
-        assert!(message.contains("standalone"), "{message}");
+        assert!(
+            message.contains("could not check which programs are still running"),
+            "{message}"
+        );
         assert!(message.contains("deleted nothing"), "{message}");
+        assert!(worktree.exists());
+        assert!(harness.paths.config_path.exists());
+        assert!(harness.paths.sessions_db_path.exists());
+    }
+
+    #[test]
+    fn an_empty_process_list_is_never_taken_for_no_programs_running() {
+        assert!(process_list_problem(0).is_some());
+        assert!(process_list_problem(1).is_none());
     }
 
     /// A factory reset must not remove a STANDALONE agent's folder, even when
