@@ -190,6 +190,26 @@ fn run_tui_with_flip() -> Result<()> {
     Ok(())
 }
 
+/// Creates the config folder owner-only before anything is written in it.
+/// `dux server` never runs `DuxPaths::ensure_dirs`, so without this a first run
+/// leaves the folder at the umask default.
+fn create_config_root(paths: &dux_core::config::DuxPaths) -> Result<()> {
+    dux_core::file_modes::create_private_dir_all(&paths.root)?;
+    Ok(())
+}
+
+fn init_server_logger(
+    logging: &dux_core::config::LoggingConfig,
+    paths: &dux_core::config::DuxPaths,
+) {
+    dux_core::logger::init(logging, paths);
+    // The folder was tightened before the log existed, so any warning that
+    // raised (a symlinked folder, a mode dux could not change) was dropped.
+    // Tightening is idempotent, so running it again raises the same warning
+    // into the log that is open now.
+    dux_core::file_modes::restrict_to_owner_best_effort(&paths.root, "directory");
+}
+
 fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let parsed = match parse_server_args(args) {
         ParsedServerArgs::HelpRequested => {
@@ -207,7 +227,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let overrides = parsed.into_overrides();
 
     let paths = dux_core::config::DuxPaths::discover()?;
-    std::fs::create_dir_all(&paths.root)?;
+    create_config_root(&paths)?;
     // `dux server` never calls `ensure_config`, so without this the bootstrap's
     // project-sync would create a comment-free config.toml on a first run that
     // starts in server mode. Registering the TUI's canonical renderer keeps
@@ -226,7 +246,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.
     // OnceLock::set is idempotent, so it is safe if the TUI already initialized it (flip).
-    dux_core::logger::init(&config.logging, &paths);
+    init_server_logger(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 
     // Detected up front to feed the Tailscale leg of the bind plan; blocking is fine
@@ -475,6 +495,52 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths_in(root: &std::path::Path) -> dux_core::config::DuxPaths {
+        dux_core::config::DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        }
+    }
+
+    #[test]
+    fn a_symlinked_config_folder_warning_reaches_the_log_of_a_server_start() {
+        let parent = std::env::temp_dir().join(format!("dux-server-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let target = parent.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let paths = paths_in(&link);
+
+        create_config_root(&paths).unwrap();
+        init_server_logger(&dux_core::config::LoggingConfig::default(), &paths);
+
+        let log = std::fs::read_to_string(target.join("dux.log")).unwrap();
+        let _ = std::fs::remove_dir_all(&parent);
+        assert!(
+            log.contains("is a symlink, so its permissions were left alone"),
+            "the symlink warning was lost before the logger opened:\n{log}"
+        );
+    }
+
+    #[test]
+    fn server_start_creates_a_missing_config_folder_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = std::env::temp_dir().join(format!("dux-server-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = parent.join("fresh-home");
+
+        create_config_root(&paths_in(&root)).unwrap();
+
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&parent);
+        assert_eq!(mode, 0o700);
+    }
 
     fn parse(args: &[&str]) -> ParsedServerArgs {
         parse_server_args(args.iter().map(|s| s.to_string()))

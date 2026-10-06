@@ -591,6 +591,10 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
         return Ok(());
     }
 
+    // The config file exists, so its folder does; tighten it before the write
+    // lock, the backup and the new file are created in it.
+    dux_core::file_modes::create_private_dir_all(&paths.root)?;
+
     // Back up BEFORE committing. The writer below is atomic, which protects
     // against a torn file, but not against "the result was not what I wanted".
     // Both happen inside the config write lock, on the file as it is NOW (a
@@ -2675,15 +2679,25 @@ mod tests {
 
     #[test]
     fn restore_docs_yes_writes_a_backup_containing_the_original_bytes() {
+        use std::os::unix::fs::PermissionsExt;
         let harness = ResetHarness::new();
         let original = bare_user_config_fixture();
         fs::write(&harness.paths.config_path, &original).expect("seed");
+        fs::set_permissions(&harness.paths.root, fs::Permissions::from_mode(0o755))
+            .expect("loosen root");
 
         run(
             &["restore-docs".to_string(), "--yes".to_string()],
             &harness.paths,
         )
         .expect("apply");
+
+        let root_mode = fs::metadata(&harness.paths.root)
+            .expect("stat root")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(root_mode, 0o700, "the config folder must be tightened");
 
         // The config was rewritten with comments...
         let after = fs::read_to_string(&harness.paths.config_path).expect("read config");
