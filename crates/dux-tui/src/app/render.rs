@@ -18717,6 +18717,26 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render sizing frame");
+        // The shell prints on its own clock: wait for its last line, or a
+        // loaded machine scrolls back through history that is not there yet.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.refresh_snapshot_buf();
+            let screen: String = app
+                .snapshot_buf
+                .cells
+                .iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect();
+            if screen.contains("n120") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "test setup: the shell never printed its last line"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         // Deep enough to land in the wide-glyph half of the history.
         enter_scroll_mode(&mut app, 150);
         terminal
