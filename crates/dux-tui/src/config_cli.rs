@@ -7,12 +7,11 @@
 //! ([`dux_core::client::reload`]).
 
 use std::io::{Read, Write};
-use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
 use dux_core::client::reload::ReloadAnswer;
-use dux_core::config::{Config, DuxPaths, StartProblem, Surface};
+use dux_core::config::{DuxPaths, StartProblem, Surface};
 use dux_core::config_keys::{self, GetValue, Key, SecretKind, SetPasswordError, WritePolicy};
 use zeroize::Zeroizing;
 
@@ -324,8 +323,7 @@ pub(crate) fn run_set(
     write_surface_verdicts(out, &remaining)?;
     // What happened to a running dux is said only from the outcome of
     // asking it, and only once that outcome is known.
-    let wait = dux_core::client::wait::wait_timeout(None, &paths.config_path)
-        .unwrap_or_else(|_| Duration::from_secs(Config::default().cli.wait_timeout_seconds));
+    let wait = dux_core::client::wait::wait_timeout(None, &paths.config_path);
     let answer = dux_core::client::reload::ask_to_reload(&paths.lock_path, wait);
     say_reload(&answer, !remaining.is_empty(), out)?;
     if password && let Some(sentence) = password_sentence(&answer) {

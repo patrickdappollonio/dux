@@ -939,8 +939,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # either way; \"dux operations show <id>\" looks it up later. --wait-timeout\n\
                  # overrides this for one command and --no-wait skips the wait. dux config\n\
                  # set waits this long too, for the running dux to say whether its reload\n\
-                 # worked. Read by the command line on this machine only. Default 600 (10\n\
-                 # minutes).",
+                 # worked. Read by the command line on this machine only. At most 86400\n\
+                 # (one day); a longer value waits a day. Default 600 (10 minutes).",
             )),
             value_fn: |c| FieldValue::U64(c.cli.wait_timeout_seconds),
         },

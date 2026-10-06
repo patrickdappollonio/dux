@@ -272,7 +272,7 @@ pub struct ChangeFlags {
     /// Print the operation id and return without waiting for the change.
     #[arg(long)]
     pub no_wait: bool,
-    /// Wait at most this many seconds for the change to finish.
+    /// Wait at most this many seconds for the change to finish (at most a day).
     #[arg(long, value_name = "SECONDS", conflicts_with = "no_wait")]
     pub wait_timeout: Option<u64>,
 }

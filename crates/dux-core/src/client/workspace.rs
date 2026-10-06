@@ -637,7 +637,7 @@ pub fn perform(
     planned: Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
-    let deadline = wait.map(|timeout| Instant::now() + timeout);
+    let deadline = wait.map(wait::deadline_after);
     let record = match client.try_change(planned.method, &planned.path, planned.body.clone(), None)
     {
         Ok(record) => record,

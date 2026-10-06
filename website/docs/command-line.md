@@ -114,7 +114,7 @@ the terminal UI refuse it.
 
 - `--no-wait` prints the change's id and returns at once.
 - `--wait-timeout <seconds>` waits a different time than usual. The usual time is
-  `[cli] wait_timeout_seconds` (10 minutes); see
+  `[cli] wait_timeout_seconds` (10 minutes). No wait lasts more than a day; see
   [Configuration](/docs/configuration#how-long-a-command-waits-cli).
 - A wait that runs out says the outcome is unknown, prints the id, and exits 6. The change
   has not been stopped: it carries on, and `dux operations show <id>` tells you how it

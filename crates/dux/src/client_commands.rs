@@ -286,7 +286,7 @@ fn change_with(
     let wait = if flags.no_wait {
         None
     } else {
-        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path))
     };
     change(Writer::Dux {
         client: &client,
@@ -445,7 +445,7 @@ fn change_on_dux(
     let wait = if flags.no_wait {
         None
     } else {
-        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path))
     };
     workspace::perform(&client, planned, wait)
 }
