@@ -109,9 +109,11 @@ Subcommands:
   dux config diff --raw    Show a unified diff against the default config.
                            This prints the WHOLE config, [env] values included:
                            redact it before sharing.
-  dux config reset         Remove config and logs (keeps agents and worktrees)
-  dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
-                           (deletes nothing if a program dux started still runs)
+  dux config reset         Remove config, logs and saved remotes (keeps agents
+                           and worktrees)
+  dux config reset --all   Full factory reset: remove config, logs, saved remotes,
+                           sessions, and worktrees (deletes nothing if a program
+                           dux started still runs)
   dux config regenerate    Preview a fresh default config (shows diff; [env]
                            and other sensitive values are hidden unless you
                            add --show)

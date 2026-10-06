@@ -181,6 +181,11 @@ the change goes through it and applies at once; with dux stopped, it is written 
 into `config.toml`, comments kept, and applies the next time dux starts. `--remote
 <name>` lists and changes a remote dux's macros instead.
 
+A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
+hidden on the command line, the same rule `dux config get` follows: `ls` lists it under a
+placeholder name, and `show` finds it by its real name but prints only that placeholder and
+its surface. The browser's macro editor shows it in full.
+
 ## Adding macros directly in config
 
 You can manage macros entirely by hand. Open `config.toml` (`dux config path` locates

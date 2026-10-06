@@ -212,6 +212,19 @@ reopens dux at once, and a note says so.
 
 ![The cog menu open under the Settings button, with Sign out as its last item.](/screens/app-menu-sign-out.png)
 
+### Signing in from the command line
+
+The `dux` [command line](/docs/command-line) on another machine signs in with the same
+password: `dux remote login <name>` asks for it without echoing it, or reads it from a pipe
+with `--stdin`. Its wrong guesses count exactly like the sign-in page's, slow-downs and bans
+included, and `require` decides whether it is asked at all, the same as for a browser on
+that machine.
+
+A command-line sign-in outlives a browser's: it stays good between commands until it goes
+unused for `cli_token_idle_days` (30 by default), so daily use never asks again. It ends at
+once on `dux remote logout`, or when the password changes. It is kept on the signing-in
+machine in `remotes.toml`, in the config folder, readable only by you.
+
 ## Changing the password
 
 From a terminal, run `dux config set server.auth.password` again. From the browser, open
@@ -219,7 +232,8 @@ From a terminal, run `dux config set server.auth.password` again. From the brows
 and save. Leaving the fields empty keeps the password you have.
 
 Either way, every browser is signed out, the one you changed it from included, and signs
-in again with the new password. A wrong current password counts as a failed sign-in, the
+in again with the new password. Every command-line sign-in ends too, so each machine runs
+`dux remote login` again. A wrong current password counts as a failed sign-in, the
 same as one on the sign-in page.
 
 The raw config editor in the browser (**Configuration → Edit config file…**) refuses any

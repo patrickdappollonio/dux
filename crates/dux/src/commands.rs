@@ -18,15 +18,31 @@ Environment variables:
               When unset, defaults to:
                 macOS: ~/.dux/
                 Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/
+  DUX_REMOTE  The saved remote to talk to when neither --remote nor --local
+              is given. It wins over the default set with `dux remote default`.
 
 First run writes a full default config to config.toml in that directory, and
-session state is stored beside it in sessions.sqlite3.";
+session state is stored beside it in sessions.sqlite3.
+
+Projects, agents, terminals, `dux server connections` and `dux operations`
+need a running dux: the one on this machine, or a saved remote. Macros,
+providers, keys, themes and env read and edit config.toml when dux is stopped,
+and `dux server logs` reads server.log. These commands end with these exit
+codes:
+  0  success
+  1  the change failed, or what was named does not exist
+  2  the command line is wrong
+  3  refused: someone is attached, another change is in the way, or the
+     change was not confirmed
+  4  dux isn't running, or does not answer
+  5  the remote asks for its password; sign in with `dux remote login`
+  6  the outcome is unknown: the wait ran out, and the change keeps running";
 
 #[derive(Parser, Debug)]
 #[command(
     name = "dux",
     version,
-    about = "Terminal and web UI for AI worktree sessions. Run with no command to launch the terminal UI.",
+    about = "Terminal and web UI for AI worktree sessions, and a command line for their state. Run with no command to launch the terminal UI.",
     after_help = ROOT_AFTER_HELP
 )]
 pub struct Cli {

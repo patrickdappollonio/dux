@@ -19,6 +19,10 @@ dux writes a fully annotated `config.toml` the first time it launches:
 Themes are preselected, keybindings are ready to remap, and the default providers are
 already wired in. Open it, read the comments, change what you like.
 
+The remotes the [command line](/docs/command-line#another-machines-dux) can talk to, and
+its sign-ins to them, are kept beside it in `remotes.toml`, readable only by you. They
+never go in `config.toml`.
+
 Each provider block carries its own settings, including `web_dragdrop_paste`, which
 decides what a dragged, dropped or pasted file's path looks like when the web UI writes it
 into that agent's prompt. dux ships a measured value for every CLI it knows about, so you
@@ -51,6 +55,10 @@ A handful of subcommands handle the file without you hunting for it:
   Both refuse while another dux is running.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
+
+`dux config` always works on this machine's file. When the command line has a remote
+selected, through `DUX_REMOTE` or a default remote, it refuses rather than let you think
+you changed the other machine; `dux --local config …` goes ahead.
 
 ### Reading and changing one setting
 

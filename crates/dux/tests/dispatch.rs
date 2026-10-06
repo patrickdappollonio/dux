@@ -99,7 +99,7 @@ fn config_set_with_an_unknown_flag_gives_the_config_codes_flag_message() {
 }
 
 #[test]
-fn config_help_is_the_config_codes_own_help() {
+fn config_help_is_the_config_codes_own_help_and_says_what_reset_removes() {
     let run = dux("config-help", &["config", "--help"]);
     assert_eq!(run.code(), 0);
     assert!(
@@ -108,6 +108,7 @@ fn config_help_is_the_config_codes_own_help() {
         "{}",
         run.stdout()
     );
+    assert!(run.stdout().contains("saved remotes"), "{}", run.stdout());
 }
 
 #[test]
@@ -122,7 +123,7 @@ fn a_nested_command_prints_its_own_help() {
 }
 
 #[test]
-fn top_level_help_lists_the_commands_and_the_config_folder_variable() {
+fn top_level_help_lists_the_commands_the_variables_and_the_exit_codes() {
     let run = dux("top-help", &["--help"]);
     assert_eq!(run.code(), 0);
     let help = run.stdout();
@@ -137,6 +138,13 @@ fn top_level_help_lists_the_commands_and_the_config_folder_variable() {
         "--remote",
         "--local",
         "DUX_HOME",
+        "DUX_REMOTE",
+        "1  the change failed",
+        "2  the command line is wrong",
+        "3  refused",
+        "4  dux isn't running",
+        "5  the remote asks for its password",
+        "6  the outcome is unknown",
     ] {
         assert!(help.contains(needle), "missing {needle}:\n{help}");
     }
