@@ -146,12 +146,16 @@ change, a block after failed logins), never by dux saving its other settings.
 > run while another dux is running, and it is all or nothing. First it stops what dux itself
 > started and left running in those worktrees (a startup command's dev server, or a job a
 > terminal left working in one, say), giving each the same grace period as a delete before
-> forcing it. That includes what a standalone agent started, wherever it works. If anything
-> dux started still runs afterwards, or dux cannot tell whether something does (it cannot
-> read the database, the list of what it started, or the process list), the reset deletes
-> nothing: not the config, not the database, not a worktree. It says why, lists each program
-> and its folder, and exits with status 1. Stop what is listed and run the reset again. A
-> folder a standalone agent runs in is never removed. Once the reset does delete, it keeps
+> forcing it. That includes everything a standalone agent started, wherever it works. Then it
+> looks once more: if anything dux started still runs, or any program of yours is working in a
+> folder the reset would delete (one dux never started included), or dux cannot tell whether
+> something does (it cannot read the database, the list of what it started, or the process
+> list), the reset deletes nothing: not the config, not the database, not a worktree. It says
+> why, lists each program and its folder, and exits with status 1. Stop what is listed and run
+> the reset again. If a folder cannot be removed once the deleting has begun, the reset stops
+> there, keeps the database and the config, lists what it removed and what failed, and exits
+> with status 1; fix that and run it again. A folder a standalone agent runs in is never
+> removed. Once the reset does delete, it keeps
 > the record that you have seen the welcome screen, so the screen does not open again on
 > the next start.
 
