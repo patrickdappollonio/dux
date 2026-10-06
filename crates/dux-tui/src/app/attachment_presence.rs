@@ -104,17 +104,18 @@ impl App {
         if asked.attached().is_empty() {
             act(self)
         } else {
-            self.over_everybody_attached(act)
+            self.over_shown_attached(asked.attached(), act)
         }
     }
 
-    /// Run `act` as a change the person said to go ahead with over everybody
-    /// attached: the guard still reserves what it ends, and only its refusal
-    /// is skipped.
-    fn over_everybody_attached<R>(&mut self, act: impl FnOnce(&mut Self) -> R) -> R {
+    /// Run `act` as a change the person said to go ahead with over `shown`,
+    /// the blockers the dialog named: the guard still reserves what it ends,
+    /// and refuses again, naming everybody, when anybody else is in the way.
+    fn over_shown_attached<R>(&mut self, shown: &[Blocker], act: impl FnOnce(&mut Self) -> R) -> R {
         let forced = dux_core::attachments::Policy {
             requester: Some(TERMINAL_UI_CONNECTION.to_string()),
             force: true,
+            accepted: Some(shown.iter().map(Blocker::key).collect()),
         };
         let previous = self.engine.dispatch_policy.replace(forced);
         let result = act(self);
@@ -128,6 +129,71 @@ impl App {
     pub(crate) fn reopen_naming_attached(&mut self, mut asked: PromptState, refused: Attached) {
         asked.name_attached(refused.blockers);
         self.prompt = asked;
+        self.forget_buttons_until_redrawn();
+    }
+
+    /// Keep the list a dialog names live while it is open: anybody attaching
+    /// or leaving changes it, and a change puts focus back on Cancel, because
+    /// the override would now cut off someone the person has not seen yet.
+    /// Returns whether it changed, for the redraw gate. Only a dialog already
+    /// naming somebody is followed; one that names nobody asks when confirmed.
+    pub(crate) fn refresh_attached_dialog(&mut self) -> bool {
+        if self.prompt.attached().is_empty() {
+            return false;
+        }
+        let Some(now) = self.attached_now() else {
+            return false;
+        };
+        let keys =
+            |blockers: &[Blocker]| -> Vec<String> { blockers.iter().map(Blocker::key).collect() };
+        if keys(&now) == keys(self.prompt.attached()) {
+            return false;
+        }
+        self.prompt.name_attached(now);
+        self.forget_buttons_until_redrawn();
+        true
+    }
+
+    /// Everybody else attached to what the open guarded dialog would end.
+    fn attached_now(&self) -> Option<Vec<Blocker>> {
+        let scope = match &self.prompt {
+            PromptState::ConfirmDeleteAgent { session_id, .. }
+            | PromptState::ConfirmDetachAgent { session_id, .. } => {
+                self.engine.agent_scope(session_id)
+            }
+            PromptState::ConfirmDeleteTerminal { terminal_id, .. } => {
+                dux_core::engine::Engine::pty_scope(terminal_id)
+            }
+            PromptState::ConfirmCloseTab { tab_id, .. }
+            | PromptState::ConfirmStopTab { tab_id, .. } => {
+                dux_core::engine::Engine::pty_scope(tab_id)
+            }
+            PromptState::ConfirmDeleteProject { project_id, .. }
+            | PromptState::ConfirmRemoveProject { project_id, .. } => {
+                self.engine.project_scope(project_id)
+            }
+            PromptState::ConfirmKillRunning(confirm) => {
+                self.kill_running_scope(&confirm.target_ids)
+            }
+            PromptState::ConfirmQuit { .. } => return Some(self.engine.attached_elsewhere()),
+            _ => return None,
+        };
+        Some(self.engine.attachments.blockers(
+            &scope,
+            Some(TERMINAL_UI_CONNECTION),
+            std::time::Instant::now(),
+        ))
+    }
+
+    /// The dialog on screen is not the one the next clicks were aimed at: drop
+    /// the button rects the last frame published and any press in flight, so
+    /// the rest of this input batch (the second click of a double click above
+    /// all) lands on nothing, and the override takes a fresh press once it has
+    /// been drawn.
+    pub(crate) fn forget_buttons_until_redrawn(&mut self) {
+        self.overlay_layout.reset();
+        self.pressed_button = None;
+        self.mark_frame_dirty();
     }
 
     /// What the confirm of `asked` came to: nothing to say when it went
@@ -173,6 +239,7 @@ impl PromptState {
             | PromptState::ConfirmDeleteProject { attached, .. }
             | PromptState::ConfirmRemoveProject { attached, .. }
             | PromptState::ConfirmQuit { attached, .. } => attached,
+            PromptState::ConfirmKillRunning(confirm) => &confirm.attached,
             _ => &[],
         }
     }
@@ -185,6 +252,10 @@ impl PromptState {
             } => {
                 *attached = blockers;
                 *focus = DeleteAgentFocus::Cancel;
+            }
+            PromptState::ConfirmKillRunning(confirm) => {
+                confirm.attached = blockers;
+                confirm.focus = ConfirmFocus::Cancel;
             }
             PromptState::ConfirmDeleteTerminal {
                 attached, focus, ..
@@ -225,6 +296,66 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
+    }
+
+    /// A dialog naming who is attached keeps its list live: somebody new
+    /// joins it (with focus back on Cancel, since the override would now cut
+    /// off someone the person has not seen yet), and once everybody has gone
+    /// the confirm is the plain one again.
+    #[test]
+    fn a_dialog_naming_who_is_attached_follows_them_while_it_is_open() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        let first = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
+        app.confirm_delete_selected_session()
+            .expect("open the delete dialog");
+        app.resolve_confirm_delete_agent(true);
+        assert_eq!(app.prompt.attached().len(), 1);
+        if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
+            *focus = DeleteAgentFocus::Delete;
+        }
+        assert!(!app.refresh_attached_dialog(), "nothing moved");
+
+        app.engine.attachments.register(
+            "second-browser",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Safari".to_string()),
+                address: Some("10.0.0.8".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        let second = app
+            .engine
+            .attachments
+            .attach(
+                "second-browser",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: slot_tab.clone(),
+                    agent: Some(session_id.clone()),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(app.refresh_attached_dialog());
+        let PromptState::ConfirmDeleteAgent {
+            attached, focus, ..
+        } = &app.prompt
+        else {
+            panic!("the dialog stays open");
+        };
+        assert_eq!(attached.len(), 2);
+        assert_eq!(*focus, DeleteAgentFocus::Cancel);
+
+        crate::app::test_support::stop_watching(&app, first);
+        crate::app::test_support::stop_watching(&app, second);
+        assert!(app.refresh_attached_dialog());
+        assert!(app.prompt.attached().is_empty(), "{:?}", app.prompt);
     }
 
     /// A delete the command line asks for is refused while this surface draws

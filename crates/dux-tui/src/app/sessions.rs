@@ -3762,13 +3762,23 @@ impl App {
         let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_persist_ops.insert(op_id.clone(), op);
-        let reaction = self.engine.apply(Command::PersistProject {
+        let reaction = match self.engine.apply(Command::PersistProject {
             action: Box::new(ProjectPersistenceAction::Remove {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
             }),
-            status_op_id: Some(op_id),
-        })?;
+            status_op_id: Some(op_id.clone()),
+        }) {
+            Ok(reaction) => reaction,
+            // Refused before anything ran (somebody else is attached, or
+            // another change holds the project): no final will ever come for
+            // this op, so it leaves nothing behind.
+            Err(error) => {
+                self.pending_persist_ops.remove(&op_id);
+                self.engine.retire_status_key(&op_id);
+                return Err(error);
+            }
+        };
         self.apply_reaction(reaction);
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
@@ -4541,6 +4551,7 @@ impl App {
         }
 
         self.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            attached: Vec::new(),
             previous: prompt,
             action,
             target_ids,
@@ -9601,6 +9612,9 @@ mod tests {
             other => panic!("the removal dialog stays open naming who, got {other:?}"),
         }
         assert_eq!(app.engine.projects.len(), 1);
+        // A refusal leaves no operation behind it.
+        assert!(app.pending_persist_ops.is_empty());
+        assert_eq!(app.engine.live_status_keys.len(), 0);
 
         // The override goes ahead over them.
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))

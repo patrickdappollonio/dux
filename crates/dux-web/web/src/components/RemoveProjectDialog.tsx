@@ -24,7 +24,10 @@ export function RemoveProjectDialog() {
   // projects with no live project record, so a vanish guard would dismiss the
   // exact case it exists for.
   const isOpen = removeProjectTarget !== null
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    removeProjectTarget,
+  )
   const project = spine?.projects.find((p) => p.id === removeProjectTarget)
   // For an orphaned ("ghost") project there is no project record, so fall back
   // to the short-id name the sidebar shows for its group.
@@ -40,7 +43,7 @@ export function RemoveProjectDialog() {
   async function handleConfirm() {
     if (!removeProjectTarget) return
     const target = removeProjectTarget
-    const done = await confirm((force) => removeProject(target, force))
+    const done = await confirm((accepted) => removeProject(target, accepted))
     if (done) closeRemoveProject()
   }
 
@@ -58,6 +61,8 @@ export function RemoveProjectDialog() {
           </DialogDescription>
         </DialogHeader>
         <AttachedSection blockers={blockers} />
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
         <DialogFooter>
           <Button
             ref={cancelRef}

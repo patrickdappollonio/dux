@@ -124,12 +124,13 @@ describe("project confirmations name the project as a chip", () => {
         verified: true,
         driving: false,
         target: { kind: "terminal", id: "term-3" },
+        key: "k1",
       },
     ])
     render(<RemoveProjectDialog />)
 
     fireEvent.click(screen.getByRole("button", { name: "Remove" }))
-    expect(removeProject).toHaveBeenCalledWith("p1", false)
+    expect(removeProject).toHaveBeenCalledWith("p1", null)
     const override = await screen.findByRole("button", { name: "Remove anyway" })
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
     const who = screen.getByText((_, el) => el?.tagName === "LI")
@@ -137,7 +138,7 @@ describe("project confirmations name the project as a chip", () => {
 
     removeProject.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(removeProject).toHaveBeenLastCalledWith("p1", true)
+    expect(removeProject).toHaveBeenLastCalledWith("p1", ["k1"])
   })
 
   it("Check out default branch names the project and its current base", () => {

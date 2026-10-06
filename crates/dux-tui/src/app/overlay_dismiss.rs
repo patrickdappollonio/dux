@@ -1751,6 +1751,7 @@ mod tests {
         parity(
             |app| {
                 app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+                    attached: Vec::new(),
                     previous: KillRunningPrompt {
                         runtimes: Vec::new(),
                         list: SearchableList::new(),

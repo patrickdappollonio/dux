@@ -8472,17 +8472,16 @@ impl App {
         // The confirmation is about ending processes, not about cutting
         // anybody off: refused while somebody else is attached to one of them,
         // with the list left open and who named.
-        let _reservation = match self
-            .engine
-            .reserve_destruction(self.kill_running_scope(&confirm_prompt.target_ids))
-        {
-            Ok(reservation) => reservation,
-            Err(attached) => {
-                self.prompt = PromptState::KillRunning(confirm_prompt.previous);
-                self.set_error(attached.to_string());
-                return false;
-            }
-        };
+        let asked = PromptState::ConfirmKillRunning(confirm_prompt.clone());
+        let scope = self.kill_running_scope(&confirm_prompt.target_ids);
+        let _reservation =
+            match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope)) {
+                Ok(reservation) => reservation,
+                Err(refused) => {
+                    self.reopen_naming_attached(asked, refused);
+                    return false;
+                }
+            };
         self.prompt = PromptState::None;
         let requested = confirm_prompt.target_ids.len();
         let (agents, terminals) = self.kill_runtime_targets(&confirm_prompt.target_ids);
@@ -8515,6 +8514,7 @@ impl App {
             // until dux has gone.
             if let Err(now) = self.engine.reserve_quit(&attached) {
                 self.prompt.name_attached(now.blockers);
+                self.forget_buttons_until_redrawn();
                 self.set_warning(
                     "Another device connected while this was open. Check who is connected now, \
                      then confirm again to quit.",
@@ -13703,6 +13703,7 @@ not_a_real_action = ["x"]
     fn confirm_kill_running_prompt() -> ConfirmKillRunningPrompt {
         let runtime_id = RuntimeTargetId::Agent("session-1".to_string());
         ConfirmKillRunningPrompt {
+            attached: Vec::new(),
             previous: KillRunningPrompt {
                 runtimes: vec![sample_runtime(
                     runtime_id.clone(),
@@ -15486,6 +15487,7 @@ not_a_real_action = ["x"]
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
         };
         app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            attached: Vec::new(),
             previous: previous.clone(),
             action: KillRunningAction::Selected,
             target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
@@ -16100,23 +16102,25 @@ not_a_real_action = ["x"]
                 .unwrap();
         };
 
-        // Refused, naming who, while a browser watches one of the targets;
-        // nothing is stopped and the list stays open.
+        // Refused while a browser watches one of the targets: the
+        // confirmation stays open naming who, with focus back on Cancel, and
+        // nothing is stopped.
         let session_id = app.engine.sessions[0].id.clone();
-        let watching = crate::app::test_support::watch_from_a_browser(&app, "term-1", &session_id);
+        crate::app::test_support::watch_from_a_browser(&app, "term-1", &session_id);
         open(&mut app);
         app.resolve_confirm_kill_running(true);
-        assert!(
-            app.status.text().contains("10.0.0.7"),
-            "{}",
-            app.status.text()
-        );
+        match &app.prompt {
+            PromptState::ConfirmKillRunning(confirm) => {
+                assert_eq!(confirm.attached.len(), 1);
+                assert_eq!(confirm.attached[0].address.as_deref(), Some("10.0.0.7"));
+                assert_eq!(confirm.focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the kill confirmation stays open, got {other:?}"),
+        }
         assert!(!app.engine.providers.is_empty());
         assert!(!app.engine.companion_terminals.is_empty());
-        assert!(matches!(app.prompt, PromptState::KillRunning(_)));
-        crate::app::test_support::stop_watching(&app, watching);
 
-        open(&mut app);
+        // Confirming again kills them over the browser.
         app.resolve_confirm_kill_running(true);
 
         assert!(app.engine.providers.is_empty());
@@ -16130,6 +16134,7 @@ not_a_real_action = ["x"]
     fn kill_selected_warns_when_targets_are_already_gone() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            attached: Vec::new(),
             previous: KillRunningPrompt {
                 runtimes: vec![sample_runtime(
                     RuntimeTargetId::Agent("session-1".to_string()),
@@ -25062,9 +25067,17 @@ cyan = "#00ffff"
                 None,
             )
             .unwrap();
+        if let PromptState::ConfirmQuit { focus, .. } = &mut app.prompt {
+            *focus = ConfirmFocus::Confirm;
+        }
         assert!(!app.resolve_confirm_quit(true), "asked again");
         match &app.prompt {
-            PromptState::ConfirmQuit { attached, .. } => assert_eq!(attached.len(), 2),
+            PromptState::ConfirmQuit {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 2);
+                assert_eq!(*focus, ConfirmFocus::Cancel, "focus is back on Cancel");
+            }
             _ => panic!("the quit confirmation stays open"),
         }
         assert!(app.resolve_confirm_quit(true), "nobody new since");

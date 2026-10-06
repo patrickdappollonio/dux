@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -33,12 +38,17 @@ export function ConfirmForceReconnectDialog() {
     session !== undefined,
     closeForceReconnect,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    forceReconnectTarget,
+  )
   const name = session ? sessionLabel(session) : ""
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!forceReconnectTarget) return
-    reconnectSession(forceReconnectTarget, true)
-    closeForceReconnect()
+    const target = forceReconnectTarget
+    const done = await confirm((accepted) => reconnectSession(target, true, accepted))
+    if (done) closeForceReconnect()
   }
 
   function handleOpenChange(open: boolean) {
@@ -58,17 +68,26 @@ export function ConfirmForceReconnectDialog() {
             session instead of continuing the existing session.
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           {/* Cancel is the default focus, matching the TUI. shadcn/base-ui
               buttons activate on Space/Enter natively. */}
-          <Button variant="outline" autoFocus onClick={closeForceReconnect}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeForceReconnect}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Force recreate
-          </Button>
+          <GuardedConfirmButton
+            verb="Force recreate"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

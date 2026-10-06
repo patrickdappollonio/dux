@@ -200,7 +200,10 @@ export function DeleteSessionDialog() {
     },
   )
 
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    deleteTarget,
+  )
 
   // Asked exactly when the branch offer is on screen, since the answer carries both
   // the names and the count; with the worktree kept there is nothing to render.
@@ -232,8 +235,8 @@ export function DeleteSessionDialog() {
     // and the server keeps its own default.
     const branchAnswerToSend = removeWorktree ? deleteBranch : null
     const target = deleteTarget
-    const done = await confirm((force) =>
-      deleteSession(target, removeWorktree, branchAnswerToSend, force),
+    const done = await confirm((accepted) =>
+      deleteSession(target, removeWorktree, branchAnswerToSend, accepted),
     )
     if (!done) return
     reset()

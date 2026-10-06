@@ -48,6 +48,9 @@ let calls: [string, RequestInit | undefined][] = []
 // When set, the terminals reorder POST responds 400 so the overlay-clear-on-error
 // path can be exercised.
 let reorderFail = false
+// A terminal DELETE to this exact URL is refused because somebody else is
+// attached to it.
+let attachedUrl: string | null = null
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
@@ -85,6 +88,28 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       status: 201,
       json: async () => ({ terminal_id: "t9", label: "Terminal 2" }),
       text: async () => JSON.stringify({ terminal_id: "t9", label: "Terminal 2" }),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u === attachedUrl) {
+    const body = {
+      error: "attached",
+      blockers: [
+        {
+          surface: "browser",
+          device: null,
+          address: "10.0.0.7",
+          verified: false,
+          driving: false,
+          target: { kind: "terminal", id: "t1" },
+          key: "k1",
+        },
+      ],
+    }
+    return {
+      ok: false,
+      status: 409,
+      text: async () => JSON.stringify(body),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -307,9 +332,12 @@ describe("store companion-terminal lifecycle", () => {
       ],
       sidebar: { groups: [] },
     }
+    // Somebody else is attached to the session's terminal: that one is
+    // refused and named, the project's goes.
+    attachedUrl = "/api/v1/sessions/s1/terminals/t1"
     const mod = await loadStore()
-    mod.stopAllRunning()
-    await tick()
+    const refused = await mod.stopAllRunning()
+    attachedUrl = null
     const sessionDel = find(
       (u, init) =>
         u === "/api/v1/sessions/s1/terminals/t1" && init?.method === "DELETE",
@@ -320,6 +348,18 @@ describe("store companion-terminal lifecycle", () => {
     )
     expect(sessionDel).toBeDefined()
     expect(projectDel).toBeDefined()
+    expect(refused?.agents).toEqual([])
+    expect(refused?.terminals).toEqual(["t1"])
+    expect(refused?.blockers.map((b) => b.key)).toEqual(["k1"])
+
+    // Going ahead stops only what was refused, over exactly who was shown.
+    calls = []
+    expect(await mod.stopAllRunning(refused, ["k1"])).toBeNull()
+    expect(
+      calls
+        .filter(([, init]) => init?.method === "DELETE" || init?.method === "POST")
+        .map(([u]) => u),
+    ).toEqual(["/api/v1/sessions/s1/terminals/t1?force_connected=k1"])
   })
 
   // The panic button is the ONE caller that skips the shutdown grace. A polite

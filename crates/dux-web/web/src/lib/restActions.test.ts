@@ -104,6 +104,12 @@ describe("sessionsApi", () => {
         `/api/v1/sessions/s1?delete_worktree=true&delete_branch=${answer}`,
       )
     }
+    // The override names exactly who the dialog showed.
+    const fetchMock = stubOkFetch(204, null)
+    await sessionsApi.remove("s1", false, null, ["k1", "k2"])
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1?delete_worktree=false&force_connected=k1,k2",
+    )
   })
 
   it("patch PATCHes the session with the title/provider/auto_reopen body", async () => {
@@ -124,6 +130,9 @@ describe("sessionsApi", () => {
     expect(c.url).toBe("/api/v1/sessions/s1/reconnect")
     expect(c.method).toBe("POST")
     expect(c.body).toEqual({ force: true })
+    // The override names exactly who the dialog showed.
+    await sessionsApi.reconnect("s1", true, ["k1"])
+    expect(lastCall(fetchMock).url).toBe("/api/v1/sessions/s1/reconnect?force_connected=k1")
   })
 
   // The polite path is the DEFAULT, and the panic button is the only caller
@@ -142,6 +151,11 @@ describe("sessionsApi", () => {
     const fetchMock = stubOkFetch(200)
     await sessionsApi.kill("s1", true)
     expect(lastCall(fetchMock).body).toEqual({ force: true })
+    // The override names exactly who the dialog showed, apart from the
+    // shutdown grace the body asks for.
+    await sessionsApi.kill("s1", false, ["k1"])
+    expect(lastCall(fetchMock).url).toBe("/api/v1/sessions/s1/kill?force_connected=k1")
+    expect(lastCall(fetchMock).body).toEqual({ force: false })
   })
 
   it("reorder POSTs /sessions/reorder with project + ordered ids", async () => {
@@ -272,6 +286,15 @@ describe("projectsApi", () => {
     const c = lastCall(fetchMock)
     expect(c.url).toBe("/api/v1/projects/p1")
     expect(c.method).toBe("DELETE")
+    // Both removals carry the override's keys when they have them.
+    await projectsApi.remove("p1", ["k1"])
+    expect(lastCall(fetchMock).url).toBe("/api/v1/projects/p1?force_connected=k1")
+    await projectsApi.deleteWithWorktrees("p1")
+    expect(lastCall(fetchMock).url).toBe("/api/v1/projects/p1?delete_worktrees=true")
+    await projectsApi.deleteWithWorktrees("p1", ["k1", "k2"])
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/projects/p1?delete_worktrees=true&force_connected=k1,k2",
+    )
   })
 
   it("patch sends the tri-state body verbatim (null clears, omit untouched)", async () => {

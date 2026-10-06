@@ -168,18 +168,19 @@ describe("ConfirmDetachAgentDialog", () => {
         verified: false,
         driving: true,
         target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
       }])
     render(<ConfirmDetachAgentDialog />)
 
     fireEvent.click(await screen.findByText("Detach"))
-    expect(killSessionPty).toHaveBeenCalledWith("s1", false, false)
+    expect(killSessionPty).toHaveBeenCalledWith("s1", false, null)
     const override = await screen.findByRole("button", { name: "Detach anyway" })
     expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
     expect(closeStopAgent).not.toHaveBeenCalled()
 
     killSessionPty.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(killSessionPty).toHaveBeenLastCalledWith("s1", false, true)
+    expect(killSessionPty).toHaveBeenLastCalledWith("s1", false, ["k1"])
     await vi.waitFor(() => expect(closeStopAgent).toHaveBeenCalled())
   })
 

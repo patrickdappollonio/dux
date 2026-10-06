@@ -31,7 +31,10 @@ export function DeleteProjectDialog() {
     project !== undefined,
     closeDeleteProject,
   )
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    deleteProjectTarget,
+  )
   const name = project?.name
   const agentCount =
     spine?.sessions.filter(
@@ -41,7 +44,7 @@ export function DeleteProjectDialog() {
   async function handleConfirm() {
     if (!deleteProjectTarget) return
     const target = deleteProjectTarget
-    const done = await confirm((force) => deleteProject(target, force))
+    const done = await confirm((accepted) => deleteProject(target, accepted))
     if (done) closeDeleteProject()
   }
 
@@ -59,6 +62,8 @@ export function DeleteProjectDialog() {
           </DialogDescription>
         </DialogHeader>
         <AttachedSection blockers={blockers} />
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
         <DialogFooter>
           <Button
             ref={cancelRef}

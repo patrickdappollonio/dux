@@ -42,7 +42,10 @@ export function ConfirmDeleteTerminalDialog() {
     terminal !== undefined,
     closeDeleteTerminal,
   )
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    deleteTerminalTarget,
+  )
   // The title names the STATIC label like the TUI's prompt does ("delete
   // Terminal 1?"); the running command appears in the warning body instead,
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
@@ -52,7 +55,7 @@ export function ConfirmDeleteTerminalDialog() {
   async function handleConfirm() {
     if (!deleteTerminalTarget) return
     const target = deleteTerminalTarget
-    const done = await confirm((force) => deleteTerminal(target, force))
+    const done = await confirm((accepted) => deleteTerminal(target, accepted))
     if (done) closeDeleteTerminal()
   }
 

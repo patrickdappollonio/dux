@@ -104,18 +104,19 @@ describe("DeleteProjectDialog", () => {
         verified: true,
         driving: true,
         target: { kind: "terminal", id: "term-9" },
+        key: "k1",
       },
     ])
     render(<DeleteProjectDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteProject).toHaveBeenCalledWith("p1", false)
+    expect(deleteProject).toHaveBeenCalledWith("p1", null)
     const override = await screen.findByRole("button", { name: "Delete anyway" })
     expect(screen.getByText("the dux TUI").tagName).toBe("CODE")
     expect(closeDeleteProject).not.toHaveBeenCalled()
 
     deleteProject.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(deleteProject).toHaveBeenLastCalledWith("p1", true)
+    expect(deleteProject).toHaveBeenLastCalledWith("p1", ["k1"])
     await vi.waitFor(() => expect(closeDeleteProject).toHaveBeenCalled())
   })
 

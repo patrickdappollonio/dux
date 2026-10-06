@@ -133,12 +133,13 @@ describe("ConfirmDeleteTerminalDialog", () => {
         verified: false,
         driving: false,
         target: { kind: "terminal", id: "term-1" },
+        key: "k1",
       },
     ])
     render(<ConfirmDeleteTerminalDialog />)
 
     fireEvent.click(screen.getByRole("button", { name: "Close terminal" }))
-    expect(deleteTerminal).toHaveBeenCalledWith("term-1", false)
+    expect(deleteTerminal).toHaveBeenCalledWith("term-1", null)
     const override = await screen.findByRole("button", {
       name: "Close terminal anyway",
     })
@@ -148,6 +149,6 @@ describe("ConfirmDeleteTerminalDialog", () => {
 
     deleteTerminal.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(deleteTerminal).toHaveBeenLastCalledWith("term-1", true)
+    expect(deleteTerminal).toHaveBeenLastCalledWith("term-1", ["k1"])
   })
 })

@@ -1011,6 +1011,7 @@ pub(super) mod tests {
             (
                 "ConfirmKillRunning",
                 PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+                    attached: Vec::new(),
                     previous: kill_running_prompt(),
                     action: KillRunningAction::Visible,
                     target_ids: Vec::new(),

@@ -54,20 +54,20 @@ export const projectsApi = {
     // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
-  // Both removals take `force` to go ahead over everybody attached to a terminal
-  // the removal ends.
-  remove: (id: string, force = false) =>
+  // Both removals take `accepted`, the keys of the blockers a dialog showed, to go
+  // ahead over exactly them.
+  remove: (id: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",
-      `/api/v1/projects/${encodeURIComponent(id)}` + forceConnectedQuery(force, true),
+      `/api/v1/projects/${encodeURIComponent(id)}` + forceConnectedQuery(accepted, true),
     ),
   // The destructive cascade: removes the project, its agents and their worktrees
   // from disk, where the plain `remove` above keeps the worktrees.
-  deleteWithWorktrees: (id: string, force = false) =>
+  deleteWithWorktrees: (id: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(id)}?delete_worktrees=true` +
-        forceConnectedQuery(force, false),
+        forceConnectedQuery(accepted, false),
     ),
   patch: (id: string, body: PatchProjectBody) =>
     request<void>("PATCH", `/api/v1/projects/${encodeURIComponent(id)}`, body),

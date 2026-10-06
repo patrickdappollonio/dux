@@ -3,7 +3,7 @@
 //! A delete, stop, tab or terminal close, project removal or quit that somebody
 //! else is attached to lists them in its dialog, one line each, under one
 //! opening line, before offering to go ahead anyway. The terminal UI renders
-//! these, and the browser's `lib/attachedProse.ts` builds the same segments;
+//! these, and the browser's `lib/attached.ts` builds the same segments;
 //! `tests/fixtures/prose_cross_language.json` pins the two together.
 
 use crate::attachments::{Surface, TargetKind};

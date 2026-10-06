@@ -45,12 +45,15 @@ export function ConfirmStopTabDialog() {
     tab !== undefined,
     closeStopTab,
   )
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    stopTabTarget && `${stopTabTarget.sessionId}/${stopTabTarget.tabId}`,
+  )
 
   async function handleConfirm() {
     if (!stopTabTarget) return
     const { sessionId, tabId } = stopTabTarget
-    const done = await confirm((force) => stopTab(sessionId, tabId, force))
+    const done = await confirm((accepted) => stopTab(sessionId, tabId, accepted))
     if (done) closeStopTab()
   }
 

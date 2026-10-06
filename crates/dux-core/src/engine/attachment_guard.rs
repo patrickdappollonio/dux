@@ -173,6 +173,7 @@ impl Engine {
         let policy = self.dispatch_policy.clone().unwrap_or_else(|| Policy {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
             force: false,
+            accepted: None,
         });
         let watch = self
             .operation_in_dispatch

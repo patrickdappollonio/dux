@@ -69,9 +69,9 @@ describe("tabsApi", () => {
     expect(result).toEqual({ detached: true })
 
     // Going ahead over everybody attached is asked for only when told to.
-    await tabsApi.remove("s1", "b2", true)
+    await tabsApi.remove("s1", "b2", ["k1", "k2"])
     expect(lastCall(fetchMock).url).toBe(
-      "/api/v1/sessions/s1/tabs/b2?force_connected=true",
+      "/api/v1/sessions/s1/tabs/b2?force_connected=k1,k2",
     )
   })
 
@@ -90,14 +90,14 @@ describe("tabsApi", () => {
     expect(c.method).toBe("POST")
   })
 
-  it("stop POSTs the stop endpoint, going ahead over everybody attached only when told to", async () => {
+  it("stop POSTs the stop endpoint, going ahead over exactly the blockers it is given", async () => {
     const fetchMock = stubOkFetch(200, {})
     await tabsApi.stop("s1", "b2")
     expect(lastCall(fetchMock).url).toBe("/api/v1/sessions/s1/tabs/b2/stop")
     expect(lastCall(fetchMock).method).toBe("POST")
-    await tabsApi.stop("s1", "b2", true)
+    await tabsApi.stop("s1", "b2", ["k1"])
     expect(lastCall(fetchMock).url).toBe(
-      "/api/v1/sessions/s1/tabs/b2/stop?force_connected=true",
+      "/api/v1/sessions/s1/tabs/b2/stop?force_connected=k1",
     )
   })
 
@@ -134,6 +134,7 @@ describe("tabsApi", () => {
       verified: false,
       driving: true,
       target: { kind: "tab", id: "b2", agent: "s1" },
+      key: "k1",
     }
     vi.stubGlobal(
       "fetch",

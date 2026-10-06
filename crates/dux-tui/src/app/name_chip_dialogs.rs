@@ -465,12 +465,105 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     assert!(text.contains("Delete anyway"), "{text}");
     assert!(app.engine.sessions.iter().any(|s| s.id == agent));
 
+    // Somebody the dialog did not show attaches: the override is refused
+    // again, naming both, with focus back on Cancel.
+    app.engine.attachments.register(
+        "second-browser",
+        dux_core::attachments::ConnectionFacts {
+            surface: dux_core::attachments::Surface::Browser,
+            device: Some("Safari".to_string()),
+            address: Some("10.0.0.8".parse().unwrap()),
+            verified: false,
+            events: true,
+        },
+        None,
+    );
+    app.engine
+        .attachments
+        .attach(
+            "second-browser",
+            dux_core::attachments::Target {
+                kind: dux_core::attachments::TargetKind::Tab,
+                id: app.engine.sessions[0].slot_tab_id().to_string(),
+                agent: Some(agent.clone()),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
+        *focus = DeleteAgentFocus::Delete;
+    }
+    app.resolve_confirm_delete_agent(true);
+    let PromptState::ConfirmDeleteAgent {
+        focus, attached, ..
+    } = &app.prompt
+    else {
+        panic!("the override is refused again, got {:?}", app.prompt);
+    };
+    assert_eq!(attached.len(), 2);
+    assert_eq!(*focus, DeleteAgentFocus::Cancel);
+    assert!(app.engine.sessions.iter().any(|s| s.id == agent));
+
     app.resolve_confirm_delete_agent(true);
 
     assert!(matches!(app.prompt, PromptState::None));
     assert!(
         !app.engine.sessions.iter().any(|s| s.id == agent),
         "the override deletes the agent"
+    );
+}
+
+/// A double click on Delete never goes ahead over who the refusal named: the
+/// second click arrives before the override has been drawn, so it lands on
+/// nothing. The override takes a fresh press on the button once it is on
+/// screen.
+#[test]
+fn a_double_click_on_a_refused_delete_never_presses_the_override() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].id.clone();
+    let tab = app.engine.sessions[0].slot_tab_id().to_string();
+    crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
+    app.confirm_delete_selected_session()
+        .expect("open the delete dialog");
+    let click = |app: &mut App, rect: ratatui::layout::Rect| {
+        let (column, row) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+        }
+    };
+    let delete_button = |app: &App| match app.overlay_layout.active {
+        OverlayMouseLayout::ConfirmDeleteAgent { delete_button, .. } => delete_button,
+        _ => panic!("the delete dialog publishes its buttons"),
+    };
+
+    render(&mut app);
+    let first = delete_button(&app);
+    // Both halves of the double click in one input batch, no frame between.
+    click(&mut app, first);
+    click(&mut app, first);
+
+    assert!(
+        app.engine.sessions.iter().any(|s| s.id == agent),
+        "the second click must not go ahead"
+    );
+    assert!(!app.prompt.attached().is_empty(), "{:?}", app.prompt);
+
+    render(&mut app);
+    let drawn = delete_button(&app);
+    click(&mut app, drawn);
+    assert!(
+        !app.engine.sessions.iter().any(|s| s.id == agent),
+        "a fresh press on the drawn override goes ahead"
     );
 }
 

@@ -2351,6 +2351,10 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) action: KillRunningAction,
     pub(crate) target_ids: Vec<RuntimeTargetId>,
     pub(crate) focus: ConfirmFocus,
+    /// Everybody else attached to what confirming would end, filled in when
+    /// the guard refused the confirm: the dialog names them and its confirm
+    /// becomes the override. Empty until then.
+    pub(crate) attached: Vec<dux_core::attachments::Blocker>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4760,6 +4764,10 @@ impl App {
         self.status.tick(Instant::now(), BUSY_TIMEOUT);
         // The sidebar reflects these per-row flags, and nothing else reports them.
         if self.refresh_row_activity() {
+            self.mark_frame_dirty();
+        }
+        // Who an open dialog names attaches and leaves on other threads.
+        if self.refresh_attached_dialog() {
             self.mark_frame_dirty();
         }
     }

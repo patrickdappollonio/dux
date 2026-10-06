@@ -23,6 +23,8 @@ export interface AttachedBlocker {
   /** Typing in it rather than watching it. */
   driving: boolean
   target: { kind: "tab" | "terminal"; id: string; agent?: string }
+  /** Who this is, sent back to go ahead over exactly the blockers shown. */
+  key: string
 }
 
 /** A change the server refused because somebody else is attached to what it
@@ -59,13 +61,21 @@ function blockerFrom(value: unknown): AttachedBlocker | null {
       id: target.id,
       ...(typeof target.agent === "string" ? { agent: target.agent } : {}),
     },
+    key: typeof value.key === "string" ? value.key : "",
   }
 }
 
-/** The query a guarded route takes to go ahead over everybody attached:
- * nothing unless `force`, so a plain request reads exactly as before. */
-export function forceConnectedQuery(force: boolean, first: boolean): string {
-  return force ? `${first ? "?" : "&"}force_connected=true` : ""
+/** The query a guarded route takes to go ahead over exactly the blockers a
+ * dialog showed (their keys): the server refuses again, naming everybody,
+ * when anybody else is in the way by then. Nothing when `accepted` is null, so
+ * a plain request reads exactly as before. */
+export function forceConnectedQuery(
+  accepted: readonly string[] | null,
+  first: boolean,
+): string {
+  if (accepted === null) return ""
+  const keys = accepted.map(encodeURIComponent).join(",")
+  return `${first ? "?" : "&"}force_connected=${keys}`
 }
 
 /** The blockers of an `attached` refusal, or `null` for any other answer. */

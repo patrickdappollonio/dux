@@ -88,6 +88,7 @@ describe("ConfirmStopTabDialog", () => {
         verified: false,
         driving: true,
         target: { kind: "tab", id: "b2", agent: "s1" },
+        key: "k1",
       },
     ])
     seed("b2", [
@@ -103,7 +104,7 @@ describe("ConfirmStopTabDialog", () => {
     expect(body).toContain("stays in the strip")
     expect(body).not.toContain("detaches")
     fireEvent.click(screen.getByRole("button", { name: "Stop tab" }))
-    expect(stopTab).toHaveBeenCalledWith("s1", "b2", false)
+    expect(stopTab).toHaveBeenCalledWith("s1", "b2", null)
     const override = await screen.findByRole("button", { name: "Stop tab anyway" })
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
     expect(screen.getByText("Firefox on Linux").tagName).toBe("CODE")
@@ -111,7 +112,7 @@ describe("ConfirmStopTabDialog", () => {
 
     stopTab.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(stopTab).toHaveBeenLastCalledWith("s1", "b2", true)
+    expect(stopTab).toHaveBeenLastCalledWith("s1", "b2", ["k1"])
     await vi.waitFor(() => expect(closeStopTab).toHaveBeenCalled())
   })
 

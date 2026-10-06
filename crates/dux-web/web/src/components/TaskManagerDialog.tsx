@@ -10,6 +10,10 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -21,6 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatBytes, formatCpu } from "@/lib/formatStats"
@@ -41,6 +46,7 @@ import {
 import { resourcesApi, type ResourceStatsView } from "@/lib/resourcesApi"
 import {
   closeStopAll,
+  type StopAllRefusal,
   closeTaskManager,
   openCloseTab,
   openDeleteTerminal,
@@ -615,10 +621,26 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
   // Every terminal of every owner, which is exactly what `stopAllRunning` will
   // stop: one flat collection, so the count cannot miss an owner kind.
   const terminals = spine?.terminals.length ?? 0
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    open,
+    "stop-all",
+  )
+  // The stops refused for somebody attached, which are all going ahead
+  // retries: everything else already stopped. Forgotten with the dialog.
+  const [refused, setRefused] = useState<StopAllRefusal | null>(null)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (wasOpen !== open) {
+    setWasOpen(open)
+    if (!open) setRefused(null)
+  }
 
-  function handleConfirm() {
-    stopAllRunning()
-    closeStopAll()
+  async function handleConfirm() {
+    const done = await confirm(async (accepted) => {
+      const answer = await stopAllRunning(refused, accepted)
+      if (answer !== null) setRefused(answer)
+      return answer?.blockers ?? null
+    })
+    if (done) closeStopAll()
   }
 
   function handleOpenChange(next: boolean) {
@@ -636,15 +658,24 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
             destroyed and cannot be recovered.
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeStopAll}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeStopAll}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Force stop everything
-          </Button>
+          <GuardedConfirmButton
+            verb="Force stop everything"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

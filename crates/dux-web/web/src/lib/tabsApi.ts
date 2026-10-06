@@ -48,13 +48,13 @@ export const tabsApi = {
     ),
   // Close a tab. The agent detaches when it was the last live one, and closing the slot tab
   // promotes the next tab in strip order; the 200 body carries both outcomes. The agent's
-  // only tab is refused with a 400, because an agent always has a slot. `force` goes ahead
-  // over everybody attached to the tab.
-  remove: (sessionId: string, tabId: string, force = false) =>
+  // only tab is refused with a 400, because an agent always has a slot. `accepted` goes ahead
+  // over exactly those blockers (their keys), the ones a dialog showed.
+  remove: (sessionId: string, tabId: string, accepted: readonly string[] | null = null) =>
     request<ClosedTab | undefined>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}` +
-        forceConnectedQuery(force, true),
+        forceConnectedQuery(accepted, true),
     ),
   // Start a dormant tab. It is the only start that gets past a recorded launch failure, which
   // opening the tab's PTY socket refuses; dispatching the launch clears that verdict, so the
@@ -67,12 +67,12 @@ export const tabsApi = {
   // Stop a tab: its process ends and the tab stays, dormant. The agent detaches
   // when it was the last running tab. Refused with a 409 while somebody else is
   // attached to the tab.
-  // `force` goes ahead over everybody attached to the tab.
-  stop: (sessionId: string, tabId: string, force = false) =>
+  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
+  stop: (sessionId: string, tabId: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/stop` +
-        forceConnectedQuery(force, true),
+        forceConnectedQuery(accepted, true),
     ),
   // Retarget a tab's provider (effective on its next launch).
   patch: (sessionId: string, tabId: string, provider: string) =>

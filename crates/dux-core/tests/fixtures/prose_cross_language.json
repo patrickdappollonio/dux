@@ -546,6 +546,36 @@
           "quoted": false
         }
       ]
+    },
+    {
+      "what": "the terminal UI with no device label of its own, named by its fixed label",
+      "sentence": "attached_entry",
+      "args": {
+        "device": null,
+        "surface": "terminal_ui",
+        "address": null,
+        "verified": true,
+        "driving": false,
+        "target_kind": "tab",
+        "target_label": "Codex",
+        "agent_label": "feat/login"
+      },
+      "segments": [
+        {
+          "name": "the dux TUI",
+          "quoted": false
+        },
+        ", watching tab ",
+        {
+          "name": "Codex",
+          "quoted": false
+        },
+        " of agent ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        }
+      ]
     }
   ]
 }

@@ -47,13 +47,16 @@ export function ConfirmDetachAgentDialog() {
     session !== undefined,
     closeStopAgent,
   )
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    stopAgentTarget,
+  )
 
   async function handleConfirm() {
     if (!stopAgentTarget) return
     const target = stopAgentTarget
-    const done = await confirm((force) =>
-      killSessionPty(target, false, force),
+    const done = await confirm((accepted) =>
+      killSessionPty(target, false, accepted),
     )
     if (done) closeStopAgent()
   }

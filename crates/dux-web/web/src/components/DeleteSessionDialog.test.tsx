@@ -173,7 +173,7 @@ describe("DeleteSessionDialog", () => {
     })
     expect(branchBox.getAttribute("aria-checked")).toBe("true")
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", true, true, false)
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, true, null)
   })
 
   // The mirror, and the reason the box is a control rather than a label: it
@@ -186,7 +186,7 @@ describe("DeleteSessionDialog", () => {
       screen.getByRole("checkbox", { name: /Also delete the branch/ }),
     )
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", true, false, false)
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, false, null)
   })
 
   // With the worktree kept there is no branch offer on screen at all, so the
@@ -208,11 +208,12 @@ describe("DeleteSessionDialog", () => {
         verified: false,
         driving: false,
         target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k-firefox",
       },
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", false, null, false)
+    expect(deleteSession).toHaveBeenCalledWith("s1", false, null, null)
 
     const override = await screen.findByRole("button", { name: "Delete anyway" })
     expect(closeDelete).not.toHaveBeenCalled()
@@ -230,8 +231,46 @@ describe("DeleteSessionDialog", () => {
 
     deleteSession.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(deleteSession).toHaveBeenLastCalledWith("s1", false, null, true)
+    // The override goes ahead over exactly who it showed.
+    expect(deleteSession).toHaveBeenLastCalledWith("s1", false, null, ["k-firefox"])
     await vi.waitFor(() => expect(closeDelete).toHaveBeenCalled())
+  })
+
+  // A refusal that arrives after its dialog was cancelled belongs to nobody:
+  // the next agent's dialog names nobody and its first confirm is a plain one.
+  it("ignores a refusal that arrives after the dialog moved on to another agent", async () => {
+    seed("s1", [session1, session2])
+    let answerLate: (blockers: unknown) => void = () => {}
+    deleteSession.mockImplementationOnce(
+      () => new Promise((resolve) => (answerLate = resolve)) as never,
+    )
+    const { rerender } = render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    seed(null, [session1, session2])
+    rerender(<DeleteSessionDialog />)
+
+    answerLate([
+      {
+        surface: "browser",
+        device: null,
+        address: "10.0.0.7",
+        verified: false,
+        driving: false,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k-late",
+      },
+    ])
+    seed("s2", [session1, session2])
+    rerender(<DeleteSessionDialog />)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(screen.queryByRole("button", { name: "Delete anyway" })).toBeNull()
+    const confirm = screen.getByRole("button", { name: "Delete" })
+    expect((confirm as HTMLButtonElement).disabled).toBe(false)
+    deleteSession.mockResolvedValueOnce(null)
+    fireEvent.click(confirm)
+    expect(deleteSession).toHaveBeenLastCalledWith("s2", false, null, null)
   })
 
   // THE PIN. There is no worktree to remove and no branch to delete, so the
@@ -278,7 +317,7 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, false)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null)
   })
 
   // The checkbox state outlives one open: the dialog stays mounted. A box ticked
@@ -304,7 +343,7 @@ describe("DeleteSessionDialog", () => {
     seed("sa1", [session1, standalone])
     rerender(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, false)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null)
   })
 
   // A branch that predates the agent is still offered, because the user may
@@ -320,7 +359,7 @@ describe("DeleteSessionDialog", () => {
     expect(branchBox.getAttribute("aria-checked")).toBe("false")
     expect(screen.getByText(/This branch existed before the agent\./)).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s3", true, false, false)
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, false, null)
   })
 
   it("sends the override when the user ticks a pre-existing branch", () => {
@@ -331,7 +370,7 @@ describe("DeleteSessionDialog", () => {
       screen.getByRole("checkbox", { name: /Also delete the branch/ }),
     )
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s3", true, true, false)
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, true, null)
   })
 
   it("warns about nothing for a branch dux created", () => {

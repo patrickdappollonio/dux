@@ -177,6 +177,11 @@ pub struct Policy {
     pub requester: Option<String>,
     /// Skip the refusal. The reservation is still installed.
     pub force: bool,
+    /// With `force`: go ahead only over these blockers ([`Blocker::key`]),
+    /// the ones a dialog showed the person who said to go ahead. Anybody else
+    /// in the way refuses the change, with everybody, so the dialog can ask
+    /// again. `None` goes ahead over everybody (the command line's flag).
+    pub accepted: Option<BTreeSet<String>>,
 }
 
 /// How long a reservation lasts.
@@ -206,6 +211,26 @@ pub struct Blocker {
 }
 
 impl Blocker {
+    /// Who this is, for saying "go ahead over these and nobody else": the same
+    /// connection on the same terminal has the same key whether or not it has
+    /// started or stopped typing since. A digest of what the blocker already
+    /// shows, so a client learns nothing it did not already have.
+    pub fn key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let identity = serde_json::json!([
+            self.surface,
+            self.device,
+            self.address,
+            self.verified,
+            self.target,
+        ]);
+        let digest = Sha256::digest(identity.to_string().as_bytes());
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// One blocker in words: who, from where, doing what, to which tab or
     /// terminal.
     pub fn describe(&self) -> String {
@@ -521,7 +546,15 @@ impl Attachments {
     ) -> Result<u64, Vec<Blocker>> {
         self.with(|state| {
             let blockers = state.blockers(&scope, policy.requester.as_deref(), now);
-            if !blockers.is_empty() && !policy.force {
+            let refused = match (&policy.accepted, policy.force) {
+                _ if blockers.is_empty() => false,
+                (_, false) => true,
+                (None, true) => false,
+                (Some(accepted), true) => blockers
+                    .iter()
+                    .any(|blocker| !accepted.contains(&blocker.key())),
+            };
+            if refused {
                 return Err(blockers);
             }
             state
@@ -770,9 +803,36 @@ mod tests {
             "another agent has nobody attached"
         );
 
+        // Going ahead over only who was shown: refused, with everybody, once
+        // somebody nobody was shown has attached since, whatever the first
+        // one started doing meanwhile.
+        let shown: BTreeSet<String> = refused.iter().map(Blocker::key).collect();
+        attachments.register("e3", browser("10.0.0.9", "Safari"), Some(Heard::at(now)));
+        attachments
+            .attach("e3", tab("s1-slot", "s1"), Some(Heard::at(now)), Some(8))
+            .unwrap();
+        let over_shown = Policy {
+            requester: None,
+            force: true,
+            accepted: Some(shown),
+        };
+        let again = attachments
+            .reserve(agent_scope("s1"), &over_shown, Life::Released, now)
+            .unwrap_err();
+        assert_eq!(again.len(), 2, "{again:?}");
+        let over_both = Policy {
+            accepted: Some(again.iter().map(Blocker::key).collect()),
+            ..over_shown
+        };
+        let id = attachments
+            .reserve(agent_scope("s1"), &over_both, Life::Released, now)
+            .expect("everybody in the way was shown");
+        attachments.release(id);
+
         let forced = Policy {
             requester: None,
             force: true,
+            accepted: None,
         };
         let id = attachments
             .reserve(agent_scope("s1"), &forced, Life::Released, now)
@@ -826,6 +886,7 @@ mod tests {
         let own = Policy {
             requester: Some("e1".to_string()),
             force: false,
+            accepted: None,
         };
         let refused = attachments
             .reserve(agent_scope("s1"), &own, Life::Released, now)
@@ -945,6 +1006,7 @@ mod tests {
                     let forced = Policy {
                         requester: None,
                         force: true,
+                        accepted: None,
                     };
                     let id = a
                         .reserve(agent_scope("s1"), &forced, Life::Released, at)

@@ -138,11 +138,12 @@ describe("ConfirmForceStopAgentDialog", () => {
         verified: false,
         driving: true,
         target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
       }])
     render(<ConfirmForceStopAgentDialog />)
 
     fireEvent.click(await screen.findByText("Force stop"))
-    expect(killSessionPty).toHaveBeenCalledWith("s1", true, false)
+    expect(killSessionPty).toHaveBeenCalledWith("s1", true, null)
     const override = await screen.findByRole("button", {
       name: "Force stop anyway",
     })
@@ -151,7 +152,7 @@ describe("ConfirmForceStopAgentDialog", () => {
 
     killSessionPty.mockResolvedValueOnce(null)
     fireEvent.click(override)
-    expect(killSessionPty).toHaveBeenLastCalledWith("s1", true, true)
+    expect(killSessionPty).toHaveBeenLastCalledWith("s1", true, ["k1"])
     await vi.waitFor(() => expect(closeForceStopAgent).toHaveBeenCalled())
   })
 

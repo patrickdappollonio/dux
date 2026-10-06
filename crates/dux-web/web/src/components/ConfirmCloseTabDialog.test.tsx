@@ -242,6 +242,7 @@ describe("ConfirmCloseTabDialog", () => {
               verified: true,
               driving: true,
               target: { kind: "tab", id: "s1", agent: "s1" },
+              key: "k1",
             },
           ],
         },
@@ -280,7 +281,7 @@ describe("ConfirmCloseTabDialog", () => {
     const urls = fetchMock.mock.calls.map((call) => String(call[0]))
     expect(urls).toEqual([
       "/api/v1/sessions/s1/tabs/s1",
-      "/api/v1/sessions/s1/tabs/s1?force_connected=true",
+      "/api/v1/sessions/s1/tabs/s1?force_connected=k1",
     ])
   })
 

@@ -1439,23 +1439,30 @@ impl App {
     /// them: a blank row, the shared opening line in the warning tone, then
     /// one indented line each, every name a chip. Nothing while nobody is
     /// named.
-    fn attached_section(&self, blockers: &[dux_core::attachments::Blocker]) -> Vec<Line<'static>> {
+    ///
+    /// Wrapped here, to `inner_width`, so every row keeps its own indent: the
+    /// frame's own wrap would run a continuation back to the dialog's edge.
+    fn attached_section(
+        &self,
+        blockers: &[dux_core::attachments::Blocker],
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
         if blockers.is_empty() {
             return Vec::new();
         }
         let mut lines = vec![Line::from("")];
-        lines.extend(prose_lines(
+        lines.extend(self.hanging_prose_lines(
             &dux_core::attached_prose::attached_lead_prose(),
-            " ",
             Style::default().fg(self.theme.warning_fg),
-            &self.theme,
+            " ",
+            inner_width,
         ));
         for entry in self.engine.attached_entries(blockers) {
-            lines.extend(prose_lines(
+            lines.extend(self.hanging_prose_lines(
                 &dux_core::attached_prose::attached_entry_prose(&entry),
-                "   ",
                 Style::default(),
-                &self.theme,
+                "   ",
+                inner_width,
             ));
         }
         lines
@@ -1470,12 +1477,26 @@ impl App {
         style: Style,
         inner_width: u16,
     ) -> Vec<Line<'static>> {
+        self.hanging_prose_lines(prose, style, " ", inner_width)
+    }
+
+    /// `prose` wrapped to `inner_width` with `indent` in front of every row,
+    /// continuation rows included, and every name a chip.
+    fn hanging_prose_lines(
+        &self,
+        prose: &Prose,
+        style: Style,
+        indent: &str,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
         let sentence = prose_lines(prose, "", style, &self.theme);
-        let width = usize::from(inner_width).saturating_sub(1).max(1);
+        let width = usize::from(inner_width)
+            .saturating_sub(indent.chars().count())
+            .max(1);
         wrap_styled_lines(&sentence, width)
             .into_iter()
             .map(|row| {
-                let mut spans = vec![Span::styled(" ", style)];
+                let mut spans = vec![Span::styled(indent.to_string(), style)];
                 spans.extend(row.spans);
                 Line::from(spans)
             })
@@ -7684,11 +7705,16 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ];
+        let mut lines = lines;
+        lines.extend(
+            self.attached_section(&confirm_prompt.attached, confirm_inner_width(frame.area())),
+        );
+        let confirm_label = guarded_confirm_label("Kill", &confirm_prompt.attached);
         let (cancel, act) = confirm_focus_buttons(
             confirm_prompt.focus,
             ButtonPressedTarget::ConfirmKillCancel,
             (
-                "Kill",
+                &confirm_label,
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmKillConfirm,
             ),
@@ -8001,7 +8027,7 @@ impl App {
                 Style::default().fg(self.theme.warning_fg),
             )));
         }
-        lines.extend(self.attached_section(attached));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Delete", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
@@ -8082,7 +8108,7 @@ impl App {
             Style::default().fg(self.theme.warning_fg),
             &self.theme,
         ));
-        lines.extend(self.attached_section(attached));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Close", attached);
         // Sized to the wrapped prose by the shared frame: a fixed percentage
         // clipped the whole tail on an 80x24 terminal, which is exactly where
@@ -8160,7 +8186,7 @@ impl App {
             Style::default().fg(self.theme.warning_fg),
             &self.theme,
         ));
-        lines.extend(self.attached_section(attached));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Stop", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
@@ -8211,7 +8237,7 @@ impl App {
         // clips the tail on an 80x24 terminal, which is exactly where the "you
         // can resume it later" half has to be readable.
         let mut lines = self.prose_body(&body);
-        lines.extend(self.attached_section(attached));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Detach", attached);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
@@ -8450,7 +8476,7 @@ impl App {
         dialog: ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
         let mut body = self.prose_body(dialog.body);
-        body.extend(self.attached_section(dialog.attached));
+        body.extend(self.attached_section(dialog.attached, confirm_inner_width(frame.area())));
         let layout = self.render_confirm_dialog(
             frame,
             ConfirmDialog {
@@ -8499,7 +8525,7 @@ impl App {
                 Span::raw(" if you quit."),
             ]));
         }
-        lines.extend(self.attached_section(attached));
+        lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(
@@ -10378,7 +10404,7 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )));
         }
-        body_lines.extend(self.attached_section(attached));
+        body_lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Delete", attached);
         let layout = self.render_confirm_dialog(
             frame,
@@ -10701,7 +10727,7 @@ impl App {
         let (agent_label, folder_label, focus) =
             (agent_label.clone(), folder_label.clone(), *focus);
         let confirm_label = guarded_confirm_label("Delete", attached);
-        let attached_lines = self.attached_section(attached);
+        let attached_lines = self.attached_section(attached, confirm_inner_width(frame.area()));
         let mut body_lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -24355,6 +24381,53 @@ mod tests {
             delete_worktree,
             delete_branch,
             unpushed_commits,
+        }
+    }
+
+    /// Who a refusal named wraps under its own text: the opening line keeps
+    /// the body's one-cell margin on every row, like the paragraphs above it,
+    /// and each blocker's rows keep its deeper indent, so a continuation never
+    /// runs back to the dialog's edge.
+    #[test]
+    fn who_is_attached_wraps_under_its_own_first_row() {
+        let app = test_app(default_bindings());
+        let blocker = dux_core::attachments::Blocker {
+            surface: dux_core::attachments::Surface::Browser,
+            device: Some("Firefox".to_string()),
+            address: Some("10.0.0.7".to_string()),
+            verified: false,
+            driving: false,
+            target: dux_core::attachments::Target {
+                kind: dux_core::attachments::TargetKind::Tab,
+                id: "s1-slot".to_string(),
+                agent: Some(app.engine.sessions[0].id.clone()),
+            },
+        };
+        let lines = app.attached_section(&[blocker], 30);
+        let rows: Vec<(String, String)> = lines
+            .iter()
+            .skip(1)
+            .map(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let first = line
+                    .spans
+                    .first()
+                    .map(|s| s.content.to_string())
+                    .unwrap_or_default();
+                (first, text)
+            })
+            .collect();
+        let lead_rows: Vec<_> = rows
+            .iter()
+            .take_while(|(_, t)| !t.contains("Firefox"))
+            .collect();
+        let entry_rows: Vec<_> = rows.iter().skip(lead_rows.len()).collect();
+        assert!(lead_rows.len() > 1 && entry_rows.len() > 1, "{rows:?}");
+        for (first, text) in lead_rows {
+            assert_eq!(first, " ", "a lead row keeps the body margin: {text:?}");
+        }
+        for (first, text) in entry_rows {
+            assert_eq!(first, "   ", "a blocker row keeps its indent: {text:?}");
         }
     }
 

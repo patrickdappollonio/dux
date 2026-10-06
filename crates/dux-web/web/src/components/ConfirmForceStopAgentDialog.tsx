@@ -42,13 +42,16 @@ export function ConfirmForceStopAgentDialog() {
     session !== undefined,
     closeForceStopAgent,
   )
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    forceStopAgentTarget,
+  )
 
   async function handleConfirm() {
     if (!forceStopAgentTarget) return
     const target = forceStopAgentTarget
-    const done = await confirm((force) =>
-      killSessionPty(target, true, force),
+    const done = await confirm((accepted) =>
+      killSessionPty(target, true, accepted),
     )
     if (done) closeForceStopAgent()
   }

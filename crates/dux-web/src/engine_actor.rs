@@ -99,9 +99,13 @@ pub struct Followed {
     /// connection, when the request named one from its own address (see
     /// `rest_common::exempt_requester`). `None` exempts nobody.
     /// Go ahead even though somebody else is attached to what the change
-    /// would end (`force_connected=true` on the route). Only that refusal is
+    /// would end (`force_connected` on the route). Only that refusal is
     /// skipped; the reservation and every other check still run.
     pub force_connected: bool,
+    /// With `force_connected`: go ahead only over these blockers
+    /// ([`dux_core::attachments::Blocker::key`]), the ones the asking dialog
+    /// showed. `None` goes ahead over everybody.
+    pub accepted_connected: Option<std::collections::BTreeSet<String>>,
     pub requester: Option<String>,
 }
 
@@ -1223,6 +1227,7 @@ impl EngineHandle {
                     kind,
                     answered: true,
                     force_connected: false,
+                    accepted_connected: None,
                     requester: None,
                 }),
             ))
@@ -1260,6 +1265,7 @@ impl EngineHandle {
                     kind,
                     answered: false,
                     force_connected: false,
+                    accepted_connected: None,
                     requester: None,
                 }),
             ))
@@ -4220,6 +4226,10 @@ fn handle_apply_wire_request(
             .operation
             .as_ref()
             .is_some_and(|followed| followed.force_connected),
+        accepted: origin
+            .operation
+            .as_ref()
+            .and_then(|followed| followed.accepted_connected.clone()),
     });
     engine.current_origin = origin.scope;
     let result = match origin.operation {
