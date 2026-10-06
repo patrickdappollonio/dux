@@ -162,13 +162,14 @@ import type {
   DirEntryView,
   EventsServerMessage,
   MacroView,
+  OperationView,
   ProjectWorktreeEntryView,
   SessionView,
   StartupLogContent,
   StartupLogEntry,
   TerminalView,
 } from "./types"
-import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Who a companion terminal belongs to, defined in `lib/terminalOwner.ts`
 // alongside the exhaustive switches that consume it and re-exported here for
@@ -280,21 +281,27 @@ export interface DiscardTarget {
 export type CreateFocusScope =
   | { kind: "project"; projectId: string }
   | { kind: "standalone" }
-  // A clone makes its project and then its agent, so there is no project to
-  // name yet: the agent is recognized as the one called `agentName` (any, when
-  // the dialog left it to the server) in a project this tab had not seen.
-  // `opId` is the clone's own operation while it runs, which is what keeps the
-  // token armed for as long as a big repository takes; null before the 202
-  // names it and after the clone hands over to the agent's own create.
+  // A clone makes its project and then its agent, so nothing about the request
+  // can recognize the agent: another client may clone the same address, and a
+  // blank name is resolved on the server. The clone's operation record names
+  // it instead, and follows the agent's create to its own outcome, so the
+  // token lives exactly as long as the operation. `request` tells this
+  // submit's replies from a later submit's; `opId` is the record, null until
+  // the 202 names it; `created` is every id the record has named so far;
+  // `finished` is set once the record has an outcome.
   | {
       kind: "clone"
-      knownProjectIds: string[]
-      agentName: string | null
+      request: number
       opId: string | null
+      created: string[]
+      finished: boolean
     }
 
 /** The clone dialog's form. Null while the dialog is closed. */
 export interface CloneProjectForm {
+  /** Which opening of the dialog this is, so a reply to an earlier opening
+   * cannot write into this one. */
+  openId: number
   url: string
   path: string
   /** Whether the user has typed in the destination, after which the address
@@ -1220,29 +1227,7 @@ eventsSocket.subscribe(["sessions", "projects", "config"])
 // does, so the registration is never retired.
 registerPageLifecycle(eventsSocket)
 
-// What a clone's own operation tells the focus token. Anything but a busy under
-// its key is the operation's final: the clone stopped short, so no agent is
-// coming and the token goes. A cleared key is the hand-over to the agent's
-// create, whose own final is a different key, so the token now waits out the
-// usual window for the agent to appear.
-function followCloneOperation(key: string | null | undefined, ended: boolean): void {
-  const pending = state.pendingCreateFocus
-  if (!key || pending?.scope.kind !== "clone" || pending.scope.opId !== key) return
-  if (ended) {
-    setState({ pendingCreateFocus: null })
-    return
-  }
-  setState({
-    pendingCreateFocus: {
-      ...pending,
-      scope: { ...pending.scope, opId: null },
-      armedAt: Date.now(),
-    },
-  })
-}
-
 function handleStatusEvent(event: EventsServerMessage): void {
-  if (event.tone !== "busy") followCloneOperation(event.key, true)
   if (event.tone === "error") setState({ ...clearPendingClientIntent() })
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
   showStatusToast(
@@ -1291,7 +1276,6 @@ function routeEvent(event: EventsServerMessage): void {
       handleStatusEvent(event)
       return
     case "status_cleared":
-      followCloneOperation(event.key, false)
       dismissNotification(event.key ?? ANON_TOAST_ID)
       return
     case "config.changed":
@@ -2171,13 +2155,10 @@ function navigateAfterVanish(
 // keep a stale token armed to grab a later, unrelated session.
 const CREATE_FOCUS_TTL_MS = 90_000
 
-// A running clone keeps its token armed for as long as the operation lives, but
-// not forever: the engine turns any busy still open at 30 minutes into a
-// warning, so a token alive well past that is orphaned (its final was missed).
-const CLONE_FOCUS_CEILING_MS = 60 * 60_000
-
-// Whether an armed token has outlived its window. A clone with a running
-// operation is bounded by the ceiling instead of the usual window.
+// Whether an armed token has outlived its window. A clone's token has none
+// while its operation runs: the record ends it, and it can only ever select the
+// agent the record names, so a long wait cannot mis-focus anything. Once the
+// record has an outcome, the agent it named gets the usual window to show up.
 function createFocusExpired(
   pending: NonNullable<DuxState["pendingCreateFocus"]>,
   now: number,
@@ -2189,7 +2170,7 @@ function createFocusExpired(
     case "standalone":
       return age > CREATE_FOCUS_TTL_MS
     case "clone":
-      return age > (scope.opId !== null ? CLONE_FOCUS_CEILING_MS : CREATE_FOCUS_TTL_MS)
+      return scope.finished && age > CREATE_FOCUS_TTL_MS
     default:
       return assertNever(scope)
   }
@@ -2228,14 +2209,10 @@ function sessionInCreateScope(
     // was handed and may answer with a different string than the one typed.
     case "standalone":
       return projectId === null
-    // A project the tab had not seen when the clone started is the clone's,
-    // whatever spelling of the destination the server settled on.
+    // Whatever the clone's record named. It names the new project too, which
+    // is harmless here: only sessions are looked for.
     case "clone":
-      return (
-        projectId !== null &&
-        !scope.knownProjectIds.includes(projectId) &&
-        (scope.agentName === null || sessionLabel(session) === scope.agentName)
-      )
+      return scope.created.includes(session.id)
     default:
       return assertNever(scope)
   }
@@ -2257,10 +2234,16 @@ function focusNewlyCreatedSession(spine: Spine): void {
     return
   }
   const known = new Set(pending.knownIds)
+  const scope = pending.scope
+  // The record names the clone's agent exactly, so it may already have been on
+  // screen when the token learned its id.
   const created = spine.sessions.find(
-    (s) => !known.has(s.id) && sessionInCreateScope(s, pending.scope),
+    (s) => (scope.kind === "clone" || !known.has(s.id)) && sessionInCreateScope(s, scope),
   )
-  if (!created) return
+  if (!created) {
+    if (scope.kind === "clone") askCloneRecordAboutNewAgents(spine, pending.knownIds, scope)
+    return
+  }
   // Consume the token before selecting so a later spine can't re-fire.
   setState({ pendingCreateFocus: null })
   // Force the owning project open so the new agent is actually visible: a
@@ -2273,6 +2256,88 @@ function focusNewlyCreatedSession(spine: Spine): void {
   // first tab has no recorded failure behind it, so selecting it shows the pane
   // and not the card, whether or not the PTY is up yet.
   selectSession(created.id)
+}
+
+// How long one read of a clone's record may wait for its outcome (the server's
+// own cap), and the pause before the next read, so a server answering at once
+// (handing its engine over, or failing) is not asked again in a tight loop.
+const CLONE_RECORD_WAIT_SECONDS = 25
+const CLONE_RECORD_PAUSE_MS = 2_000
+
+type CloneScope = Extract<CreateFocusScope, { kind: "clone" }>
+
+// The clone token armed by submit `request`, while it is still the armed one.
+function cloneFocusFor(request: number): CloneScope | null {
+  const scope = state.pendingCreateFocus?.scope
+  return scope?.kind === "clone" && scope.request === request ? scope : null
+}
+
+// Fold what the clone's record says into its token, then look for the agent it
+// names. An outcome that named no agent the workspace shows ends the token
+// unless it succeeded, when the agent gets the usual window to arrive.
+function applyCloneRecord(request: number, view: OperationView): void {
+  const pending = state.pendingCreateFocus
+  const scope = cloneFocusFor(request)
+  if (!pending || !scope || scope.finished) return
+  const finished = view.state === "succeeded" || view.state === "failed" || view.state === "partial"
+  const created = Array.isArray(view.created) ? view.created : []
+  setState({
+    pendingCreateFocus: {
+      ...pending,
+      scope: { ...scope, created, finished },
+      armedAt: finished ? Date.now() : pending.armedAt,
+    },
+  })
+  if (state.spine) focusNewlyCreatedSession(state.spine)
+  if (finished && view.state !== "succeeded" && cloneFocusFor(request)) {
+    setState({ pendingCreateFocus: null })
+  }
+}
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+// Follow a clone's record until it has an outcome or the token is no longer
+// this submit's. A record the server does not know (past its retention, or a
+// server that restarted) can name nothing, so the token goes; any other failure
+// is tried again, since the record outlives a dropped connection.
+async function followCloneRecord(request: number, opId: string): Promise<void> {
+  while (cloneFocusFor(request) && !cloneFocusFor(request)?.finished) {
+    try {
+      const view = await projectsApi.operation(opId, CLONE_RECORD_WAIT_SECONDS)
+      applyCloneRecord(request, view)
+    } catch (e) {
+      if (e instanceof ProjectsApiError && e.status === 404) {
+        if (cloneFocusFor(request)) setState({ pendingCreateFocus: null })
+        return
+      }
+    }
+    if (cloneFocusFor(request)?.finished !== false) return
+    await pause(CLONE_RECORD_PAUSE_MS)
+  }
+}
+
+// A long read of the record answers only at the outcome, which for a clone is
+// the agent's provider coming up. So when the workspace shows an agent the
+// token has not seen, ask the record at once whether it is the one, and only
+// once per such agent.
+function askCloneRecordAboutNewAgents(
+  spine: Spine,
+  knownIds: string[],
+  scope: CloneScope,
+): void {
+  if (scope.opId === null || scope.finished) return
+  const known = new Set(knownIds)
+  if (spine.sessions.every((s) => known.has(s.id))) return
+  const pending = state.pendingCreateFocus
+  if (!pending) return
+  setState({
+    pendingCreateFocus: { ...pending, knownIds: spine.sessions.map((s) => s.id) },
+  })
+  const { request, opId } = scope
+  projectsApi
+    .operation(opId, 0)
+    .then((view) => applyCloneRecord(request, view))
+    .catch(() => {})
 }
 
 // Record an explicit expand/collapse choice for a project. The sidebar reads
@@ -2297,7 +2362,8 @@ eventsSocket.onConn = (conn) => {
   // command or its rejection may have been lost, and nothing would reconcile
   // the overlay afterwards. It also voids a pending create-focus, whose
   // `knownIds` snapshot predates the disconnect and could mis-identify an
-  // unrelated session as ours.
+  // unrelated session as ours (a clone's excepted, see
+  // `clearPendingClientIntent`).
   const patch =
     conn === "closed" || conn === "failed" ? clearPendingClientIntent() : {}
   // Latch the sticky offline flag that drives the full-screen `OfflineOverlay`.
@@ -2355,7 +2421,10 @@ function clearPendingOrders(): Partial<DuxState> {
 function clearPendingClientIntent(): Partial<DuxState> {
   return {
     ...clearPendingOrders(),
-    pendingCreateFocus: null,
+    // Except a clone's, which mis-identifies nothing: it selects only what its
+    // operation's record names, and ends on that record's outcome.
+    pendingCreateFocus:
+      state.pendingCreateFocus?.scope.kind === "clone" ? state.pendingCreateFocus : null,
     changesPaneOverride: null,
     mobileAccessoryBarOverride: null,
   }
@@ -5048,22 +5117,40 @@ function defaultCloneDestination(url: string, startFolder: string | null): strin
   return `${startFolder.replace(/\/+$/, "")}/${name}`
 }
 
-// Write the form, refreshing the destination the address chooses and retiring
-// a refusal, since whatever the user just changed is the answer to it.
-function patchCloneProject(patch: Partial<CloneProjectForm>): void {
+// Counters behind the clone dialog's replies: each opening of the dialog, each
+// pet-name request and each submit gets the next number, and a reply acts only
+// while its number is still the current one.
+let cloneOpenSeq = 0
+let cloneNameRequestSeq = 0
+let cloneSubmitSeq = 0
+
+// Write the form, refreshing the destination the address chooses. A change the
+// user made is the answer to a refusal, so it retires the refusal's sentence; a
+// reply landing in the background (the start folder, a pet name) is not, and
+// leaves it on screen.
+function patchCloneProject(patch: Partial<CloneProjectForm>, byUser: boolean): void {
   const form = state.cloneProject
   if (!form) return
-  const next = { ...form, ...patch, error: null }
+  const next = { ...form, ...patch }
+  if (byUser) next.error = null
   if (!next.pathEdited) {
     next.path = defaultCloneDestination(next.url, next.startFolder)
   }
   setState({ cloneProject: next })
 }
 
+// The dialog as opening `openId` left it, or null once it closed or reopened.
+function cloneFormFor(openId: number): CloneProjectForm | null {
+  const form = state.cloneProject
+  return form?.openId === openId ? form : null
+}
+
 export function openCloneProject(): void {
   const randomize = state.bootstrap?.randomize_agent_names_by_default ?? false
+  const openId = ++cloneOpenSeq
   setState({
     cloneProject: {
+      openId,
       url: "",
       path: "",
       pathEdited: false,
@@ -5083,8 +5170,8 @@ export function openCloneProject(): void {
   browseApi
     .browse(null)
     .then((res) => {
-      if (state.cloneProject && state.cloneProject.startFolder === null) {
-        patchCloneProject({ startFolder: res.path })
+      if (cloneFormFor(openId)?.startFolder === null) {
+        patchCloneProject({ startFolder: res.path }, false)
       }
     })
     .catch(() => {})
@@ -5095,40 +5182,52 @@ export function closeCloneProject(): void {
 }
 
 export function setCloneProjectUrl(raw: string): void {
-  patchCloneProject({ url: raw })
+  patchCloneProject({ url: raw }, true)
 }
 
 export function setCloneProjectPath(raw: string): void {
-  patchCloneProject({ path: raw, pathEdited: true })
+  patchCloneProject({ path: raw, pathEdited: true }, true)
 }
 
 export function setCloneProjectName(raw: string): void {
   const form = state.cloneProject
   if (!form) return
   const name = sanitizeAgentName(raw)
-  patchCloneProject({
-    name,
-    generatedName: generatedNameAfterEdit(name, form.generatedName),
-  })
+  patchCloneProject(
+    {
+      name,
+      generatedName: generatedNameAfterEdit(name, form.generatedName),
+    },
+    true,
+  )
 }
 
-// The pet-name preview for the clone dialog; a reply that lands after the box
-// was unchecked or the dialog closed is dropped, and a failure stops the
-// spinner so a name can be typed by hand.
+// The pet-name preview for the clone dialog. Only the latest request's reply
+// is shown, and only in the opening that asked while the box is still checked;
+// a failure stops the spinner so a name can be typed by hand.
 function requestCloneAgentName(): void {
+  const form = state.cloneProject
+  if (!form) return
+  const openId = form.openId
+  const request = ++cloneNameRequestSeq
+  const current = () =>
+    request === cloneNameRequestSeq && cloneFormFor(openId) !== null
   browseApi
     .agentName()
     .then((res) => {
-      if (state.cloneProject?.randomize) {
-        patchCloneProject({
-          name: res.name,
-          generatedName: res.name,
-          namePending: false,
-        })
+      if (current() && state.cloneProject?.randomize) {
+        patchCloneProject(
+          {
+            name: res.name,
+            generatedName: res.name,
+            namePending: false,
+          },
+          false,
+        )
       }
     })
     .catch(() => {
-      if (state.cloneProject) patchCloneProject({ namePending: false })
+      if (current()) patchCloneProject({ namePending: false }, false)
     })
 }
 
@@ -5136,23 +5235,27 @@ export function toggleCloneProjectRandomize(): void {
   const form = state.cloneProject
   if (!form) return
   if (!form.randomize) {
-    patchCloneProject({ randomize: true, namePending: true })
+    patchCloneProject({ randomize: true, namePending: true }, true)
     requestCloneAgentName()
     return
   }
-  patchCloneProject({
-    randomize: false,
-    name: draftAfterRandomizeOff(form.name, form.generatedName),
-    generatedName: null,
-    namePending: false,
-  })
+  patchCloneProject(
+    {
+      randomize: false,
+      name: draftAfterRandomizeOff(form.name, form.generatedName),
+      generatedName: null,
+      namePending: false,
+    },
+    true,
+  )
 }
 
 // Ask the server to clone the address into the destination and start the agent.
-// The token is armed before the request so a clone that finishes ahead of its
-// own reply cannot be missed; a refusal disarms it and keeps the dialog open
-// with the sentence, and the 202 closes the dialog and hands the token the
-// operation to follow.
+// The token is armed before the request; a refusal disarms it and keeps the
+// dialog open with the sentence, and the 202 closes the dialog and hands the
+// token the operation whose record names the agent. Each reply acts only on
+// the dialog opening and the token this submit made: the dialog may have been
+// closed, reopened and submitted again while it was on the way.
 export function submitCloneProject(): void {
   const form = state.cloneProject
   if (!form || form.submitting) return
@@ -5160,13 +5263,10 @@ export function submitCloneProject(): void {
   const path = form.path.trim()
   const name = form.name.trim()
   if (url === "" || path === "") return
-  patchCloneProject({ submitting: true })
-  armCreateFocus({
-    kind: "clone",
-    knownProjectIds: (state.spine?.projects ?? []).map((p) => p.id),
-    agentName: name === "" ? null : name,
-    opId: null,
-  })
+  const openId = form.openId
+  const request = ++cloneSubmitSeq
+  patchCloneProject({ submitting: true }, true)
+  armCreateFocus({ kind: "clone", request, opId: null, created: [], finished: false })
   projectsApi
     .create({
       path,
@@ -5177,18 +5277,20 @@ export function submitCloneProject(): void {
     .then((accepted) => {
       const opId = (accepted as AcceptedOperation | undefined)?.op_id ?? null
       const pending = state.pendingCreateFocus
-      if (opId && pending?.scope.kind === "clone" && pending.scope.opId === null) {
-        setState({
-          pendingCreateFocus: { ...pending, scope: { ...pending.scope, opId } },
-        })
+      const scope = cloneFocusFor(request)
+      if (pending && scope) {
+        if (opId) {
+          setState({ pendingCreateFocus: { ...pending, scope: { ...scope, opId } } })
+          void followCloneRecord(request, opId)
+        } else {
+          setState({ pendingCreateFocus: null })
+        }
       }
-      closeCloneProject()
+      if (cloneFormFor(openId)) closeCloneProject()
     })
     .catch((e) => {
-      if (state.pendingCreateFocus?.scope.kind === "clone") {
-        setState({ pendingCreateFocus: null })
-      }
-      const current = state.cloneProject
+      if (cloneFocusFor(request)) setState({ pendingCreateFocus: null })
+      const current = cloneFormFor(openId)
       if (!current) return
       setState({
         cloneProject: {

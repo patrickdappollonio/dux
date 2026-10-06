@@ -9,6 +9,7 @@ import type {
   BranchChoiceView,
   BranchWarningView,
   InspectKind,
+  OperationView,
   ProjectView,
   ProjectWorktreeEntryView,
   StartupLogContent,
@@ -61,6 +62,13 @@ export const projectsApi = {
     agent_name?: string
     random_name?: boolean
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
+  // The record of the operation a 202 named. The server holds the reply until
+  // the record has an outcome or `waitSeconds` pass (it caps the wait at 25).
+  operation: (opId: string, waitSeconds: number) =>
+    request<OperationView>(
+      "GET",
+      `/api/v1/operations/${encodeURIComponent(opId)}?wait_seconds=${waitSeconds}`,
+    ),
   remove: (id: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",

@@ -467,3 +467,13 @@ export interface EventsClientMessage {
 export interface AcceptedOperation {
   op_id: string | null
 }
+
+// `GET /api/v1/operations/{id}`: the record of a change, as it stands. Only the
+// fields a reader here acts on. `state` is "running" or "unknown" while the
+// change has no outcome yet, and "succeeded", "failed" or "partial" once it
+// has; `created` names the ids the change made (projects and agents alike).
+export interface OperationView {
+  id: string
+  state: string
+  created: string[]
+}
