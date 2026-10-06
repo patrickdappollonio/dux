@@ -29486,7 +29486,14 @@ cyan = "#00ffff"
             .canonicalize()
             .expect("canonical start folder")
             .join("no-such-remote");
-        assert!(app.engine.is_in_flight(&InFlightKey::Clone(destination)));
+        let key = InFlightKey::Clone(destination);
+        assert!(app.engine.is_in_flight(&key));
+
+        // The clone's final ends the git it ran, so nothing outlives the
+        // test's folder: git refuses a source that is no repository.
+        drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
+        assert!(!app.engine.is_in_flight(&key), "the clone is still running");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
     }
 
     #[test]
