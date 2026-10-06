@@ -92,7 +92,15 @@ fn main() -> Result<()> {
         Some(commands::Command::Env(env)) => {
             client_commands::finish(client_commands::env(env.command, &selection))
         }
-        Some(_) => not_built(),
+        Some(commands::Command::Projects(projects)) => {
+            client_commands::finish(client_commands::projects(projects.command, &selection))
+        }
+        Some(commands::Command::Agents(agents)) => {
+            client_commands::finish(client_commands::agents(agents.command, &selection))
+        }
+        Some(commands::Command::Terminals(terminals)) => {
+            client_commands::finish(client_commands::terminals(terminals.command, &selection))
+        }
     }
 }
 

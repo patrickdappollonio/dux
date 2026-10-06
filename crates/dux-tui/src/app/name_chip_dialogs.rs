@@ -345,37 +345,46 @@ fn the_delete_terminal_dialog_chips_the_terminal() {
 }
 
 #[test]
-fn the_close_tab_dialog_chips_the_provider_the_agent_and_the_successor() {
+fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor() {
     let mut app = test_app(default_bindings());
     let session_id = app.engine.sessions[0].id.clone();
     let agent = app.session_label(&app.engine.sessions[0]);
-    let buf = open(
-        &mut app,
-        PromptState::ConfirmCloseTab {
-            session_id,
-            tab_id: "no-such-tab".to_string(),
-            provider_label: "Prov-ct".to_string(),
-            promoted_label: Some("Next-ct".to_string()),
-            focus: ConfirmFocus::Cancel,
-        },
-    );
-    assert_chipped(&app, &buf, "Prov-ct");
-    assert_chipped(&app, &buf, "Next-ct");
-    // The agent's name also labels its sidebar row behind the overlay, so
-    // only the occurrence inside the dialog is asked about.
-    let dialog_row = occurrences(&buf, "Prov-ct")[0].1;
-    let in_dialog: Vec<_> = occurrences(&buf, &agent)
-        .into_iter()
-        .filter(|(_, y)| *y == dialog_row)
-        .collect();
-    assert!(!in_dialog.is_empty(), "{}", screen(&buf));
-    for (x, y) in in_dialog {
-        assert_eq!(
-            (buf[(x, y)].fg, buf[(x, y)].bg),
-            (app.theme.overlay_bg, app.theme.text_fg),
-            "{}",
-            screen(&buf)
-        );
+    let close = PromptState::ConfirmCloseTab {
+        session_id: session_id.clone(),
+        tab_id: "no-such-tab".to_string(),
+        provider_label: "Prov-ct".to_string(),
+        promoted_label: Some("Next-ct".to_string()),
+        focus: ConfirmFocus::Cancel,
+    };
+    let stop = PromptState::ConfirmStopTab {
+        session_id,
+        tab_id: "no-such-tab".to_string(),
+        provider_label: "Prov-st".to_string(),
+        last_running: false,
+        focus: ConfirmFocus::Cancel,
+    };
+    for (prompt, provider) in [(close, "Prov-ct"), (stop, "Prov-st")] {
+        let buf = open(&mut app, prompt);
+        assert_chipped(&app, &buf, provider);
+        if provider == "Prov-ct" {
+            assert_chipped(&app, &buf, "Next-ct");
+        }
+        // The agent's name also labels its sidebar row behind the overlay, so
+        // only the occurrence inside the dialog is asked about.
+        let dialog_row = occurrences(&buf, provider)[0].1;
+        let in_dialog: Vec<_> = occurrences(&buf, &agent)
+            .into_iter()
+            .filter(|(_, y)| *y == dialog_row)
+            .collect();
+        assert!(!in_dialog.is_empty(), "{}", screen(&buf));
+        for (x, y) in in_dialog {
+            assert_eq!(
+                (buf[(x, y)].fg, buf[(x, y)].bg),
+                (app.theme.overlay_bg, app.theme.text_fg),
+                "{}",
+                screen(&buf)
+            );
+        }
     }
 }
 

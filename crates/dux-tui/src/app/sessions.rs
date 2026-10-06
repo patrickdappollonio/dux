@@ -1517,6 +1517,40 @@ impl App {
         };
     }
 
+    /// Stop-tab entry point: the focused tab of the selected agent. A tab
+    /// with nothing running gets no dialog, only a line saying so; a running
+    /// one is confirmed first, and the dialog says when stopping it detaches
+    /// the agent.
+    pub(crate) fn stop_focused_tab_prompt(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let tab_id = self.focused_tab_id(&session_id);
+        let provider_label = self
+            .engine
+            .tab_prose_label(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
+            .unwrap_or_else(|| Self::title_case_word(session.provider.as_str()));
+        if !self.engine.providers.contains_key(TabIdRef::new(&tab_id)) {
+            self.set_info(format!(
+                "The {provider_label} tab is not running, so there is nothing to stop."
+            ));
+            return;
+        }
+        let last_running = self
+            .engine
+            .live_tab_ids(&session_id)
+            .iter()
+            .all(|live| live.as_str() == tab_id);
+        self.prompt = PromptState::ConfirmStopTab {
+            session_id,
+            tab_id,
+            provider_label,
+            last_running,
+            focus: ConfirmFocus::Cancel,
+        };
+    }
+
     pub(crate) fn agent_launch_request(
         &self,
         session: AgentSession,
@@ -8773,9 +8807,10 @@ mod tests {
     }
 
     /// A dormant agent's row already looks exactly as it would after a
-    /// successful detach, so silence here is indistinguishable from a failure.
+    /// successful detach or tab stop, so silence here is indistinguishable
+    /// from a failure.
     #[test]
-    fn detach_agent_refuses_a_dormant_agent_out_loud() {
+    fn detaching_or_stopping_a_tab_of_a_dormant_agent_says_so_without_a_dialog() {
         let session = make_session("s1", "claude", "/tmp/wt/a");
         let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
         app.selected_left = 1;
@@ -8790,6 +8825,16 @@ mod tests {
                 .contains("is not running, so there is nothing to detach"),
             "status: {}",
             app.status.text()
+        );
+
+        app.stop_focused_tab_prompt();
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "nothing to confirm, so no dialog"
+        );
+        assert_eq!(
+            app.status.text(),
+            "The Claude tab is not running, so there is nothing to stop."
         );
     }
 
@@ -8835,9 +8880,11 @@ mod tests {
         assert!(!app.engine.providers.is_empty());
     }
 
-    /// Cancelling abandons, exactly as Escape does, and touches nothing.
+    /// Cancelling abandons, exactly as Escape does, and touches nothing. A
+    /// tab stop confirms first too, and confirming it ends that tab's process
+    /// through the engine and keeps the tab.
     #[test]
-    fn detach_agent_cancel_leaves_the_agent_running() {
+    fn detach_or_stop_cancel_leaves_the_agent_running_and_a_confirmed_stop_keeps_the_tab() {
         let session = make_session("s1", "claude", "/tmp/wt/a");
         let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
         app.selected_left = 1;
@@ -8848,6 +8895,38 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::None));
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
         assert!(app.engine.pending_detachments.is_empty());
+
+        app.stop_focused_tab_prompt();
+        let PromptState::ConfirmStopTab {
+            session_id,
+            provider_label,
+            last_running,
+            focus,
+            ..
+        } = &app.prompt
+        else {
+            panic!("a running tab raises the confirmation");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(provider_label, "Claude");
+        assert!(*last_running, "it is the agent's only running tab");
+        assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
+        app.resolve_confirm_stop_tab(false);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(!app.engine.providers.is_empty(), "nothing was stopped");
+
+        app.stop_focused_tab_prompt();
+        app.resolve_confirm_stop_tab(true);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.engine.providers.is_empty(), "the tab's process ended");
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
+        assert!(
+            app.status
+                .text()
+                .starts_with("Stopped the Claude tab. It was the agent's last running tab"),
+            "{}",
+            app.status.text()
+        );
     }
 
     /// Confirming reaches the shared engine teardown: the provider leaves for

@@ -188,6 +188,7 @@ const HINTLESS_PROMPTS: &[&str] = &[
     "ConfirmChangeBaseBranch",
     "ConfirmCheckoutDefaultBranch",
     "ConfirmCloseTab",
+    "ConfirmStopTab",
     "ConfirmCreateInitialCommit",
     "ConfirmDeleteAgent",
     "ConfirmDeleteProject",

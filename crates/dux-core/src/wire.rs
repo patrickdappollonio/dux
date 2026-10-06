@@ -489,6 +489,14 @@ pub enum WireCommand {
         session_id: String,
         tab_id: String,
     },
+    /// Stop one tab's provider process and keep the tab, dormant, in the strip
+    /// (any tab, the session-slot tab included). The agent detaches only when
+    /// this was its last running tab. A tab that is not running is an
+    /// idempotent no-op that says so; `tab_id` must belong to `session_id`.
+    StopAgentTab {
+        session_id: String,
+        tab_id: String,
+    },
     /// Retarget one tab's provider (effective on its next launch), mirroring
     /// `ChangeAgentProvider` but scoped to a single tab. For the session-slot tab
     /// this delegates to the session-level change; for a
@@ -1889,6 +1897,12 @@ impl Engine {
                     status, &outcome,
                 )))
             }
+            WireCommand::StopAgentTab { session_id, tab_id } => {
+                let (status, detached) = self.stop_agent_tab_wire(&session_id, &tab_id)?;
+                Ok(WireDispatch::handled(WireCommandOutcome::with_detached(
+                    status, detached,
+                )))
+            }
             WireCommand::ChangeAgentTabProvider {
                 session_id,
                 tab_id,
@@ -2810,6 +2824,48 @@ impl Engine {
         // too small to stand in for a destructive act's confirmation. The slot
         // handover it may also report is invisible either way.
         Ok((WireStatus::new("info", message), outcome))
+    }
+
+    /// Stop one tab's process and keep the tab, through the teardown every
+    /// surface's kill shares ([`Engine::kill_tab_runtime`]). Answers whether
+    /// the agent detached, which it does only when this was its last running
+    /// tab.
+    fn stop_agent_tab_wire(
+        &mut self,
+        session_id: &str,
+        tab_id: &str,
+    ) -> anyhow::Result<(WireStatus, bool)> {
+        if self.owning_session_for_tab(tab_id).as_deref() != Some(session_id) {
+            anyhow::bail!("unknown tab: {tab_id} is not a tab of agent {session_id}");
+        }
+        let label = self
+            .tab_prose_label(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
+            .unwrap_or_else(|| tab_id.to_string());
+        let outcome = self.kill_tab_runtime(tab_id);
+        // Loud in every case: a pill going quiet is too small to stand in for
+        // a stop, and a stop that found nothing running looks like a failure.
+        let message = if !outcome.killed {
+            crate::status_text![
+                "The ",
+                n(label),
+                " tab is not running, so there was nothing to stop."
+            ]
+        } else if outcome.detached {
+            crate::status_text![
+                "Stopped the ",
+                n(label),
+                " tab. It was the agent's last running tab, so the agent is detached now; \
+                 start it again from its menu."
+            ]
+        } else {
+            crate::status_text![
+                "Stopped the ",
+                n(label),
+                " tab. Its other tabs are still running."
+            ]
+        };
+        let detached = outcome.detached || !self.any_tab_active(session_id);
+        Ok((WireStatus::new("info", message), detached))
     }
 
     /// Retarget one tab's provider, validating the choice server-side. The
@@ -5138,10 +5194,11 @@ impl Engine {
             | WireCommand::DetachAgent { .. }
             | WireCommand::RecreateWorkingCopy { .. }
             | WireCommand::CloseAgentTab { .. }
+            | WireCommand::StopAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. }
             | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
+                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/stop-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -7507,6 +7564,91 @@ mod tests {
             !status.quiet_on.web,
             "closing a tab is destructive, so the browser is told in words"
         );
+    }
+
+    /// Stopping a tab ends its process and keeps the tab: the agent detaches
+    /// only when no other tab of it is running, a tab that is not running says
+    /// so, and a tab of another agent is unknown here.
+    #[test]
+    fn apply_wire_stop_agent_tab_ends_the_process_and_keeps_the_tab() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        for id in ["s1", "s2"] {
+            let mut session = sample_session(id, "p1", id);
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .worktree_path = worktree.path().to_string_lossy().to_string();
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+        let tab = crate::model::AgentTab {
+            id: "t2".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new("t2"), tab);
+        for tab in ["s1-slot", "t2"] {
+            let client = crate::pty::PtyClient::spawn_with_env(
+                "cat",
+                &[],
+                worktree.path(),
+                24,
+                80,
+                engine.config.ui.agent_scrollback_lines,
+                &[],
+            )
+            .expect("spawn cat provider");
+            engine.providers.insert(TabId::new(tab), client);
+        }
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        let stop = |engine: &mut Engine, session: &str, tab: &str| {
+            engine.apply_wire(WireCommand::StopAgentTab {
+                session_id: session.to_string(),
+                tab_id: tab.to_string(),
+            })
+        };
+
+        let outcome = stop(&mut engine, "s1", "t2").expect("stop the extra tab");
+        assert_eq!(outcome.detached, Some(false));
+        assert_eq!(
+            outcome.status.expect("a status").message,
+            "Stopped the Codex tab. Its other tabs are still running."
+        );
+        assert!(!engine.providers.contains_key(TabIdRef::new("t2")));
+        assert!(
+            engine.agent_tabs.contains_key(TabIdRef::new("t2")),
+            "a stopped tab stays in the strip"
+        );
+
+        let again = stop(&mut engine, "s1", "t2").expect("stop it again");
+        assert_eq!(
+            again.status.expect("a status").message,
+            "The Codex tab is not running, so there was nothing to stop."
+        );
+
+        let last = stop(&mut engine, "s1", "s1-slot").expect("stop the last running tab");
+        assert_eq!(last.detached, Some(true));
+        assert_eq!(
+            last.status.expect("a status").message,
+            "Stopped the Claude tab. It was the agent's last running tab, so the agent is \
+             detached now; start it again from its menu."
+        );
+        assert_eq!(
+            engine.sessions[0].status,
+            crate::model::SessionStatus::Detached
+        );
+
+        let refused = stop(&mut engine, "s2", "t2").unwrap_err();
+        assert!(refused.to_string().contains("unknown tab"), "{refused}");
     }
 
     #[test]

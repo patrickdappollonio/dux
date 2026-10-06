@@ -146,6 +146,16 @@ same process if it was running, same link. It simply becomes the tab the agent o
 > agent to stop everything it is running (the Task Manager's **Force stop** on the agent's
 > row does the same, without the shutdown wait).
 
+### Stopping a tab keeps it
+
+To end a tab's session without throwing the tab away, stop it instead: **Stop tab** in a
+running tab's menu on the web, the `stop-agent-tab` command in the terminal UI's palette
+(it acts on the focused tab), or `dux agents tabs stop <agent> <tab>` from the command
+line. dux asks first, then ends the tab's process; the pill stays in the strip, dormant,
+ready to start again. Stopping the agent's **last running** tab detaches the agent, the
+same as closing it would. Any tab can be stopped, an agent's only tab included, and a tab
+that is not running has nothing to stop, so the web menu leaves the entry out for it.
+
 ### Closing a tab is one-way
 
 > [!CAUTION]

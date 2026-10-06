@@ -121,6 +121,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Close the focused tab of the selected agent",
     },
     PaletteCommand {
+        action: Action::StopTab,
+        name: "stop-agent-tab",
+        description: "Stop the focused tab of the selected agent, keeping the tab",
+        // Per-tab: the web has it as "Stop tab…" in each running tab's menu.
+    },
+    PaletteCommand {
         action: Action::ChangeDefaultProvider,
         name: "change-default-provider",
         description: "Change the global default provider for new agents in projects without a project-specific override",

@@ -15,7 +15,7 @@
 //! own attachments are then the exempt ones.
 
 use super::{Command, Engine};
-use crate::attachments::{Attachments, Blocker, Life, Policy, Scope, Surface, TargetKind};
+use crate::attachments::{Attachments, Blocker, Life, Policy, Scope};
 use crate::model::TerminalOwner;
 use crate::wire::WireCommand;
 
@@ -31,7 +31,7 @@ const ATTACHED_LEAD: &str = "Someone else is using this right now";
 
 impl std::fmt::Display for Attached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let who: Vec<String> = self.blockers.iter().map(describe).collect();
+        let who: Vec<String> = self.blockers.iter().map(Blocker::describe).collect();
         write!(
             f,
             "{ATTACHED_LEAD}: {}. dux did not go ahead, so nothing was changed. Ask them to \
@@ -42,34 +42,6 @@ impl std::fmt::Display for Attached {
 }
 
 impl std::error::Error for Attached {}
-
-/// One blocker in words: who, from where, doing what, to which tab or
-/// terminal.
-fn describe(blocker: &Blocker) -> String {
-    let who = blocker
-        .device
-        .as_deref()
-        .and_then(crate::device_label::short_device_label)
-        .unwrap_or_else(|| match blocker.surface {
-            Surface::Browser => "a browser".to_string(),
-            Surface::TerminalUi => crate::background_serve::TUI_DEVICE_LABEL.to_string(),
-        });
-    let place = match &blocker.address {
-        Some(address) if blocker.verified => format!(" at {address}"),
-        Some(address) => format!(" at {address} (unverified)"),
-        None => String::new(),
-    };
-    let doing = if blocker.driving {
-        "typing in"
-    } else {
-        "watching"
-    };
-    let what = match blocker.target.kind {
-        TargetKind::Tab => "tab",
-        TargetKind::Terminal => "terminal",
-    };
-    format!("{who}{place}, {doing} {what} {}", blocker.target.id)
-}
 
 /// A reservation that lasts until the end of the call holding it, for a
 /// change with no operation record to outlive it. One tied to a record ends
@@ -266,7 +238,8 @@ impl Engine {
                 }
                 scope
             }
-            WireCommand::CloseAgentTab { tab_id, .. } => Self::pty_scope(tab_id),
+            WireCommand::CloseAgentTab { tab_id, .. }
+            | WireCommand::StopAgentTab { tab_id, .. } => Self::pty_scope(tab_id),
             _ => return Ok(None),
         };
         self.reserve_destruction(scope).map(Some)

@@ -10,6 +10,7 @@ import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEven
 let mockState: DuxState
 const addTabMock = vi.fn()
 const openCloseTabMock = vi.fn()
+const openStopTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -17,6 +18,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     addTab: (...args: unknown[]) => addTabMock(...args),
     openCloseTab: (...args: unknown[]) => openCloseTabMock(...args),
+    openStopTab: (...args: unknown[]) => openStopTabMock(...args),
   }
 })
 
@@ -61,6 +63,7 @@ beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
   openCloseTabMock.mockClear()
+  openStopTabMock.mockClear()
   mockState = {
     bootstrap: { available_providers: ["claude", "codex", "opencode"] },
     spine: {
@@ -139,6 +142,9 @@ describe("AgentTabsStrip", () => {
     expect(menu.getByText(ONLY_TAB_CLOSE_REFUSAL)).toBeTruthy()
     fireEvent.click(menu.getByText("Close tab…"))
     expect(openCloseTabMock).not.toHaveBeenCalled()
+    // Stopping needs no successor: the tab stays, so the only tab stops too.
+    fireEvent.click(menu.getByText("Stop tab…"))
+    expect(openStopTabMock).toHaveBeenCalledWith("s1", "s1")
   })
 
   it("keeps the first tab's Close item enabled and acting", async () => {
@@ -152,14 +158,29 @@ describe("AgentTabsStrip", () => {
     expect(openCloseTabMock).toHaveBeenCalledWith("s1", "s1")
   })
 
-  it("keeps an extra tab's Close item enabled and acting", async () => {
+  it("keeps an extra tab's Close and Stop items enabled and acting", async () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
     const menu = within(await screen.findByRole("menu"))
     const item = menu.getByText("Close tab…").closest("[role='menuitem']")
     expect(item?.getAttribute("aria-disabled")).not.toBe("true")
-    fireEvent.click(menu.getByText("Close tab…"))
+    fireEvent.click(menu.getByText("Stop tab…"))
+    expect(openStopTabMock).toHaveBeenCalledWith("s1", "b2")
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
+    fireEvent.click(within(await screen.findByRole("menu")).getByText("Close tab…"))
     expect(openCloseTabMock).toHaveBeenCalledWith("s1", "b2")
+  })
+
+  // A tab that is not running has no process to stop, so the item is absent,
+  // as the agent menu's Detach is with nothing running.
+  it("offers no Stop item on a tab that is not running", async () => {
+    const stopped = session()
+    stopped.tabs[1] = { ...stopped.tabs[1], has_live_process: false }
+    render(<AgentTabsStrip session={stopped} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText("Close tab…")).toBeTruthy()
+    expect(menu.queryByText("Stop tab…")).toBeNull()
   })
 
   it("marks the flagged tab's pill with an attention dot", () => {

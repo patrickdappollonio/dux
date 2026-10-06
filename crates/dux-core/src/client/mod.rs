@@ -15,6 +15,7 @@ pub mod remotes;
 pub mod sign_in;
 pub mod transport;
 pub mod wait;
+pub mod workspace;
 
 #[cfg(test)]
 mod test_server;

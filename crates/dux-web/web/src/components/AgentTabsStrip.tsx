@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, Ellipsis, Plus, Replace, X } from "lucide-react"
+import { Bot, Check, ChevronDown, CircleStop, Ellipsis, Plus, Replace, X } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { AttentionDot } from "@/components/AttentionDot"
@@ -22,6 +22,7 @@ import {
 import {
   addTab,
   openCloseTab,
+  openStopTab,
   retargetTab,
   selectTab,
   useDux,
@@ -248,6 +249,16 @@ function TabPill({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
+            {/* Stopping ends the tab's process and keeps the tab, so the only
+                tab stops like any other. Absent, not disabled, on a tab with
+                nothing running, as the agent menu's Detach is: there is no
+                process to ask to go. */}
+            {tab.has_live_process ? (
+              <DropdownMenuItem onClick={() => openStopTab(session.id, tab.id)}>
+                <CircleStop />
+                Stop tab…
+              </DropdownMenuItem>
+            ) : null}
             {/* Every tab closes the same way, the agent's FIRST included: the
                 slot is a pointer, so closing the tab holding it hands the slot
                 to the next tab in strip order rather than being refused. The

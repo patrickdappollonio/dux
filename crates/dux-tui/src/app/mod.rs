@@ -2748,6 +2748,18 @@ pub(crate) enum PromptState {
         promoted_label: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Close
     },
+    /// Stop one running agent tab: its process ends and the tab stays in the
+    /// strip, dormant. Destructive (whatever the tab is doing is interrupted),
+    /// so it defaults to Cancel. Whether it is the agent's last running tab is
+    /// captured when the dialog opens, because the dialog promises it.
+    ConfirmStopTab {
+        session_id: String,
+        tab_id: String,
+        provider_label: String,
+        /// Stopping it detaches the agent, because no other tab of it runs.
+        last_running: bool,
+        focus: ConfirmFocus, // Cancel (default) or Stop
+    },
     /// Ask the selected agent to shut down and leave it Detached. Destructive
     /// (whatever the agent is doing is interrupted), so it defaults to Cancel.
     ///
@@ -3716,6 +3728,10 @@ pub(crate) enum OverlayMouseLayout {
         delete_button: Rect,
     },
     ConfirmCloseTab {
+        cancel_button: Rect,
+        confirm_button: Rect,
+    },
+    ConfirmStopTab {
         cancel_button: Rect,
         confirm_button: Rect,
     },
@@ -5555,6 +5571,10 @@ impl App {
             "new-agent-tab" => self.open_new_tab_provider_prompt(),
             "close-tab" => {
                 self.close_focused_tab_prompt();
+                Ok(())
+            }
+            "stop-agent-tab" => {
+                self.stop_focused_tab_prompt();
                 Ok(())
             }
             "change-default-provider" => self.open_change_default_provider_prompt(),
