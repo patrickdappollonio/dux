@@ -13129,8 +13129,8 @@ not_a_real_action = ["x"]
         }
     }
 
-    /// `dux config set` signals the running dux with SIGUSR1; the terminal UI
-    /// answers with its ordinary reload, so the change is live at once.
+    /// A `kill -USR1` sent to the running dux after a hand edit; the terminal
+    /// UI answers with its ordinary reload, so the change is live at once.
     #[test]
     fn a_sigusr1_runs_the_ordinary_config_reload() {
         dux_core::reload_signal::install().expect("install the handler");

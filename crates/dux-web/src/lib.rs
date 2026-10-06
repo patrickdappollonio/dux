@@ -680,8 +680,8 @@ fn run_plain_http(
                     shutdown.trigger();
                 });
             }
-            // SIGUSR1 (`dux config set`, or `kill -USR1`) runs the engine
-            // actor's reload, until the serve stops.
+            // SIGUSR1 (`kill -USR1`, for a hand edit) runs the engine actor's
+            // reload, until the serve stops.
             tokio::spawn(reload_signal::reload_on_signal(
                 handle.clone(),
                 shutdown.subscribe(),

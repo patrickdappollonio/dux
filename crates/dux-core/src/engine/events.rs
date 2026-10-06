@@ -9814,7 +9814,7 @@ mod tests {
         }
     }
 
-    /// Two `dux config set` runs in quick succession each signal a reload; the
+    /// Two `dux config set` runs in quick succession each ask for a reload; the
     /// second arrives while the first is still reading. It must not be
     /// dropped: it runs right after, so the file's final state is what runs.
     /// A client that asked for either reload follows its own: the one asked

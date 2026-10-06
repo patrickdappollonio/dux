@@ -137,8 +137,16 @@ for the answer. It then says which of these happened:
   with status 1. The same goes when the change also started, stopped or moved a listener
   (the background web server, the Tailscale address) and that could not be done: `set`
   waits for the listener to answer, and the message names what it refused or why it failed.
-- dux is running but could not be asked, or did not answer in time: the change is saved and
-  the message says why dux was not reached, so you can restart it or reload it by hand.
+- dux is not running: nothing was asked. `set` prints "dux is not running, so the change
+  applies the next time it starts." and exits with status 0.
+- dux is running but could not be asked: the change is saved, and `set` prints "The change is
+  saved, but the running dux was not asked to reload it:" followed by why (for example that
+  dux is running without a control socket, or does not answer on it), then says dux keeps its
+  current settings until you reload it from the app or restart it. It exits with status 0.
+- dux did not answer in time: `set` waits up to `[cli] wait_timeout_seconds` (10 minutes by
+  default) for the reload's answer. If none comes it prints "The change is saved, but the
+  running dux has not said whether the reload worked:" followed by the operation it was
+  following, which keeps running and can be looked up later, and exits with status 0.
 
 The running dux also reports how the reload went in its status line, in the web UI's
 notifications and in `dux.log`; two `set`s in quick succession are both picked up. If dux
