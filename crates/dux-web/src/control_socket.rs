@@ -67,6 +67,20 @@ pub(crate) async fn control_socket_routes(request: Request, next: Next) -> Respo
     next.run(request).await
 }
 
+/// What answers a request no route matched: the static UI for a browser, and
+/// 404 over the control socket, which serves no page.
+pub(crate) async fn fallback(request: Request) -> Response {
+    if crate::auth::provenance::over_control_socket(&request) {
+        return (
+            StatusCode::NOT_FOUND,
+            "this route is not served on the control socket",
+        )
+            .into_response();
+    }
+    let (parts, _) = request.into_parts();
+    crate::web_assets::static_handler(parts.uri, parts.headers).await
+}
+
 /// The control socket's listener: accepts only connections whose peer runs as
 /// `uid`, closing any other before a byte of its request is read.
 pub struct ControlListener {
@@ -212,6 +226,7 @@ mod tests {
             "/api/v1/projects/p1/terminals/t1/files/raw",
             "/api/v1/file/read",
             "/api/v1/file-drop",
+            "/api/v1/no-such-route",
         ] {
             assert_eq!(
                 status_over_socket(&app, absent).await,

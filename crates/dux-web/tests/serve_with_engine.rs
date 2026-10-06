@@ -152,6 +152,12 @@ fn socket_inode(path: &std::path::Path) -> u64 {
 #[tokio::test]
 async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (mut engine, _tmp) = build_engine();
+    // The config folder is owner-only, and the control socket goes nowhere else.
+    std::fs::set_permissions(
+        &engine.paths.root,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
     let socket = engine.paths.root.join("dux.sock");
     assert_eq!(
         dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),

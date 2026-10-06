@@ -915,7 +915,7 @@ pub fn build_app(
         .merge(crate::auth::routes::routes())
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
-        .fallback(crate::web_assets::static_handler)
+        .fallback(crate::control_socket::fallback)
         // REST mutation same-origin check (cross-site request forgery defense).
         // Rejects POST/PATCH/PUT/DELETE when an `Origin` header is present but
         // its `host:port` authority does not match the `Host` header. A missing
@@ -1025,10 +1025,16 @@ async fn log_request(
     // operator may persist, so dropping the query avoids leaking them. The session
     // id is an opaque path segment now, so it still appears in the logged path.
     let path = request.uri().path().to_string();
+    let over_socket = crate::auth::provenance::over_control_socket(&request);
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let latency_ms = started.elapsed().as_millis();
-    console.access(&method, &path, response.status().as_u16(), latency_ms);
+    let status = response.status().as_u16();
+    if over_socket {
+        console.access_over_control_socket(&method, &path, status, latency_ms);
+    } else {
+        console.access(&method, &path, status, latency_ms);
+    }
     response
 }
 

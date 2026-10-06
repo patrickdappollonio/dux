@@ -1143,8 +1143,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # terminal UI, the flip, background serving and `dux server` alike).\n\
                  # It carries no password; your user account is the credential. A\n\
                  # relative path is read from this config folder, an absolute one is\n\
-                 # used as written. A leftover socket from a dux that crashed is\n\
-                 # replaced when dux starts. A path longer than the system allows (103\n\
+                 # used as written, but its folder must be yours alone (owned by you,\n\
+                 # and nobody else can write to it), as this config folder is. A\n\
+                 # leftover socket from a dux that crashed is replaced when dux starts. A path longer than the system allows (103\n\
                  # bytes on macOS, 107 on Linux) starts dux without the socket, and dux\n\
                  # says why on its status line and in dux.log; pick a shorter path here.\n\
                  # Read once when dux starts, so a change applies the next time it does.",

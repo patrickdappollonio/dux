@@ -368,10 +368,19 @@ mod tests {
         unreachable!("loop returns on success or final error")
     }
 
+    /// A temp folder only this user can write to, as the config folder is:
+    /// the control socket refuses any other.
+    fn private_tmp() -> TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        tmp
+    }
+
     #[test]
     fn acquire_writes_own_pid_and_the_control_socket_to_the_lockfile() {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tmp();
         let path = tmp.path().join("dux.lock");
 
         let mut lock = SingleInstanceLock::acquire(&path).expect("first acquire should succeed");
@@ -424,7 +433,8 @@ mod tests {
     /// A clean exit takes the socket file and its line in the lock file with it.
     #[test]
     fn releasing_the_lock_removes_the_socket_and_its_line() {
-        let tmp = TempDir::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = private_tmp();
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
         let mut lock = SingleInstanceLock::acquire(&path).unwrap();
@@ -436,14 +446,28 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(LockFileContents::parse(&contents).control_socket, None);
         assert!(!contents.contains("control-socket"), "{contents:?}");
+
+        // A folder that other users came to be able to write to meanwhile is
+        // not one dux removes anything from.
+        let folder = tmp.path().join("loosened");
+        fs::create_dir(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = folder.join("dux.sock");
+        let mut lock = SingleInstanceLock::acquire(&path).unwrap();
+        lock.open_control_socket(&socket).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o777)).unwrap();
+
+        drop(lock);
+
+        assert!(socket.exists(), "left in a folder others can write to");
     }
 
     /// The next lock holder replaces a socket a crashed dux left behind, and
     /// leaves alone anything at the path that is not a dead socket.
     #[test]
     fn a_leftover_socket_is_replaced_and_anything_else_is_left_alone() {
-        use std::os::unix::fs::MetadataExt;
-        let tmp = TempDir::new().unwrap();
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let tmp = private_tmp();
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
@@ -467,13 +491,36 @@ mod tests {
         let serving_ino = fs::symlink_metadata(&live).unwrap().ino();
         assert!(lock.open_control_socket(&live).is_err());
         assert_eq!(fs::symlink_metadata(&live).unwrap().ino(), serving_ino);
+
+        // Only a refused connection proves a socket dead: one dux cannot even
+        // try (its mode lets nobody connect) is left where it is.
+        let shut = tmp.path().join("shut.sock");
+        drop(std::os::unix::net::UnixListener::bind(&shut).unwrap());
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+        let shut_ino = fs::symlink_metadata(&shut).unwrap().ino();
+        assert!(lock.open_control_socket(&shut).is_err());
+        assert_eq!(fs::symlink_metadata(&shut).unwrap().ino(), shut_ino);
+
+        // A folder other users can write to is refused before anything is
+        // bound or removed there, and the reason names the setting.
+        let shared = tmp.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        let in_shared = shared.join("dux.sock");
+        drop(std::os::unix::net::UnixListener::bind(&in_shared).unwrap());
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        let shared_ino = fs::symlink_metadata(&in_shared).unwrap().ino();
+        let err = lock
+            .open_control_socket(&in_shared)
+            .expect_err("a folder others can write to is refused");
+        assert!(err.to_string().contains("[server] control_socket"), "{err}");
+        assert_eq!(fs::symlink_metadata(&in_shared).unwrap().ino(), shared_ino);
     }
 
     /// A dux that loses the lock race cannot reach the socket the winner holds.
     #[test]
     fn the_loser_of_the_lock_never_touches_the_winners_socket() {
         use std::os::unix::fs::MetadataExt;
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tmp();
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
         let mut winner = SingleInstanceLock::acquire(&path).unwrap();

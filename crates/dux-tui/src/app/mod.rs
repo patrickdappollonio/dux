@@ -4126,6 +4126,7 @@ fn boot_status(
     orientation: impl Into<String>,
     trap_warning: Option<String>,
     theme_warning: Option<String>,
+    socket_warning: Option<String>,
 ) -> KeyedStatusController {
     // Sharing the engine's live-key set is what lets the status line tell a slow
     // operation from an abandoned one; without it every busy is timed out on
@@ -4139,6 +4140,11 @@ fn boot_status(
         status.set(Instant::now(), None, StatusTone::Warning, message);
     }
     if let Some(message) = theme_warning {
+        status.set(Instant::now(), None, StatusTone::Warning, message);
+        status.pin();
+    }
+    // True until dux starts again, so it holds the line like the theme's.
+    if let Some(message) = socket_warning {
         status.set(Instant::now(), None, StatusTone::Warning, message);
         status.pin();
     }
@@ -4213,16 +4219,14 @@ impl App {
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
-        let mut status = boot_status(
+        let status = boot_status(
             Duration::from_secs(config.ui.status_clear_seconds as u64),
             live_status_keys.clone(),
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
             theme_warning,
+            socket_warning,
         );
-        if let Some(message) = socket_warning {
-            status.set(Instant::now(), None, StatusTone::Warning, message);
-        }
         let gh_integration_val = config.ui.github_integration;
         let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
             paths.config_path.clone(),
@@ -4546,6 +4550,7 @@ impl App {
             "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
             theme_warning,
+            None,
         );
         Self::assemble(
             engine,
@@ -10281,7 +10286,14 @@ mod pinned_warning_tests {
     #[test]
     fn the_boot_status_holds_the_orientation_hint_past_every_window() {
         let t0 = Instant::now();
-        let mut status = boot_status(WINDOW, Default::default(), "Press ? for help.", None, None);
+        let mut status = boot_status(
+            WINDOW,
+            Default::default(),
+            "Press ? for help.",
+            None,
+            None,
+            None,
+        );
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert_eq!(
             status.message(),
@@ -10299,11 +10311,37 @@ mod pinned_warning_tests {
             "Press ? for help.",
             None,
             Some("Theme 'nope' could not be loaded.".to_string()),
+            None,
         );
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert!(
             status.message().contains("could not be loaded"),
             "a theme that will not load is still true tomorrow: {}",
+            status.message()
+        );
+    }
+
+    /// A dux that started without its control socket says so on the line, and
+    /// keeps saying it: it stays true until dux starts again.
+    #[test]
+    fn the_boot_status_holds_the_missing_control_socket_warning_past_every_window() {
+        let t0 = Instant::now();
+        let mut status = boot_status(
+            WINDOW,
+            Default::default(),
+            "Press ? for help.",
+            None,
+            None,
+            Some("dux is running without its control socket: the path is too long.".to_string()),
+        );
+        let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert_eq!(
+            status.most_recent_tui().map(|(tone, _)| tone),
+            Some(StatusTone::Warning)
+        );
+        assert!(
+            status.message().contains("without its control socket"),
+            "{}",
             status.message()
         );
     }

@@ -652,6 +652,27 @@ impl Console {
 
     /// One access-log line. Gated by the caller on the `access_log` setting.
     /// Returns early, before any formatting, on a console that records nothing.
+    /// An access line for a request that came over the control socket, which
+    /// has no address to show, so the line says how it came instead.
+    pub fn access_over_control_socket(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        latency_ms: u128,
+    ) {
+        if !self.is_recording() {
+            return;
+        }
+        self.line(LogLine::access_over_control_socket(
+            &(self.0.clock)(),
+            method,
+            path,
+            status,
+            latency_ms,
+        ));
+    }
+
     pub fn access(&self, method: &str, path: &str, status: u16, latency_ms: u128) {
         if !self.is_recording() {
             return;
@@ -937,6 +958,13 @@ mod tests {
         let (console, sink) = Console::test_capture(false);
         console.access("POST", "/api/login", 401, 250);
         assert_eq!(sink.contents(), "12:00:00 POST /api/login 401 250ms\n");
+        console.access_over_control_socket("GET", "/api/v1/workspace", 200, 3);
+        assert!(
+            sink.contents()
+                .ends_with("12:00:00 GET /api/v1/workspace 200 3ms via socket\n"),
+            "{}",
+            sink.contents()
+        );
     }
 
     #[test]

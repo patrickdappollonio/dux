@@ -29,6 +29,12 @@ fn get_over_socket(path: &std::path::Path, uri: &str) -> String {
 fn dux_server_answers_on_its_control_socket_and_removes_it_on_exit() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
+    // The config folder is owner-only, and the control socket goes nowhere else.
+    std::fs::set_permissions(
+        &root,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
     let paths = DuxPaths {
         root: root.clone(),
         config_path: root.join("config.toml"),

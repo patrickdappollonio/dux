@@ -476,6 +476,12 @@ mod tests {
         // Not a test about Tailscale: on any other mode every request waits on
         // the first Funnel check, which would consult this machine's real CLI.
         engine.config.server.tailscale = "no".to_string();
+        // The config folder is owner-only, and the control socket goes nowhere else.
+        std::fs::set_permissions(
+            &engine.paths.root,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
         let socket = engine.paths.root.join("dux.sock");
         assert_eq!(
             dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),

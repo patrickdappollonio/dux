@@ -35,6 +35,13 @@ pub enum Unavailable {
     NotASocket { path: PathBuf },
     /// A socket at the path answers: another process is serving on it.
     InUse { path: PathBuf },
+    /// The folder the socket would go in is not this user's alone, so a file
+    /// dux binds, changes the mode of or removes there could be swapped under
+    /// it by somebody else.
+    SharedFolder { folder: PathBuf },
+    /// Connecting to a socket left at the path failed for a reason other than
+    /// a refusal, so nothing proves it dead and dux leaves it alone.
+    Unproven { path: PathBuf, err: io::Error },
     /// The bind, the removal of a dead socket or the mode change failed.
     Io {
         path: PathBuf,
@@ -63,6 +70,23 @@ impl fmt::Display for Unavailable {
                 "another process is already serving on {}",
                 path.display()
             ),
+            Self::SharedFolder { folder } => write!(
+                f,
+                "the folder {} is not yours alone (another user owns it or can write to it), \
+                 so dux puts no socket there; point [server] control_socket at a folder only \
+                 you can write to",
+                folder.display()
+            ),
+            Self::Unproven { path, err } => {
+                let err = err.to_string().replace(['\n', '\r'], " ");
+                write!(
+                    f,
+                    "a socket is already at {} and dux could not tell whether anything still \
+                     serves on it ({err}), so it leaves it alone; remove it or point \
+                     [server] control_socket elsewhere",
+                    path.display()
+                )
+            }
             Self::Io { path, step, err } => {
                 // One line whatever the OS put in its message.
                 let err = err.to_string().replace(['\n', '\r'], " ");
@@ -98,6 +122,14 @@ impl ControlSocket {
         }
         if path.as_os_str().as_encoded_bytes().contains(&b'\n') {
             return Err(Unavailable::LineBreak);
+        }
+        // Everything below names the path, which follows symlinks: only a
+        // folder nobody else can write to keeps it from being swapped between
+        // the steps.
+        if !in_private_folder(path) {
+            return Err(Unavailable::SharedFolder {
+                folder: folder_of(path),
+            });
         }
         remove_dead_socket(path)?;
         let io = |step: &'static str| {
@@ -136,12 +168,30 @@ impl ControlSocket {
 
 impl Drop for ControlSocket {
     fn drop(&mut self) {
-        let ours = std::fs::symlink_metadata(&self.path)
-            .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.identity);
+        // The same rule as the bind: nothing is removed from a folder somebody
+        // else could swap the file in, and only the socket this bound is.
+        let ours = in_private_folder(&self.path)
+            && std::fs::symlink_metadata(&self.path)
+                .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.identity);
         if ours {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// The folder `path` is in.
+fn folder_of(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Whether the folder `path` is in belongs to this user and neither its group
+/// nor anyone else can write to it.
+fn in_private_folder(path: &Path) -> bool {
+    std::fs::metadata(folder_of(path))
+        .is_ok_and(|meta| meta.uid() == current_uid() && meta.mode() & 0o022 == 0)
 }
 
 /// Remove a socket nobody serves on any more. A path that is not a socket, or
@@ -163,10 +213,20 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
             path: path.to_path_buf(),
         });
     }
-    if UnixStream::connect(path).is_ok() {
-        return Err(Unavailable::InUse {
-            path: path.to_path_buf(),
-        });
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(Unavailable::InUse {
+                path: path.to_path_buf(),
+            });
+        }
+        // Only a refusal proves nothing listens there any more.
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
+        Err(err) => {
+            return Err(Unavailable::Unproven {
+                path: path.to_path_buf(),
+                err,
+            });
+        }
     }
     std::fs::remove_file(path).map_err(|err| Unavailable::Io {
         path: path.to_path_buf(),
