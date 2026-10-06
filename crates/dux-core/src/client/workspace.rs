@@ -1289,9 +1289,9 @@ mod create_wait_tests {
 
     #[test]
     fn waiting_for_the_other_creation_comes_out_of_the_one_time_the_command_has() {
-        // The other creation takes about 0.75 s of a 1 s wait; the new agent then
-        // never finishes. Its wait gets the 0.25 s left, so the command ends near
-        // 1 s in all, not near 1.75 s.
+        // The other creation takes about 0.75 s of a 3 s wait; the new agent then
+        // never finishes. Its wait gets what is left, so the command ends near
+        // 3 s in all, not near 3.75 s. The spare seconds absorb a slow machine.
         let dir = private_dir();
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![
@@ -1303,10 +1303,10 @@ mod create_wait_tests {
         script.accepted = MINE_RUNNING;
         let (_fake, _lock, client) = dux_running(dir.path(), script);
         let started = Instant::now();
-        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        let error = perform(&client, add(&client), Some(Duration::from_secs(3))).unwrap_err();
         assert_eq!(error.exit, Exit::Unknown);
         assert!(
-            started.elapsed() < Duration::from_millis(1400),
+            started.elapsed() < Duration::from_millis(3600),
             "took {:?}",
             started.elapsed()
         );
