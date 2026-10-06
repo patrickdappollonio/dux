@@ -88,8 +88,7 @@ async fn get_log(
     let Some(path) = state.console.server_log_path() else {
         return (
             StatusCode::NOT_FOUND,
-            "this dux is not writing a server log right now: it is not serving the web UI, or \
-             it could not open the file (dux.log says why)",
+            dux_core::client::server_inspect::NO_SERVER_LOG,
         )
             .into_response();
     };

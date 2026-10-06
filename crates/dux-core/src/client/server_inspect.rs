@@ -22,6 +22,11 @@ use crate::file_follow::{LogError, MAX_LINES, open_log};
 /// How many lines `dux server logs` shows when `--lines` does not say.
 pub const DEFAULT_LINES: usize = 100;
 
+/// What a dux answers the log route with when it writes no server log: it is
+/// not serving the web UI, or it could not open the file.
+pub const NO_SERVER_LOG: &str = "this dux is not writing a server log right now: it is not \
+     serving the web UI, or it could not open the file (dux.log says why)";
+
 /// The path of the log route; `follow` streams, and `lines` is how many of
 /// the last lines to start from.
 const LOG_ROUTE: &str = "/api/v1/server/log";
@@ -185,6 +190,39 @@ pub fn log_follow(
             client.target()
         ),
     ))
+}
+
+fn writes_no_log(error: &CliError) -> bool {
+    error.message == NO_SERVER_LOG
+}
+
+/// [`log_tail`], reading the file at `paths` instead when the dux answered
+/// that it writes no log and `paths` is given (the dux is this machine's).
+pub fn tail_or_file(
+    client: &Client,
+    paths: Option<&DuxPaths>,
+    lines: usize,
+) -> Result<(Vec<String>, Option<String>), CliError> {
+    match (log_tail(client, lines), paths) {
+        (Err(error), Some(paths)) if writes_no_log(&error) => file_tail(&log_file(paths)?, lines),
+        (answer, _) => answer,
+    }
+}
+
+/// [`log_follow`], following the file at `paths` instead when the dux
+/// answered that it writes no log and `paths` is given.
+pub fn follow_or_file(
+    client: &Client,
+    paths: Option<&DuxPaths>,
+    lines: usize,
+    on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,
+) -> Result<(), CliError> {
+    match (log_follow(client, lines, on_line), paths) {
+        (Err(error), Some(paths)) if writes_no_log(&error) => {
+            file_follow(&log_file(paths)?, lines, on_line)
+        }
+        (answer, _) => answer,
+    }
 }
 
 /// Where the server log is on this machine: `[server] log_path`, read from
@@ -496,6 +534,36 @@ mod tests {
             socket_path: dir.path().join("dux.sock"),
         };
         assert_eq!(log_file(&paths).unwrap(), dir.path().join("server.log"));
+
+        // A dux on this machine that writes no log (a terminal UI not serving)
+        // leaves the file to be read, as with none running; for a remote
+        // there is no file here to read, and its sentence is shown.
+        std::fs::write(dir.path().join("server.log"), "from file\n").unwrap();
+        let (_fake, _lock, client) = local_dux(dir.path(), |path| {
+            if path.starts_with("/api/v1/server/log") {
+                Reply::Raw(format!(
+                    "HTTP/1.1 404 X\r\ncontent-length: {}\r\n\r\n{NO_SERVER_LOG}",
+                    NO_SERVER_LOG.len()
+                ))
+            } else {
+                Reply::json(404, "{}")
+            }
+        });
+        assert_eq!(
+            tail_or_file(&client, Some(&paths), 5).unwrap(),
+            (vec!["from file".to_string()], None)
+        );
+        let mut seen = Vec::new();
+        follow_or_file(&client, Some(&paths), 5, &mut |line| {
+            seen.push(line.to_string());
+            ControlFlow::Break(())
+        })
+        .unwrap();
+        assert_eq!(seen, ["from file"]);
+        let shown = tail_or_file(&client, None, 5).unwrap_err();
+        assert_eq!(shown.message, NO_SERVER_LOG);
+        let shown = follow_or_file(&client, None, 5, &mut |_| ControlFlow::Break(())).unwrap_err();
+        assert_eq!(shown.message, NO_SERVER_LOG);
         std::fs::write(
             &paths.config_path,
             "[server]\nlog_path = \"logs/web.log\"\n",

@@ -430,14 +430,20 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
             Err(_) => ControlFlow::Break(()),
         }
     };
-    let client = match selection.target(&paths)? {
+    let target = selection.target(&paths)?;
+    // This machine's dux that writes no log leaves its file to be read; a
+    // remote's file is not here, so its sentence is shown.
+    let this_machine = matches!(target, Target::Local).then_some(&paths);
+    let client = match target {
         Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
         target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
     };
     match client {
-        Some(client) if follow => server_inspect::log_follow(&client, lines, &mut print)?,
+        Some(client) if follow => {
+            server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?
+        }
         Some(client) => {
-            let (tail, note) = server_inspect::log_tail(&client, lines)?;
+            let (tail, note) = server_inspect::tail_or_file(&client, this_machine, lines)?;
             for line in tail {
                 if print(&line).is_break() {
                     break;
