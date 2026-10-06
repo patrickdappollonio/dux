@@ -257,7 +257,8 @@ across rotations, until you press `Ctrl-c`. With a dux running it asks that dux,
 says so when the file does not exist yet. A followed log the server ends (because it is
 stopping, or because the sign-in the command was using ended) makes `dux server logs -f` stop with
 exit status 4; run it again to carry on. One answer holds at most 10000 lines, and a command
-that asks for more says it was cut short.
+that asks for more says it was cut short. A follow through a running dux also starts from at
+most the last 10000 lines.
 
 dux reads only the file it is writing the log to: if a symbolic link takes that file's place,
 the command refuses with a message instead of reading what the link points at.

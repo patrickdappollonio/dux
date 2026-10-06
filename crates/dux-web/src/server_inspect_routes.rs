@@ -6,7 +6,8 @@
 //! of `server.log`, or for the lines after `since`, a count of the file's
 //! complete lines as a previous answer's `cursor` gave it. With `follow=true`
 //! it instead streams the same starting lines as plain text and then every
-//! line written after, as a chunked reply with no end of its own. The stream
+//! line written after, as a chunked reply with no end of its own; it starts from
+//! at most as many lines as one answer holds. The stream
 //! stops when the client goes away and when the session it was opened under
 //! ends (a sign-out, a password change), through the same watch every
 //! WebSocket holds.
@@ -92,12 +93,11 @@ async fn get_log(
             .into_response();
     };
     let tail = query.lines.unwrap_or(DEFAULT_LINES);
-    // A followed read starts from every line it is asked for; only an answer
-    // that is one document is bounded.
-    let cap = if query.follow { usize::MAX } else { MAX_LINES };
+    // A followed read starts from at most as many lines as one answer holds.
     let since = query.since;
     let read =
-        tokio::task::spawn_blocking(move || open_log(&path, since.as_deref(), tail, cap)).await;
+        tokio::task::spawn_blocking(move || open_log(&path, since.as_deref(), tail, MAX_LINES))
+            .await;
     let (read, follower) = match read {
         Ok(Ok(read)) => read,
         Ok(Err(error @ LogError::BadCursor)) => {
@@ -401,6 +401,7 @@ mod tests {
         let app = app_logging(tmp.path());
 
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/server/log?follow=true&lines=2")
@@ -429,6 +430,25 @@ mod tests {
             gauge_settles_at(before).await,
             "the stream ends once its client has gone"
         );
+
+        // A follow starts from at most as many lines as one answer holds.
+        let many: String = (0..10_001).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&log, many).unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/server/log?follow=true&lines=20000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = resp.into_body().into_data_stream();
+        let first = next_text(&mut body).await;
+        assert_eq!(first.lines().count(), 10_000);
+        assert_eq!(first.lines().next(), Some("line 1"));
+        drop(body);
+        assert!(gauge_settles_at(before).await);
     }
 
     #[tokio::test]
