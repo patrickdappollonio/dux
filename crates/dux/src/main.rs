@@ -68,6 +68,21 @@ fn main() -> Result<()> {
         Some(commands::Command::Operations(operations)) => client_commands::finish_with_code(
             client_commands::operations(operations.command, &selection),
         ),
+        Some(commands::Command::Macros(macros)) => {
+            client_commands::finish(client_commands::macros(macros.command, &selection))
+        }
+        Some(commands::Command::Providers(providers)) => {
+            client_commands::finish(client_commands::providers(providers.command, &selection))
+        }
+        Some(commands::Command::Keys(keys)) => {
+            client_commands::finish(client_commands::keys(keys.command, &selection))
+        }
+        Some(commands::Command::Themes(themes)) => {
+            client_commands::finish(client_commands::themes(themes.command, &selection))
+        }
+        Some(commands::Command::Env(env)) => {
+            client_commands::finish(client_commands::env(env.command, &selection))
+        }
         Some(_) => not_built(),
     }
 }

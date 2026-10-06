@@ -165,6 +165,22 @@ script), Save is refused and nothing is written, so the other change is not lost
 dialog keeps your edits and offers to reload the list, which drops them, or to keep
 editing so you can copy what you need first.
 
+## Managing macros from the command line
+
+```bash
+dux macros ls                                   # name, surface and the first line of text
+dux macros show review                          # one macro, its whole text included
+dux macros add review "Review this diff" --surface both
+dux macros rm review
+```
+
+`add` saves a new macro, or replaces the one with that name where it stands in the list;
+`--surface` takes `agent` (the default), `terminal` or `both`. Both changes ask before
+they go ahead, and need `--yes` when there is no terminal to ask on. With dux running,
+the change goes through it and applies at once; with dux stopped, it is written straight
+into `config.toml`, comments kept, and applies the next time dux starts. `--remote
+<name>` lists and changes a remote dux's macros instead.
+
 ## Adding macros directly in config
 
 You can manage macros entirely by hand. Open `config.toml` (`dux config path` locates

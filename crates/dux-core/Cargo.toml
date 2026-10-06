@@ -62,6 +62,11 @@ signal-hook = "0.4"
 getrandom = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
+# The built-in theme names (dux_core::theme::discover_available), listed for the
+# terminal UI's picker, `dux themes ls` and the web API alike. Default features
+# off: `ratatui` would pull ratatui-core into dux-web, which must stay free of
+# terminal UI crates.
+opaline = { version = "0.4", default-features = false, features = ["builtin-themes"] }
 
 [dev-dependencies]
 # Decodes the QR codes dux_core::qr draws, so the tests prove a phone could read

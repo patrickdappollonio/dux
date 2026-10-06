@@ -119,7 +119,125 @@ fn printed(body: &str) -> Vec<(String, String)> {
         ));
     }
     said.extend(previews(body, false));
+    said.extend(listings(&paths, body, false));
     said
+}
+
+/// What `dux env ls`, `dux macros ls` and `dux providers ls` print about
+/// `body` with no dux running, `show` passed to `env ls`, in every shape.
+fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
+    use dux_core::client::config_resources::{Source, env_ls, macros_ls, providers_ls};
+    use dux_core::client::output::Shape;
+    let mut said = Vec::new();
+    for shape in [Shape::Table, Shape::Json, Shape::Ids] {
+        std::fs::write(&paths.config_path, body).expect("seed");
+        let source = Source::File(paths);
+        for (printer, result) in [
+            (
+                format!("env ls (show {show})"),
+                env_ls(&source, show, shape),
+            ),
+            ("macros ls".to_string(), macros_ls(&source, shape)),
+            ("providers ls".to_string(), providers_ls(&source, shape)),
+        ] {
+            let text = match result {
+                Ok(text) => text,
+                Err(error) => error.message,
+            };
+            said.push((format!("{printer} {shape:?}"), text));
+        }
+    }
+    said
+}
+
+/// What the command line prints about `name` when it is typed as a provider,
+/// a macro or an environment variable with no dux running: `providers show`,
+/// `macros show`, the questions `env set`, `env rm`, `macros add` and `macros
+/// rm` ask, `env set`'s name check, and each change on the file.
+fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
+    use dux_core::client::config_resources::{
+        Source, Writer, check_env_name, macros_show, providers_show, remove_env,
+        remove_env_question, remove_macro, remove_macro_question, set_env, set_env_question,
+        set_macro, set_macro_question,
+    };
+    let text = |result: Result<String, dux_core::client::CliError>| match result {
+        Ok(text) => text,
+        Err(error) => error.message,
+    };
+    let mut said = vec![
+        ("env set question".to_string(), set_env_question(name)),
+        ("env rm question".to_string(), remove_env_question(name)),
+        ("macros add question".to_string(), set_macro_question(name)),
+        (
+            "macros rm question".to_string(),
+            remove_macro_question(name),
+        ),
+        (
+            "env set name check".to_string(),
+            text(check_env_name(name).map(|()| String::new())),
+        ),
+    ];
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "providers show".to_string(),
+        text(providers_show(&Source::File(paths), name)),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "macros show".to_string(),
+        text(macros_show(&Source::File(paths), name)),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "env set".to_string(),
+        text(set_env(Writer::File(paths), name, "v")),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "env rm".to_string(),
+        text(remove_env(Writer::File(paths), name)),
+    ));
+    // A save that succeeds, and the two it refuses for what it was given.
+    for (text_given, surface) in [("t", "agent"), ("", "agent"), ("t", "nowhere")] {
+        std::fs::write(&paths.config_path, body).expect("seed");
+        said.push((
+            format!("macros add ({text_given:?}, {surface})"),
+            text(set_macro(
+                Writer::File(paths),
+                name,
+                text_given.to_string(),
+                surface,
+            )),
+        ));
+    }
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "macros rm".to_string(),
+        text(remove_macro(Writer::File(paths), name)),
+    ));
+    said
+}
+
+/// `dux env ls` prints an environment value only with `--show`.
+#[test]
+fn env_ls_prints_a_value_only_with_show() {
+    crate::config::install_canonical_renderer();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = paths_in(tmp.path());
+    let body = "[env]\nAPI_TOKEN = \"zzSECRETvalue\"\n";
+    for (printer, text) in listings(&paths, body, false) {
+        assert!(!text.contains("zzSECRETvalue"), "{printer}: {text}");
+    }
+    let shown: Vec<String> = listings(&paths, body, true)
+        .into_iter()
+        .filter(|(printer, _)| printer.starts_with("env ls") && !printer.ends_with("Ids"))
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(shown.len(), 2);
+    assert!(
+        shown.iter().all(|text| text.contains("zzSECRETvalue")),
+        "{shown:?}"
+    );
 }
 
 /// dux's own documented file with `line` added where a user adds one: at
@@ -167,14 +285,132 @@ fn a_name_that_is_not_a_setting_name_never_reaches_a_printer() {
         for position in POSITIONS {
             let body = position.replace("{T}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
-            for (printer, text) in printed(&body) {
+            // `env ls --show` prints values, and still no name it hides.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let paths = paths_in(tmp.path());
+            let mut shown = listings(&paths, &body, true);
+            // The name typed on the command line, as the file has it.
+            shown.extend(named(&paths, &body, &token));
+            for (printer, text) in printed(&body).into_iter().chain(shown) {
                 if text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
             }
         }
+        for (printer, text) in through_a_running_dux(&token) {
+            if text.contains(fragment) {
+                leaks.push(format!("{printer} through a running dux:\n{text}"));
+            }
+        }
     }
     assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// What `dux macros add` and `dux macros rm` print about `name` when a
+/// running dux makes the change. The stand-in answers as the engine does,
+/// naming the macro as it was given in every outcome and refusal, so the
+/// command line must never pass those sentences on as they are.
+fn through_a_running_dux(name: &str) -> Vec<(String, String)> {
+    use dux_core::client::config_resources::{Writer, remove_macro, set_macro};
+    use std::io::{BufRead, BufReader, Read, Write};
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let socket = dir.path().join("dux.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let given = name.to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let body = String::from_utf8_lossy(&body).into_owned();
+            let quoted = serde_json::to_string(&given).unwrap();
+            let record = |state: &str, message: String| {
+                serde_json::json!({
+                    "id": "op1", "kind": "macro.set", "state": state, "message": message,
+                    "created": [], "removed": [], "parts": [],
+                })
+                .to_string()
+            };
+            let (status, reply) = if request.contains("/api/v1/build") {
+                (200, r#"{"version":"v1","process":"p","api":1}"#.to_string())
+            } else if request.starts_with("DELETE") {
+                (404, format!("unknown macro {quoted}"))
+            } else if body.contains("nowhere") {
+                (
+                    400,
+                    format!("Macro {quoted} has an unknown surface \"nowhere\"."),
+                )
+            } else if body.contains(r#""text":"""#) {
+                (400, format!("Macro {quoted} has no text."))
+            } else if body.contains("fail") {
+                (
+                    202,
+                    record("failed", format!("Couldn't save macro {quoted}.")),
+                )
+            } else {
+                (202, record("succeeded", format!("Saved macro {quoted}.")))
+            };
+            let _ = write!(
+                reader.get_mut(),
+                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    let lock_path = dir.path().join("dux.lock");
+    let _lock = dux_core::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+    std::fs::write(
+        &lock_path,
+        format!(
+            "{}\ncontrol-socket={}\n",
+            std::process::id(),
+            socket.display()
+        ),
+    )
+    .unwrap();
+    let client =
+        dux_core::client::connect::connect(&dux_core::client::connect::Target::Local, &lock_path)
+            .expect("the stand-in answers");
+    let writer = || Writer::Dux {
+        client: &client,
+        wait: Some(std::time::Duration::from_secs(5)),
+    };
+    let text = |result: Result<String, dux_core::client::CliError>| match result {
+        Ok(text) => text,
+        Err(error) => error.message,
+    };
+    let mut said = Vec::new();
+    for (given_text, surface) in [
+        ("t", "agent"),
+        ("fail", "agent"),
+        ("", "agent"),
+        ("t", "nowhere"),
+    ] {
+        said.push((
+            format!("macros add ({given_text:?}, {surface})"),
+            text(set_macro(writer(), name, given_text.to_string(), surface)),
+        ));
+    }
+    said.push(("macros rm".to_string(), text(remove_macro(writer(), name))));
+    said
 }
 
 /// A VALUE below a key the formatter does not name is never printed either:
@@ -261,6 +497,7 @@ fn printed_with_show(body: &str) -> Vec<(String, String)> {
     let mut said = previews(body, true);
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = paths_in(tmp.path());
+    said.extend(listings(&paths, body, true));
     let mut asks: Vec<Vec<&str>> = TABLES.iter().map(|table| vec![*table, "--show"]).collect();
     asks.push(vec!["server.auth.password"]);
     asks.push(vec!["server.auth.password", "--show"]);

@@ -101,12 +101,41 @@ fn table(listing: &Listing) -> String {
     out
 }
 
+/// One resource as `show` prints it: a `field: value` line per field that
+/// holds something, a string as its text and anything else as JSON.
+pub fn details(object: &serde_json::Value) -> String {
+    let Some(fields) = object.as_object() else {
+        return format!("{object}\n");
+    };
+    fields
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(field, value)| match value {
+            serde_json::Value::String(text) => format!("{field}: {text}\n"),
+            other => format!("{field}: {other}\n"),
+        })
+        .collect()
+}
+
 /// The one item of `items` that `query` names: the item whose id it is, or
 /// else the only item with that name. No match fails; a name several items
 /// share is refused, listing them so the caller can pick by id.
 pub fn select<'a, T>(
     noun: &str,
     query: &str,
+    items: &'a [T],
+    id: impl Fn(&T) -> &str,
+    name: impl Fn(&T) -> &str,
+) -> Result<&'a T, CliError> {
+    select_shown(noun, query, query, items, id, name)
+}
+
+/// [`select`] for a query that may not be repeated as typed: `shown` is how
+/// every refusal names it.
+pub fn select_shown<'a, T>(
+    noun: &str,
+    query: &str,
+    shown: &str,
     items: &'a [T],
     id: impl Fn(&T) -> &str,
     name: impl Fn(&T) -> &str,
@@ -119,14 +148,14 @@ pub fn select<'a, T>(
         [one] => Ok(one),
         [] => Err(CliError::new(
             Exit::Failed,
-            format!("no {noun} has the id or name {query}"),
+            format!("no {noun} has the id or name {shown}"),
         )),
         many => {
             let ids: Vec<&str> = many.iter().map(|item| id(item)).collect();
             Err(CliError::new(
                 Exit::Usage,
                 format!(
-                    "{} {noun}s are named {query}; name one by its id: {}",
+                    "{} {noun}s are named {shown}; name one by its id: {}",
                     many.len(),
                     ids.join(", ")
                 ),
@@ -236,6 +265,20 @@ mod tests {
         assert_eq!(render(&empty, Shape::Table), "ID   NAME\n");
         assert_eq!(render(&empty, Shape::Json).trim(), "[]");
         assert_eq!(render(&empty, Shape::Ids), "");
+    }
+
+    #[test]
+    fn a_shown_resource_prints_a_line_per_field_that_holds_something() {
+        let shown = details(&serde_json::json!({
+            "name": "claude",
+            "args": ["--fast"],
+            "install_hint": null,
+            "forward_scroll": false,
+        }));
+        assert_eq!(
+            shown,
+            "args: [\"--fast\"]\nforward_scroll: false\nname: claude\n"
+        );
     }
 
     #[test]

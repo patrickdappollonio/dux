@@ -757,6 +757,32 @@ pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> 
     prompt_hidden(label, None)
 }
 
+/// An environment value for `dux env set <name>`: piped in with
+/// `from_stdin` (refused on a terminal, which would show it), else asked for
+/// twice on the terminal without echo, as `dux config set env.<name>` asks.
+pub fn read_env_value(from_stdin: bool, name: &str) -> Result<Password> {
+    let mut secrets = TerminalSecrets;
+    if from_stdin {
+        return secrets.read_stdin().map_err(|error| {
+            if error.is::<StdinTooLarge>() {
+                anyhow!(
+                    "standard input held an environment value larger than 1 MiB, which dux does \
+                     not accept; nothing was changed"
+                )
+            } else {
+                error
+            }
+        });
+    }
+    let Some((first, second)) = secrets.prompt_twice(&format!("Value for {name}"), None)? else {
+        bail!("there is no terminal to ask for the value of {name} on; pipe it in and add --stdin");
+    };
+    if first.expose() != second.expose() {
+        bail!("the two answers did not match. Nothing was changed.");
+    }
+    Ok(first)
+}
+
 /// `--stdin` reads a pipe. On a terminal it would read what is typed with
 /// the terminal echoing it, so it is refused in favour of the hidden prompt.
 fn refuse_terminal_stdin(stdin_is_terminal: bool) -> Result<()> {

@@ -5894,11 +5894,7 @@ impl App {
             .options
             .iter()
             .map(|option| {
-                let source_label = match option.source {
-                    crate::theme::ThemeSource::Bundled => "bundled",
-                    crate::theme::ThemeSource::Opaline => "opaline",
-                    crate::theme::ThemeSource::User => "user",
-                };
+                let source_label = option.source.as_str();
                 let suffix = if option.id == prompt.current {
                     format!("  {source_label} · current")
                 } else {
@@ -22188,7 +22184,7 @@ mod tests {
             .map(|i| crate::theme::ThemeListing {
                 id: format!("theme-{i}"),
                 display_name: format!("Theme {i}"),
-                source: crate::theme::ThemeSource::Bundled,
+                source: dux_core::theme::ThemeSource::Bundled,
             })
             .collect::<Vec<_>>();
         app.prompt = PromptState::ChangeTheme(crate::app::ChangeThemePrompt {

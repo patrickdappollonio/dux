@@ -31,7 +31,7 @@ pub use server_screen::{ServerScreenTick, ServerStatusScreen, restore_terminal};
 pub use config::install_canonical_renderer;
 
 /// The hidden password prompt `dux remote login` signs in with.
-pub use config_cli::read_sign_in_password;
+pub use config_cli::{read_env_value, read_sign_in_password};
 
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.

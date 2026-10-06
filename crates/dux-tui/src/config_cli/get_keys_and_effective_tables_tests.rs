@@ -125,3 +125,36 @@ fn get_of_a_partly_written_table_reports_the_defaults_in_use_for_the_rest() {
          [ui]: out={out:?} err={err:?}"
     );
 }
+
+/// `dux keys ls` lists every action with the keys the terminal UI binds it
+/// to, saying which bindings the file changed.
+#[test]
+fn keys_ls_marks_the_bindings_the_file_changes() {
+    use dux_core::client::config_resources::{Source, keys_ls};
+    use dux_core::client::output::Shape;
+    crate::config::install_canonical_renderer();
+    let (_tmp, paths) = paths_with("[keys]\nquit = [\"ctrl-q\"]\n");
+    let listed: serde_json::Value =
+        serde_json::from_str(&keys_ls(&Source::File(&paths), Shape::Json).unwrap()).unwrap();
+    let row = |action: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["action"] == action)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {action} in {listed}"))
+    };
+    assert_eq!(
+        row("quit"),
+        serde_json::json!({"action": "quit", "keys": ["ctrl-q"], "source": "yours"})
+    );
+    assert_eq!(
+        row("move_down"),
+        serde_json::json!({"action": "move_down", "keys": ["j", "down"], "source": "default"})
+    );
+    assert_eq!(
+        listed[0]["action"], "move_down",
+        "the terminal UI's own order"
+    );
+}

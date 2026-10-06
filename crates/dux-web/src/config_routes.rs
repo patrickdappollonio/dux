@@ -19,6 +19,11 @@
 //! `/api/v1/macros/{name}` and `/api/v1/global-env/{name}`) is what a script
 //! changes, leaving the rest of the set alone; an entry that is not there is a
 //! `404`, and `?operation=1` answers an operation record.
+//!
+//! Three reads list what the command line's `dux providers ls`, `dux keys ls`
+//! and `dux themes ls` print through a remote, built from this dux's own
+//! `config.toml` by [`dux_core::config_resources`], the code that lists them
+//! on the command line's own machine.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +54,9 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/v1/ui/changes-pane", put(set_changes_pane))
         .route("/api/v1/config/reload", post(reload_config))
+        .route("/api/v1/config/providers", get(list_providers))
+        .route("/api/v1/config/keys", get(list_keys))
+        .route("/api/v1/config/themes", get(list_themes))
         .route(
             "/api/v1/defaults/toggle-randomized-pet-name",
             post(toggle_randomized_pet_name_default),
@@ -306,6 +314,60 @@ fn config_refusal(error: String) -> Response {
         return (StatusCode::NOT_FOUND, error).into_response();
     }
     refusal(error, StatusCode::BAD_REQUEST)
+}
+
+// ── Config-file listings ─────────────────────────────────────────────────────
+
+/// Build a listing from this dux's own `config.toml` off the async runtime:
+/// `200` with its JSON array, or `500` with the sentence saying why the file
+/// could not be read.
+async fn config_listing<T: Serialize + Send + 'static>(
+    state: &AppState,
+    build: impl FnOnce(&dux_core::config::DuxPaths) -> Result<T, String> + Send + 'static,
+) -> Response {
+    let paths = state.engine.paths();
+    match tokio::task::spawn_blocking(move || build(&paths)).await {
+        Ok(Ok(listing)) => Json(listing).into_response(),
+        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reading config.toml stopped before it finished",
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/config/providers`: every provider, dux's own included, as
+/// `dux providers ls` lists them.
+async fn list_providers(State(state): State<AppState>) -> Response {
+    config_listing(&state, |paths| {
+        dux_core::config_resources::read(&paths.config_path)
+            .map(|file| dux_core::config_resources::providers(&file))
+    })
+    .await
+}
+
+/// `GET /api/v1/config/keys`: every action the terminal UI binds, with its
+/// keys, as `dux keys ls` lists them.
+async fn list_keys(State(state): State<AppState>) -> Response {
+    config_listing(&state, |paths| {
+        let file = dux_core::config_resources::read(&paths.config_path)?;
+        dux_core::config_resources::keys(&file.raw)
+    })
+    .await
+}
+
+/// `GET /api/v1/config/themes`: the themes the terminal UI's picker offers,
+/// in its order, as `dux themes ls` lists them.
+async fn list_themes(State(state): State<AppState>) -> Response {
+    config_listing(&state, |paths| {
+        let file = dux_core::config_resources::read(&paths.config_path)?;
+        Ok(dux_core::config_resources::themes(
+            paths,
+            &file.config.ui.theme,
+        ))
+    })
+    .await
 }
 
 // ── Changes pane ───────────────────────────────────────────────────────────────
@@ -748,6 +810,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_config_listings_read_this_duxs_own_file_in_the_pickers_order() {
+        let (tmp, app) = router_no_auth();
+        std::fs::create_dir_all(tmp.path().join("themes")).unwrap();
+        std::fs::write(tmp.path().join("themes/alpha.toml"), "").unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[ui]\ntheme = \"alpha\"\n\n[providers.mytool]\ncommand = \"my-cli\"\n",
+        )
+        .unwrap();
+        let get = |uri: &'static str| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let themes = get("/api/v1/config/themes").await;
+        assert_eq!(
+            themes.as_array().unwrap()[..3],
+            [
+                serde_json::json!({"name": "dux_dark", "source": "bundled", "current": false}),
+                serde_json::json!({"name": "alpha", "source": "user", "current": true}),
+                serde_json::json!({"name": "ayu_dark", "source": "opaline", "current": false}),
+            ]
+        );
+        let providers = get("/api/v1/config/providers").await;
+        assert_eq!(providers[0]["name"], "mytool");
+        assert_eq!(providers[0]["source"], "yours");
+        assert_eq!(providers[0]["settings"]["command"], "my-cli");
+        assert_eq!(providers[1]["name"], "claude");
+        assert_eq!(providers[1]["source"], "built in");
+    }
+
+    #[tokio::test]
     async fn setting_the_tailscale_mode_saves_it_and_says_it_applies_when_a_listener_starts() {
         // Nothing is serving behind a test router, which is the honest half of
         // the answer: the choice is saved, and the listener half happens later.
@@ -1134,12 +1242,20 @@ mod tests {
             !record.to_string().contains("secret"),
             "a value is never echoed: {record}"
         );
-        let (status, _) = answer(
+        let (status, refusal) = answer(
             &app,
             json_req("PUT", "/api/v1/global-env/1BAD", r#"{"value":"x"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "not a variable name");
+        assert!(
+            !refusal.to_string().contains("1BAD"),
+            "a name that is no variable name is never echoed: {refusal}"
+        );
+        let (status, refusal) =
+            answer(&app, json_req("DELETE", "/api/v1/global-env/zz%20LEAK", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!refusal.to_string().contains("LEAK"), "{refusal}");
         for bad in ["nul\u{0}inside", "${1UNCLOSED}"] {
             let body = serde_json::json!({ "value": bad }).to_string();
             let (status, refusal) =

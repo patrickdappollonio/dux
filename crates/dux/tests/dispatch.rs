@@ -183,25 +183,30 @@ fn remote_and_local_cannot_be_combined() {
 fn resource_commands_answer_with_no_dux_running_and_never_create_the_database() {
     const NOT_BUILT: &str = "this command is not built yet\n";
     const NOT_RUNNING: &str = "dux isn't running; start it with \"dux\" or \"dux server\"\n";
-    for (args, code, stderr) in [
-        (&["projects", "ls"][..], 2, NOT_BUILT),
-        (&["projects", "list"][..], 2, NOT_BUILT),
-        (&["projects", "worktrees", "ls", "p"][..], 2, NOT_BUILT),
-        (&["agents", "rm", "a"][..], 2, NOT_BUILT),
-        (&["agents", "remove", "a", "--yes"][..], 2, NOT_BUILT),
-        (&["agents", "tabs", "stop", "a", "t"][..], 2, NOT_BUILT),
-        (&["terminals", "ls", "-q"][..], 2, NOT_BUILT),
-        (&["macros", "show", "m"][..], 2, NOT_BUILT),
-        (&["env", "ls", "--show"][..], 2, NOT_BUILT),
-        (&["server", "logs", "-f"][..], 2, NOT_BUILT),
-        (&["server", "connections", "ls"][..], 2, NOT_BUILT),
-        (&["operations", "show", "op1"][..], 4, NOT_RUNNING),
+    for (args, code, stdout, stderr) in [
+        (&["projects", "ls"][..], 2, "", NOT_BUILT),
+        (&["projects", "list"][..], 2, "", NOT_BUILT),
+        (&["projects", "worktrees", "ls", "p"][..], 2, "", NOT_BUILT),
+        (&["agents", "rm", "a"][..], 2, "", NOT_BUILT),
+        (&["agents", "remove", "a", "--yes"][..], 2, "", NOT_BUILT),
+        (&["agents", "tabs", "stop", "a", "t"][..], 2, "", NOT_BUILT),
+        (&["terminals", "ls", "-q"][..], 2, "", NOT_BUILT),
+        (
+            &["macros", "show", "m"][..],
+            1,
+            "",
+            "no macro has the id or name m\n",
+        ),
+        (&["env", "ls", "--show"][..], 0, "NAME   VALUE\n", ""),
+        (&["server", "logs", "-f"][..], 2, "", NOT_BUILT),
+        (&["server", "connections", "ls"][..], 2, "", NOT_BUILT),
+        (&["operations", "show", "op1"][..], 4, "", NOT_RUNNING),
     ] {
         let dir = home("no-dux");
         let run = dux_in(&dir, args, &[]);
         assert_eq!(run.code(), code, "{args:?}: {}", run.stderr());
         assert_eq!(run.stderr(), stderr, "{args:?}");
-        assert_eq!(run.stdout(), "", "{args:?}");
+        assert_eq!(run.stdout(), stdout, "{args:?}");
         assert!(!dir.join("sessions.sqlite3").exists(), "{args:?}");
     }
 }
@@ -316,17 +321,29 @@ fn global_flags_work_beside_a_server_subcommand() {
 }
 
 #[test]
-fn macros_and_env_changes_are_declared_but_not_built_yet() {
-    for args in [
-        &["macros", "add", "m"][..],
-        &["macros", "rm", "m"][..],
-        &["macros", "remove", "m"][..],
-        &["env", "set", "TOKEN", "--stdin"][..],
-        &["env", "rm", "TOKEN"][..],
+fn a_macro_or_env_change_with_no_terminal_and_no_yes_is_refused_and_writes_nothing() {
+    const UNCONFIRMED: &str = "add --yes";
+    const NOT_A_NAME: &str = "That is not a valid environment variable name";
+    for (args, code, says) in [
+        (&["macros", "add", "m", "hello"][..], 3, UNCONFIRMED),
+        (&["macros", "rm", "m"][..], 3, UNCONFIRMED),
+        (&["macros", "remove", "m"][..], 3, UNCONFIRMED),
+        (&["env", "set", "TOKEN", "--stdin"][..], 3, UNCONFIRMED),
+        (&["env", "rm", "TOKEN"][..], 3, UNCONFIRMED),
+        // Refused before it is asked or sent, and never repeated.
+        (
+            &["env", "set", "zz LEAK.x", "--stdin", "--yes"][..],
+            1,
+            NOT_A_NAME,
+        ),
+        (&["env", "rm", "zz LEAK.x"][..], 3, UNCONFIRMED),
     ] {
-        let run = dux("not-built-edits", args);
-        assert_eq!(run.code(), 2, "{args:?}: {}", run.stderr());
-        assert_eq!(run.stderr(), "this command is not built yet\n", "{args:?}");
+        let dir = home("unconfirmed-edits");
+        let run = dux_in(&dir, args, &[]);
+        assert_eq!(run.code(), code, "{args:?}: {}", run.stderr());
+        assert!(run.stderr().contains(says), "{args:?}: {}", run.stderr());
+        assert!(!run.stderr().contains("LEAK"), "{args:?}: {}", run.stderr());
+        assert!(!dir.join("config.toml").exists(), "{args:?}");
     }
 }
 

@@ -1,13 +1,17 @@
 //! The commands that run as a client of a dux: they reach it through
 //! `dux_core::client`, print what it answers and exit with the client's codes.
 
+use dux_core::client::config_resources::{self as resources, Source, Writer};
 use dux_core::client::connect::{self, REMOTE_VARIABLE, Target};
 use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
 use dux_core::client::{CliError, Exit, sign_in, wait};
 use dux_core::config::DuxPaths;
 
-use crate::commands::{Format, ListFlags, OperationsSub, RemoteSub};
+use crate::commands::{
+    ChangeFlags, EnvSub, Format, ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub,
+    RemoteSub,
+};
 
 /// What `--remote` and `--local` said, before the variable and the saved
 /// default are consulted.
@@ -234,4 +238,164 @@ fn named_or_selected(
             format!("name the remote: \"dux remote {verb} <name>\""),
         )
     })
+}
+
+// ---------------------------------------------------------------------------
+// The resources kept in config.toml
+// ---------------------------------------------------------------------------
+
+/// Run a listing against this machine's config.toml, or a remote's API when
+/// one is selected. The file is read whether or not dux is running.
+fn read_with<T>(
+    selection: &Selection,
+    read: impl FnOnce(&Source<'_>) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    // `dux keys ls` reads the terminal UI's own bindings.
+    dux_tui::install_canonical_renderer();
+    let paths = discover()?;
+    match selection.target(&paths)? {
+        Target::Local => read(&Source::File(&paths)),
+        target @ Target::Remote { .. } => {
+            let client = connect::connect(&target, &paths.lock_path)?;
+            read(&Source::Dux(&client))
+        }
+    }
+}
+
+/// Run a change: through the running dux it is selected on, so it applies at
+/// once, or, on this machine with no dux running, on config.toml itself.
+/// `question` is asked first (see [`output::confirm`]); `stdin_taken` says
+/// standard input carries a value, so it cannot carry the answer too.
+fn change_with(
+    selection: &Selection,
+    flags: &ChangeFlags,
+    question: &str,
+    stdin_taken: bool,
+    change: impl FnOnce(Writer<'_>) -> Result<String, CliError>,
+) -> Result<String, CliError> {
+    let paths = discover()?;
+    let client = match selection.target(&paths)? {
+        Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
+        target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
+    };
+    let Some(client) = client else {
+        ask(
+            question,
+            &paths.config_path.display().to_string(),
+            flags.yes,
+            stdin_taken,
+        )?;
+        return change(Writer::File(&paths));
+    };
+    ask(question, client.target(), flags.yes, stdin_taken)?;
+    let wait = if flags.no_wait {
+        None
+    } else {
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+    };
+    change(Writer::Dux {
+        client: &client,
+        wait,
+    })
+}
+
+/// Confirm a change on the terminal, or take `--yes` for it.
+fn ask(question: &str, target: &str, yes: bool, stdin_taken: bool) -> Result<(), CliError> {
+    use std::io::IsTerminal;
+    let terminal =
+        !stdin_taken && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !terminal {
+        return output::confirm(question, target, yes, None);
+    }
+    let mut input = std::io::stdin().lock();
+    let mut prompt = std::io::stderr();
+    output::confirm(question, target, yes, Some((&mut input, &mut prompt)))
+}
+
+pub fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        MacrosSub::Ls(list) => read_with(selection, |source| {
+            resources::macros_ls(source, shape(&list))
+        }),
+        MacrosSub::Show { name } => {
+            read_with(selection, |source| resources::macros_show(source, &name))
+        }
+        MacrosSub::Add {
+            name,
+            text,
+            surface,
+            change,
+        } => change_with(
+            selection,
+            &change,
+            &resources::set_macro_question(&name),
+            false,
+            |writer| resources::set_macro(writer, &name, text, &surface),
+        ),
+        MacrosSub::Rm { name, change } => change_with(
+            selection,
+            &change,
+            &resources::remove_macro_question(&name),
+            false,
+            |writer| resources::remove_macro(writer, &name),
+        ),
+    }
+}
+
+pub fn providers(command: NamedReadSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        NamedReadSub::Ls(list) => read_with(selection, |source| {
+            resources::providers_ls(source, shape(&list))
+        }),
+        NamedReadSub::Show { name } => {
+            read_with(selection, |source| resources::providers_show(source, &name))
+        }
+    }
+}
+
+pub fn keys(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
+    let ListOnlySub::Ls(list) = command;
+    read_with(selection, |source| resources::keys_ls(source, shape(&list)))
+}
+
+pub fn themes(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
+    let ListOnlySub::Ls(list) = command;
+    read_with(selection, |source| {
+        resources::themes_ls(source, shape(&list))
+    })
+}
+
+pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        EnvSub::Ls { show, list } => read_with(selection, |source| {
+            resources::env_ls(source, show, shape(&list))
+        }),
+        EnvSub::Set {
+            name,
+            stdin,
+            change,
+        } => {
+            // A name that is no variable name is refused before anything is
+            // asked or sent, so it never reaches a dux or its access log.
+            resources::check_env_name(&name)?;
+            change_with(
+                selection,
+                &change,
+                &resources::set_env_question(&name),
+                stdin,
+                |writer| {
+                    let value = dux_tui::read_env_value(stdin, &name)
+                        .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
+                    resources::set_env(writer, &name, value.expose())
+                },
+            )
+        }
+        EnvSub::Rm { name, change } => change_with(
+            selection,
+            &change,
+            &resources::remove_env_question(&name),
+            false,
+            |writer| resources::remove_env(writer, &name),
+        ),
+    }
 }

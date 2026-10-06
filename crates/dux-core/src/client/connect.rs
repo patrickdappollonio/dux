@@ -86,12 +86,7 @@ impl std::fmt::Debug for Client {
 /// is this machine's `dux.lock`, read only for the local target.
 pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
     let client = match target {
-        Target::Local => Client {
-            transport: Box::new(find_local(lock_path)?),
-            token: None,
-            target: "this machine's dux".to_string(),
-            remote: None,
-        },
+        Target::Local => local_client(find_local(lock_path)?),
         Target::Remote { name, remote } => {
             let client = Client {
                 transport: Box::new(HttpTransport::new(&remote.url, remote.insecure)),
@@ -107,9 +102,42 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
     Ok(client)
 }
 
+/// The dux on this machine when one is running, ready for requests; `None`
+/// when none is (the lock is free), for a command that then works on the
+/// config file itself. A dux that holds the lock but does not answer is
+/// reported, never worked around.
+pub fn connect_local_if_running(lock_path: &Path) -> Result<Option<Client>, CliError> {
+    let Some(transport) = find_running_local(lock_path)? else {
+        return Ok(None);
+    };
+    let client = local_client(transport);
+    client.check_api()?;
+    Ok(Some(client))
+}
+
+/// A client of the dux on this machine, which needs no sign-in.
+fn local_client(transport: UnixTransport) -> Client {
+    Client {
+        transport: Box::new(transport),
+        token: None,
+        target: "this machine's dux".to_string(),
+        remote: None,
+    }
+}
+
 /// The control socket of the dux on this machine, or why there is none to
 /// talk to.
 fn find_local(lock_path: &Path) -> Result<UnixTransport, CliError> {
+    find_running_local(lock_path)?.ok_or_else(|| {
+        CliError::new(
+            Exit::NotRunning,
+            "dux isn't running; start it with \"dux\" or \"dux server\"",
+        )
+    })
+}
+
+/// [`find_local`], with `None` for a free lock.
+fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliError> {
     let read = || {
         std::fs::read_to_string(lock_path)
             .map(|text| LockFileContents::parse(&text))
@@ -118,14 +146,12 @@ fn find_local(lock_path: &Path) -> Result<UnixTransport, CliError> {
     if let Some(socket) = read().control_socket {
         let transport = UnixTransport::new(socket);
         if transport.answers() {
-            return Ok(transport);
+            return Ok(Some(transport));
         }
     }
     let not_running = |message: String| CliError::new(Exit::NotRunning, message);
     match crate::reload_signal::lock_holder(lock_path) {
-        LockHolder::Free => Err(not_running(
-            "dux isn't running; start it with \"dux\" or \"dux server\"".to_string(),
-        )),
+        LockHolder::Free => Ok(None),
         LockHolder::Held(pid) => match read().control_socket_unavailable {
             Some(reason) => Err(not_running(format!(
                 "dux (PID {pid}) is running without a control socket: {reason}"

@@ -516,7 +516,7 @@ fn check_alone(key: &Key, value: &Value) -> Result<(), String> {
 
 /// Set `path` to `value` in `doc`, creating the tables on the way and keeping
 /// the comment that trails an existing value.
-fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Result<()> {
+pub(crate) fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Result<()> {
     // A path `lookup` validated, printed through the one formatter.
     fn shown<S: AsRef<str>>(path: &[S]) -> String {
         let segments: Vec<String> = path.iter().map(|s| s.as_ref().to_string()).collect();
