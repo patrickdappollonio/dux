@@ -245,6 +245,22 @@ impl Dux {
         .await
     }
 
+    async fn cli_login(&self, from: Arrival, password: &str) -> Answer {
+        self.send(
+            from,
+            Req::new(Method::POST, "/api/v1/auth/cli-login")
+                .json(json!({ "password": password, "label": "a laptop" })),
+        )
+        .await
+    }
+
+    /// Sign in from the command line and answer the bearer token.
+    async fn cli_token(&self, from: Arrival) -> String {
+        let login = self.cli_login(from, PASSWORD).await;
+        assert_eq!(login.status, StatusCode::OK, "{}", login.body);
+        login.json()["token"].as_str().unwrap().to_string()
+    }
+
     /// Sign in and answer the `Cookie` header value the session rides on.
     async fn signed_in(&self, from: Arrival) -> String {
         let login = self.login(from, PASSWORD).await;
@@ -294,6 +310,10 @@ impl Req {
     fn cookie(mut self, cookie: &str) -> Self {
         self.cookie = Some(cookie.to_string());
         self
+    }
+
+    fn bearer(self, token: &str) -> Self {
+        self.header("authorization", &format!("Bearer {token}"))
     }
 }
 
@@ -376,6 +396,7 @@ fn protected_routes() -> Vec<Req> {
         post("/api/v1/server/tailscale-mode"),
         post("/api/v1/file-drop"),
         post("/api/v1/auth/logout"),
+        post("/api/v1/auth/cli-logout"),
         post("/api/v1/auth/password"),
         post("/api/v1/auth/dismiss-no-auth-warning"),
         // A path no route names, which the SPA fallback would answer with the
@@ -646,6 +667,65 @@ async fn a_session_is_a_host_only_strict_cookie_and_signing_out_revokes_it_on_th
 }
 
 #[tokio::test]
+async fn a_cli_token_authorizes_as_a_bearer_and_ends_on_logout_and_on_a_password_change() {
+    let dux = Dux::with_password("");
+    let login = dux.cli_login(NETWORK, PASSWORD).await;
+    assert_eq!(login.status, StatusCode::OK, "{}", login.body);
+    assert_eq!(login.json()["expires_at"], Value::Null);
+    assert!(
+        login.set_cookie().is_empty(),
+        "a token rides in a header, not a cookie"
+    );
+    let token = login.json()["token"].as_str().unwrap().to_string();
+    let projects = |token: &str| Req::new(Method::GET, "/api/v1/projects").bearer(token);
+    assert_eq!(
+        dux.send(NETWORK, projects(&token)).await.status,
+        StatusCode::OK
+    );
+    assert_auth_required(
+        &dux.send(
+            NETWORK,
+            projects("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        )
+        .await,
+        "a token dux never minted",
+    );
+
+    // Signing out ends that token and no other.
+    let other = dux.cli_token(NETWORK).await;
+    let logout = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/cli-logout").bearer(&token),
+        )
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+    assert_auth_required(
+        &dux.send(NETWORK, projects(&token)).await,
+        "the token after cli-logout",
+    );
+    assert_eq!(
+        dux.send(NETWORK, projects(&other)).await.status,
+        StatusCode::OK
+    );
+
+    // A password change, made with a token itself, ends every token.
+    let change = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/password")
+                .bearer(&other)
+                .json(json!({ "current": PASSWORD, "new": OTHER_PASSWORD })),
+        )
+        .await;
+    assert_eq!(change.status, StatusCode::NO_CONTENT, "{}", change.body);
+    assert_auth_required(
+        &dux.send(NETWORK, projects(&other)).await,
+        "the token after a password change",
+    );
+}
+
+#[tokio::test]
 async fn the_cookie_is_secure_by_the_setting_and_never_by_a_forwarded_header() {
     let dux = Dux::with_password("require = \"everywhere\"");
     let forged = Req::new(Method::POST, "/api/v1/auth/login")
@@ -672,12 +752,12 @@ async fn the_cookie_is_secure_by_the_setting_and_never_by_a_forwarded_header() {
 #[tokio::test]
 async fn a_wrong_password_is_slowed_then_blocked_and_this_machine_never_is() {
     let dux = Dux::with_password("max_failed_logins = 3\nfailed_login_delay_seconds = 1");
-    let wrong = dux.login(NETWORK, "not the password at all").await;
+    let wrong = dux.cli_login(NETWORK, "not the password at all").await;
     assert_eq!(
         (wrong.status, wrong.error().as_deref()),
         (StatusCode::UNAUTHORIZED, Some("wrong_password"))
     );
-    let slowed = dux.login(NETWORK, PASSWORD).await;
+    let slowed = dux.cli_login(NETWORK, PASSWORD).await;
     assert_eq!(
         slowed.status,
         StatusCode::TOO_MANY_REQUESTS,
@@ -692,9 +772,14 @@ async fn a_wrong_password_is_slowed_then_blocked_and_this_machine_never_is() {
     assert_eq!(wait, 1);
 
     let mut last = None;
-    for _ in 0..2 {
+    for attempt in 0..2 {
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        last = Some(dux.login(NETWORK, "not the password at all").await);
+        // The browser's login and the command line's count against one limit.
+        last = Some(if attempt == 0 {
+            dux.login(NETWORK, "not the password at all").await
+        } else {
+            dux.cli_login(NETWORK, "not the password at all").await
+        });
     }
     let last = last.unwrap();
     assert_eq!(
@@ -722,6 +807,11 @@ async fn a_wrong_password_is_slowed_then_blocked_and_this_machine_never_is() {
     assert_eq!(
         dux.login(NETWORK, PASSWORD).await.status,
         StatusCode::FORBIDDEN
+    );
+    let banned = dux.cli_login(NETWORK, PASSWORD).await;
+    assert_eq!(
+        (banned.status, banned.error().as_deref()),
+        (StatusCode::FORBIDDEN, Some("blocked"))
     );
 
     // This machine fails just as often and is only ever slowed.

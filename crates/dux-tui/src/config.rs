@@ -1560,6 +1560,18 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U32(c.server.auth.session_idle_seconds),
         },
         ConfigEntry::Field {
+            key: "cli_token_idle_days",
+            comment: Some(CommentSource::Static(
+                "# How many days the dux command line stays signed in to this server\n\
+                 # with nothing using it. Signing in from the command line gives that\n\
+                 # machine a token instead of a browser session, so daily use never asks\n\
+                 # for the password again; a token nobody uses for this many days stops\n\
+                 # working on its own. A password change or a command-line sign-out ends\n\
+                 # every token at once. At least 1. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.cli_token_idle_days),
+        },
+        ConfigEntry::Field {
             key: "disable_no_auth_warning",
             comment: Some(CommentSource::Static(
                 "# Hide the red warning the web UI shows when dux is reachable beyond this\n\

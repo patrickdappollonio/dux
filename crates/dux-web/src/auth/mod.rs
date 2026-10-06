@@ -31,6 +31,7 @@
 //! middleware changing.
 
 pub(crate) mod admission;
+pub(crate) mod bearer;
 pub(crate) mod blocked_page;
 pub(crate) mod cookie;
 pub(crate) mod gate;
@@ -50,7 +51,7 @@ use std::time::Instant;
 use axum::http::HeaderMap;
 use dux_core::auth::Password;
 use dux_core::config::{AddressBlock, AuthRequire, ServerAuthConfig};
-use dux_core::web_sessions::TokenDigest;
+use dux_core::web_sessions::{SessionKind, TokenDigest};
 
 use crate::exposure::{Exposure, ExposureCell};
 pub use provenance::{Arrival, ClientClass};
@@ -371,9 +372,12 @@ pub(crate) struct Assessment {
     pub(crate) required: bool,
     /// The valid session the request presented, if any.
     pub(crate) session: Option<TokenDigest>,
-    /// Every session token the request presented, valid or not: what a
-    /// sign-out revokes.
+    /// Every session token the request presented in a cookie, valid or not:
+    /// what a sign-out revokes.
     pub(crate) presented: Vec<TokenDigest>,
+    /// Every token the request presented as a bearer, valid or not: what a
+    /// command-line sign-out revokes.
+    pub(crate) bearer: Vec<TokenDigest>,
 }
 
 /// The [`Assessment`] of the request in hand, as an extension.
@@ -453,7 +457,11 @@ impl AuthState {
             let sessions = state.sessions.clone();
             tokio::spawn(async move {
                 sessions
-                    .load(db, snapshot.generation.clone(), idle_ms(&snapshot.config))
+                    .load(
+                        db,
+                        snapshot.generation.clone(),
+                        idle_windows(&snapshot.config),
+                    )
                     .await;
             });
         }
@@ -530,23 +538,29 @@ impl AuthState {
         );
         let cookie_port = facts.arrival.map_or(0, |arrival| arrival.local.port());
         let mut session = None;
-        let presented: Vec<TokenDigest> = if snapshot.has_password() {
-            cookie::read_all(headers, cookie_port)
-                .iter()
-                .filter_map(|value| dux_core::web_sessions::digest_of(value))
-                .collect()
+        let (presented, bearer): (Vec<TokenDigest>, Vec<TokenDigest>) = if snapshot.has_password() {
+            let digests = |values: Vec<String>| -> Vec<TokenDigest> {
+                values
+                    .iter()
+                    .filter_map(|value| dux_core::web_sessions::digest_of(value))
+                    .collect()
+            };
+            (
+                digests(cookie::read_all(headers, cookie_port)),
+                digests(bearer::read_all(headers)),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        if !presented.is_empty() {
+        if !presented.is_empty() || !bearer.is_empty() {
             self.sessions.ready().await;
             // The first value that is a valid session wins; a planted or
             // stale one beside it changes nothing.
-            session = presented.iter().copied().find(|digest| {
+            session = presented.iter().chain(&bearer).copied().find(|digest| {
                 self.sessions.check(
                     digest,
                     &snapshot.generation,
-                    idle_ms(&snapshot.config),
+                    idle_windows(&snapshot.config),
                     true,
                 )
             });
@@ -562,6 +576,7 @@ impl AuthState {
             required,
             session,
             presented,
+            bearer,
         }
     }
 
@@ -593,7 +608,7 @@ impl AuthState {
             self.sessions.check(
                 digest,
                 &snapshot.generation,
-                idle_ms(&snapshot.config),
+                idle_windows(&snapshot.config),
                 false,
             )
         });
@@ -910,6 +925,7 @@ impl AuthState {
         &self,
         facts: &RequestFacts,
         generation: &str,
+        kind: SessionKind,
     ) -> Result<Issued, anyhow::Error> {
         let refused = |state: &Self| {
             if state.snapshot().generation != generation {
@@ -927,7 +943,7 @@ impl AuthState {
         if let Some(refused) = refused(self) {
             return Ok(refused);
         }
-        let token = self.sessions.issue(generation).await?;
+        let token = self.sessions.issue(generation, kind).await?;
         if let Some(refused) = refused(self) {
             self.end_session(token.digest).await;
             return Ok(refused);
@@ -967,15 +983,21 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// `session_idle_seconds`, in milliseconds.
-pub(crate) fn idle_ms(config: &ServerAuthConfig) -> i64 {
-    i64::from(config.session_idle_seconds) * 1000
+/// How long each kind of session may sit unused: `session_idle_seconds` for a
+/// browser's and `cli_token_idle_days` for the command line's, in milliseconds.
+pub(crate) fn idle_windows(config: &ServerAuthConfig) -> sessions::Idle {
+    sessions::Idle {
+        browser_ms: i64::from(config.session_idle_seconds) * 1000,
+        cli_ms: i64::from(config.cli_token_idle_days) * 86_400_000,
+    }
 }
 
 /// How often the sessions' last use is written: a third of the idle timeout,
 /// between one and fifteen seconds.
 fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
-    std::time::Duration::from_millis((idle_ms(config) / 3).clamp(1_000, 15_000) as u64)
+    std::time::Duration::from_millis(
+        (idle_windows(config).browser_ms / 3).clamp(1_000, 15_000) as u64
+    )
 }
 
 /// How often the reach behind the no-password alarm is looked at.
@@ -1089,7 +1111,7 @@ async fn maintain(state: Arc<AuthState>) {
                 say_forward(&state);
             }
             _ = flush.tick() => {
-                state.sessions.flush(idle_ms(&state.snapshot().config)).await;
+                state.sessions.flush(idle_windows(&state.snapshot().config)).await;
             }
             _ = reach.tick() => {
                 warning.check(&state);
@@ -1342,7 +1364,11 @@ mod tests {
             opening_hook: None,
         });
         state.sessions.ready().await;
-        let token = state.sessions.issue("").await.unwrap();
+        let token = state
+            .sessions
+            .issue("", SessionKind::Browser)
+            .await
+            .unwrap();
         let _lease = state.sessions.lease(token.digest).unwrap();
         let stored = || {
             dux_core::web_sessions::WebSessionStore::open(&db)
