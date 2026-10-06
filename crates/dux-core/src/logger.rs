@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
 
-use crate::config::{DuxPaths, LoggingConfig};
+use crate::config::{DuxPaths, LoggingConfig, ServerConfig};
 // The level type and its parser belong to `[logging] level`, so they live with
 // the setting: `config_effective::effective_log_level` is the one rule for what
 // a value means.
@@ -378,32 +378,7 @@ impl RotatingLog {
     /// probing costs one syscall per position, which a large `keep` turns into a
     /// stall on every line.
     fn scan(&self) -> (Vec<u32>, Vec<PathBuf>) {
-        let (Some(dir), Some(base)) = (self.path.parent(), self.path.file_name()) else {
-            return (Vec::new(), Vec::new());
-        };
-        let prefix = format!("{}.", base.to_string_lossy());
-        let mut positions = Vec::new();
-        let mut temps = Vec::new();
-        let Ok(entries) = fs::read_dir(dir) else {
-            return (positions, temps);
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(rest) = name.strip_prefix(&prefix) else {
-                continue;
-            };
-            if rest.ends_with(".tmp") {
-                temps.push(entry.path());
-                continue;
-            }
-            let digits = rest.strip_suffix(".gz").unwrap_or(rest);
-            if let Ok(n) = digits.parse::<u32>() {
-                positions.push(n);
-            }
-        }
-        positions.sort_unstable();
-        positions.dedup();
-        (positions, temps)
+        scan_copies(&self.path)
     }
 
     /// Shift the numbered copies up, move the live log into position 1, and open
@@ -511,6 +486,76 @@ impl RotatingLog {
         }
         open_log_file(&self.path)
     }
+}
+
+/// What the part of a file name after `<log>.` says it is.
+enum CopyName {
+    /// `<n>` or `<n>.gz`: a rotated copy at position `n`.
+    Copy(u32),
+    /// `<n>.gz.<pid>.tmp`: the file a compression was writing.
+    Temporary,
+}
+
+/// Only the names rotation itself makes, with their numbers validated, so a file
+/// the user keeps beside the log (`server.log.notes.tmp`, `server.log.old`) is
+/// never taken for a copy.
+fn copy_name(rest: &str) -> Option<CopyName> {
+    let all_digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = rest.split('.');
+    let position = parts.next().filter(|text| all_digits(text))?;
+    let position = position.parse::<u32>().ok()?;
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (None, ..) | (Some("gz"), None, ..) => Some(CopyName::Copy(position)),
+        (Some("gz"), Some(pid), Some("tmp"), None) if all_digits(pid) => Some(CopyName::Temporary),
+        _ => None,
+    }
+}
+
+/// The rotated copies of the log at `path` found beside it: their positions,
+/// ascending, and the abandoned temporary files.
+fn scan_copies(path: &Path) -> (Vec<u32>, Vec<PathBuf>) {
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
+        return (Vec::new(), Vec::new());
+    };
+    let prefix = format!("{}.", base.to_string_lossy());
+    let mut positions = Vec::new();
+    let mut temps = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (positions, temps);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        match copy_name(rest) {
+            Some(CopyName::Copy(n)) => positions.push(n),
+            Some(CopyName::Temporary) => temps.push(entry.path()),
+            None => {}
+        }
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    (positions, temps)
+}
+
+/// Every rotated copy of the log at `path` that exists, plain or gzipped, and
+/// every temporary file a killed compression left, so a caller removing the log
+/// can remove what belongs to it.
+pub fn rotated_copies_of(path: &Path) -> Vec<PathBuf> {
+    let (positions, temps) = scan_copies(path);
+    let mut found = temps;
+    for n in positions {
+        for suffix in ["", ".gz"] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(format!(".{n}{suffix}"));
+            let copy = PathBuf::from(name);
+            if copy.exists() {
+                found.push(copy);
+            }
+        }
+    }
+    found
 }
 
 /// Gzip each plain rotated copy on a thread of its own, then release the claim.
@@ -631,7 +676,14 @@ fn report_rotation_failure(reported: &'static std::sync::Once, message: &str) {
 /// Separate from [`init`] because `init` installs a process-global logger and a
 /// panic hook, neither of which a test can do twice.
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    // Private from the first instant: a dangling symlink at the log path makes
+    // this open create its target, which tightening afterwards would leave
+    // alone (it never follows a link) and readable by everyone.
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(crate::file_modes::PRIVATE_FILE_MODE)
+        .open(path)?;
     // A warning about the log file itself may have nowhere to go: `init`
     // installs the logger it warns through just after this returns.
     crate::file_modes::restrict_to_owner_best_effort(path, "log file");
@@ -639,15 +691,62 @@ fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
 }
 
 pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
-    let configured = PathBuf::from(&config.path);
+    resolve_under_root(&config.path, paths, "dux.log")
+}
+
+/// `[server] log_path` the way `[logging] path` is read: empty is the default,
+/// relative is from the config folder.
+pub fn resolve_server_log_path(config: &ServerConfig, paths: &DuxPaths) -> PathBuf {
+    resolve_under_root(&config.log_path, paths, "server.log")
+}
+
+fn resolve_under_root(configured: &str, paths: &DuxPaths, default_name: &str) -> PathBuf {
+    let configured = PathBuf::from(configured);
     if configured.as_os_str().is_empty() {
-        return paths.root.join("dux.log");
+        return paths.root.join(default_name);
     }
     if configured.is_absolute() {
         configured
     } else {
         paths.root.join(configured)
     }
+}
+
+/// The server's own log file: the lines `dux server` prints, written by every way
+/// of serving, rotated and pruned by `[server]`'s `log_*` settings through the
+/// same machinery as `dux.log`. A second [`RotatingLog`] with settings of its
+/// own, so neither log's limits move the other's.
+pub struct ServerLog(RotatingLog);
+
+impl ServerLog {
+    /// Append one line, adding its newline.
+    pub fn write_line(&self, line: &str) {
+        let mut text = String::with_capacity(line.len() + 1);
+        text.push_str(line);
+        text.push('\n');
+        self.0.write_line(&text);
+    }
+
+    /// The file lines are written to, with any symlink resolved.
+    pub fn path(&self) -> &Path {
+        &self.0.path
+    }
+}
+
+/// Open the server log named by `config`, creating its folder and the file
+/// owner-only. The settings are read once, here: a serve that is already
+/// running keeps what it started with.
+pub fn open_server_log(config: &ServerConfig, paths: &DuxPaths) -> std::io::Result<ServerLog> {
+    let path = resolve_server_log_path(config, paths);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let settings = RotationSettings {
+        max_bytes: config.log_max_bytes,
+        keep: crate::config::effective_log_keep(config.log_keep),
+        compress: config.log_compress,
+    };
+    RotatingLog::open(path, Arc::new(RotationCell::new(settings))).map(ServerLog)
 }
 
 /// Serializes the tests that move the process-wide [`LEVEL`], so a parallel run
@@ -723,6 +822,15 @@ mod tests {
         drop(open_log_file(&path).unwrap());
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode & 0o077, 0, "expected owner-only, got {mode:o}");
+
+        // A dangling symlink at the log path makes the open create its target,
+        // which must be private from the first instant, not tightened after.
+        let target = dir.path().join("created-through-the-link.log");
+        let link = dir.path().join("linked.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop(open_log_file(&link).unwrap());
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
     }
 
     #[test]
@@ -1155,6 +1263,40 @@ mod tests {
                 write_and_settle(&log, &format!("line {n}\n"));
             }
 
+            // The server log rotates through the same machinery on its own
+            // `[server]` settings: a 12-byte limit and three copies keep
+            // `server.log` plus exactly three gzipped copies.
+            let server = crate::config::ServerConfig {
+                log_max_bytes: 12,
+                log_keep: 3,
+                ..Default::default()
+            };
+            let paths = DuxPaths {
+                root: dir.path().to_path_buf(),
+                config_path: dir.path().join("config.toml"),
+                sessions_db_path: dir.path().join("sessions.sqlite3"),
+                worktrees_root: dir.path().join("worktrees"),
+                lock_path: dir.path().join("dux.lock"),
+            };
+            let server_log = open_server_log(&server, &paths).expect("open the server log");
+            for n in 1..=6 {
+                server_log.write_line(&format!("line {n}\n"));
+                settle(&server_log.0);
+            }
+            let server_files: Vec<String> = names_in(dir.path())
+                .into_iter()
+                .filter(|name| name.starts_with("server.log"))
+                .collect();
+            assert_eq!(
+                server_files,
+                [
+                    "server.log",
+                    "server.log.1.gz",
+                    "server.log.2.gz",
+                    "server.log.3.gz"
+                ]
+            );
+
             for entry in fs::read_dir(dir.path()).unwrap() {
                 let entry = entry.unwrap();
                 let mode = entry.metadata().unwrap().permissions().mode() & 0o777;
@@ -1328,11 +1470,25 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let log = log_in(dir.path(), settings(8, 3, false));
             fs::write(dir.path().join("dux.log.1.gz.999999.tmp"), "half a gzip").unwrap();
+            // Names that only look like a copy or a temporary are somebody else's.
+            let lookalikes = [
+                "dux.log.notes.tmp",
+                "dux.log.1.gz.abc.tmp",
+                "dux.log.1x",
+                "dux.log.-1",
+                "dux.log.2.bz2",
+            ];
+            for name in lookalikes {
+                fs::write(dir.path().join(name), "mine").unwrap();
+            }
 
             log.write_line("line one\n");
             log.write_line("line two\n");
 
-            assert_eq!(names_in(dir.path()), vec!["dux.log", "dux.log.1"]);
+            let mut expected = vec!["dux.log".to_string(), "dux.log.1".to_string()];
+            expected.extend(lookalikes.map(String::from));
+            expected.sort();
+            assert_eq!(names_in(dir.path()), expected);
         }
 
         /// Rotation reads the directory once instead of probing every position

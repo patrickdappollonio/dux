@@ -329,6 +329,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ViewServerLog,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         // No default key: a tri-state a user changes when they move between
         // networks does not earn a chord, and the palette is where it lives.
         action: Action::SetTailscaleMode,
@@ -3398,6 +3405,7 @@ mod tests {
             "toggle-remove-git-pane",
             "toggle-sidebar",
             "toggle-tab-to-agent",
+            "view-server-log",
         ];
 
         assert_eq!(

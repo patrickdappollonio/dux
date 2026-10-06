@@ -225,7 +225,7 @@ impl std::error::Error for ResetFailed {}
 
 /// The reset itself. Prints what it removed as it goes.
 fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
-    let log_path = resolve_reset_log_path(paths);
+    let (log_path, server_log_path) = resolve_reset_log_paths(paths);
 
     if all {
         reset_agent_data(paths)?;
@@ -235,6 +235,31 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
         eprintln!("warning: {error}");
     }
     prune_empty_ancestors(&log_path, &paths.root)?;
+    // The server log goes with its rotated copies, and the saved remotes with
+    // the sign-in tokens they hold.
+    // Only from inside the config folder: a path that leaves it, by an absolute
+    // name, a `..` or a symlinked folder, is the user's to delete.
+    if is_plainly_inside(&server_log_path, &paths.root) {
+        // A log that will not go is a warning, as for dux.log, never a reason
+        // to keep the config.
+        for copy in logger::rotated_copies_of(&server_log_path)
+            .into_iter()
+            .chain([server_log_path.clone()])
+        {
+            if let Err(error) = remove_file_with_message(&copy) {
+                eprintln!("warning: {error}");
+            }
+        }
+        prune_empty_ancestors(&server_log_path, &paths.root)?;
+    } else {
+        println!(
+            "left {} alone: it is outside the config folder {}, or reached through a \
+             symlinked folder, so dux does not delete it. Remove it yourself if you want it gone",
+            server_log_path.display(),
+            paths.root.display()
+        );
+    }
+    remove_file_with_message(&paths.root.join("remotes.toml"))?;
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
 
@@ -1291,17 +1316,48 @@ fn remove_leftover_folder(worktree: &Path) -> Option<SessionWorktreeReset> {
 // File / directory helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_reset_log_path(paths: &DuxPaths) -> PathBuf {
-    let logging = if paths.config_path.exists() {
+/// Where the config says `dux.log` and `server.log` are, or where they are by
+/// default when there is no config or it does not parse.
+fn resolve_reset_log_paths(paths: &DuxPaths) -> (PathBuf, PathBuf) {
+    let config = if paths.config_path.exists() {
         fs::read_to_string(&paths.config_path)
             .ok()
             .and_then(|raw| toml::from_str::<config::Config>(&raw).ok())
-            .map(|config| config.logging)
             .unwrap_or_default()
     } else {
-        config::LoggingConfig::default()
+        config::Config::default()
     };
-    logger::resolve_log_path(&logging, paths)
+    (
+        logger::resolve_log_path(&config.logging, paths),
+        logger::resolve_server_log_path(&config.server, paths),
+    )
+}
+
+/// Whether `path` is a name under `root` that reaches it by plain folders: no
+/// `..`, and no folder on the way (the last name, a file, excepted) that is a
+/// symlink. The last name may itself be a symlink: removing it unlinks the link.
+fn is_plainly_inside(path: &Path, root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let names: Vec<_> = relative.components().collect();
+    if names.is_empty() {
+        return false;
+    }
+    let mut walked = root.to_path_buf();
+    for (index, name) in names.iter().enumerate() {
+        let std::path::Component::Normal(name) = name else {
+            return false;
+        };
+        walked.push(name);
+        let is_folder_on_the_way = index + 1 < names.len();
+        if is_folder_on_the_way
+            && fs::symlink_metadata(&walked).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn remove_file_with_message(path: &Path) -> Result<()> {
@@ -2609,14 +2665,94 @@ mod tests {
         let harness = ResetHarness::new();
         harness.write_config_with_log_path("logs/custom.log");
         harness.write_log("logs/custom.log");
+        // The server log, its rotated copies (plain, gzipped, an abandoned
+        // temporary) and the saved remotes all go with the config.
+        for name in [
+            "logs/web-custom.log",
+            "logs/web-custom.log.1",
+            "logs/web-custom.log.2.gz",
+            "logs/web-custom.log.3.gz.4242.tmp",
+            "remotes.toml",
+        ] {
+            harness.write_log(name);
+        }
+        // A file that only looks like a copy is somebody else's.
+        harness.write_log("logs/web-custom.log.old");
+        harness.write_log("logs/web-custom.log.notes.tmp");
         let worktree = harness.create_session("agent-1");
 
         run_reset(&harness.paths, false).expect("reset");
 
         assert!(!harness.paths.config_path.exists());
         assert!(!harness.paths.root.join("logs/custom.log").exists());
+        for name in [
+            "logs/web-custom.log",
+            "logs/web-custom.log.1",
+            "logs/web-custom.log.2.gz",
+            "logs/web-custom.log.3.gz.4242.tmp",
+            "remotes.toml",
+        ] {
+            assert!(!harness.paths.root.join(name).exists(), "{name} is removed");
+        }
+        assert!(
+            harness.paths.root.join("logs/web-custom.log.old").exists(),
+            "a file that is not a numbered copy stays"
+        );
+        assert!(
+            harness
+                .paths
+                .root
+                .join("logs/web-custom.log.notes.tmp")
+                .exists(),
+            "a temporary that is not the compression's stays"
+        );
         assert!(harness.paths.sessions_db_path.exists());
         assert!(worktree.exists());
+
+        // A reset never deletes outside the config folder: a server log path that
+        // leaves it (absolute, through `..`, or through a symlinked folder) is
+        // left alone with its copies. A symlink AT the path is unlinked, and what
+        // it points at stays.
+        let outside = harness.paths.root.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).expect("outside");
+        std::os::unix::fs::symlink(&outside, harness.paths.root.join("linked-dir"))
+            .expect("folder link");
+        std::os::unix::fs::symlink(
+            outside.join("target.log"),
+            harness.paths.root.join("leaf-link.log"),
+        )
+        .expect("leaf link");
+        for (configured, kept) in [
+            (
+                outside.join("abs.log").to_string_lossy().into_owned(),
+                "abs.log",
+            ),
+            ("../outside/dots.log".to_string(), "dots.log"),
+            ("linked-dir/through.log".to_string(), "through.log"),
+        ] {
+            harness.write_config_with_server_log_path(&configured);
+            for name in [kept.to_string(), format!("{kept}.1")] {
+                fs::write(outside.join(name), "not dux's to delete").expect("outside file");
+            }
+            run_reset(&harness.paths, false).expect("reset");
+            for name in [kept.to_string(), format!("{kept}.1")] {
+                assert!(
+                    outside.join(&name).exists(),
+                    "{configured}: {name} survives"
+                );
+            }
+        }
+        fs::write(outside.join("target.log"), "behind the link").expect("link target");
+        harness.write_config_with_server_log_path("leaf-link.log");
+        run_reset(&harness.paths, false).expect("reset");
+        assert!(
+            fs::symlink_metadata(harness.paths.root.join("leaf-link.log")).is_err(),
+            "the link itself is unlinked"
+        );
+        assert!(
+            outside.join("target.log").exists(),
+            "what it pointed at stays"
+        );
 
         let _config = config::ensure_config(&harness.paths).expect("config recreated");
         let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
@@ -3002,6 +3138,15 @@ mod tests {
         fn write_config_with_log_path(&self, log_path: &str) {
             let mut config = Config::default();
             config.logging.path = log_path.to_string();
+            config.server.log_path = "logs/web-custom.log".to_string();
+            let bindings = RuntimeBindings::from_keys_config(&config.keys);
+            let body = config::render_config_with(&config, &bindings);
+            fs::write(&self.paths.config_path, body).expect("config");
+        }
+
+        fn write_config_with_server_log_path(&self, server_log_path: &str) {
+            let mut config = Config::default();
+            config.server.log_path = server_log_path.to_string();
             let bindings = RuntimeBindings::from_keys_config(&config.keys);
             let body = config::render_config_with(&config, &bindings);
             fs::write(&self.paths.config_path, body).expect("config");

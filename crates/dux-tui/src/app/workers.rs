@@ -759,8 +759,12 @@ impl App {
                 self.apply_server_flip_preflight(result, warning, startup);
             }
 
-            EventReaction::BackgroundServerPreflightReady { result, warning } => {
-                self.apply_background_server_preflight(result, warning);
+            EventReaction::BackgroundServerPreflightReady {
+                result,
+                warning,
+                startup,
+            } => {
+                self.apply_background_server_preflight(result, warning, startup);
             }
         }
     }
@@ -923,7 +927,12 @@ impl App {
         if let Some(companion) = self.companion.as_mut() {
             companion.note_config_applied(&self.engine.config);
         }
+        // The listener's bind settings and the server log's are both read when a
+        // serve starts, so a running one cannot adopt either.
         if dux_core::config::server_bind_settings_changed(
+            &before.server,
+            &self.engine.config.server,
+        ) || dux_core::config::server_log_file_settings_changed(
             &before.server,
             &self.engine.config.server,
         ) {
@@ -3495,27 +3504,42 @@ mod tests {
     /// The copy is chosen by whether a listener is up on this process, so the
     /// choice must read the live companion rather than a remembered flag.
     #[test]
-    fn a_serving_terminal_ui_gets_the_stop_and_start_wording_on_a_bind_change() {
-        let (companion, _recorded) = crate::app::background_server::tests::FakeCompanion::serving();
-        let mut app =
-            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        app.engine.config.server.serve_while_tui = true;
-        app.companion = Some(companion);
-        let mut config = app.engine.config.clone();
-        // Kept on, or the reload's own live switch stops the serve before the
-        // warning is chosen and the copy would be right for the wrong reason.
-        config.server.serve_while_tui = true;
-        config.server.port += 1;
+    fn a_serving_terminal_ui_gets_the_stop_and_start_wording_on_a_startup_bound_change() {
+        // A bind setting and each of the four server log settings: the log is
+        // opened when the serve starts, so a running one cannot adopt them.
+        type Change = fn(&mut dux_core::config::ServerConfig);
+        let changes: [(&str, Change); 5] = [
+            ("port", |server| server.port += 1),
+            ("log_path", |server| server.log_path = "other.log".into()),
+            ("log_max_bytes", |server| server.log_max_bytes += 1),
+            ("log_keep", |server| server.log_keep += 1),
+            ("log_compress", |server| {
+                server.log_compress = !server.log_compress
+            }),
+        ];
+        for (setting, change) in changes {
+            let (companion, _recorded) =
+                crate::app::background_server::tests::FakeCompanion::serving();
+            let mut app =
+                crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+            app.engine.config.server.serve_while_tui = true;
+            app.companion = Some(companion);
+            let mut config = app.engine.config.clone();
+            // Kept on, or the reload's own live switch stops the serve before the
+            // warning is chosen and the copy would be right for the wrong reason.
+            config.server.serve_while_tui = true;
+            change(&mut config.server);
 
-        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+            app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
-        let (tone, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(tone, StatusTone::Warning);
-        assert_eq!(
-            message,
-            server_restart_warning(true),
-            "a serving companion picks the stop-and-start copy"
-        );
+            let (tone, message) = app.status.most_recent_tui().expect("a status");
+            assert_eq!(tone, StatusTone::Warning, "{setting}");
+            assert_eq!(
+                message,
+                server_restart_warning(true),
+                "{setting}: a serving companion picks the stop-and-start copy"
+            );
+        }
     }
 
     /// A config the engine adopted after its own apply failed runs the same

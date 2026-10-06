@@ -846,8 +846,9 @@ pub struct ServerConfig {
     /// Whether the server logs a per-request access line (method, path, status,
     /// latency) to its console: `dux server`'s stdout, and the log viewer of the
     /// `start-web-server` flip. The `/healthz` probe is always skipped.
-    /// Default true. The access log is console-only (never written to `dux.log`),
-    /// so piping `dux server`'s stdout captures it, and the `start-web-server`
+    /// Default true. The access log is never written to `dux.log`; it goes to the
+    /// console and to `server.log` (the background server, which prints nothing
+    /// over the terminal UI, writes only the file), and the `start-web-server`
     /// flip shows the same lines in its log viewer.
     pub access_log: bool,
     /// How many lines the `start-web-server` flip's log viewer keeps for
@@ -860,6 +861,25 @@ pub struct ServerConfig {
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
     /// starts.
     pub log_viewer_lines: usize,
+    /// Where the server's own log is written: the same lines `dux server` prints,
+    /// kept by all three ways of serving, so the log of a server that ran with no
+    /// terminal in front of it can still be read. A relative path is resolved from
+    /// the config folder; an empty one is read as the default. Default
+    /// `server.log`. `dux.log` keeps the debugging trail and is unaffected. Read
+    /// when a serve starts.
+    pub log_path: String,
+    /// Size in bytes the server log may reach before dux rotates it, with the same
+    /// whole-line and `0 = never rotate` rules as `[logging] max_bytes`. Default
+    /// 10 MiB. Read when a serve starts.
+    pub log_max_bytes: u64,
+    /// How many rotated copies of the server log to keep, numbered `server.log.1`
+    /// upwards; the oldest is deleted. `0` rotates and discards. Read through
+    /// [`effective_log_keep`], so values above [`MAX_LOG_KEEP`] are clamped.
+    /// Default 5. Read when a serve starts.
+    pub log_keep: u32,
+    /// Whether a rotated server log is gzipped to `server.log.N.gz` in the
+    /// background. Default true. Read when a serve starts.
+    pub log_compress: bool,
     /// Whether `dux server` and the start-web-server flip show QR codes for
     /// this machine's tailnet addresses (its Tailscale IP and its MagicDNS
     /// name, the `tailscale serve` HTTPS URL when one ends at dux), so a phone
@@ -1098,6 +1118,16 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
     server_bind_settings_changed(prev, next)
         || server_console_settings_changed(prev, next)
         || server_log_viewer_settings_changed(prev, next)
+        || server_log_file_settings_changed(prev, next)
+}
+
+/// True when a config reload changed a setting of `server.log`, which is opened
+/// when a serve starts, in every way of serving.
+pub fn server_log_file_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    prev.log_path != next.log_path
+        || prev.log_max_bytes != next.log_max_bytes
+        || prev.log_keep != next.log_keep
+        || prev.log_compress != next.log_compress
 }
 
 /// True when a config reload changed a `[server]` setting read once, as the
@@ -2105,6 +2135,10 @@ impl Default for ServerConfig {
             color: "auto".to_string(),
             access_log: true,
             log_viewer_lines: DEFAULT_LOG_VIEWER_LINES,
+            log_path: "server.log".to_string(),
+            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            log_keep: DEFAULT_LOG_KEEP,
+            log_compress: true,
             qr_codes: true,
             serve_while_tui: false,
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,

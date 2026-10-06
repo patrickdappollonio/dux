@@ -42,9 +42,13 @@ A handful of subcommands handle the file without you hunting for it:
   options after an upgrade.
 - `dux config restore-docs` puts the explanatory comments back into a config that lost
   them, keeping every value exactly as it is.
-- `dux config reset` removes the config and the log, and keeps your agents and worktrees.
-  `dux config reset --all` is the full factory reset: config, log, the session database and
-  every worktree dux made. Both refuse while another dux is running.
+- `dux config reset` removes the config, the log, the server log with its rotated copies
+  and your saved remotes, and keeps your agents and worktrees.
+  `dux config reset --all` is the full factory reset: all of that, the session database and
+  every worktree dux made. It deletes nothing if a program dux started is still running,
+  and it keeps one thing, the note that you have already seen the welcome screen, in the
+  fresh database it leaves behind, so the next start does not greet you as a stranger.
+  Both refuse while another dux is running.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
 
@@ -314,6 +318,9 @@ crossing it, and a single line longer than the whole limit is still written and
 briefly goes over. `keep` above 1000 is clamped, with a note in the log. If you
 are upgrading with a log that is already far bigger than `max_bytes`, it is
 rotated on the first line dux writes after the upgrade.
+
+The server has a log of its own, `server.log`, with the same rotation settings under
+`[server]`: see [the server's own log](/docs/server-mode#the-servers-own-log).
 
 If `path` points at a symlink, dux follows it once at startup: the live log and
 its rotated copies all live beside the file the link points at, and the link

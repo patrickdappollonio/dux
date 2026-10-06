@@ -1181,6 +1181,10 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.server_log_viewer.is_some() {
+            self.handle_server_log_key(key);
+            return Ok(false);
+        }
         // A keystroke retires a live row drag: the pointer and the keyboard must
         // not both be moving the sidebar. The close-overlay key is the advertised
         // way out of a drag, so it is consumed only once the gesture became one;
@@ -11078,6 +11082,10 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.server_log_viewer.is_some() {
+            self.handle_server_log_mouse(mouse);
+            return false;
+        }
         if let Some(should_exit) = self.route_prompt_mouse(mouse) {
             return should_exit;
         }

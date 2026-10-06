@@ -408,6 +408,7 @@ pub enum EventReaction {
     BackgroundServerPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        startup: crate::serve_log::StartupNotes,
     },
     /// The background web server finished applying a live `[server] tailscale`
     /// change. The terminal UI resolves its pending status op with it.
@@ -4564,9 +4565,17 @@ impl Engine {
                     startup,
                 }
             }
-            WorkerEvent::BackgroundServerPreflightReady { result, warning } => {
+            WorkerEvent::BackgroundServerPreflightReady {
+                result,
+                warning,
+                startup,
+            } => {
                 // Same story: the listeners belong to whoever asked to serve.
-                EventReaction::BackgroundServerPreflightReady { result, warning }
+                EventReaction::BackgroundServerPreflightReady {
+                    result,
+                    warning,
+                    startup,
+                }
             }
             WorkerEvent::TailscaleModeApplied { mode, outcome } => {
                 EventReaction::TailscaleModeApplied { mode, outcome }

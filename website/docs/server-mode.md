@@ -162,6 +162,11 @@ line and your TUI is untouched. Stopping leaves every agent and terminal running
 the listener goes away, and connected browsers report the connection closed. Quitting
 the TUI stops the listener too, and changes nothing about your saved setting.
 
+The terminal shows nothing of the server's log while it serves behind the TUI, so the palette
+has **view-server-log**: it opens the log full-screen with the last `log_viewer_lines` lines of
+`server.log`, then follows it live, with the same scroll keys as the flip's viewer. `q` or `Esc`
+goes back. It is available only while the background server is serving.
+
 **set-tailscale-mode** in the same palette changes whether the Tailscale leg exists,
 without stopping anything: see [Changing the mode while dux is serving](/docs/tailscale#changing-the-mode-while-dux-is-serving).
 
@@ -222,6 +227,19 @@ Which to reach for:
   story.
 - **The background mode** when you want to keep working in the terminal and still pick
   the same agent up on the couch.
+
+### The server's own log
+
+Every way of serving writes the same lines to `server.log` in the config folder: what
+`dux server` prints, the startup banner, who connected, the access log (when `access_log`
+is on) and the shutdown, in the plain spelling `dux server` uses without color. The
+background server prints nothing over the terminal UI, but still writes the file, so the
+log of a server that ran with no terminal in front of it can be read afterwards. `dux.log`
+keeps the debugging trail and is not affected.
+
+Like `dux.log`, it rotates by size and keeps a bounded number of copies, so it cannot grow
+without end; see the `log_*` settings in the table below. The file and every copy are readable only by
+you. A server that cannot open its log still serves, and says why in `dux.log`.
 
 ## Who can get in
 
@@ -339,8 +357,12 @@ The rest tune presentation and limits:
 | Key | Default | What it does |
 |---|---|---|
 | `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
-| `access_log` | `true` | Log a per-request line to the server's console: `dux server`'s output and the flip's log viewer alike (never to `dux.log`, so pipe `dux server`'s stdout to capture it). `/healthz` is always skipped. Set `false` to silence it in both. A config reload applies it. |
-| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000: 0 is read as 1 and anything above 20000 as 20000, while a negative value is not valid there, so dux uses the default instead and says so in `dux.log`. The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
+| `access_log` | `true` | Log a per-request line to the server's log: `dux server`'s output, the flip's log viewer and `server.log` alike (never to `dux.log`). `/healthz` is always skipped. Set `false` to silence it everywhere, which also keeps the addresses that connected off disk. A config reload applies it. |
+| `log_viewer_lines` | `2000` | How many lines the log viewers keep for scrolling back, between 1 and 20000: 0 is read as 1 and anything above 20000 as 20000, while a negative value is not valid there, so dux uses the default instead and says so in `dux.log`. The flip's viewer and **view-server-log** both use it; the flip's also keeps the startup lines (the banner and its warnings) on top of these and never drops them. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts or the viewer opens. |
+| `log_path` | `"server.log"` | Where the server's own log is written. A relative path is resolved from the config folder. Readable only by you. Read when a server starts. |
+| `log_max_bytes` | `10485760` | Size in bytes the server log may reach before dux rotates it. `0` never rotates. Read when a server starts. |
+| `log_keep` | `5` | How many rotated copies of the server log to keep; the oldest is deleted. `0` rotates and discards; values above 1000 are clamped. Read when a server starts. |
+| `log_compress` | `true` | Gzip rotated copies of the server log in the background, as `server.log.1.gz` and so on. Read when a server starts. |
 | `qr_codes` | `true` | Show QR codes for this machine's Tailscale IP and MagicDNS URLs (the `https://` one when `tailscale serve` points at dux) in `dux server` and on the start-web-server flip's status screen, side by side or stacked to fit, each with its URL under it. `dux server` prints them only when its output is a terminal; the background server never shows them. Read when a server starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
@@ -378,6 +400,9 @@ The rest tune presentation and limits:
 > and tells you it applies the next time you start `dux server`; the terminal app
 > stays quiet, because nothing it can start reads the setting. `qr_codes` is the same,
 > read when `dux server` or the start-web-server flip starts serving.
+>
+> The four `log_*` keys (`server.log`) are read when any server starts. A reload that
+> changes one says so and tells you it applies the next time a server starts.
 >
 > The exceptions are `allowed_hosts`, `access_log`, `search_index_max_files`,
 > `pty_send_timeout_seconds` and the seven browser timing settings (`replay_wait_seconds`,

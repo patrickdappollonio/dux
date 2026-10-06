@@ -888,6 +888,13 @@ pub fn use_time_corrections_at(
                 .to_string()
         },
     );
+    let server_keep = server.log_keep;
+    note(
+        &["server", "log_keep"],
+        json(&server_keep),
+        json(&effective_log_keep(server_keep)),
+        &|| format!("dux keeps at most {MAX_LOG_KEEP} rotated copies"),
+    );
     let lines = server.log_viewer_lines;
     note(
         &["server", "log_viewer_lines"],

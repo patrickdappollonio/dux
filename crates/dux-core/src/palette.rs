@@ -173,6 +173,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // off the branch. Closing the browser tab is the web-side equivalent.
     },
     PaletteCommand {
+        action: Action::ViewServerLog,
+        name: "view-server-log",
+        description: "Open the server's log full-screen while dux serves in the background",
+        // TUI-only: `dux server` prints this log to its terminal and the flip shows
+        // it on its status screen. The web has no view of it by decision.
+    },
+    PaletteCommand {
         action: Action::SetTailscaleMode,
         name: "set-tailscale-mode",
         description: "Choose whether dux binds your Tailscale address, and apply it now",
