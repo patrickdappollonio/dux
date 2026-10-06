@@ -21,7 +21,7 @@ already wired in. Open it, read the comments, change what you like.
 
 The remotes the [command line](/docs/command-line#another-machines-dux) can talk to, and
 its sign-ins to them, are kept beside it in `remotes.toml`, readable only by you. They
-never go in `config.toml`, so pasting your config into a bug report never leaks a sign-in.
+never go in `config.toml`.
 
 Each provider block carries its own settings, including `web_dragdrop_paste`, which
 decides what a dragged, dropped or pasted file's path looks like when the web UI writes it

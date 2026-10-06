@@ -122,7 +122,7 @@ change is still working on, from anywhere, is refused with what is in the way.
 
 ## Nobody gets cut off by accident
 
-Deleting, stopping or restarting an agent, closing or stopping a tab, closing a terminal
+Deleting or stopping an agent, closing or stopping a tab, closing a terminal
 and removing a project are refused while somebody else is connected to what they would
 end: a browser watching the agent, or the terminal UI showing it. The refusal lists them:
 
@@ -160,8 +160,10 @@ The environment's values are usually secrets, so they are treated like it:
   `--stdin`. It never takes the value as an argument, where shell history would keep it.
   Reading from a pipe leaves no terminal to confirm on, so `--stdin` always needs `--yes`.
 
-A macro whose name is anything other than letters, digits, `_` and `-` is listed with its
-text hidden, the same rule `dux config get` follows. `dux macros show '<name>'` prints it.
+A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
+hidden, the same rule `dux config get` follows: `ls` lists it under a placeholder name, and
+`dux macros show '<name>'` finds it by its real name but prints only that placeholder and
+its surface. The macro editor in the browser shows it in full.
 
 ## Another machine's dux
 
@@ -181,8 +183,9 @@ dux --remote box agents ls
 | `dux remote default <name>`, `default --unset` | Picks the remote used when none is named, or goes back to this machine. |
 | `dux remote login [<name>]`, `logout [<name>]` | Signs in with that dux's [web password](/docs/web-login), or out. |
 
-Every command takes the same two flags, before or after the command's own words (for
-`dux config`, before the word `config`):
+The commands that talk to a dux take two flags, before or after the command's own words,
+and `dux config` takes them before the word `config`. Starting dux or `dux server` takes
+neither:
 
 - `--remote <name>` talks to that saved remote.
 - `--local` talks to this machine's dux, whatever else says otherwise.
@@ -206,7 +209,8 @@ environment.
 
 A remote that does not ask this machine for a password needs no sign-in: commands reach it
 as they are. That covers a dux on your tailnet with the default `require = "network"`, and
-any dux with no password at all. One that does ask, with no sign-in, stops with exit 5:
+any dux with no password at all. One that does ask stops with exit 5 when this machine needs
+a sign-in there (none saved, or the saved one ended):
 
 ```text
 box asks for its password; run "dux remote login box"
@@ -220,7 +224,9 @@ and bans included. A sign-in stays good until it goes unused for
 once.
 
 Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder, readable
-only by you, never in `config.toml`, which you may paste into a bug report.
+only by you, never in `config.toml`. Neither file is safe to paste into a bug report:
+`config.toml` holds your environment's secrets and the password hash. Paste the plain
+`dux config diff` summary instead.
 `dux config reset` removes it.
 
 ### Plain HTTP
@@ -245,7 +251,7 @@ Scripts can rely on these:
 | `2` | The command line is wrong: a bad flag, a name two things share, an unknown remote. |
 | `3` | Refused: somebody is connected, another change is in the way, or the change was not confirmed. |
 | `4` | dux isn't running, or does not answer. |
-| `5` | The remote asks for its password and this machine is not signed in. |
+| `5` | The remote asks for its password and this machine needs a sign-in there (none saved, or the saved one ended). |
 | `6` | The outcome is unknown: the wait ran out, and the change keeps running. |
 
 `dux operations show <id>` exits 0 for a change that succeeded, 1 for one that failed or
