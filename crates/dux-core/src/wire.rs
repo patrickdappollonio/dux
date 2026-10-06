@@ -9092,13 +9092,24 @@ mod tests {
         engine.projects.push(project);
 
         let outcome = engine
-            .apply_wire(WireCommand::CreateAgent {
-                project_id: "p1".to_string(),
-                name: "my-agent".to_string(),
-                copy_uncommitted_changes: None,
-                use_existing_branch: false,
-            })
+            .apply_wire_operation(
+                WireCommand::CreateAgent {
+                    project_id: "p1".to_string(),
+                    name: "my-agent".to_string(),
+                    copy_uncommitted_changes: None,
+                    use_existing_branch: false,
+                },
+                crate::operations::OperationKind::AgentCreate,
+            )
             .expect("dispatch create");
+
+        // The record following this create is the one that holds the guard
+        // against the next create, until the guard clears.
+        assert_eq!(
+            engine.operations.create_guard_record(),
+            outcome.operation_id
+        );
+        assert!(outcome.operation_id.is_some());
 
         let op_id = outcome
             .created_op_id
@@ -9108,6 +9119,9 @@ mod tests {
             engine.pending_create_ops.contains_key(&op_id),
             "the create op must be registered under the surfaced id"
         );
+
+        engine.clear_in_flight(&crate::engine::InFlightKey::CreateAgent);
+        assert_eq!(engine.operations.create_guard_record(), None);
 
         // A non-create command surfaces no create op id, so the handler never
         // mistakes a plain command's outcome for a create to correlate.

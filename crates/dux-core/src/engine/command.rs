@@ -573,7 +573,7 @@ impl Engine {
                 // would already exist.
                 if self.is_in_flight(&InFlightKey::CreateAgent) {
                     return Ok(EventReaction::Status(StatusUpdate::error(
-                        "An agent is already being created or forked.",
+                        crate::operations::CREATE_IN_FLIGHT_REFUSAL,
                     )));
                 }
                 // A project being deleted takes no new agents: the deletion
@@ -715,7 +715,7 @@ impl Engine {
                         in_flight_key: Some(InFlightKey::CreateAgent),
                         busy_status: Some(pending),
                         already_running_status: Some(StatusUpdate::error(
-                            "An agent is already being created or forked.",
+                            crate::operations::CREATE_IN_FLIGHT_REFUSAL,
                         )),
                         panic_event: Some(Box::new(move |reason| WorkerEvent::CreateAgentFailed {
                             status_op_id: op_id_panic,
@@ -737,7 +737,9 @@ impl Engine {
                 );
                 // A worker that never started cleared the in-flight key; the
                 // create's own bookkeeping goes with it.
-                if !self.is_in_flight(&InFlightKey::CreateAgent) {
+                if self.is_in_flight(&InFlightKey::CreateAgent) {
+                    self.operations.set_create_guard(&op_id);
+                } else {
                     self.note_create_finished(&op_id);
                 }
                 Ok(reaction)

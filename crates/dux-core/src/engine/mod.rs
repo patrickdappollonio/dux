@@ -2076,6 +2076,9 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+        if *key == InFlightKey::CreateAgent {
+            self.operations.clear_create_guard();
+        }
         // A worktree held for this operation is released with its key, so
         // every completion path that clears the key frees the path too.
         self.removal_coordination

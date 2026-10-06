@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ use super::output::{self, Listing, Row, Shape};
 use super::transport::Method;
 use super::wait::{self, OperationRecord, RecordState, segment};
 use super::{CliError, Exit};
+use crate::operations::CREATE_IN_FLIGHT_REFUSAL;
 
 // ---------------------------------------------------------------------------
 // What the API answers
@@ -621,19 +622,80 @@ impl Planned {
     }
 }
 
+/// How often a create refused for another create that named no operation is sent again.
+const CREATE_RETRY_PAUSE: Duration = Duration::from_millis(500);
+
 /// Send a planned change and, unless `wait` is `None`, wait for its outcome. A finished change
 /// prints its sentence, each part, then the ids it created, last; with no wait, the operation's id.
+///
+/// A create refused only because another create is running waits for that one to
+/// finish, sends once more, and says so on stderr. That waiting and the new create's own
+/// wait share the one `wait`, and no create is started once it has run out. With no wait the
+/// create is refused as any other change is.
 pub fn perform(
     client: &Client,
     planned: Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
-    let record = client.change(planned.method, &planned.path, planned.body)?;
-    let Some(timeout) = wait else {
+    let deadline = wait.map(|timeout| Instant::now() + timeout);
+    let record = match client.try_change(planned.method, &planned.path, planned.body.clone(), None)
+    {
+        Ok(record) => record,
+        Err(refused) => match deadline {
+            Some(deadline) if refused.error.message == CREATE_IN_FLIGHT_REFUSAL => {
+                retry_after_other_create(client, &planned, refused, deadline)?
+            }
+            _ => return Err(refused.error),
+        },
+    };
+    let Some(deadline) = deadline else {
         return Ok(format!("{}\n", record.id));
     };
-    let record = client.wait(record, timeout)?;
+    let record = client.wait(record, deadline.saturating_duration_since(Instant::now()))?;
     report(&record)
+}
+
+/// Wait for the create `refused` named to finish, or, when it named none, send the create
+/// again every [`CREATE_RETRY_PAUSE`]; then, with `deadline` still ahead, send it again.
+fn retry_after_other_create(
+    client: &Client,
+    planned: &Planned,
+    refused: wait::Refused,
+    deadline: Instant,
+) -> Result<OperationRecord, CliError> {
+    let send = || {
+        let left = deadline.saturating_duration_since(Instant::now());
+        client.try_change(
+            planned.method,
+            &planned.path,
+            planned.body.clone(),
+            Some(left),
+        )
+    };
+    let Some(other) = refused.operation.as_deref() else {
+        eprintln!("Another agent was being created, so this one waited for it.");
+        let mut last = refused.error;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(CREATE_RETRY_PAUSE.min(left));
+            if Instant::now() >= deadline {
+                return Err(last);
+            }
+            match send() {
+                Ok(record) => return Ok(record),
+                Err(again) if again.error.message == CREATE_IN_FLIGHT_REFUSAL => {
+                    last = again.error;
+                }
+                Err(again) => return Err(again.error),
+            }
+        }
+    };
+    eprintln!("Another agent was being created (operation {other}), so this one waited for it.");
+    client.wait_for_other(other, deadline)?;
+    if Instant::now() >= deadline {
+        return Err(refused.error);
+    }
+    send().map_err(|again| again.error)
 }
 
 fn report(record: &OperationRecord) -> Result<String, CliError> {
@@ -1045,5 +1107,225 @@ mod tests {
             "An agent is already being created or forked.",
         );
         assert_eq!(existing_branch_refusal(other.clone()), other);
+    }
+}
+
+#[cfg(test)]
+mod create_wait_tests {
+    use super::*;
+    use crate::client::connect::{Target, connect};
+    use crate::client::test_server::{FakeDux, Reply, private_dir};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SENTENCE: &str = "An agent is already being created or forked.";
+    const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
+    const OTHER_RUNNING: &str = r#"{"id":"op-1","kind":"agent.create","state":"running","message":"","created":[],"removed":[],"parts":[]}"#;
+    const OTHER_DONE: &str = r#"{"id":"op-1","kind":"agent.create","state":"succeeded","message":"Created agent first.","created":["s1"],"removed":[],"parts":[]}"#;
+    const MINE_RUNNING: &str = r#"{"id":"op-2","kind":"agent.create","state":"running","message":"","created":[],"removed":[],"parts":[]}"#;
+    const MINE_DONE: &str = r#"{"id":"op-2","kind":"agent.create","state":"succeeded","message":"Created agent second.","created":["s2"],"removed":[],"parts":[]}"#;
+    const NAMED: &str =
+        r#"{"message":"An agent is already being created or forked.","operation":"op-1"}"#;
+
+    /// What the stand-in answers: the n-th create POST gets `refusals[n]` (later ones are
+    /// accepted with `accepted`), and the n-th read of operation op-1 gets `other[n]`
+    /// (the last repeats).
+    struct Script {
+        refusals: Vec<&'static str>,
+        other: Vec<(u16, &'static str)>,
+        accepted: &'static str,
+    }
+
+    impl Script {
+        fn new(refusals: Vec<&'static str>) -> Self {
+            Self {
+                refusals,
+                other: vec![(200, OTHER_DONE)],
+                accepted: MINE_DONE,
+            }
+        }
+    }
+
+    fn dux_running(
+        dir: &Path,
+        script: Script,
+    ) -> (FakeDux, crate::lockfile::SingleInstanceLock, Client) {
+        let socket = dir.join("dux.sock");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let fake = FakeDux::unix(&socket, move |seen| {
+            if seen.path == "/api/v1/build" {
+                return Reply::json(200, BUILD);
+            }
+            if seen.path.starts_with("/api/v1/operations/op-1") {
+                let n = reads.fetch_add(1, Ordering::SeqCst);
+                let (status, body) = script.other[n.min(script.other.len() - 1)];
+                return Reply::json(status, body);
+            }
+            if seen.path.starts_with("/api/v1/operations/op-2") {
+                return Reply::json(200, MINE_RUNNING);
+            }
+            if seen.path == "/api/v1/sessions?operation=1" {
+                let n = posts.fetch_add(1, Ordering::SeqCst);
+                return match script.refusals.get(n) {
+                    Some(body) => Reply::json(409, body),
+                    None => Reply::json(202, script.accepted),
+                };
+            }
+            Reply::json(404, "{}")
+        });
+        let lock_path = dir.join("dux.lock");
+        let lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        (fake, lock, client)
+    }
+
+    fn add(client: &Client) -> Planned {
+        agents_add(
+            client,
+            NewAgent::Standalone {
+                folder: "/work/f".to_string(),
+                provider: None,
+            },
+            Some("second"),
+            Path::new("/"),
+        )
+        .unwrap()
+    }
+
+    fn posts(fake: &FakeDux) -> usize {
+        fake.seen()
+            .iter()
+            .filter(|seen| seen.path == "/api/v1/sessions?operation=1")
+            .count()
+    }
+
+    #[test]
+    fn a_create_refused_for_another_create_waits_for_it_and_tries_again() {
+        let dir = private_dir();
+        let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED]));
+        let out = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(out, "Created agent second.\ns2\n");
+        assert_eq!(posts(&fake), 2);
+        assert!(
+            fake.seen()
+                .iter()
+                .any(|seen| seen.path.starts_with("/api/v1/operations/op-1")),
+            "the other creation's operation was read"
+        );
+    }
+
+    #[test]
+    fn a_create_refused_for_another_create_without_an_operation_is_retried_until_accepted() {
+        let dir = private_dir();
+        let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![SENTENCE, SENTENCE]));
+        let out = perform(&client, add(&client), Some(Duration::from_secs(10))).unwrap();
+        assert_eq!(out, "Created agent second.\ns2\n");
+        assert_eq!(posts(&fake), 3);
+    }
+
+    #[test]
+    fn with_no_wait_a_create_refused_for_another_create_is_not_retried() {
+        let dir = private_dir();
+        let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED]));
+        let error = perform(&client, add(&client), None).unwrap_err();
+        assert_eq!(error.exit, Exit::Refused);
+        assert_eq!(error.message, SENTENCE);
+        assert_eq!(posts(&fake), 1);
+    }
+
+    #[test]
+    fn a_create_refused_again_after_waiting_fails_with_the_refusal() {
+        let dir = private_dir();
+        let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED, NAMED]));
+        let error = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap_err();
+        assert_eq!(error.exit, Exit::Refused);
+        assert_eq!(error.message, SENTENCE);
+        assert_eq!(posts(&fake), 2);
+    }
+
+    #[test]
+    fn the_other_creation_counts_as_finished_only_when_the_dux_has_forgotten_it() {
+        // Forgotten (404): finished, so the create goes ahead.
+        let dir = private_dir();
+        let mut script = Script::new(vec![NAMED]);
+        script.other = vec![(404, r#"{"error":"unknown_operation"}"#)];
+        let (fake, _lock, client) = dux_running(dir.path(), script);
+        assert!(perform(&client, add(&client), Some(Duration::from_secs(5))).is_ok());
+        assert_eq!(posts(&fake), 2);
+
+        // A server error is read again within the time, then the answer counts.
+        let dir = private_dir();
+        let mut script = Script::new(vec![NAMED]);
+        script.other = vec![(500, "boom"), (200, OTHER_DONE)];
+        let (fake, _lock, client) = dux_running(dir.path(), script);
+        assert!(perform(&client, add(&client), Some(Duration::from_secs(5))).is_ok());
+        assert_eq!(posts(&fake), 2);
+
+        // Any other refusal of the read is the command's error, and nothing is sent again.
+        let dir = private_dir();
+        let mut script = Script::new(vec![NAMED]);
+        script.other = vec![(400, r#"{"error":"bad request"}"#)];
+        let (fake, _lock, client) = dux_running(dir.path(), script);
+        let error = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap_err();
+        assert_eq!(error.exit, Exit::Failed);
+        assert_eq!(error.message, "bad request");
+        assert_eq!(posts(&fake), 1);
+    }
+
+    #[test]
+    fn waiting_for_the_other_creation_comes_out_of_the_one_time_the_command_has() {
+        // The other creation takes about 0.75 s of a 1 s wait; the new agent then
+        // never finishes. Its wait gets the 0.25 s left, so the command ends near
+        // 1 s in all, not near 1.75 s.
+        let dir = private_dir();
+        let mut script = Script::new(vec![NAMED]);
+        script.other = vec![
+            (200, OTHER_RUNNING),
+            (200, OTHER_RUNNING),
+            (200, OTHER_RUNNING),
+            (200, OTHER_DONE),
+        ];
+        script.accepted = MINE_RUNNING;
+        let (_fake, _lock, client) = dux_running(dir.path(), script);
+        let started = Instant::now();
+        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown);
+        assert!(
+            started.elapsed() < Duration::from_millis(1400),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn no_create_is_started_once_the_time_has_run_out() {
+        // The other creation outlasts the 1 s wait: the command ends unknown and sends
+        // no second create.
+        let dir = private_dir();
+        let mut script = Script::new(vec![NAMED]);
+        script.other = vec![(200, OTHER_RUNNING)];
+        let (fake, _lock, client) = dux_running(dir.path(), script);
+        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown);
+        assert_eq!(posts(&fake), 1);
+
+        // The same with no operation named: it gives up with the refusal.
+        let dir = private_dir();
+        let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![SENTENCE; 100]));
+        let started = Instant::now();
+        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        assert_eq!(error.exit, Exit::Refused);
+        assert!(started.elapsed() < Duration::from_millis(1400));
+        assert!(posts(&fake) <= 3, "{} creates", posts(&fake));
     }
 }
