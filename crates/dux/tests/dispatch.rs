@@ -194,3 +194,51 @@ fn resource_commands_are_declared_but_not_built_yet() {
         assert_eq!(run.stdout(), "", "{args:?}");
     }
 }
+
+#[test]
+fn config_refuses_an_explicit_remote_and_touches_nothing() {
+    let dir = home("config-remote");
+    let out = Command::new(env!("CARGO_BIN_EXE_dux"))
+        .args(["--remote", "box", "config", "set", "server.port", "4000"])
+        .env("DUX_HOME", &dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let run = Run { out };
+    assert_eq!(run.code(), 2);
+    assert_eq!(
+        run.stderr(),
+        "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE\n"
+    );
+    assert_eq!(run.stdout(), "");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}
+
+#[test]
+fn config_with_local_runs_as_normal() {
+    let run = dux("config-local", &["--local", "config", "path"]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(run.stdout().ends_with("config.toml\n"), "{}", run.stdout());
+}
+
+#[test]
+fn global_flags_work_beside_a_server_subcommand() {
+    let run = dux("server-remote-logs", &["server", "--remote", "box", "logs"]);
+    assert_eq!(run.stderr(), "this command is not built yet\n");
+    assert_eq!(run.code(), 2);
+}
+
+#[test]
+fn macros_and_env_changes_are_declared_but_not_built_yet() {
+    for args in [
+        &["macros", "add", "m"][..],
+        &["macros", "rm", "m"][..],
+        &["macros", "remove", "m"][..],
+        &["env", "set", "TOKEN", "--stdin"][..],
+        &["env", "rm", "TOKEN"][..],
+    ] {
+        let run = dux("not-built-edits", args);
+        assert_eq!(run.code(), 2, "{args:?}: {}", run.stderr());
+        assert_eq!(run.stderr(), "this command is not built yet\n", "{args:?}");
+    }
+}

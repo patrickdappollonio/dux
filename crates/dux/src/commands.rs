@@ -56,7 +56,7 @@ pub enum Command {
     /// Terminals, project-owned, agent-owned and standalone.
     Terminals(TerminalsCmd),
     /// Macros from config.toml.
-    Macros(NamedReadCmd),
+    Macros(MacrosCmd),
     /// Providers from config.toml.
     Providers(NamedReadCmd),
     /// Keybindings from config.toml.
@@ -76,7 +76,7 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 
 #[derive(Args, Debug)]
-#[command(before_help = SERVER_ABOUT, args_conflicts_with_subcommands = true)]
+#[command(before_help = SERVER_ABOUT)]
 pub struct ServerCmd {
     /// Bind this exact address, overriding [server] host and port. An IP:port
     /// socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
@@ -104,6 +104,32 @@ impl ServerCmd {
             no_tailscale: self.no_tailscale,
         }
     }
+}
+
+/// The listener flags only make sense when starting a server, so they are
+/// refused beside `logs` and `connections`. The global flags are not.
+pub fn listener_flags_with_subcommand(server: &ServerCmd) -> Result<(), String> {
+    let set = server.bind.is_some() || server.port.is_some() || server.no_tailscale;
+    if set && server.command.is_some() {
+        return Err(
+            "--bind, --port and --no-tailscale start a server and cannot be used with a server subcommand"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// `dux config` edits this machine's file, so it refuses when a remote is
+/// selected unless `--local` is given. Callers pass whatever selected the
+/// remote; today that is the `--remote` flag.
+pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), String> {
+    if remote.is_some() && !local {
+        return Err(
+            "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Subcommand, Debug)]
@@ -370,6 +396,34 @@ pub enum NamedReadSub {
 }
 
 #[derive(Args, Debug)]
+pub struct MacrosCmd {
+    #[command(subcommand)]
+    pub command: MacrosSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MacrosSub {
+    /// List the macros.
+    #[command(visible_alias = "list")]
+    Ls(ListFlags),
+    /// Show one macro by name.
+    Show { name: String },
+    /// Add a macro.
+    Add {
+        name: String,
+        #[command(flatten)]
+        rest: OpenArgs,
+    },
+    /// Remove a macro.
+    #[command(visible_alias = "remove")]
+    Rm {
+        name: String,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+}
+
+#[derive(Args, Debug)]
 pub struct ListOnlyCmd {
     #[command(subcommand)]
     pub command: ListOnlySub,
@@ -398,6 +452,22 @@ pub enum EnvSub {
         show: bool,
         #[command(flatten)]
         list: ListFlags,
+    },
+    /// Set a variable; the value is asked for, or read from stdin.
+    Set {
+        name: String,
+        /// Read the value from standard input.
+        #[arg(long)]
+        stdin: bool,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Remove a variable.
+    #[command(visible_alias = "remove")]
+    Rm {
+        name: String,
+        #[command(flatten)]
+        change: ChangeFlags,
     },
 }
 
@@ -531,7 +601,6 @@ mod tests {
     fn server_inspection_commands_carry_no_listener_flags() {
         assert!(parse(&["server", "logs", "-f"]).is_ok());
         assert!(parse(&["server", "connections", "ls"]).is_ok());
-        assert!(parse(&["server", "--port", "9", "logs"]).is_err());
     }
 
     #[test]
@@ -588,6 +657,60 @@ mod tests {
         assert!(parse(&["remote", "default", "box"]).is_ok());
         assert!(parse(&["remote", "default", "--unset"]).is_ok());
         assert!(parse(&["remote", "default", "box", "--unset"]).is_err());
+    }
+
+    #[test]
+    fn global_flags_are_accepted_at_every_depth() {
+        for args in [
+            &["--remote", "a", "server", "logs"][..],
+            &["server", "--remote", "a", "logs"][..],
+            &["server", "logs", "--remote", "a"][..],
+            &["server", "connections", "ls", "--remote", "a"][..],
+            &["agents", "tabs", "ls", "x", "--local"][..],
+        ] {
+            assert!(parse(args).is_ok(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn listener_flags_are_refused_beside_a_subcommand_but_global_flags_are_not() {
+        let with_port = server_cmd(&["server", "--port", "9", "logs"]);
+        assert!(listener_flags_with_subcommand(&with_port).is_err());
+        let with_remote = server_cmd(&["server", "--remote", "a", "logs"]);
+        assert!(listener_flags_with_subcommand(&with_remote).is_ok());
+        let plain = server_cmd(&["server", "--port", "9"]);
+        assert!(listener_flags_with_subcommand(&plain).is_ok());
+    }
+
+    fn server_cmd(args: &[&str]) -> ServerCmd {
+        match parse(args).unwrap().command {
+            Some(Command::Server(s)) => s,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_selected_remote_refuses_config_unless_local() {
+        let msg = "dux config edits this machine's config.toml; add --local to go ahead, or unset DUX_REMOTE";
+        assert_eq!(
+            check_config_target(Some("box"), false),
+            Err(msg.to_string())
+        );
+        assert_eq!(check_config_target(None, false), Ok(()));
+        assert_eq!(check_config_target(None, true), Ok(()));
+        assert_eq!(check_config_target(Some("box"), true), Ok(()));
+    }
+
+    #[test]
+    fn macro_and_env_changes_parse() {
+        for args in [
+            &["macros", "add", "m"][..],
+            &["macros", "remove", "m"][..],
+            &["env", "set", "T", "--stdin"][..],
+            &["env", "rm", "T"][..],
+        ] {
+            assert!(parse(args).is_ok(), "{args:?}");
+        }
     }
 
     #[test]

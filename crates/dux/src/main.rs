@@ -14,13 +14,29 @@ fn main() -> Result<()> {
     let cli = commands::Cli::parse();
     match cli.command {
         None => run_tui_with_flip(),
-        Some(commands::Command::Server(server)) => match server.command {
-            None => run_server(server.into_overrides()),
-            Some(_) => not_built(),
-        },
-        Some(commands::Command::Config(config)) => dux_tui::run_config(&config.args),
+        Some(commands::Command::Server(server)) => {
+            if let Err(message) = commands::listener_flags_with_subcommand(&server) {
+                usage_error(&message);
+            }
+            match server.command {
+                None => run_server(server.into_overrides()),
+                Some(_) => not_built(),
+            }
+        }
+        Some(commands::Command::Config(config)) => {
+            if let Err(message) = commands::check_config_target(cli.remote.as_deref(), cli.local) {
+                usage_error(&message);
+            }
+            dux_tui::run_config(&config.args)
+        }
         Some(_) => not_built(),
     }
+}
+
+/// A refusal found while checking the command line, before anything starts.
+fn usage_error(message: &str) -> ! {
+    eprintln!("{message}");
+    std::process::exit(2);
 }
 
 /// The resource commands are declared in the command tree before their
