@@ -287,14 +287,21 @@ mod tests {
 
     /// A terminal UI gesture keeps no record, so it holds nothing, but it is
     /// still refused, with the sentence naming the operation, while a change
-    /// another surface follows holds what the gesture would change.
+    /// another surface follows holds what the gesture would change. One that
+    /// would end a terminal somebody else is attached to is refused too,
+    /// naming who and from where; the terminal UI's own attachments are never
+    /// in its way.
     #[test]
     fn a_terminal_ui_command_is_refused_while_a_followed_operation_holds_what_it_changes() {
+        use crate::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
+
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
-        let session = sample_session("s1", "p1", "feat");
-        engine.session_store.upsert_session(&session).unwrap();
-        engine.sessions.push(session);
+        for id in ["s1", "s2", "s3"] {
+            let session = sample_session(id, "p1", id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
         engine.open_operation("op-held", OperationKind::AgentStop);
         engine
             .operations
@@ -308,22 +315,60 @@ mod tests {
                 ],
             )
             .unwrap();
+        // A browser watches s2; the terminal UI draws s3.
+        let tab = |agent: &str| Target {
+            kind: TargetKind::Tab,
+            id: format!("{agent}-slot"),
+            agent: Some(agent.to_string()),
+        };
+        engine.attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                        .to_string(),
+                ),
+                address: Some("192.168.1.5".parse().unwrap()),
+                verified: true,
+                events: true,
+            },
+            Some(Heard::now()),
+        );
+        engine
+            .attachments
+            .attach("e1", tab("s2"), None, None)
+            .unwrap();
+        engine.attachments.register(
+            crate::attachments::TERMINAL_UI_CONNECTION,
+            ConnectionFacts {
+                surface: Surface::TerminalUi,
+                device: Some(crate::background_serve::TUI_DEVICE_LABEL.to_string()),
+                address: None,
+                verified: true,
+                events: false,
+            },
+            None,
+        );
+        engine.attachments.set_terminal_ui(vec![tab("s3")], None);
 
-        let commands = vec![
-            (
-                "an agent delete",
-                Command::BeginDeleteSession {
-                    session_id: "s1".to_string(),
-                    delete_worktree: false,
-                    delete_branch: None,
-                },
-            ),
+        let held: &[&str] = &["op-held", "stopping an agent"];
+        let delete = |id: &str| Command::BeginDeleteSession {
+            session_id: id.to_string(),
+            delete_worktree: false,
+            delete_branch: None,
+        };
+        // (what, command, the sentence it is refused with, or `None` to go ahead)
+        let commands: Vec<(&str, Command, Option<&[&str]>)> = vec![
+            ("an agent delete", delete("s1"), Some(held)),
             (
                 "a project removal",
                 Command::RemoveProject {
                     project_id: "p1".to_string(),
                     project_name: "p1".to_string(),
                 },
+                Some(held),
             ),
             (
                 "a project deletion",
@@ -331,29 +376,55 @@ mod tests {
                     project_id: "p1".to_string(),
                     project_name: "p1".to_string(),
                 },
+                Some(held),
             ),
             (
                 "a macro save",
                 Command::UpdateMacros {
                     macros: Default::default(),
                 },
+                Some(held),
             ),
             (
                 "an environment save",
                 Command::PersistGlobalEnv {
                     env: Default::default(),
                 },
+                Some(held),
+            ),
+            (
+                "a delete of an agent a browser watches",
+                delete("s2"),
+                Some(&["Chrome on macOS", "192.168.1.5"]),
+            ),
+            (
+                "a delete of an agent only the terminal UI draws",
+                delete("s3"),
+                None,
             ),
         ];
-        for (name, command) in commands {
-            let Err(refused) = engine.apply(command) else {
-                panic!("{name} went ahead");
-            };
-            let sentence = refused.to_string();
-            assert!(sentence.contains("op-held"), "{name}: {sentence}");
-            assert!(sentence.contains("stopping an agent"), "{name}: {sentence}");
+        for (name, command, refused_with) in commands {
+            match (engine.apply(command), refused_with) {
+                (Err(refused), Some(needles)) => {
+                    let sentence = refused.to_string();
+                    for needle in needles {
+                        assert!(sentence.contains(needle), "{name}: {sentence}");
+                    }
+                }
+                (Ok(_), None) => {}
+                (Err(refused), None) => panic!("{name} was refused: {refused}"),
+                (Ok(_), Some(_)) => panic!("{name} went ahead"),
+            }
         }
+        // The web's own kill of an agent's processes is refused the same way.
+        let Err(refused) = engine.apply_wire(WireCommand::KillSessionPty {
+            session_id: "s2".to_string(),
+        }) else {
+            panic!("a kill of an agent a browser watches went ahead");
+        };
+        assert!(refused.to_string().contains("192.168.1.5"), "{refused}");
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+        assert!(engine.sessions.iter().any(|s| s.id == "s2"));
         assert!(engine.projects.iter().any(|p| p.id == "p1"));
     }
 }

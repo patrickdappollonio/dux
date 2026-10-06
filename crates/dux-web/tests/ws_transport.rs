@@ -588,6 +588,12 @@ async fn connect_events(addr: SocketAddr) -> (ClientWs, String) {
     panic!("never received the connected frame");
 }
 
+/// [`connect_events`] presenting `user_agent`, as a browser's events socket
+/// presents the same one its terminal sockets do.
+async fn connect_events_as(addr: SocketAddr, user_agent: &str) -> (ClientWs, String) {
+    connect_events_at(addr, "/ws/events", user_agent).await
+}
+
 /// Whether a `status` event whose message contains `needle` arrives within the
 /// window (`/ws/events` status shape `{"event":"status",...,"message":...}`).
 async fn saw_status(ws: &mut ClientWs, needle: &str, timeout: Duration) -> bool {
@@ -961,7 +967,7 @@ async fn a_final_is_replayable_continuously_from_the_moment_it_is_broadcast() {
 /// sleep in the suite would cost more than the coverage is worth.)
 #[tokio::test]
 async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() {
-    let (addr, tmp) = boot_with_extra_sessions(&["s2"]).await;
+    let (addr, tmp) = boot_with_extra_sessions(&["s2", "s3"]).await;
     let (mut ws_a, _id_a) = connect_events(addr).await;
 
     // Deleting s1 with its worktree runs an async removal whose git call fails
@@ -1021,6 +1027,195 @@ async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() 
         parts[1],
         serde_json::json!({"part": "branch", "subject": "s2", "outcome": "kept"})
     );
+
+    // A delete of s3 while a browser watches it, from a client with no
+    // connection of its own, is refused naming that browser and where it is;
+    // told to go ahead over it, the delete runs.
+    let _watcher = connect_pty_as(addr, "/ws/sessions/s3/pty", "dux-test-browser").await;
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/s3"))
+        .send()
+        .await
+        .expect("DELETE session");
+    assert_eq!(resp.status().as_u16(), 409);
+    let refused: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(refused["error"], "attached");
+    assert_eq!(refused["blockers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(refused["blockers"][0]["device"], "dux-test-browser");
+    assert_eq!(refused["blockers"][0]["address"], "127.0.0.1");
+    assert_eq!(refused["blockers"][0]["target"]["agent"], "s3");
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s3?force_connected=true"
+        ))
+        .send()
+        .await
+        .expect("DELETE session");
+    assert_eq!(resp.status().as_u16(), 204);
+}
+
+/// Open a terminal socket at `path` (query included) presenting
+/// `user_agent`, and wait for its handshake, by which time it is attached.
+async fn connect_pty_as(addr: SocketAddr, path: &str, user_agent: &str) -> ClientWs {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("user-agent", user_agent.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect the pty socket");
+    next_event_frame(&mut ws, "connected", Duration::from_secs(8))
+        .await
+        .expect("the pty handshake");
+    ws
+}
+
+/// DELETE `/api/v1/sessions/{id}` as the browser tab `connection` (or as a
+/// client with none), answering the status and the body.
+async fn delete_agent_as(
+    addr: SocketAddr,
+    id: &str,
+    connection: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let mut request = reqwest::Client::new().delete(format!("http://{addr}/api/v1/sessions/{id}"));
+    if let Some(connection) = connection {
+        request = request.header("x-connection-id", connection);
+    }
+    let resp = request.send().await.expect("DELETE session");
+    let status = resp.status().as_u16();
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// Retry the delete of `id` until it is no longer refused, for up to five
+/// seconds, answering the last status: a socket's close reaches the server a
+/// moment after the client sends it.
+async fn delete_agent_once_free(addr: SocketAddr, id: &str, connection: Option<&str>) -> u16 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (status, _) = delete_agent_as(addr, id, connection).await;
+        if status != 409 || tokio::time::Instant::now() >= deadline {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A browser tab's terminal sockets name its events connection, so the tab
+/// deleting the agent it is viewing is not in its own way; a second tab on the
+/// same machine, with the same address and the same `User-Agent`, is.
+#[tokio::test]
+async fn a_browser_tab_is_not_in_its_own_way_but_a_second_tab_on_the_same_machine_is() {
+    let (addr, _tmp) = boot().await;
+    let (_events_a, tab_a) = connect_events(addr).await;
+    let (_events_b, tab_b) = connect_events(addr).await;
+    let _pty_a = connect_pty_as(
+        addr,
+        &format!("/ws/sessions/s1/pty?events={tab_a}"),
+        "dux-same-browser",
+    )
+    .await;
+    let pty_b = connect_pty_as(
+        addr,
+        &format!("/ws/sessions/s1/pty?events={tab_b}"),
+        "dux-same-browser",
+    )
+    .await;
+
+    let (status, refused) = delete_agent_as(addr, "s1", Some(&tab_a)).await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(
+        refused["blockers"].as_array().map(Vec::len),
+        Some(1),
+        "only the other tab is in the way: {refused}"
+    );
+
+    drop(pty_b);
+    assert_eq!(delete_agent_once_free(addr, "s1", Some(&tab_a)).await, 204);
+}
+
+/// A phone whose terminal socket was lost while its owner was looking at it
+/// (the last beat said so) still protects that agent for the grace, even once
+/// its events socket is reaped too; one whose page was not being looked at
+/// does not, and one whose socket was closed cleanly releases it at once.
+#[tokio::test]
+async fn a_phone_that_parked_its_terminal_while_looking_at_it_still_blocks_a_delete() {
+    let (addr, _tmp) = boot_with_extra_sessions(&["s2", "s3"]).await;
+    // (agent, the last beat looked at it, the socket closed cleanly)
+    let mut phones = Vec::new();
+    for (agent, viewed, clean) in [
+        ("s1", true, false),
+        ("s2", false, false),
+        ("s3", true, true),
+    ] {
+        let (events, phone) = connect_events_as(addr, "dux-test-phone").await;
+        let mut pty = connect_pty_as(
+            addr,
+            &format!("/ws/sessions/{agent}/pty?events={phone}"),
+            "dux-test-phone",
+        )
+        .await;
+        pty.send(Message::Text(
+            format!(r#"{{"beat":1,"viewed":{viewed}}}"#).into(),
+        ))
+        .await
+        .unwrap();
+        next_event_frame(&mut pty, "beat", Duration::from_secs(8))
+            .await
+            .expect("the beat is answered");
+        if clean {
+            pty.close(None).await.unwrap();
+        } else {
+            drop(pty);
+        }
+        phones.push((events, phone));
+    }
+    let first_phone = phones[0].1.clone();
+    // Every phone's events socket is lost too, never closed: the connection
+    // just stops, as a reap sees it.
+    drop(phones);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        delete_agent_once_free(addr, "s2", None).await,
+        204,
+        "the agent the phone was not looking at is free once its socket was lost"
+    );
+    assert_eq!(
+        delete_agent_once_free(addr, "s3", None).await,
+        204,
+        "a cleanly closed socket releases its agent at once"
+    );
+    let (status, refused) = delete_agent_as(addr, "s1", None).await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["blockers"][0]["device"], "dux-test-phone");
+    assert_eq!(refused["blockers"][0]["driving"], false);
+
+    // The phone comes back: its new events socket names the one it lost, so
+    // the agent it was looking at is its own again, not in its own way.
+    let (_back, phone) = connect_events_at(
+        addr,
+        &format!("/ws/events?after={first_phone}"),
+        "dux-test-phone",
+    )
+    .await;
+    assert_eq!(delete_agent_once_free(addr, "s1", Some(&phone)).await, 204);
+}
+
+/// An events socket opened at `path` (query included) presenting
+/// `user_agent`, with its connection id.
+async fn connect_events_at(addr: SocketAddr, path: &str, user_agent: &str) -> (ClientWs, String) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("user-agent", user_agent.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(5))
+        .await
+        .expect("the connected frame");
+    (ws, hello["id"].as_str().unwrap().to_string())
 }
 
 /// THE WHOLE JOURNEY for a standalone agent, over the real HTTP surface: create
@@ -1300,6 +1495,26 @@ async fn rest_create_session_returns_201_and_scopes_status() {
     .await
     .expect("the create's final reaches the posting connection");
     assert_eq!(record["message"], final_frame["message"]);
+
+    // A change sent by a client with no connection of its own, as the
+    // command line is, raises its status for everybody watching.
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/{new_id}"))
+        .send()
+        .await
+        .expect("DELETE session");
+    assert_eq!(resp.status().as_u16(), 204);
+    for ws in [&mut ws_a, &mut ws_b] {
+        assert!(
+            saw_status_with(
+                ws,
+                &["\"scope\":\"all\"", "Deleted"],
+                Duration::from_secs(8)
+            )
+            .await,
+            "every connection hears the delete a client with no connection made"
+        );
+    }
 }
 
 /// The deferred create, end to end through a real server: a create still running
@@ -3511,8 +3726,11 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
         "agent PTY never came up"
     );
 
+    // Going ahead over the socket attached to it.
     let killed = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/kill"))
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/kill?force_connected=true"
+        ))
         .send()
         .await
         .unwrap();

@@ -153,6 +153,12 @@ impl App {
             .and_then(|companion| companion.ownership())
     }
 
+    /// This surface's id in the ownership record, or `None` when nothing is
+    /// serving.
+    pub(super) fn pty_ownership_conn_id(&self) -> Option<u64> {
+        self.pty_ownership().map(|seat| seat.conn_id)
+    }
+
     /// Who is driving `pty_id` right now. A live read every time it is asked,
     /// never a latched flag: ownership moves between devices while nothing on
     /// this surface happens, and a cached verdict is how a screen ends up telling

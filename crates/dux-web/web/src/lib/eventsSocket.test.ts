@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { publishConnectionTiming } from "./connectionTiming"
+import { setConnectionId } from "./connection"
 import { EventsSocket } from "./eventsSocket"
 import type { ConnState, EventsServerMessage, ResourceEvent } from "./types"
 
@@ -72,6 +73,19 @@ function lastFrame(ws: FakeWS): unknown {
 }
 
 describe("EventsSocket", () => {
+  it("names the connection it had before on every reopen, so the server can hand over what it counted", () => {
+    vi.useFakeTimers()
+    const sock = new EventsSocket("ws://x/ws/events")
+    sock.connect()
+    expect(last().url).toBe("ws://x/ws/events")
+    last().open()
+    setConnectionId("e/1")
+    setConnectionId(null)
+    last().triggerClose()
+    vi.advanceTimersByTime(600)
+    expect(last().url).toBe("ws://x/ws/events?after=e%2F1")
+  })
+
   it("sends a subscribe frame for newly-added topics when open", () => {
     const sock = new EventsSocket("ws://x/ws/events")
     sock.connect()

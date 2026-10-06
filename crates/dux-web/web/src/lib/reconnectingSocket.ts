@@ -249,7 +249,7 @@ export abstract class ReconnectingSocket {
     this.attempt = this.failures + 1
     this.onConn("connecting")
     this.emitPlan("connecting", this.attempt, null)
-    const ws = new WebSocket(this.url)
+    const ws = new WebSocket(this.openUrl())
     this.configureSocket(ws)
     this.ws = ws
     this.armConnectTimer(ws)
@@ -562,6 +562,12 @@ export abstract class ReconnectingSocket {
   // Tweak the freshly-constructed WebSocket before handlers are attached. Default:
   // no-op. (`void ws` keeps the param in the base signature without tripping
   // no-unused-vars.)
+  // The address each open dials. The base is `url` itself; a subclass that
+  // has to say something that can change between opens says it here.
+  protected openUrl(): string {
+    return this.url
+  }
+
   protected configureSocket(ws: WebSocket): void {
     void ws
   }

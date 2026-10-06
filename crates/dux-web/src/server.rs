@@ -263,11 +263,88 @@ const WS_LIVENESS_PING_PERIOD: std::time::Duration = std::time::Duration::from_s
 /// oversight): a half-open connection holds a slot of the per-class caps
 /// either way, every browser answers pings by protocol, and one liveness rule
 /// for all sockets is one rule to reason about rather than two.
-const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
+const PONG_DEADLINE: std::time::Duration = dux_core::attachments::QUIET_DEADLINE;
 
 /// Whether a peer last heard at `heard` has been quiet past [`PONG_DEADLINE`].
-fn peer_went_quiet(heard: std::time::Instant) -> bool {
-    heard.elapsed() > PONG_DEADLINE
+fn peer_went_quiet(heard: &dux_core::attachments::Heard) -> bool {
+    heard.quiet_for(std::time::Instant::now()) > PONG_DEADLINE
+}
+
+/// How long a liveness ping or a closing frame may take to send before the
+/// socket gives up on it. Both go to a peer that may already be gone, and an
+/// unbounded send to a dead peer holds the socket's loop, and everything it
+/// is still holding, for as long as the kernel keeps retrying.
+const LIVENESS_SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a socket's opening request says about who it is: the events
+/// connection a terminal socket names as its browser tab (`?events=<id>`), the
+/// lost events connection a tab's new events socket succeeds (`?after=<id>`),
+/// and the client's address, the verified one when the auth layer could
+/// verify it.
+pub(crate) struct SocketClient {
+    link: Option<String>,
+    after: Option<String>,
+    address: Option<IpAddr>,
+    verified: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct SocketLinkQuery {
+    events: Option<String>,
+    after: Option<String>,
+}
+
+impl axum::extract::FromRequestParts<AppState> for SocketClient {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let query = axum::extract::Query::<SocketLinkQuery>::try_from_uri(&parts.uri)
+            .ok()
+            .map(|axum::extract::Query(query)| query);
+        let bounded = |id: Option<String>| id.filter(|id| crate::rest_common::id_within_bound(id));
+        let (link, after) = match query {
+            Some(query) => (bounded(query.events), bounded(query.after)),
+            None => (None, None),
+        };
+        let verified = parts
+            .extensions
+            .get::<crate::auth::RequestAuth>()
+            .and_then(|auth| auth.0.classification.verified_ip);
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(peer)| peer.ip());
+        Ok(Self {
+            link,
+            after,
+            address: verified.or(peer),
+            verified: verified.is_some(),
+        })
+    }
+}
+
+impl SocketClient {
+    /// The client's address, the verified one when there is one.
+    pub(crate) fn address(&self) -> Option<IpAddr> {
+        self.address
+    }
+
+    fn facts(
+        &self,
+        device: Option<String>,
+        events: bool,
+    ) -> dux_core::attachments::ConnectionFacts {
+        dux_core::attachments::ConnectionFacts {
+            surface: dux_core::attachments::Surface::Browser,
+            device,
+            address: self.address,
+            verified: self.verified,
+            events,
+        }
+    }
 }
 
 /// The close frame for an auth close code (see [`crate::auth::socket`]).
@@ -1313,6 +1390,20 @@ enum PtyTarget {
 }
 
 impl PtyTarget {
+    /// This PTY as the attachment registry names it, with the agent it
+    /// belongs to (`None` for a project or standalone terminal).
+    fn attachment_target(&self, agent: Option<&str>) -> dux_core::attachments::Target {
+        let kind = match self {
+            PtyTarget::Agent(_) | PtyTarget::Tab(_) => dux_core::attachments::TargetKind::Tab,
+            PtyTarget::Terminal(_) => dux_core::attachments::TargetKind::Terminal,
+        };
+        dux_core::attachments::Target {
+            kind,
+            id: self.pty_id().to_string(),
+            agent: agent.map(str::to_owned),
+        }
+    }
+
     /// The id used to route stdin writes and resizes (the session-slot tab id for
     /// an agent, the terminal id for a companion terminal, the tab id for an extra
     /// tab). The engine's `pty_for` accepts any of these keyspaces.
@@ -1428,15 +1519,22 @@ struct PtyBeatFrame {
     viewed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upgrade_pty_socket(
     ws: WebSocketUpgrade,
     state: &AppState,
     target: PtyTarget,
+    agent: Option<&str>,
+    client: SocketClient,
     peer_ip: IpAddr,
     permit: tokio::sync::OwnedSemaphorePermit,
     headers: &HeaderMap,
     socket_auth: crate::auth::SocketAuth,
 ) -> Response {
+    let attach = PtyAttach {
+        target: target.attachment_target(agent),
+        client,
+    };
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
@@ -1451,6 +1549,7 @@ fn upgrade_pty_socket(
                 socket,
                 engine,
                 target,
+                attach,
                 console,
                 peer_ip,
                 permit,
@@ -1466,6 +1565,12 @@ fn upgrade_pty_socket(
         .into_response()
 }
 
+/// Who a terminal socket attaches as, and to what.
+struct PtyAttach {
+    target: dux_core::attachments::Target,
+    client: SocketClient,
+}
+
 /// Upgrade handler for `GET /ws/sessions/:id/pty`: stream the agent session's main
 /// provider PTY. Replicates the `/ws` protections (origin check, connection-cap
 /// permit, frame-size limit) and path-validates `:id` against a known session
@@ -1474,6 +1579,7 @@ async fn ws_session_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     Path(id): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1517,6 +1623,8 @@ async fn ws_session_pty_upgrade(
         ws,
         &state,
         PtyTarget::Agent(slot_tab_id),
+        Some(&id),
+        client,
         peer.ip(),
         permit,
         &headers,
@@ -1533,6 +1641,7 @@ async fn ws_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     Path((id, tid)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1576,6 +1685,8 @@ async fn ws_terminal_pty_upgrade(
         ws,
         &state,
         PtyTarget::Terminal(tid),
+        Some(&id),
+        client,
         peer.ip(),
         permit,
         &headers,
@@ -1592,6 +1703,7 @@ async fn ws_project_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     Path((id, tid)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1635,6 +1747,8 @@ async fn ws_project_terminal_pty_upgrade(
         ws,
         &state,
         PtyTarget::Terminal(tid),
+        None,
+        client,
         peer.ip(),
         permit,
         &headers,
@@ -1652,6 +1766,7 @@ async fn ws_standalone_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     Path(tid): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1689,6 +1804,8 @@ async fn ws_standalone_terminal_pty_upgrade(
         ws,
         &state,
         PtyTarget::Terminal(tid),
+        None,
+        client,
         peer.ip(),
         permit,
         &headers,
@@ -1763,6 +1880,7 @@ async fn ws_tab_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     Path((id, tab)): Path<(String, String)>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -1841,10 +1959,16 @@ async fn ws_tab_pty_upgrade(
             // Hold the per-agent sub-quota guard for the socket's lifetime; it
             // decrements the agent's tab-socket count when this future is dropped.
             let _tab_guard = tab_guard;
+            let target = PtyTarget::Tab(tab);
+            let attach = PtyAttach {
+                target: target.attachment_target(Some(&id)),
+                client,
+            };
             handle_pty_socket(
                 socket,
                 engine,
-                PtyTarget::Tab(tab),
+                target,
+                attach,
                 console,
                 peer_ip,
                 permit,
@@ -1874,6 +1998,7 @@ async fn handle_pty_socket(
     socket: WebSocket,
     engine: EngineHandle,
     target: PtyTarget,
+    attach: PtyAttach,
     console: Console,
     peer_ip: std::net::IpAddr,
     // Held for the socket's lifetime purely for its Drop (frees a connection-cap
@@ -1914,7 +2039,7 @@ async fn handle_pty_socket(
     };
     connections.insert(registry_id.clone(), conn_class);
     let _conn_guard = ConnectionGuard {
-        id: registry_id,
+        id: registry_id.clone(),
         registry: Arc::clone(&connections),
         watchers: None,
     };
@@ -1936,6 +2061,59 @@ async fn handle_pty_socket(
         let _ = sink.lock().await.send(auth_close(code)).await;
         return;
     }
+
+    // This connection's id in the ownership record, allocated before the
+    // subscribe so the attachment below can carry it, but NOT a claim:
+    // attaching is not taking over. A connection becomes the owner only by
+    // resizing an UNOWNED pty or by sending a resize explicitly flagged as a
+    // take-over (see the resize arm below), so no attach of any kind can steal
+    // the device that is actually being typed on.
+    let conn_id = pty_size_owners.next_conn_id();
+    // The release, on EVERY exit path. A socket that gave up on its opening
+    // sends has to let go of the pty too (it may have claimed it at the
+    // handshake), and so does one a panic unwinds through: leaving it held wedges
+    // the pty behind a client that can never see it. `PtyOwnershipGuard` also
+    // broadcasts the owner-cleared `pty.owner`, without which every other
+    // device's card keeps naming a browser tab that closed.
+    let _ownership_guard = PtyOwnershipGuard {
+        pty_id: target.pty_id().to_string(),
+        conn_id,
+        owners: Arc::clone(&pty_size_owners),
+        bus: Arc::clone(&bus),
+    };
+    // Attached before the subscribe, which can launch the provider: a change
+    // that is ending this PTY has reserved it, and a socket that arrives in
+    // that window is turned away with the provider-gone close rather than
+    // launching what is being torn down.
+    let heard = dux_core::attachments::Heard::now();
+    let Some(attachment) = AttachmentGuard::attach(
+        &engine,
+        attach,
+        &registry_id,
+        user_agent.clone(),
+        &heard,
+        conn_id,
+        Arc::clone(&live_limits),
+    ) else {
+        send_close(&sink, provider_gone_close()).await;
+        return;
+    };
+    // The deadline has its own timer, started once the receive loop runs:
+    // past it this attachment and its input rights are revoked whatever the
+    // loop is stuck on, and the loop is cancelled.
+    let expired = Arc::new(tokio::sync::Notify::new());
+    let quiet_watch = QuietWatch {
+        heard: heard.clone(),
+        deadline: PONG_DEADLINE,
+        attachments: engine.attachments().clone(),
+        token: attachment.token,
+        owners: Arc::clone(&pty_size_owners),
+        pty_id: target.pty_id().to_string(),
+        conn_id,
+        bus: Arc::clone(&bus),
+        expired: Arc::clone(&expired),
+        live_limits: Arc::clone(&live_limits),
+    };
 
     // Subscribe to the target PTY. An agent subscribe also launches/resumes the
     // provider if it isn't running yet (the same flow the legacy Subscribe uses);
@@ -1969,25 +2147,6 @@ async fn handle_pty_socket(
             // this socket out twice.
             return;
         }
-    };
-    // Allocate this connection's id, but do NOT claim ownership: attaching is not
-    // taking over, and now the server means it. A connection becomes the owner
-    // only by resizing an UNOWNED pty or by sending a resize explicitly flagged
-    // as a take-over (see the resize arm below), so no attach of any kind can
-    // steal the device that is actually being typed on. Ownership is released on
-    // disconnect, through the guard declared immediately below.
-    let conn_id = pty_size_owners.next_conn_id();
-    // The release, on EVERY exit path. A socket that gave up on its opening
-    // sends has to let go of the pty too (it may have claimed it at the
-    // handshake), and so does one a panic unwinds through: leaving it held wedges
-    // the pty behind a client that can never see it. `PtyOwnershipGuard` also
-    // broadcasts the owner-cleared `pty.owner`, without which every other
-    // device's card keeps naming a browser tab that closed.
-    let _ownership_guard = PtyOwnershipGuard {
-        pty_id: target.pty_id().to_string(),
-        conn_id,
-        owners: Arc::clone(&pty_size_owners),
-        bus: Arc::clone(&bus),
     };
     // Who is driving right now, read once for the handshake frame. This is what
     // stops a foregrounded arrival from wedging itself as a phantom owner: with
@@ -2128,8 +2287,17 @@ async fn handle_pty_socket(
             event_bus: &bus,
             user_agent: user_agent.as_deref(),
             live_limits: &live_limits,
+            attachment: &attachment,
+            heard: &heard,
         }
-        .run(stream, rx, grid_changes, handshake_grid_seq, socket_auth)
+        .run(
+            stream,
+            rx,
+            grid_changes,
+            handshake_grid_seq,
+            socket_auth,
+            quiet_watch,
+        )
         .await;
     }
 
@@ -2151,22 +2319,57 @@ struct AttachedPtySocket<'a> {
     event_bus: &'a EventBus,
     user_agent: Option<&'a str>,
     live_limits: &'a crate::engine_actor::LiveServerLimits,
+    attachment: &'a AttachmentGuard,
+    /// When the peer last sent anything, a pong included; shared with the
+    /// attachment registry and the quiet watchdog.
+    heard: &'a dux_core::attachments::Heard,
 }
 
 impl AttachedPtySocket<'_> {
     async fn run(
         &self,
-        mut stream: futures_util::stream::SplitStream<WebSocket>,
+        stream: futures_util::stream::SplitStream<WebSocket>,
         rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
+        last_grid_seq: u64,
+        socket_auth: crate::auth::SocketAuth,
+        quiet_watch: QuietWatch,
+    ) {
+        let expired = Arc::clone(&quiet_watch.expired);
+        let _watchdog = start_quiet_watch(quiet_watch);
+        let pty_forwarder = AbortOnDrop(spawn_pty_forwarder(
+            Arc::clone(self.sink),
+            rx,
+            self.engine.shutdown_flag(),
+        ));
+        if until_expired(
+            self.receive(
+                stream,
+                pty_forwarder,
+                grid_changes,
+                last_grid_seq,
+                socket_auth,
+            ),
+            &expired,
+        )
+        .await
+        {
+            self.close_quiet_peer().await;
+        }
+    }
+
+    /// The receive loop, which owns the output forwarder: whatever ends it,
+    /// expiry included, ends the forwarder too.
+    async fn receive(
+        &self,
+        mut stream: futures_util::stream::SplitStream<WebSocket>,
+        mut pty_forwarder: AbortOnDrop,
         mut grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
         mut last_grid_seq: u64,
         mut socket_auth: crate::auth::SocketAuth,
     ) {
-        let mut pty_forwarder =
-            spawn_pty_forwarder(Arc::clone(self.sink), rx, self.engine.shutdown_flag());
         let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
         ping.tick().await;
-        let mut heard = std::time::Instant::now();
 
         loop {
             // Handle each received value inside its selected branch. A combined
@@ -2179,11 +2382,11 @@ impl AttachedPtySocket<'_> {
                 code = socket_auth.revoked() => {
                     // The forwarder writes output on its own task, so it is
                     // stopped before the close rather than after the loop.
-                    pty_forwarder.abort();
+                    pty_forwarder.0.abort();
                     self.close_for_auth(code).await
                 }
                 _ = ping.tick() => {
-                    if peer_went_quiet(heard) {
+                    if peer_went_quiet(self.heard) {
                         self.close_quiet_peer().await
                     } else {
                         self.send_liveness_ping().await
@@ -2192,10 +2395,10 @@ impl AttachedPtySocket<'_> {
                 change = grid_changes.recv() => {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
-                _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
+                _ = &mut pty_forwarder.0 => self.close_after_forwarder_end().await,
                 next = stream.next() => match next {
                     Some(Ok(message)) => {
-                        heard = std::time::Instant::now();
+                        self.heard.touch();
                         self.handle_client_message(message).await
                     }
                     _ => PtyLoopAction::Break,
@@ -2205,14 +2408,15 @@ impl AttachedPtySocket<'_> {
                 break;
             }
         }
-
-        pty_forwarder.abort();
     }
 
     /// A send-only liveness ping. Its failure is how a socket whose peer is gone
     /// without a close frame is reaped, so it ends the loop.
     async fn send_liveness_ping(&self) -> PtyLoopAction {
-        if send_ping(self.sink).await.is_ok() {
+        if with_send_deadline(LIVENESS_SEND_DEADLINE, send_ping(self.sink))
+            .await
+            .is_ok()
+        {
             return PtyLoopAction::Continue;
         }
         dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
@@ -2226,8 +2430,8 @@ impl AttachedPtySocket<'_> {
     /// [`crate::auth::socket`]), so it must not keep driving this PTY. Closed with
     /// the auth code the browser recognizes.
     async fn close_for_auth(&self, code: u16) -> PtyLoopAction {
-        let mut guard = self.sink.lock().await;
-        let _ = guard.send(auth_close(code)).await;
+        self.attachment.end_deliberately();
+        send_close(self.sink, auth_close(code)).await;
         PtyLoopAction::Break
     }
 
@@ -2239,8 +2443,7 @@ impl AttachedPtySocket<'_> {
             self.conn_id,
             crate::pty_log::FailedSend::LivenessPing,
         ));
-        let mut guard = self.sink.lock().await;
-        let _ = guard.send(Message::Close(None)).await;
+        send_close(self.sink, Message::Close(None)).await;
         PtyLoopAction::Break
     }
 
@@ -2251,8 +2454,9 @@ impl AttachedPtySocket<'_> {
             .engine
             .shutdown_flag()
             .load(std::sync::atomic::Ordering::SeqCst);
-        let mut guard = self.sink.lock().await;
-        let _ = guard.send(forwarder_end_close(shutting_down)).await;
+        // The terminal is gone (or dux is): there is nothing left to protect.
+        self.attachment.end_deliberately();
+        send_close(self.sink, forwarder_end_close(shutting_down)).await;
         PtyLoopAction::Break
     }
 
@@ -2287,7 +2491,10 @@ impl AttachedPtySocket<'_> {
         match message {
             Message::Binary(bytes) => self.handle_input(&bytes),
             Message::Text(text) => self.handle_text_frame(text.as_str()).await,
-            Message::Close(_) => return PtyLoopAction::Break,
+            Message::Close(_) => {
+                self.attachment.end_deliberately();
+                return PtyLoopAction::Break;
+            }
             _ => {}
         }
         PtyLoopAction::Continue
@@ -2395,6 +2602,7 @@ impl AttachedPtySocket<'_> {
     }
 
     async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
+        self.attachment.note_viewed(frame.viewed);
         if frame.viewed {
             self.engine.note_viewed(self.target.pty_id().to_string());
         }
@@ -2858,6 +3066,7 @@ async fn ws_events_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     socket_auth: crate::auth::SocketAuth,
+    client: SocketClient,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -2889,6 +3098,8 @@ async fn ws_events_upgrade(
     let changes = Arc::clone(&state.changes);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
+    let facts = client.facts(captured_user_agent(&headers), true);
+    let after = client.after;
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
             handle_events_socket(
@@ -2901,6 +3112,8 @@ async fn ws_events_upgrade(
                 permit,
                 connections,
                 socket_auth,
+                facts,
+                after,
             )
         })
         .into_response()
@@ -2929,6 +3142,12 @@ async fn handle_events_socket(
     // allowed, and holds the session's lease while it is open: an open tab is
     // what keeps a signed-in browser from going idle.
     socket_auth: crate::auth::SocketAuth,
+    // Who this browser tab is, for the attachment registry: the tab's
+    // terminal sockets link themselves to this connection.
+    facts: dux_core::attachments::ConnectionFacts,
+    // The lost events connection this tab had before, whose terminals this
+    // one takes over (`?after=<id>`).
+    after: Option<String>,
 ) {
     console.client_connected(peer_ip);
     // A server-assigned random id correlating REST actions with the statuses they
@@ -2951,6 +3170,14 @@ async fn handle_events_socket(
         registry: Arc::clone(&connections),
         watchers: Some(watchers),
     };
+    let heard = dux_core::attachments::Heard::now();
+    let engine_attachments = engine.attachments().clone();
+    let presence = TabPresenceGuard::register(
+        engine_attachments.clone(),
+        &connection_id,
+        facts,
+        heard.clone(),
+    );
     let (sink, stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
     let bus_rx = bus.subscribe();
@@ -2961,6 +3188,7 @@ async fn handle_events_socket(
     // meantime must get its close and nothing else. Checked before the late
     // warnings are TAKEN, too, so a refused socket cannot consume them.
     if let Some(code) = socket_auth.opening_verdict().await {
+        presence.end_deliberately();
         let _ = sink.lock().await.send(auth_close(code)).await;
         console.client_disconnected(peer_ip);
         return;
@@ -3001,6 +3229,7 @@ async fn handle_events_socket(
     let workspace_alive = true;
 
     if let Some(code) = socket_auth.verdict_now() {
+        presence.end_deliberately();
         let _ = sink.lock().await.send(auth_close(code)).await;
         console.client_disconnected(peer_ip);
         return;
@@ -3017,6 +3246,7 @@ async fn handle_events_socket(
     }
 
     if let Some(code) = socket_auth.verdict_now() {
+        presence.end_deliberately();
         let _ = sink.lock().await.send(auth_close(code)).await;
         console.client_disconnected(peer_ip);
         return;
@@ -3066,8 +3296,14 @@ async fn handle_events_socket(
         connections,
         peer_ip,
         socket_auth,
-        heard: std::time::Instant::now(),
+        heard,
+        deliberate: Arc::clone(&presence.deliberate),
     };
+    // A tab whose events connection was lost takes over what the lost one
+    // still counted as attached to, once it is past its opening checks.
+    if let Some(after) = &after {
+        engine_attachments.inherit(after, &connection.connection_id);
+    }
     let _ = connection.run().await;
     drop(connection);
     console.client_disconnected(peer_ip);
@@ -3091,8 +3327,12 @@ struct EventsSocketLoop {
     connections: Arc<crate::rest_common::ConnectionRegistry>,
     peer_ip: IpAddr,
     socket_auth: crate::auth::SocketAuth,
-    /// When the peer last sent anything, a pong included.
-    heard: std::time::Instant,
+    /// When the peer last sent anything, a pong included; shared with the
+    /// attachment registry, which stops counting this tab once it goes quiet.
+    heard: dux_core::attachments::Heard,
+    /// Set when the tab ends this connection on purpose (a clean close, a
+    /// sign-out), which ends at once what it still counted as attached to.
+    deliberate: Arc<std::sync::atomic::AtomicBool>,
 }
 
 enum EventsLoopInput {
@@ -3111,20 +3351,18 @@ impl EventsLoopInput {
     async fn apply(self, connection: &mut EventsSocketLoop) -> Result<(), ()> {
         match self {
             Self::Ping => {
-                if peer_went_quiet(connection.heard) {
+                if peer_went_quiet(&connection.heard) {
                     // Half-open: nothing, not even a pong, for too long.
-                    let _ = connection
-                        .sink
-                        .lock()
-                        .await
-                        .send(Message::Close(None))
-                        .await;
+                    send_close(&connection.sink, Message::Close(None)).await;
                     return Err(());
                 }
-                send_ping(&connection.sink).await
+                with_send_deadline(LIVENESS_SEND_DEADLINE, send_ping(&connection.sink)).await
             }
             Self::Revoked(code) => {
-                let _ = connection.sink.lock().await.send(auth_close(code)).await;
+                connection
+                    .deliberate
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                send_close(&connection.sink, auth_close(code)).await;
                 Err(())
             }
             Self::Workspace(changed) => connection.handle_workspace_change(changed).await,
@@ -3158,7 +3396,7 @@ impl EventsSocketLoop {
                     EventsLoopInput::StatusCleared(cleared)
                 }
                 next = self.stream.next() => {
-                    self.heard = std::time::Instant::now();
+                    self.heard.touch();
                     EventsLoopInput::Client(next)
                 }
             };
@@ -3306,7 +3544,12 @@ impl EventsSocketLoop {
                 .await;
                 self.replay_new_subscriptions(new).await
             }
-            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => Err(()),
+            Some(Ok(Message::Close(_))) => {
+                self.deliberate
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Err(())
+            }
+            None | Some(Err(_)) => Err(()),
             Some(Ok(_)) => Ok(()),
         }
     }
@@ -3799,6 +4042,15 @@ where
     }
 }
 
+/// Send a closing frame on a live socket's `sink`, giving up after
+/// [`LIVENESS_SEND_DEADLINE`]: the peer it closes may already be gone.
+async fn send_close(sink: &SharedSink, frame: Message) {
+    let _ = with_send_deadline(LIVENESS_SEND_DEADLINE, async {
+        sink.lock().await.send(frame).await.map_err(|_| ())
+    })
+    .await;
+}
+
 /// Send one WebSocket Ping frame on `sink` for the liveness reaper. `Err(())` when
 /// the send fails (a dead/half-open peer or an already-closed socket), so the
 /// caller breaks its loop and the socket tears down (freeing its permit + registry
@@ -3868,6 +4120,229 @@ impl Drop for PtyOwnershipGuard {
             epoch,
         ));
         self.bus.emit(pty_owner_cleared_event(&self.pty_id, epoch));
+    }
+}
+
+/// A terminal socket's place in the attachment registry, for exactly as long
+/// as the socket lives. The socket counts as part of the browser tab whose
+/// events connection it named, when that connection is live and came from the
+/// same address; otherwise it is a connection of its own, registered here and
+/// forgotten on drop.
+struct AttachmentGuard {
+    attachments: dux_core::attachments::Attachments,
+    token: u64,
+    own_connection: Option<String>,
+    live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+    /// Set when the socket ends on purpose (a clean close from the client, a
+    /// sign-out, the PTY gone). Otherwise its end is a loss, and a terminal
+    /// its page was looking at keeps counting for the grace.
+    deliberate: std::sync::atomic::AtomicBool,
+}
+
+impl AttachmentGuard {
+    /// Attach, or `None` when a change ending this PTY has reserved it.
+    fn attach(
+        engine: &EngineHandle,
+        attach: PtyAttach,
+        registry_id: &str,
+        device: Option<String>,
+        heard: &dux_core::attachments::Heard,
+        conn_id: u64,
+        live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+    ) -> Option<Self> {
+        let attachments = engine.attachments().clone();
+        let PtyAttach { target, client } = attach;
+        let linked = client.link.clone().filter(|events| {
+            attachments.linkable(events, client.address, std::time::Instant::now())
+        });
+        let own_connection = match linked {
+            Some(_) => None,
+            None => {
+                attachments.register(
+                    registry_id,
+                    client.facts(device, false),
+                    Some(heard.clone()),
+                );
+                Some(registry_id.to_string())
+            }
+        };
+        let connection = linked.unwrap_or_else(|| registry_id.to_string());
+        match attachments.attach(&connection, target, Some(heard.clone()), Some(conn_id)) {
+            Ok(token) => Some(Self {
+                attachments,
+                token,
+                own_connection,
+                live_limits,
+                deliberate: std::sync::atomic::AtomicBool::new(false),
+            }),
+            Err(dux_core::attachments::Reserved) => {
+                if let Some(own) = own_connection {
+                    attachments.deregister(&own, dux_core::attachments::Ending::Deliberate);
+                }
+                None
+            }
+        }
+    }
+
+    fn note_viewed(&self, viewed: bool) {
+        self.attachments
+            .note_viewed(self.token, viewed, std::time::Instant::now());
+    }
+
+    fn end_deliberately(&self) {
+        self.deliberate
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for AttachmentGuard {
+    fn drop(&mut self) {
+        let ending = ending_of(&self.deliberate);
+        self.attachments.detach(
+            self.token,
+            ending,
+            std::time::Instant::now(),
+            self.live_limits.presence_grace(),
+        );
+        if let Some(own) = &self.own_connection {
+            self.attachments.deregister(own, ending);
+        }
+    }
+}
+
+fn ending_of(deliberate: &std::sync::atomic::AtomicBool) -> dux_core::attachments::Ending {
+    if deliberate.load(std::sync::atomic::Ordering::Relaxed) {
+        dux_core::attachments::Ending::Deliberate
+    } else {
+        dux_core::attachments::Ending::Lost
+    }
+}
+
+/// A browser tab's events connection in the attachment registry, forgotten
+/// when the socket ends: with everything the tab still counted as attached to
+/// when it ended on purpose (a clean close, a sign-out), and leaving that to
+/// its grace when it was lost.
+struct TabPresenceGuard {
+    attachments: dux_core::attachments::Attachments,
+    id: String,
+    deliberate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TabPresenceGuard {
+    fn register(
+        attachments: dux_core::attachments::Attachments,
+        id: &str,
+        facts: dux_core::attachments::ConnectionFacts,
+        heard: dux_core::attachments::Heard,
+    ) -> Self {
+        attachments.register(id, facts, Some(heard));
+        Self {
+            attachments,
+            id: id.to_string(),
+            deliberate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn end_deliberately(&self) {
+        self.deliberate
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for TabPresenceGuard {
+    fn drop(&mut self) {
+        self.attachments
+            .deregister(&self.id, ending_of(&self.deliberate));
+    }
+}
+
+/// What the quiet watchdog watches, and what it revokes when the peer has
+/// been silent past `deadline`.
+struct QuietWatch {
+    heard: dux_core::attachments::Heard,
+    deadline: std::time::Duration,
+    attachments: dux_core::attachments::Attachments,
+    token: u64,
+    owners: Arc<PtySizeOwners>,
+    pty_id: String,
+    conn_id: u64,
+    bus: Arc<EventBus>,
+    expired: Arc<tokio::sync::Notify>,
+    live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+}
+
+/// A timer of its own for a terminal socket's quiet deadline, independent of
+/// whatever the socket's loop is waiting on: past the deadline it ends the
+/// attachment as lost (so a terminal its page was looking at keeps counting
+/// for the grace) and revokes the socket's input rights at once (announcing
+/// the cleared owner as a disconnect would), and tells the loop to end.
+/// Aborted on drop.
+struct QuietWatchdog(tokio::task::JoinHandle<()>);
+
+impl QuietWatchdog {
+    fn spawn(watch: QuietWatch) -> Self {
+        Self(tokio::spawn(async move {
+            loop {
+                let quiet = watch.heard.quiet_for(std::time::Instant::now());
+                if quiet > watch.deadline {
+                    break;
+                }
+                tokio::time::sleep(watch.deadline - quiet + std::time::Duration::from_millis(5))
+                    .await;
+            }
+            watch.attachments.detach(
+                watch.token,
+                dux_core::attachments::Ending::Lost,
+                std::time::Instant::now(),
+                watch.live_limits.presence_grace(),
+            );
+            if let Some(epoch) = watch.owners.release(&watch.pty_id, watch.conn_id) {
+                dux_core::logger::info(&crate::pty_log::describe_ownership_released(
+                    &watch.pty_id,
+                    watch.conn_id,
+                    epoch,
+                ));
+                watch
+                    .bus
+                    .emit(pty_owner_cleared_event(&watch.pty_id, epoch));
+            }
+            watch.expired.notify_one();
+        }))
+    }
+}
+
+/// Start a socket's quiet clock now that its receive loop is running: the
+/// opening (the handshake and a scrollback replay that can take a long time on
+/// a slow link) reads nothing from the peer, so it must not count as silence.
+fn start_quiet_watch(watch: QuietWatch) -> QuietWatchdog {
+    watch.heard.touch();
+    QuietWatchdog::spawn(watch)
+}
+
+/// A task that ends with the future holding it: dropping the handle aborts it,
+/// so a socket cancelled anywhere also stops the task writing to it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Run a socket's loop until it ends or its quiet watchdog has expired it,
+/// whichever comes first, answering whether it expired. Expiry cancels the
+/// whole loop, a send it is parked on included, and with it every guard and
+/// task it owns.
+async fn until_expired<F: std::future::Future>(socket: F, expired: &tokio::sync::Notify) -> bool {
+    tokio::select! {
+        _ = socket => false,
+        _ = expired.notified() => true,
+    }
+}
+
+impl Drop for QuietWatchdog {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -4977,6 +5452,152 @@ mod tests {
             owners.is_owner(pty, conn_b),
             "B remains the owner after A's stale release"
         );
+    }
+
+    /// A terminal socket whose peer has gone quiet is revoked by its own
+    /// timer, with no socket loop running at all (as when every send it
+    /// attempts is stalled on a dead peer): its attachment stops blocking, its
+    /// input rights are released and announced, and the loop is told to end.
+    #[tokio::test]
+    async fn a_quiet_terminal_socket_is_revoked_on_its_own_timer() {
+        use dux_core::attachments::{
+            Attachments, ConnectionFacts, Heard, Scope, Surface, Target, TargetKind,
+        };
+        let attachments = Attachments::default();
+        attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: None,
+                address: None,
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        let heard = Heard::now();
+        let token = attachments
+            .attach(
+                "e1",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "s1-slot".to_string(),
+                    agent: Some("s1".to_string()),
+                },
+                Some(heard.clone()),
+                Some(9),
+            )
+            .unwrap();
+        let owners = Arc::new(PtySizeOwners::default());
+        owners.claim("s1-slot", 9);
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let expired = Arc::new(tokio::sync::Notify::new());
+        let _watchdog = QuietWatchdog::spawn(QuietWatch {
+            heard,
+            deadline: std::time::Duration::from_millis(100),
+            attachments: attachments.clone(),
+            token,
+            owners: Arc::clone(&owners),
+            pty_id: "s1-slot".to_string(),
+            conn_id: 9,
+            bus: Arc::clone(&bus),
+            expired: Arc::clone(&expired),
+            live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), expired.notified())
+            .await
+            .expect("the watchdog fires within the bound");
+        let scope = Scope {
+            ptys: ["s1-slot".to_string()].into(),
+            agents: Default::default(),
+        };
+        // Read with the registry's own clock far from the deadline: only the
+        // revocation, not the registry's own quiet rule, can empty it here.
+        assert!(
+            attachments
+                .blockers(&scope, None, std::time::Instant::now())
+                .is_empty()
+        );
+        assert_eq!(owners.current_owner("s1-slot").0, None);
+        let cleared = events.try_recv().expect("the cleared owner is announced");
+        assert!(matches!(
+            cleared,
+            Event::Resource { ref event, owner: None, .. } if event == "pty.owner"
+        ));
+    }
+
+    /// The quiet clock starts when the socket's receive loop does: a socket
+    /// whose opening (a long scrollback replay) took longer than the deadline
+    /// is not revoked the moment its loop begins.
+    #[tokio::test]
+    async fn the_quiet_clock_starts_with_the_receive_loop() {
+        let attachments = dux_core::attachments::Attachments::default();
+        let expired = Arc::new(tokio::sync::Notify::new());
+        let opened_long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(80))
+            .expect("a clock that has run for 80 seconds");
+        let _watchdog = start_quiet_watch(QuietWatch {
+            heard: dux_core::attachments::Heard::at(opened_long_ago),
+            deadline: std::time::Duration::from_millis(300),
+            attachments,
+            token: 1,
+            owners: Arc::new(PtySizeOwners::default()),
+            pty_id: "s1-slot".to_string(),
+            conn_id: 1,
+            bus: Arc::new(EventBus::new()),
+            expired: Arc::clone(&expired),
+            live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), expired.notified())
+                .await
+                .is_err(),
+            "revoked before the loop had a chance to hear anything"
+        );
+    }
+
+    /// Expiry ends the whole socket, whatever it is stuck on: a loop parked
+    /// on a send that never completes is cancelled, and the forwarder task it
+    /// owns is aborted with it, so every guard it holds drops.
+    #[tokio::test]
+    async fn expiry_cancels_a_socket_stuck_on_a_send_and_aborts_its_forwarder() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let forwarder_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = Dropped(Arc::clone(&forwarder_gone));
+        let forwarder = AbortOnDrop(tokio::spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        }));
+        let expired = Arc::new(tokio::sync::Notify::new());
+        let stuck = async move {
+            let _forwarder = forwarder;
+            std::future::pending::<()>().await;
+        };
+        let fire = Arc::clone(&expired);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            fire.notify_one();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            until_expired(stuck, &expired),
+        )
+        .await
+        .expect("expiry ended the socket");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !forwarder_gone.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the forwarder was aborted");
     }
 
     /// The spine-change forwarder maps each [`SpineChange`] onto the matching coarse

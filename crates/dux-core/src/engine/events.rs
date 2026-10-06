@@ -1457,6 +1457,29 @@ fn session_label(session: &AgentSession) -> String {
     session.display_label()
 }
 
+/// Ends, when dropped, the reservations a launch of one tab holds against
+/// attaching to the agents it stops: its report has come back, and whatever
+/// it was going to stop is stopped by then.
+struct LaunchReservations {
+    attachments: crate::attachments::Attachments,
+    key: String,
+}
+
+impl LaunchReservations {
+    fn of(engine: &Engine, tab_id: &str) -> Self {
+        Self {
+            attachments: engine.attachments.clone(),
+            key: crate::operations::launch_binding_key(tab_id),
+        }
+    }
+}
+
+impl Drop for LaunchReservations {
+    fn drop(&mut self) {
+        self.attachments.finish_key(&self.key);
+    }
+}
+
 impl Engine {
     /// Find any other session that owns `worktree_path` and has a running
     /// provider, and detach it so the incoming launch can take over. Returns the
@@ -1650,6 +1673,9 @@ impl Engine {
         let wants_fullscreen = request.wants_fullscreen;
         let status_quiet = request.status_quiet;
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
+        // The launch reserved the agents it stops; they are stopped below,
+        // before anything can attach again.
+        let _launch_reservations = LaunchReservations::of(self, tab_id.as_str());
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
@@ -2807,6 +2833,7 @@ impl Engine {
         let tab_id = request.tab_id.clone();
         let session = request.session;
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
+        let _launch_reservations = LaunchReservations::of(self, tab_id.as_str());
 
         let outcome = match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
@@ -3031,6 +3058,7 @@ impl Engine {
         self.operations.reload_closed();
         let deferred = std::mem::take(&mut self.deferred_commands);
         let mut deferred_operations = std::mem::take(&mut self.deferred_operations).into_iter();
+        let mut deferred_policies = std::mem::take(&mut self.deferred_policies).into_iter();
         let has_deferred = !deferred.is_empty();
         // Pre-swap `self.config` to the reloaded config (rather than leaving the
         // surface to do the swap) whenever we must base a follow-up write on the
@@ -3115,7 +3143,12 @@ impl Engine {
         let mut deferred_reactions = Vec::new();
         for command in deferred {
             let operation = deferred_operations.next().flatten();
-            match self.apply_deferred_operation(command, operation) {
+            // Judged as whoever asked for it, not as whoever is draining it.
+            let asked_by = deferred_policies.next().flatten();
+            let previous = std::mem::replace(&mut self.dispatch_policy, asked_by);
+            let applied = self.apply_deferred_operation(command, operation);
+            self.dispatch_policy = previous;
+            match applied {
                 Ok(EventReaction::Nothing) => {}
                 Ok(reaction) => deferred_reactions.push(reaction),
                 Err(err) => deferred_reactions.push(EventReaction::Status(StatusUpdate::error(

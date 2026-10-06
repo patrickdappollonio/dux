@@ -1117,6 +1117,7 @@ pub(super) mod tests {
                 PromptState::ConfirmQuit {
                     agent_count: 1,
                     terminal_count: 0,
+                    attached: Vec::new(),
                     focus: ConfirmFocus::Cancel,
                 },
             ),

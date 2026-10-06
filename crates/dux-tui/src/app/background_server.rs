@@ -219,6 +219,15 @@ impl App {
         // The serve retired itself (a required listener died, or its request
         // channel closed). Say so where the user is looking: the last thing the
         // status line told them was the address it was serving on.
+        // What a command-line change made through the serve raised for every
+        // surface: no browser stands in for this line.
+        for status in outcome.statuses {
+            let mut update = dux_core::engine::StatusUpdate::info(status.message);
+            update.tone = StatusTone::from_wire(&status.tone);
+            update.key = status.key;
+            update.sticky = status.sticky;
+            self.apply_reaction(dux_core::engine::EventReaction::Status(update));
+        }
         if let Some(message) = outcome.retirement {
             self.status.set(
                 Instant::now(),
@@ -1100,6 +1109,9 @@ pub(crate) mod tests {
         /// What the next `service` call reports as a self-retirement, standing in
         /// for a required listener dying.
         retirement_next: Option<String>,
+        /// What the next `service` call hands over as statuses raised for every
+        /// surface, standing in for a command-line change it served.
+        statuses_next: Vec<dux_core::wire::WireStatus>,
         /// One entry per maintenance hand-off the seam made.
         maintenance: Vec<DrainedMaintenance>,
         /// Stand in for the REAL fanout's side effects: its `drive_*` follow-ups
@@ -1206,6 +1218,7 @@ pub(crate) mod tests {
                 mutated: recorded.mutated_next,
                 stopped: false,
                 retirement: recorded.retirement_next.take(),
+                statuses: std::mem::take(&mut recorded.statuses_next),
             }
         }
 
@@ -3065,6 +3078,22 @@ pub(crate) mod tests {
         assert!(
             message.contains("start-background-server"),
             "and name the way back: {message}"
+        );
+
+        // A change a client with no connection here made through the serve (the
+        // command line) raises its status on this line too.
+        recorded.lock().expect("not poisoned").statuses_next =
+            vec![dux_core::wire::WireStatus::new(
+                "info",
+                "Deleted agent \"feat\" from the command line.",
+            )];
+        app.service_companion();
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .any(|status| status.message.contains("from the command line")),
+            "the change's status reaches the line"
         );
     }
 }

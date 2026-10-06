@@ -1012,9 +1012,12 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
             .await
             .expect("connect the tab's pty socket");
 
-    // Delete just this tab (not the whole agent).
+    // Delete just this tab (not the whole agent), going ahead over the socket
+    // attached to it.
     let del = client
-        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/tabs/{tab}?force_connected=true"
+        ))
         .send()
         .await
         .unwrap();

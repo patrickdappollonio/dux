@@ -205,6 +205,11 @@ pub struct ServiceOutcome {
     /// what died and how; the terminal UI puts it on the status line, replacing
     /// the "serving on ..." message that is by then a lie.
     pub retirement: Option<String>,
+    /// The statuses a change made through this serve by a client with no
+    /// connection of its own (the command line) raised for every surface, in
+    /// the order raised: no browser stands in for the terminal UI's status
+    /// line, so it is handed them here.
+    pub statuses: Vec<crate::wire::WireStatus>,
 }
 
 /// A web server the terminal UI services once per loop iteration.

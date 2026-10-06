@@ -28,9 +28,10 @@ use dux_core::operations::OperationKind;
 use dux_core::wire::WireCommand;
 
 use crate::rest_common::{
-    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, OperationQuery, await_new_project,
-    create_failed, delete_operation_response, delete_wire_response, id_within_bound,
-    idempotency_key, operation_accepted, require_configured_provider, scope_from_headers,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, ForceConnectedQuery, OperationQuery,
+    await_new_project, create_failed, delete_operation_response, delete_wire_response,
+    dispatch_guarded, id_within_bound, idempotency_key, operation_accepted,
+    require_configured_provider, scope_from_headers,
 };
 use crate::server::AppState;
 
@@ -237,6 +238,8 @@ async fn remove_project(
     Path(id): Path<String>,
     Query(q): Query<RemoveProjectQuery>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -252,27 +255,24 @@ async fn remove_project(
     } else {
         WireCommand::RemoveProject { project_id: id }
     };
-    if operation.asked() {
-        let result = state
-            .engine
-            .apply_wire_operation(
-                command,
-                scope_from_headers(&headers, &state.connections),
-                OperationKind::ProjectRemove,
-            )
-            .await;
-        return delete_operation_response(result);
-    }
-    delete_wire_response(
-        state
-            .engine
-            .apply_wire_recorded(
-                command,
-                scope_from_headers(&headers, &state.connections),
-                OperationKind::ProjectRemove,
-            )
-            .await,
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::ProjectRemove,
+        &operation,
+        &force,
+        &client,
     )
+    .await
+    {
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
+    };
+    if operation.asked() {
+        return delete_operation_response(result.and_then(|guarded| guarded.followed()));
+    }
+    delete_wire_response(result.map(|guarded| guarded.outcome))
 }
 
 // ── Patch (settings) ─────────────────────────────────────────────────────────

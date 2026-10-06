@@ -48,10 +48,11 @@ use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, OperationQuery,
-    await_new_session, await_session_for_op, create_failed, delete_operation_response,
-    delete_wire_response, id_within_bound, idempotency_key, operation_accepted, outcome_is_error,
-    refusal, require_configured_provider, scope_from_headers, unknown_session,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT,
+    ForceConnectedQuery, OperationQuery, await_new_session, await_session_for_op, create_failed,
+    delete_operation_response, delete_wire_response, dispatch_guarded, id_within_bound,
+    idempotency_key, operation_accepted, outcome_is_error, refusal, require_configured_provider,
+    scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -547,6 +548,8 @@ async fn delete_session(
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
     Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -560,27 +563,24 @@ async fn delete_session(
         delete_worktree: q.delete_worktree,
         delete_branch: q.delete_branch,
     };
-    if operation.asked() {
-        let result = state
-            .engine
-            .apply_wire_operation(
-                command,
-                scope_from_headers(&headers, &state.connections),
-                OperationKind::AgentDelete,
-            )
-            .await;
-        return delete_operation_response(result);
-    }
-    delete_wire_response(
-        state
-            .engine
-            .apply_wire_recorded(
-                command,
-                scope_from_headers(&headers, &state.connections),
-                OperationKind::AgentDelete,
-            )
-            .await,
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::AgentDelete,
+        &operation,
+        &force,
+        &client,
     )
+    .await
+    {
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
+    };
+    if operation.asked() {
+        return delete_operation_response(result.and_then(|guarded| guarded.followed()));
+    }
+    delete_wire_response(result.map(|guarded| guarded.outcome))
 }
 
 // ── Patch (rename / provider / auto-reopen) ──────────────────────────────────
@@ -701,6 +701,8 @@ async fn reconnect_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(operation): Query<OperationQuery>,
+    Query(force_connected): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
     body: Option<Json<ReconnectBody>>,
 ) -> Response {
@@ -715,23 +717,30 @@ async fn reconnect_session(
         session_id: id,
         force,
     };
-    let scope = scope_from_headers(&headers, &state.connections);
-    if operation.asked() {
-        return match state
-            .engine
-            .apply_wire_operation(command, scope, OperationKind::AgentStart)
-            .await
-        {
-            Ok((_, op)) => operation_accepted(&op),
-            Err(e) => refusal(e, StatusCode::BAD_REQUEST),
-        };
-    }
-    match state
-        .engine
-        .apply_wire_recorded(command, scope, OperationKind::AgentStart)
-        .await
+    // Only a forced restart ends what is running; the engine guards just that.
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::AgentStart,
+        &operation,
+        &force_connected,
+        &client,
+    )
+    .await
     {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
+    };
+    match result.and_then(|guarded| {
+        if operation.asked() {
+            guarded.followed().map(|(_, op)| Some(op))
+        } else {
+            Ok(None)
+        }
+    }) {
+        Ok(Some(op)) => operation_accepted(&op),
+        Ok(None) => StatusCode::OK.into_response(),
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
@@ -793,6 +802,8 @@ async fn kill_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(operation): Query<OperationQuery>,
+    Query(force_connected): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
     body: Option<Json<KillSessionBody>>,
 ) -> Response {
@@ -806,20 +817,27 @@ async fn kill_session(
         session_id: id,
         force,
     };
-    let scope = scope_from_headers(&headers, &state.connections);
-    let result = if operation.asked() {
-        state
-            .engine
-            .apply_wire_operation(command, scope, OperationKind::AgentStop)
-            .await
-            .map(|(_, op)| Some(op))
-    } else {
-        state
-            .engine
-            .apply_wire_recorded(command, scope, OperationKind::AgentStop)
-            .await
-            .map(|_| None)
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::AgentStop,
+        &operation,
+        &force_connected,
+        &client,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
     };
+    let result = result.and_then(|guarded| {
+        if operation.asked() {
+            guarded.followed().map(|(_, op)| Some(op))
+        } else {
+            Ok(None)
+        }
+    });
     match result {
         Ok(Some(op)) => operation_accepted(&op),
         Ok(None) => StatusCode::OK.into_response(),
@@ -1106,9 +1124,13 @@ mod tests {
     /// While a followed change holds an agent, every other change to it, or
     /// to a tab or a terminal inside it, is a 409 naming that operation, and
     /// so is a change to an agent a delete has already taken off the list,
-    /// rather than the 404 of an agent that never existed.
+    /// rather than the 404 of an agent that never existed. A change that
+    /// would end a terminal somebody else is attached to is a 409 listing who
+    /// (a request with no connection of its own exempts nobody), and goes
+    /// ahead only with `force_connected=true`.
     #[tokio::test]
     async fn a_change_to_an_agent_another_change_holds_is_a_409_naming_it() {
+        use dux_core::attachments::{ConnectionFacts, Surface, Target, TargetKind};
         use dux_core::engine::InFlightKey;
         use dux_core::operations::{Hold, OperationKind};
 
@@ -1117,6 +1139,9 @@ mod tests {
         engine
             .sessions
             .push(crate::test_support::sample_agent("s1"));
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s2"));
         for (record, agent, kind) in [
             ("op-h", "s1", OperationKind::AgentStop),
             ("op-g", "ghost", OperationKind::AgentDelete),
@@ -1131,35 +1156,151 @@ mod tests {
                 )
                 .unwrap();
         }
+        engine.attachments.register(
+            "e-phone",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox-on-a-phone".to_string()),
+                address: Some("10.1.2.3".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        engine
+            .attachments
+            .attach(
+                "e-phone",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "s2-slot".to_string(),
+                    agent: Some("s2".to_string()),
+                },
+                None,
+                None,
+            )
+            .unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         let app = crate::server::router(handle);
 
-        for (method, uri, holder) in [
-            ("DELETE", "/api/v1/sessions/s1", "op-h"),
-            ("DELETE", "/api/v1/sessions/s1?operation=1", "op-h"),
-            ("POST", "/api/v1/sessions/s1/kill", "op-h"),
-            ("POST", "/api/v1/sessions/s1/reconnect", "op-h"),
-            ("POST", "/api/v1/sessions/s1/tabs", "op-h"),
-            ("POST", "/api/v1/sessions/s1/tabs/s1-slot/start", "op-h"),
-            ("POST", "/api/v1/sessions/s1/terminals?operation=1", "op-h"),
-            ("DELETE", "/api/v1/sessions/ghost", "op-g"),
+        for (method, uri, body, status, says) in [
+            (
+                "DELETE",
+                "/api/v1/sessions/s1",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/s1?operation=1",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s1/kill",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s1/reconnect",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s1/tabs",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s1/tabs/s1-slot/start",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s1/terminals?operation=1",
+                "",
+                StatusCode::CONFLICT,
+                "op-h",
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/ghost",
+                "",
+                StatusCode::CONFLICT,
+                "op-g",
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/s2",
+                "",
+                StatusCode::CONFLICT,
+                r#""error":"attached""#,
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/s2?operation=1",
+                "",
+                StatusCode::CONFLICT,
+                r#""address":"10.1.2.3""#,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s2/kill",
+                "",
+                StatusCode::CONFLICT,
+                r#""device":"Firefox-on-a-phone""#,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/s2/reconnect",
+                r#"{"force":true}"#,
+                StatusCode::CONFLICT,
+                r#""id":"s2-slot""#,
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/s2/tabs/s2-slot",
+                "",
+                StatusCode::CONFLICT,
+                r#""error":"attached""#,
+            ),
+            (
+                "DELETE",
+                "/api/v1/sessions/s2?force_connected=true",
+                "",
+                StatusCode::NO_CONTENT,
+                "",
+            ),
         ] {
+            let mut request = Request::builder().method(method).uri(uri);
+            if !body.is_empty() {
+                request = request.header("content-type", "application/json");
+            }
             let resp = app
                 .clone()
                 .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
+                    request
+                        .body(axum::body::Body::from(body.to_string()))
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            let status = resp.status();
-            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-            let body = String::from_utf8_lossy(&body);
-            assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}: {body}");
-            assert!(body.contains(holder), "{method} {uri}: {body}");
+            let got = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert_eq!(got, status, "{method} {uri}: {text}");
+            assert!(text.contains(says), "{method} {uri}: {text}");
         }
     }
 

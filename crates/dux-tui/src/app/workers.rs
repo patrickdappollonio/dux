@@ -534,6 +534,13 @@ impl App {
                 quiet_on,
                 ..
             }) => {
+                // A final ends whatever a change of this surface's still holds
+                // under its key, shown or not.
+                if tone != StatusTone::Busy
+                    && let Some(key) = &key
+                {
+                    self.engine.attachments.finish_key(key);
+                }
                 // Only an INFO may be withheld: a warning, an error and a
                 // spinner all report something the screen cannot be standing in
                 // for, whatever the site asked for.

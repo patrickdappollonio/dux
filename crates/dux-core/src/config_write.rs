@@ -2170,6 +2170,12 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "presence_grace_seconds",
+        config.server.presence_grace_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "tree_list_max_concurrency",
         config.server.tree_list_max_concurrency as usize,
     );

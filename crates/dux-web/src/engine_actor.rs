@@ -91,10 +91,36 @@ impl OperationTicket {
 
 /// A change covered by an operation record, and whether the client asked to
 /// follow it (which decides only the answer's shape).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Followed {
     pub kind: OperationKind,
     pub answered: bool,
+    /// The browser tab asking, exempt from its own attachments: its events
+    /// connection, when the request named one from its own address (see
+    /// `rest_common::exempt_requester`). `None` exempts nobody.
+    /// Go ahead even though somebody else is attached to what the change
+    /// would end (`force_connected=true` on the route). Only that refusal is
+    /// skipped; the reservation and every other check still run.
+    pub force_connected: bool,
+    pub requester: Option<String>,
+}
+
+/// Why the engine refused a dispatched change: its sentence, and, when the
+/// refusal was that somebody else is attached to what the change would end,
+/// who (see [`dux_core::attachments`]).
+#[derive(Debug)]
+pub struct WireError {
+    pub message: String,
+    pub attached: Option<Vec<dux_core::attachments::Blocker>>,
+}
+
+impl From<String> for WireError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            attached: None,
+        }
+    }
 }
 
 /// What a route says when the engine made a followed change and handed back no
@@ -107,7 +133,7 @@ pub const MISSING_OPERATION_RECORD: &str =
 pub enum EngineRequest {
     ApplyWire(
         WireCommand,
-        oneshot::Sender<Result<WireCommandOutcome, String>>,
+        oneshot::Sender<Result<WireCommandOutcome, WireError>>,
         /// Audience for any statuses this command mints. The actor sets
         /// `engine.current_origin` to this for the duration of `apply_wire` and
         /// resets it to [`StatusScope::All`] after, so a web operation's toasts
@@ -673,6 +699,8 @@ pub struct LiveServerLimits {
     access_log: AtomicBool,
     pty_send_timeout_seconds: AtomicUsize,
     heartbeat_deadline_seconds: AtomicUsize,
+    /// `[server] presence_grace_seconds`, read as each terminal socket closes.
+    presence_grace_seconds: std::sync::atomic::AtomicU64,
     /// `[server] allowed_hosts`, which the Host guard reads per request, so a
     /// reload that edits the list applies to the running listener.
     allowed_hosts: crate::host_guard::LiveHostNames,
@@ -748,6 +776,16 @@ impl LiveServerLimits {
             .store(value, Ordering::Relaxed);
     }
 
+    /// How long a browser tab keeps counting as attached to a terminal it was
+    /// looking at after that terminal's socket closed.
+    pub fn presence_grace(&self) -> Duration {
+        Duration::from_secs(self.presence_grace_seconds.load(Ordering::Relaxed))
+    }
+
+    pub fn set_presence_grace_seconds(&self, value: u64) {
+        self.presence_grace_seconds.store(value, Ordering::Relaxed);
+    }
+
     /// Adopt every value from a reloaded `[server]` section. `source` is the
     /// text it was read from, when there is one (see [`crate::auth::LiveAuth::store`]).
     pub fn store_from(&self, server: &dux_core::config::ServerConfig, source: Option<&str>) {
@@ -765,6 +803,7 @@ impl LiveServerLimits {
                 server.heartbeat_seconds,
             ) as usize,
         );
+        self.set_presence_grace_seconds(server.presence_grace_seconds);
         self.set_allowed_hosts(&server.allowed_hosts);
         self.auth.store(&server.auth, source);
     }
@@ -813,9 +852,12 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // handlers write claims into it and the loop's spine check reads them back
     // out to publish the owner per agent tab.
     let pty_input_owners = Arc::new(PtySizeOwners::default());
+    // Driving or watching is read from this serve's ownership record.
+    engine.attachments.use_owners(Arc::clone(&pty_input_owners));
     // Built here for the same reason as `pty_input_owners`: the loop starts
     // before the router exists, so both sides have to be handed the same Arc.
     let live_limits = Arc::new(LiveServerLimits::default());
+    live_limits.set_presence_grace_seconds(engine.config.server.presence_grace_seconds);
     // The password and the rest of `[server.auth]` hold from the first request,
     // before any router seeds the other limits.
     live_limits.auth().store(
@@ -848,6 +890,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             admission: process_admission(engine),
             worktree_ops: engine.worktree_ops().clone(),
             operations: engine.operations.clone(),
+            attachments: engine.attachments.clone(),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -918,6 +961,10 @@ pub struct EngineHandle {
     /// record by id here, off the engine thread, while the engine and the
     /// status emitter finish it.
     operations: dux_core::operations::Operations,
+    /// The engine's attachment registry, shared by handle: the terminal
+    /// sockets attach and detach here off the engine thread, and the engine
+    /// reserves against it before every change that would end a terminal.
+    attachments: dux_core::attachments::Attachments,
     /// The engine's per-worktree registry of operations in flight, shared by
     /// handle: the editor, upload and git routes run off the engine thread and
     /// still register the worktree they write into, so a removal waits for
@@ -1175,11 +1222,16 @@ impl EngineHandle {
                 Some(Followed {
                     kind,
                     answered: true,
+                    force_connected: false,
+                    requester: None,
                 }),
             ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
-        let outcome = rx.await.map_err(|_| "engine reply dropped".to_string())??;
+        let outcome = rx
+            .await
+            .map_err(|_| "engine reply dropped".to_string())?
+            .map_err(|e| e.message)?;
         let record = outcome
             .operation
             .clone()
@@ -1207,11 +1259,47 @@ impl EngineHandle {
                 Some(Followed {
                     kind,
                     answered: false,
+                    force_connected: false,
+                    requester: None,
                 }),
             ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
-        rx.await.map_err(|_| "engine reply dropped".to_string())?
+        rx.await
+            .map_err(|_| "engine reply dropped".to_string())?
+            .map_err(|e| e.message)
+    }
+
+    /// A change that would end terminals somebody may be attached to (an
+    /// agent delete, stop or forced restart, a tab or terminal close, a
+    /// project removal), covered by an operation record of `kind` like
+    /// [`Self::apply_wire_recorded`] (or followed, like
+    /// [`Self::apply_wire_operation`], when `answered`). Refused with who is
+    /// attached unless `force_connected`; the record's view rides
+    /// `outcome.operation`.
+    pub async fn apply_wire_guarded(
+        &self,
+        command: WireCommand,
+        origin: StatusScope,
+        followed: Followed,
+    ) -> Result<WireCommandOutcome, WireError> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::ApplyWire(
+                command,
+                tx,
+                origin,
+                Some(followed),
+            ))
+            .await
+            .map_err(|_| WireError::from("engine thread gone".to_string()))?;
+        rx.await
+            .map_err(|_| WireError::from("engine reply dropped".to_string()))?
+    }
+
+    /// Who is attached to which agent tab and terminal.
+    pub fn attachments(&self) -> &dux_core::attachments::Attachments {
+        &self.attachments
     }
 
     /// The engine's operation registry.
@@ -1229,7 +1317,9 @@ impl EngineHandle {
             .send(EngineRequest::ApplyWire(command, tx, origin, None))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
-        rx.await.map_err(|_| "engine reply dropped".to_string())?
+        rx.await
+            .map_err(|_| "engine reply dropped".to_string())?
+            .map_err(|e| e.message)
     }
 
     /// Bump and return the next monotonic changed-files revision for `session_id`
@@ -2586,7 +2676,8 @@ impl EngineService {
                 events_watchers,
                 engine.live_status_keys.clone(),
                 engine.operations.clone(),
-            ),
+            )
+            .ending_reservations_of(engine.attachments.clone()),
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -3148,6 +3239,7 @@ impl EngineService {
             // Retirement is the companion's own decision, made one level up in
             // the `dux` binary: this type only reports what one iteration did.
             retirement: None,
+            statuses: self.status.take_for_terminal(),
         }
     }
 
@@ -3309,7 +3401,7 @@ impl EngineService {
                         ),
                         Err(message) => {
                             dux_core::logger::warn(&format!("[server] {message}"));
-                            let _ = reply.send(Err(message));
+                            let _ = reply.send(Err(message.into()));
                         }
                     }
                 }
@@ -3458,6 +3550,14 @@ struct StatusEmitter {
     /// web raises passes through, so it is the completion point for every
     /// worker-run change a client follows (see [`dux_core::operations`]).
     operations: dux_core::operations::Operations,
+    /// The engine's attachment registry: a final also ends the reservations
+    /// waiting on its key (see [`dux_core::attachments::Life::Key`]).
+    attachments: dux_core::attachments::Attachments,
+    /// Statuses kept for the terminal UI's status line, while a terminal UI
+    /// services this emitter (`None` otherwise, so `dux server` keeps none):
+    /// those a change made by a client with no connection here raised for
+    /// every surface, which no browser stands in for.
+    for_terminal: Option<Vec<WireStatus>>,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
     /// concurrent operation (e.g. a rapid retry during commit-msg generation).
@@ -3475,6 +3575,8 @@ impl StatusEmitter {
     ) -> Self {
         Self {
             operations,
+            attachments: dux_core::attachments::Attachments::default(),
+            for_terminal: None,
             tx,
             clear_tx,
             snapshot_tx,
@@ -3491,6 +3593,27 @@ impl StatusEmitter {
             controller: KeyedStatusController::emitting_finals().with_live_keys(live),
             generations: std::collections::HashMap::new(),
         }
+    }
+
+    /// Keep `status` for the terminal UI's status line, when one services
+    /// this emitter.
+    fn keep_for_terminal(&mut self, status: &WireStatus) {
+        if let Some(kept) = self.for_terminal.as_mut() {
+            kept.push(status.clone());
+        }
+    }
+
+    /// The statuses kept for the terminal UI since it last asked, from now on
+    /// keeping them (a terminal UI is servicing this emitter).
+    fn take_for_terminal(&mut self) -> Vec<WireStatus> {
+        std::mem::take(self.for_terminal.get_or_insert_with(Vec::new))
+    }
+
+    /// End the reservations of `attachments` waiting on a key as its final
+    /// lands here.
+    fn ending_reservations_of(mut self, attachments: dux_core::attachments::Attachments) -> Self {
+        self.attachments = attachments;
+        self
     }
 
     /// Upsert the status in the controller (keyed or anonymous), refresh the
@@ -3512,6 +3635,7 @@ impl StatusEmitter {
                 status.segments.as_deref(),
                 Instant::now(),
             );
+            self.attachments.finish_key(key);
         }
         // A status quiet on the web is the command's answer and not a
         // notification: it already rode back to its caller in the outcome, so it
@@ -3588,6 +3712,7 @@ impl StatusEmitter {
         // sentence. A hand-off moved its records to the next key first.
         self.operations
             .finish_by_key(&key, StatusTone::Info, "", None, Instant::now());
+        self.attachments.finish_key(&key);
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
@@ -4069,36 +4194,64 @@ struct WireOrigin {
 fn handle_apply_wire_request(
     engine: &mut Engine,
     cmd: WireCommand,
-    reply: oneshot::Sender<Result<WireCommandOutcome, String>>,
+    reply: oneshot::Sender<Result<WireCommandOutcome, WireError>>,
     origin: WireOrigin,
     status_tx: &mut StatusEmitter,
     config_reload_tx: &broadcast::Sender<()>,
     config_disk_ahead: &mut bool,
 ) {
     let mutates_config = cmd.mutates_config_static();
+    // A client with no connection here (the command line) is not a status
+    // surface: what its change raises for every surface reaches the terminal
+    // UI's line too.
+    let for_every_surface = matches!(origin.scope, StatusScope::All);
     // A file a raw save left ahead of memory is taken on before this runs,
     // by the loop that owns the reload (`EngineService::adopt_disk_config`).
     debug_assert!(!(mutates_config && *config_disk_ahead));
+    // Whoever sent this is not the terminal UI: a browser tab when the route
+    // vouched for the events connection the request named, otherwise a client
+    // with no connection here (the command line).
+    engine.dispatch_policy = Some(dux_core::attachments::Policy {
+        requester: origin
+            .operation
+            .as_ref()
+            .and_then(|followed| followed.requester.clone()),
+        force: origin
+            .operation
+            .as_ref()
+            .is_some_and(|followed| followed.force_connected),
+    });
     engine.current_origin = origin.scope;
     let result = match origin.operation {
         Some(Followed {
             kind,
             answered: true,
+            ..
         }) => engine.apply_wire_operation(cmd, kind),
         Some(Followed {
             kind,
             answered: false,
+            ..
         }) => engine.apply_wire_recorded(cmd, kind),
         None => engine.apply_wire(cmd),
     }
-    .map_err(|e| e.to_string());
+    .map_err(|e| WireError {
+        attached: e
+            .downcast_ref::<dux_core::engine::Attached>()
+            .map(|attached| attached.blockers.clone()),
+        message: e.to_string(),
+    });
     engine.current_origin = StatusScope::All;
+    engine.dispatch_policy = None;
 
     if result.is_ok() && mutates_config {
         let _ = config_reload_tx.send(());
     }
     if let Ok(outcome) = &result {
         for status in outcome.status.iter().chain(outcome.settled.iter()) {
+            if for_every_surface && status.scope == StatusScope::All {
+                status_tx.keep_for_terminal(status);
+            }
             let _ = status_tx.send(status.clone());
         }
     }
@@ -6393,6 +6546,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
@@ -6411,6 +6566,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(0)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         }
     }
@@ -6599,6 +6756,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         e.operations.open(
@@ -6659,6 +6818,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         // One keyed Info, one anonymous Info, and a sticky error that must not
@@ -6754,6 +6915,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("del", "error", "Worktree delete failed.").sticky());
@@ -6840,6 +7003,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("create-1", "busy", "Pulling\u{2026}"));
@@ -6883,6 +7048,8 @@ mod tests {
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             operations: Default::default(),
+            attachments: Default::default(),
+            for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
         // Drain the initial sends so `rx` only sees the upgrades.

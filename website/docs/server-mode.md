@@ -219,6 +219,15 @@ back to you.
 > rest of the screen keep working, so you can move to another agent or another tab
 > without taking anything over.
 
+**Nobody's terminal is ended under them.** Deleting, stopping or restarting an agent,
+closing a tab or a terminal, and removing a project are refused while another device is
+connected to what they would end, on every surface, and the refusal says who (see
+[When somebody else is connected](/docs/web-agents#when-somebody-else-is-connected)).
+Quitting the terminal app ends every terminal it started, so its quit confirmation opens
+whenever another device is connected to one of them, and names each one; if another device
+connects while it is open, confirming asks again with the new list. A change you make from
+the command line shows its outcome on the terminal app's status line too.
+
 Which to reach for:
 
 - **`dux server`** when nothing needs a terminal: a headless box, a tmux pane you will
@@ -385,6 +394,7 @@ The rest tune presentation and limits:
 | `pty_send_timeout_seconds` | `60` | How long dux waits for the first two things it sends a browser terminal, the handshake and the screen redraw, to actually arrive, before it gives up on that connection and lets the browser try again. A send finishes when the bytes get there, so on a slow connection this is really a measure of speed, and the screen redraw can be your whole scrollback. Set it too low and a phone on a bad signal can never finish attaching. A config reload applies it to the next terminal connection. |
 | `operation_unknown_after_seconds` | `1800` | How long a change that a program is waiting on (deleting an agent with its worktree, creating one, removing a project) may keep running before dux reports its outcome as unknown. This never stops the change and never calls it failed: it keeps running, and once it ends its real outcome replaces "unknown". A config reload applies it to the changes started after it. |
 | `operation_retention_seconds` | `1800` | How long dux remembers the outcome of a finished change so the program that asked for it can still look it up. Outcomes are kept in memory only, so restarting dux forgets them. A config reload applies it to the changes started after it. |
+| `presence_grace_seconds` | `300` | How long a browser tab keeps counting as connected to a terminal whose connection was lost (not closed) while the tab was showing it, such as a phone in a pocket, counted from the last moment the terminal was on screen and whether or not the phone is still connected at all. While it counts, deleting, stopping or restarting that agent, or closing that terminal, is refused. Closing the tab, navigating away, opening something else in it, signing out or going ahead anyway ends it at once. `0` stops counting the moment the connection is lost. A config reload applies it to the next connection that is lost. |
 | `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. `0` disables the bound. Read at startup. |
 | `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. `0` disables the bound. Read at startup. |
 | `control_socket` | `"dux.sock"` | Where dux answers command-line clients on this machine: a socket file only your user can open, served by every running dux (the terminal app, the flip, background serving and `dux server` alike), with no password because your user account is the credential. A relative path is read from the config folder, an absolute one is used as written. The folder it goes in must be yours alone (owned by you, and nobody else can write to it), as the config folder is; any other folder starts dux without the socket. A leftover socket from a dux that crashed is replaced at startup; anything at the path that is not a socket, or a socket dux cannot prove dead, is left alone. A path longer than the system allows (103 bytes on macOS, 107 on Linux) starts dux without the socket, and dux says why on its status line and in `dux.log`. Read when dux starts; a config reload that changes it says the new path waits for the next start. |

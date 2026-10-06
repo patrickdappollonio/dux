@@ -3794,6 +3794,24 @@ impl App {
         force: bool,
         seek_fullscreen: bool,
     ) -> Result<()> {
+        // A start stops any other agent running in the same folder, and a
+        // forced one ends this agent's own run first: refused while somebody
+        // else is attached to what it would end, before anything is torn down.
+        let mut scope = self.engine.launch_conflict_scope(session_id);
+        if force {
+            scope.extend(self.engine.agent_scope(session_id));
+        }
+        let _reservation = if scope.is_empty() {
+            None
+        } else {
+            match self.engine.reserve_destruction(scope) {
+                Ok(reservation) => Some(reservation),
+                Err(attached) => {
+                    self.set_error(attached.to_string());
+                    return Ok(());
+                }
+            }
+        };
         let pty_size = self.pty_size_for_launch();
         match self.engine.reconnect_plan(session_id, force, pty_size)? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
@@ -4832,7 +4850,10 @@ mod tests {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            attachments: Default::default(),
+            dispatch_policy: None,
             deferred_operations: Vec::new(),
+            deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };
@@ -4959,6 +4980,8 @@ mod tests {
             url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
+            drawn_ptys: Vec::new(),
+            published_ptys: None,
             companion: None,
             background_server_preflight_pending: false,
             background_server_wanted: false,
@@ -5186,7 +5209,10 @@ mod tests {
             last_created_op_id: None,
             operations: Default::default(),
             operation_in_dispatch: None,
+            attachments: Default::default(),
+            dispatch_policy: None,
             deferred_operations: Vec::new(),
+            deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };
@@ -8397,6 +8423,16 @@ mod tests {
                 "s1-slot",
             )));
 
+        // Refused, naming who, while a browser watches the agent.
+        let watching = crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
+        app.force_reconnect_agent().expect("force reconnect");
+        assert!(
+            app.status.message().contains("10.0.0.7"),
+            "{}",
+            app.status.message()
+        );
+        crate::app::test_support::stop_watching(&app, watching);
+
         app.force_reconnect_agent().expect("force reconnect");
 
         assert!(
@@ -8911,6 +8947,18 @@ mod tests {
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
         release_agent_elsewhere(&mut app);
 
+        // Refused, naming who, while a browser watches it.
+        let watching = crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
+        app.confirm_detach_selected_session().expect("dispatch");
+        app.resolve_confirm_detach_agent(true);
+        assert!(
+            app.status.text().contains("10.0.0.7"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!app.engine.providers.is_empty(), "nothing was stopped");
+        crate::app::test_support::stop_watching(&app, watching);
+
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);
         assert!(matches!(app.prompt, PromptState::None));
@@ -8931,6 +8979,40 @@ mod tests {
             app.status.text().contains("to shut down"),
             "status: {}",
             app.status.text()
+        );
+
+        // Nobody can attach to the agent while it is still shutting down, and
+        // can once the stop's final lands.
+        let late = || dux_core::attachments::Target {
+            kind: dux_core::attachments::TargetKind::Tab,
+            id: "s1-slot".to_string(),
+            agent: Some("s1".to_string()),
+        };
+        assert!(
+            app.engine
+                .attachments
+                .attach("late-tab", late(), None, None)
+                .is_err(),
+            "the stop is still running"
+        );
+        let key = app
+            .status
+            .snapshot()
+            .into_iter()
+            .find_map(|status| (status.tone == "busy").then_some(status.key).flatten())
+            .expect("the stop's busy");
+        app.apply_reaction(dux_core::engine::EventReaction::Status(
+            dux_core::engine::StatusUpdate::keyed(
+                key,
+                dux_core::statusline::StatusTone::Info,
+                "stopped",
+            ),
+        ));
+        assert!(
+            app.engine
+                .attachments
+                .attach("late-tab", late(), None, None)
+                .is_ok()
         );
     }
 
@@ -9324,15 +9406,73 @@ mod tests {
     fn confirming_the_project_removal_removes_the_record_and_keeps_the_folder() {
         let (_root, mut app) = agentless_project();
         let folder = PathBuf::from(&app.engine.projects[0].path);
-        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
+        let project = app.engine.projects[0].clone();
+        app.show_project_terminal(&project)
+            .expect("open a project terminal");
+        let terminal = app
+            .engine
+            .companion_terminals
+            .keys()
+            .next()
+            .cloned()
+            .expect("the project terminal");
+        let watched = || dux_core::attachments::Target {
+            kind: dux_core::attachments::TargetKind::Terminal,
+            id: terminal.clone(),
+            agent: None,
+        };
 
+        // Refused, naming who, while a browser watches the project's terminal.
+        app.engine.attachments.register(
+            "browser-tab",
+            dux_core::attachments::ConnectionFacts {
+                surface: dux_core::attachments::Surface::Browser,
+                device: Some("Firefox".to_string()),
+                address: Some("10.0.0.7".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        let watching = app
+            .engine
+            .attachments
+            .attach("browser-tab", watched(), None, None)
+            .unwrap();
+        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        assert!(
+            app.status.text().contains("10.0.0.7"),
+            "{}",
+            app.status.text()
+        );
+        assert_eq!(app.engine.projects.len(), 1);
+        crate::app::test_support::stop_watching(&app, watching);
+
+        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Nobody attaches to what the removal is ending until it has finished.
+        assert!(
+            app.engine
+                .attachments
+                .attach("late-tab", watched(), None, None)
+                .is_err()
+        );
         drain_until(&mut app, "the project to be removed", |app| {
             app.engine.projects.is_empty()
         });
+        assert!(
+            app.engine
+                .attachments
+                .attach("late-tab", watched(), None, None)
+                .is_ok()
+        );
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.engine.session_store.load_projects().unwrap().is_empty());

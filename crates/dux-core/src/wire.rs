@@ -1720,6 +1720,9 @@ impl Engine {
         // back reflects only THIS command's create.
         self.last_created_op_id = None;
         self.admit_wire(&command)?;
+        // The changes this dispatches to an engine method directly; the ones
+        // it turns into a `Command` are guarded in `Engine::apply`.
+        let _reservation = self.guard_wire(&command)?;
         let set = match &command {
             WireCommand::UpdateMacros { .. }
             | WireCommand::SetMacro { .. }

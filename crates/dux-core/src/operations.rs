@@ -450,6 +450,9 @@ struct Record {
     kind: OperationKind,
     policy: OperationPolicy,
     started: Instant,
+    /// Minted when the record opens and never changed, so a [`RecordWatch`]
+    /// finds the same record after a [`Operations::rekey`] moves its id.
+    token: u64,
     /// The key whose final finishes this record, while it runs.
     awaiting: Option<String>,
     notes: OperationNotes,
@@ -466,6 +469,7 @@ struct Record {
 #[derive(Default)]
 struct Registry {
     records: HashMap<String, Record>,
+    next_token: u64,
     /// Which reload a record asked for follows. The reload whose barrier is
     /// open, or the next one to open, is `reload_epoch`; one asked for while a
     /// reload is already reading waits for the follow-up, `reload_epoch + 1`.
@@ -496,6 +500,34 @@ impl Registry {
         self.records
             .values_mut()
             .filter(move |record| record.end.is_none() && record.awaiting.as_deref() == Some(key))
+    }
+}
+
+/// One record, followed by what it was opened as rather than by its id,
+/// which a rekey may change. See [`Operations::watch`].
+#[derive(Clone)]
+pub struct RecordWatch {
+    operations: Operations,
+    token: u64,
+}
+
+impl std::fmt::Debug for RecordWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RecordWatch").field(&self.token).finish()
+    }
+}
+
+impl RecordWatch {
+    /// Whether the record is still open: running, or past its unknown
+    /// threshold with the work not yet ended. A record discarded or pruned
+    /// is not.
+    pub fn is_open(&self) -> bool {
+        self.operations.with(|registry| {
+            registry
+                .records
+                .values()
+                .any(|record| record.token == self.token && record.end.is_none())
+        })
     }
 }
 
@@ -533,12 +565,15 @@ impl Operations {
     pub fn open(&self, id: &str, kind: OperationKind, policy: OperationPolicy, now: Instant) {
         self.with(|registry| {
             registry.prune(now);
+            registry.next_token += 1;
+            let token = registry.next_token;
             registry.records.insert(
                 id.to_string(),
                 Record {
                     kind,
                     policy,
                     started: now,
+                    token,
                     awaiting: Some(id.to_string()),
                     notes: OperationNotes::default(),
                     end: None,
@@ -645,6 +680,16 @@ impl Operations {
                     kind: record.kind,
                 })
         })
+    }
+
+    /// A watch on the record `id` that keeps finding it after a rekey, or
+    /// `None` when there is no such record.
+    pub fn watch(&self, id: &str) -> Option<RecordWatch> {
+        self.with(|registry| registry.records.get(id).map(|record| record.token))
+            .map(|token| RecordWatch {
+                operations: self.clone(),
+                token,
+            })
     }
 
     /// Forget a record whose change was refused before it started.

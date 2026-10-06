@@ -471,11 +471,50 @@ impl Engine {
         // Refused while a change another surface follows holds what this one
         // would change. Checked only: a command has no record to hold with.
         self.check_command(&command)?;
+        // Refused while somebody else is attached to what it would end; held
+        // against new attachments until the change ends (see
+        // `attachment_guard`): its operation record finishing, or, with none,
+        // the final of the status key its work runs on past this call.
+        let reservation = self.guard_command(&command)?;
+        let status_key = match &command {
+            Command::PersistProject {
+                status_op_id: Some(key),
+                ..
+            } => Some(key.clone()),
+            // A launch reports back under its tab, whatever surface started it.
+            Command::DispatchAgentLaunch { request } => Some(
+                crate::operations::launch_binding_key(request.tab_id.as_str()),
+            ),
+            _ => None,
+        };
+        let applied = self.apply_admitted(command);
+        if let Some(reservation) = reservation {
+            let key = status_key.or_else(|| {
+                applied
+                    .as_ref()
+                    .ok()
+                    .and_then(crate::wire::wire_status_from_reaction)
+                    .filter(|status| {
+                        crate::statusline::StatusTone::from_wire(&status.tone)
+                            == crate::statusline::StatusTone::Busy
+                    })
+                    .and_then(|status| status.key)
+            });
+            if let Some(key) = key {
+                reservation.until_final(&key);
+            }
+        }
+        applied
+    }
+
+    /// [`Self::apply`] once the command is admitted and guarded.
+    fn apply_admitted(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands, so it re-applies against the fresh
         // config instead of racing it.
         if self.reloading && Self::is_config_mutating(&command) {
             self.deferred_commands.push(command);
+            self.deferred_policies.push(self.dispatch_policy.clone());
             self.deferred_operations
                 .push(self.operation_in_dispatch.clone());
             return Ok(EventReaction::Nothing);
@@ -1088,6 +1127,7 @@ impl Engine {
                     {
                         self.deferred_commands.push(Command::ReloadConfig);
                         self.deferred_operations.push(None);
+                        self.deferred_policies.push(None);
                     }
                     // A client waiting on this one follows the reload that
                     // reads the file after the one running.

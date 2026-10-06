@@ -1525,6 +1525,14 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        // The panes this frame draws are the terminals this surface is
+        // attached to (see `attachment_presence`).
+        self.drawn_ptys.clear();
+        self.render_frame(frame);
+        self.publish_drawn_attachments();
+    }
+
+    fn render_frame(&mut self, frame: &mut Frame) {
         self.redraw.renders = self.redraw.renders.wrapping_add(1);
         if let Some(viewer) = self.server_log_viewer.as_mut() {
             viewer.render(frame, &self.theme, &self.bindings);
@@ -4143,7 +4151,12 @@ impl App {
         let Some(provider) = self.selected_terminal_surface_client() else {
             return (false, 0);
         };
-        if !provider.has_output() {
+        let has_output = provider.has_output();
+        self.note_drawn_pty();
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return (false, 0);
+        };
+        if !has_output {
             self.render_terminal_loading(frame, term_area, provider_name, active_surface);
             return (true, 0);
         }
@@ -8335,15 +8348,16 @@ impl App {
         let PromptState::ConfirmQuit {
             agent_count,
             terminal_count,
+            attached,
             focus,
         } = &self.prompt
         else {
             return;
         };
-        let process_desc = quit_process_description(*agent_count, *terminal_count);
-        let lines = vec![
-            Line::from(""),
-            Line::from(vec![
+        let mut lines = vec![Line::from("")];
+        if agent_count + terminal_count > 0 {
+            let process_desc = quit_process_description(*agent_count, *terminal_count);
+            lines.push(Line::from(vec![
                 Span::raw(format!(" {process_desc} will be ")),
                 Span::styled(
                     "killed",
@@ -8352,7 +8366,28 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" if you quit."),
-            ]),
+            ]));
+        }
+        if !attached.is_empty() {
+            let mut who = vec![Span::raw(" Also connected to them right now: ")];
+            for (index, blocker) in attached.iter().enumerate() {
+                if index > 0 {
+                    who.push(Span::raw(", "));
+                }
+                let device = blocker
+                    .device
+                    .as_deref()
+                    .and_then(dux_core::device_label::short_device_label)
+                    .unwrap_or_else(|| "a browser".to_string());
+                who.push(name_chip(&device, &self.theme));
+                if let Some(address) = &blocker.address {
+                    who.push(Span::raw(format!(" at {address}")));
+                }
+            }
+            who.push(Span::raw("."));
+            lines.push(Line::from(who));
+        }
+        lines.extend([
             Line::from(""),
             Line::from(Span::styled(
                 " Any in-progress work will be lost.",
@@ -8362,7 +8397,7 @@ impl App {
                 " File changes in worktrees are preserved.",
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
-        ];
+        ]);
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmQuitCancel,
@@ -18050,6 +18085,7 @@ mod tests {
             app.prompt = PromptState::ConfirmQuit {
                 agent_count: 1,
                 terminal_count: 0,
+                attached: Vec::new(),
                 focus: ConfirmFocus::Cancel,
             };
             assert!(!app.center_typeable());
@@ -18073,6 +18109,7 @@ mod tests {
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Cancel,
         };
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");

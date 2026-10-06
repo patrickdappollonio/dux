@@ -1023,6 +1023,7 @@ mod tests {
         let prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
+            attached: Vec::new(),
             focus: ConfirmFocus::Cancel,
         };
         let buf = render_at(&mut app, prompt, SMALL);
@@ -1227,6 +1228,7 @@ mod tests {
                 &PromptState::ConfirmQuit {
                     agent_count: 1,
                     terminal_count: 0,
+                    attached: Vec::new(),
                     focus: ConfirmFocus::Cancel,
                 },
                 "Same",
