@@ -15,12 +15,12 @@ import type { Spine } from "./workspaceApi"
 // standalone agent names the folder it lives in. The two spellings mirror the
 // wire, where the workspace is tagged rather than flat.
 type TestSession =
-  | { id: string; project_id: string }
+  | { id: string; project_id: string; title?: string }
   | { id: string; folder: string }
 
-function makeSpine(sessions: TestSession[]): Spine {
+function makeSpine(sessions: TestSession[], projectIds: string[] = []): Spine {
   return {
-    projects: [],
+    projects: projectIds.map((id) => ({ id, name: id, path: `/p/${id}` })) as Spine["projects"],
     sessions: sessions.map((s) =>
       "folder" in s
         ? {
@@ -42,12 +42,39 @@ function makeSpine(sessions: TestSession[]): Spine {
 
 let spineBody: Spine = makeSpine([])
 
+// The record of the clone's operation, as `GET /api/v1/operations/{id}` reads
+// it. A read asked to wait is held while the record runs, the way the server
+// holds it, and answered the moment the record ends; a read that does not wait
+// answers at once.
+type TestRecord = { state: string; created: string[] }
+let record: TestRecord = { state: "running", created: [] }
+let heldReads: (() => void)[] = []
+function setRecord(next: TestRecord) {
+  record = next
+  if (next.state !== "running") {
+    for (const answer of heldReads.splice(0)) answer()
+  }
+}
+function recordReply(): Response {
+  const body = JSON.stringify({ id: "op-clone", kind: "project.add", message: "", ...record })
+  return {
+    ok: true,
+    status: 200,
+    json: async () => JSON.parse(body),
+    text: async () => body,
+    headers: { get: () => null },
+  } as unknown as Response
+}
+
+// The clone's 202, held when a test wants it to land after something else.
+let cloneAccepted: Promise<void> | null = null
+
 // The address bar these tests read back. `syncUrl` writes through `history`, so
 // the stubs below mirror the write into `hash`: the URL is the source of truth
 // for position, and that is what a creation is supposed to move.
 let fakeLocation = { host: "localhost:0", pathname: "/", search: "", hash: "" }
 
-const fetchMock = vi.fn(async (url: string) => {
+const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   if (u.includes("/api/v1/workspace")) {
     return {
@@ -55,6 +82,29 @@ const fetchMock = vi.fn(async (url: string) => {
       status: 200,
       json: async () => spineBody,
       text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.endsWith("/api/v1/browse")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ path: "/home/u", entries: [] }),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.includes("/api/v1/operations/op-clone")) {
+    if (u.includes("wait_seconds=0") || record.state !== "running") return recordReply()
+    return new Promise<Response>((resolve) => heldReads.push(() => resolve(recordReply())))
+  }
+  if (u.endsWith("/api/v1/projects") && init?.method === "POST") {
+    if (cloneAccepted) await cloneAccepted
+    return {
+      ok: true,
+      status: 202,
+      json: async () => ({ op_id: "op-clone" }),
+      text: async () => JSON.stringify({ op_id: "op-clone" }),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -81,6 +131,9 @@ class FakeWebSocket {
 
 beforeEach(() => {
   spineBody = makeSpine([])
+  record = { state: "running", created: [] }
+  heldReads = []
+  cloneAccepted = null
   fakeLocation = { host: "localhost:0", pathname: "/", search: "", hash: "" }
   vi.stubGlobal("location", fakeLocation)
   vi.stubGlobal("localStorage", {
@@ -123,9 +176,10 @@ async function loadStore() {
 async function pushSpine(
   mod: Awaited<ReturnType<typeof loadStore>>,
   sessions: TestSession[],
+  projectIds: string[] = [],
 ): Promise<void> {
   const prev = mod.getSnapshot().spine
-  spineBody = makeSpine(sessions)
+  spineBody = makeSpine(sessions, projectIds)
   mod.eventsSocket.onEvent({ event: "sessions.changed" })
   await vi.waitFor(() => {
     expect(mod.getSnapshot().spine).not.toBe(prev)
@@ -230,6 +284,17 @@ describe("auto-focus the agent this client created", () => {
       { id: "s2", project_id: "p1" },
     ])
     expect(mod.getSnapshot().selectedSessionId).toBeNull()
+
+    // A clone's token names its agent through the operation's record rather
+    // than a snapshot, so a dropped connection costs it nothing.
+    mod.openCloneProject()
+    mod.setCloneProjectUrl("https://example.com/owner/repo.git")
+    mod.setCloneProjectPath("/home/u/repo")
+    mod.submitCloneProject()
+    await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).toBeNull())
+    mod.eventsSocket.onConn("closed")
+    mod.eventsSocket.onConn("open")
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
   })
 
   it("focuses a forked agent, scoped to the source session's project", async () => {
@@ -332,6 +397,21 @@ describe("auto-focus the agent this client created", () => {
       { id: "s2", project_id: "p1" },
     ])
     expect(mod.getSnapshot().selectedSessionId).toBeNull()
+
+    // A clone's token ends on its own operation's outcome, not on somebody
+    // else's error.
+    mod.openCloneProject()
+    mod.setCloneProjectUrl("https://example.com/owner/repo.git")
+    mod.setCloneProjectPath("/home/u/repo")
+    mod.submitCloneProject()
+    await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).toBeNull())
+    mod.eventsSocket.onEvent({
+      event: "status",
+      key: "op-other",
+      tone: "error",
+      message: "Something else failed",
+    })
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
   })
 
   it("expires a stale pending focus instead of grabbing a later session", async () => {
@@ -424,4 +504,128 @@ describe("auto-focus the agent this client created", () => {
     expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
   })
 
+})
+
+describe("auto-focus the agent a clone starts", () => {
+  // Arm a clone the way the dialog does: open it, fill it, submit, and wait for
+  // the 202 to hand back the operation the token then follows.
+  async function startClone(
+    mod: Awaited<ReturnType<typeof loadStore>>,
+    agentName: string,
+  ) {
+    mod.openCloneProject()
+    mod.setCloneProjectUrl("https://example.com/owner/repo.git")
+    mod.setCloneProjectPath("/home/u/repo")
+    mod.setCloneProjectName(agentName)
+    mod.submitCloneProject()
+    await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).toBeNull())
+  }
+
+  it("selects the agent the clone's operation names, and no other new agent", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", title: "fixer" }], ["p1"])
+    await startClone(mod, "fixer")
+    // Another client's new project with an agent of the same name is not ours.
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p1", title: "fixer" },
+        { id: "s2", project_id: "p2", title: "fixer" },
+      ],
+      ["p1", "p2"],
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+
+    setRecord({ state: "running", created: ["p3", "s3"] })
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p1", title: "fixer" },
+        { id: "s2", project_id: "p2", title: "fixer" },
+        { id: "s3", project_id: "p3", title: "fixer" },
+      ],
+      ["p1", "p2", "p3"],
+    )
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedSessionId).toBe("s3"))
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+  })
+
+  it("stays armed for as long as the clone's operation runs", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    const realNow = Date.now()
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 2 * 60 * 60_000)
+    await pushSpine(mod, [{ id: "s1", project_id: "p2", title: "other" }], ["p2"])
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+    setRecord({ state: "running", created: ["p2", "s2"] })
+    await pushSpine(
+      mod,
+      [
+        { id: "s1", project_id: "p2", title: "other" },
+        { id: "s2", project_id: "p2", title: "fixer" },
+      ],
+      ["p2"],
+    )
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedSessionId).toBe("s2"))
+    vi.restoreAllMocks()
+  })
+
+  it("gives up when the clone's own operation ends without an agent", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    setRecord({ state: "failed", created: [] })
+    await vi.waitFor(() => expect(mod.getSnapshot().pendingCreateFocus).toBeNull())
+  })
+
+  it("keeps waiting through the hand-over and a warning, until the operation's outcome", async () => {
+    const mod = await loadStore()
+    await startClone(mod, "fixer")
+    // Dismissing the hand-over's toast animates it out, which a bare node
+    // environment has no frame loop for.
+    vi.stubGlobal("requestAnimationFrame", () => 0)
+    mod.eventsSocket.onEvent({ event: "status", key: "op-clone", tone: "busy", message: "Cloning" })
+    mod.eventsSocket.onEvent({ event: "status_cleared", key: "op-clone" })
+    // The status line gives up on a spinner past its ceiling while the work
+    // still runs; that warning is not the operation's outcome.
+    mod.eventsSocket.onEvent({
+      event: "status",
+      key: "op-clone",
+      tone: "warning",
+      message: "This operation has reported nothing for 30 minutes.",
+    })
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+
+    const realNow = Date.now()
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 91_000)
+    await pushSpine(mod, [{ id: "s1", project_id: "p2", title: "fixer" }], ["p2"])
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+    setRecord({ state: "succeeded", created: ["p2", "s1"] })
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedSessionId).toBe("s1"))
+    vi.restoreAllMocks()
+  })
+
+  it("selects the agent at once when the clone finished before its 202 was read", async () => {
+    const mod = await loadStore()
+    let accept: () => void = () => {}
+    cloneAccepted = new Promise<void>((resolve) => {
+      accept = resolve
+    })
+    mod.openCloneProject()
+    mod.setCloneProjectUrl("https://example.com/owner/repo.git")
+    mod.setCloneProjectPath("/home/u/repo")
+    mod.setCloneProjectName("fixer")
+    mod.submitCloneProject()
+    // The whole clone, its final and its agent all arrive ahead of the reply.
+    setRecord({ state: "succeeded", created: ["p2", "s2"] })
+    mod.eventsSocket.onEvent({ event: "status", key: "op-clone", tone: "info", message: "Done" })
+    await pushSpine(mod, [{ id: "s2", project_id: "p2", title: "fixer" }], ["p2"])
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+
+    accept()
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedSessionId).toBe("s2"))
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+  })
 })

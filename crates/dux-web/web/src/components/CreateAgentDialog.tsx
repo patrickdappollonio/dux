@@ -1,6 +1,8 @@
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import {
+  AgentNameInput,
+  RandomizeNameCheckbox,
+} from "@/components/AgentNameFields"
 import {
   Dialog,
   DialogContent,
@@ -9,10 +11,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { sanitizeAgentName } from "@/lib/agentName"
 import { renderProse } from "@/lib/prose"
-import type { ChangeEvent, KeyboardEvent } from "react"
+import type { KeyboardEvent } from "react"
 import {
   createAgentDialogView,
   createAgentFormView,
@@ -68,12 +70,14 @@ export function CreateAgentDialog() {
           error={createAgentPrError}
           onSubmit={handleSubmit}
         />
-        <AgentNameField
-          dialog={dialog}
+        <AgentNameInput
           value={createAgentDraft}
+          onChange={setCreateAgentDraft}
+          onSubmit={handleSubmit}
+          placeholder={dialog.namePlaceholder}
           invalid={form.invalidName}
           generating={createAgentNamePending}
-          onSubmit={handleSubmit}
+          autoFocus={dialog.nameAutoFocus}
         />
         <p className="text-xs text-muted-foreground">
           Letters, digits, dashes, underscores and slashes. This becomes the
@@ -108,19 +112,6 @@ function handleEnter(
   if (event.key !== "Enter") return
   event.preventDefault()
   onSubmit()
-}
-
-function handleNameChange(event: ChangeEvent<HTMLInputElement>): void {
-  const input = event.target
-  const raw = input.value
-  const caret = input.selectionStart ?? raw.length
-  setCreateAgentDraft(raw)
-  const sanitized = sanitizeAgentName(raw)
-  if (sanitized === raw) return
-  const next = Math.max(0, caret - (raw.length - sanitized.length))
-  // Controlled sanitization moves the caret to the end; restore its adjusted
-  // position after removed characters shorten a mid-string edit.
-  requestAnimationFrame(() => input.setSelectionRange(next, next))
 }
 
 function chooseExistingProject(reference: string): void {
@@ -179,39 +170,6 @@ function PrReferenceFields({
   )
 }
 
-interface AgentNameFieldProps {
-  dialog: CreateAgentDialogView
-  value: string
-  invalid: boolean
-  generating: boolean
-  onSubmit: () => void
-}
-
-function AgentNameField({
-  dialog,
-  value,
-  invalid,
-  generating,
-  onSubmit,
-}: AgentNameFieldProps) {
-  return (
-    <div className="relative">
-      <Input
-        value={value}
-        onChange={handleNameChange}
-        onKeyDown={(event) => handleEnter(event, onSubmit)}
-        placeholder={dialog.namePlaceholder}
-        aria-invalid={invalid}
-        disabled={generating}
-        autoFocus={dialog.nameAutoFocus}
-      />
-      {generating && (
-        <GlyphSpinner className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-      )}
-    </div>
-  )
-}
-
 interface AgentOptionsProps {
   showCopyChanges: boolean
   randomize: boolean
@@ -225,16 +183,10 @@ function AgentOptions({
 }: AgentOptionsProps) {
   return (
     <>
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id="randomize-agent-name"
-          checked={randomize}
-          onCheckedChange={toggleCreateAgentRandomize}
-        />
-        <label htmlFor="randomize-agent-name" className="text-sm">
-          Use randomized pet name
-        </label>
-      </div>
+      <RandomizeNameCheckbox
+        checked={randomize}
+        onToggle={toggleCreateAgentRandomize}
+      />
       {showCopyChanges && (
         <div className="flex items-center gap-2">
           <Checkbox

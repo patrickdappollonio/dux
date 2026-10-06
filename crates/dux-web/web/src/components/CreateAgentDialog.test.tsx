@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { CreateAgentTarget, DuxState } from "@/lib/store"
 
@@ -80,6 +80,14 @@ describe("CreateAgentDialog", () => {
     expect(
       screen.getByText("Copy uncommitted changes from the project checkout"),
     ).toBeTruthy()
+    expect(screen.getByText("Use randomized pet name")).toBeTruthy()
+
+    // The name field turns a space into a dash on its way into the store.
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "my agent" },
+    })
+    const { getSnapshot } = await import("@/lib/store")
+    expect(getSnapshot().createAgentDraft).toBe("my-agent")
   })
 
   it("requires a branch name when forking", async () => {

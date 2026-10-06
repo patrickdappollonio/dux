@@ -7,6 +7,7 @@ vi.mock("@/lib/store", () => ({
   openNewAgentPicker: vi.fn(),
   openAddProject: vi.fn(),
   openAddProjectForInit: vi.fn(),
+  openCloneProject: vi.fn(),
   openCreateAgentFromPr: vi.fn(),
   createStandaloneTerminal: vi.fn(),
   useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
@@ -66,6 +67,7 @@ describe("CreationOverflowMenuItems", () => {
       "New standalone agent…",
       "New standalone terminal in your home folder",
       "Add project…",
+      "Clone a repository…",
       "Initialize a repository…",
     ])
   })
@@ -117,6 +119,7 @@ describe("CreationOverflowMenuItems", () => {
       "New standalone agent…",
       "New standalone terminal in your home folder",
       "Add project…",
+      "Clone a repository…",
       "Initialize a repository…",
     ])
     expect(

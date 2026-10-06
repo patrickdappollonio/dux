@@ -17,6 +17,7 @@ vi.mock("@/lib/store", () => ({
     openCreateAgentFromPr(projectId),
   createStandaloneTerminal: () => createStandaloneTerminal(),
   openAddProjectForInit: vi.fn(),
+  openCloneProject: vi.fn(),
   useDux: () => ({
     bootstrap: { gh_available: ghAvailable },
     spine: projects === null ? null : { projects },
@@ -95,6 +96,7 @@ describe("LauncherCorner overflow", () => {
       "New standalone agent…",
       "New standalone terminal in your home folder",
       "Add project…",
+      "Clone a repository…",
       "Initialize a repository…",
     ])
     for (const label of ["Agents", "Terminals", "Projects"]) {

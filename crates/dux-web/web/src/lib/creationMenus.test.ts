@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const openAddProject = vi.fn()
 const openAddProjectForInit = vi.fn()
+const openCloneProject = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
 const createStandaloneTerminal = vi.fn()
@@ -9,6 +10,7 @@ const createStandaloneTerminal = vi.fn()
 vi.mock("@/lib/store", () => ({
   openAddProject: () => openAddProject(),
   openAddProjectForInit: () => openAddProjectForInit(),
+  openCloneProject: () => openCloneProject(),
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
@@ -142,7 +144,7 @@ describe("splitCreationGroups", () => {
         { kind: "separator", id: "sep-a" },
         ...addProjectMenuItems(),
       ]).map((chunk) => chunk.length),
-    ).toEqual([0, 2])
+    ).toEqual([0, 3])
   })
 
   it("returns one chunk for a list with no separators at all", () => {
@@ -156,6 +158,7 @@ describe("addProjectMenuItems", () => {
   it("lists the two add-project variants in the sidebar's order", () => {
     expect(actions(addProjectMenuItems()).map((i) => i.title)).toEqual([
       "Add project…",
+      "Clone a repository…",
       "Initialize a repository…",
     ])
   })
@@ -173,5 +176,7 @@ describe("addProjectMenuItems", () => {
     expect(openAddProject).toHaveBeenCalledOnce()
     items.find((i) => i.id === "init-repository")!.run()
     expect(openAddProjectForInit).toHaveBeenCalledOnce()
+    items.find((i) => i.id === "clone-repository")!.run()
+    expect(openCloneProject).toHaveBeenCalledOnce()
   })
 })

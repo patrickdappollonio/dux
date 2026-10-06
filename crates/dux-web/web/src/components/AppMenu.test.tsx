@@ -6,6 +6,7 @@ const openCustomizeWebapp = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
 const openAddProject = vi.fn()
+const openCloneProject = vi.fn()
 const createStandaloneTerminal = vi.fn()
 // The renderer reads gh availability from the live bootstrap; tests flip this.
 let ghAvailable = true
@@ -20,6 +21,7 @@ vi.mock("@/lib/store", () => ({
   sortAgents: vi.fn(),
   openAddProject: () => openAddProject(),
   openAddProjectForInit: vi.fn(),
+  openCloneProject: () => openCloneProject(),
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
@@ -230,8 +232,9 @@ describe("AppMenu", () => {
     fireEvent.click(screen.getByText("Add project"))
     await settle()
     expect(screen.getByText("Initialize a repository…")).toBeTruthy()
-    fireEvent.click(screen.getByText("Add project…"))
-    expect(openAddProject).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByText("Clone a repository…"))
+    expect(openCloneProject).toHaveBeenCalledOnce()
+    expect(openAddProject).not.toHaveBeenCalled()
   })
 
   it("closes on Escape and returns focus to the trigger", async () => {

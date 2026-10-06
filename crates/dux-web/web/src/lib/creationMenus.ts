@@ -12,6 +12,7 @@
 
 import {
   Bot,
+  CloudDownload,
   FolderGit2,
   FolderOpen,
   FolderPlus,
@@ -24,6 +25,7 @@ import {
   createStandaloneTerminal,
   openAddProject,
   openAddProjectForInit,
+  openCloneProject,
   openCreateAgentFromPr,
   openNewAgentPicker,
   openStandaloneAgentPicker,
@@ -160,9 +162,11 @@ export function splitCreationGroups(
 }
 
 /**
- * The add-project variants, in the sidebar's order. Both open the same picker:
- * the intent only changes a header hint, and the real action comes from the
- * server's inspection, so either row reaches either outcome.
+ * The add-project variants, in the sidebar's order. "Add project" and
+ * "Initialize a repository" open the same picker: the intent only changes a
+ * header hint, and the real action comes from the server's inspection, so either
+ * row reaches either outcome. "Clone a repository" is the odd one out: it starts
+ * from a remote address rather than a folder, so it opens its own dialog.
  */
 export function addProjectMenuItems(): CreationMenuItem[] {
   return [
@@ -172,6 +176,13 @@ export function addProjectMenuItems(): CreationMenuItem[] {
       title: "Add project…",
       icon: FolderGit2,
       run: () => openAddProject(),
+    },
+    {
+      kind: "item",
+      id: "clone-repository",
+      title: "Clone a repository…",
+      icon: CloudDownload,
+      run: () => openCloneProject(),
     },
     {
       kind: "item",

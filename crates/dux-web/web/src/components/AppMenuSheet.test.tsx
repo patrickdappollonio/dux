@@ -6,6 +6,7 @@ const openCustomizeWebapp = vi.fn()
 const sortAgents = vi.fn()
 const openNewAgentPicker = vi.fn()
 const openAddProjectForInit = vi.fn()
+const openCloneProject = vi.fn()
 const createStandaloneTerminal = vi.fn()
 // The renderer reads gh availability from the live bootstrap; tests flip this.
 let ghAvailable = true
@@ -20,6 +21,7 @@ vi.mock("@/lib/store", () => ({
   sortAgents: (by: string) => sortAgents(by),
   openAddProject: vi.fn(),
   openAddProjectForInit: () => openAddProjectForInit(),
+  openCloneProject: () => openCloneProject(),
   openCreateAgentFromPr: vi.fn(),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
   createStandaloneTerminal: () => createStandaloneTerminal(),

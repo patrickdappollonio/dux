@@ -9,6 +9,7 @@ import type {
   BranchChoiceView,
   BranchWarningView,
   InspectKind,
+  OperationView,
   ProjectView,
   ProjectWorktreeEntryView,
   StartupLogContent,
@@ -53,7 +54,21 @@ export const projectsApi = {
     // Adopt a plain folder: `git init`, seed a starter .gitignore, empty initial
     // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
+    // Clone this address into `path` as a new project, then start an agent
+    // there named `agent_name` (a pet name when it is blank and `random_name`
+    // is set). Outranks every other flag; answers 202 with the operation at
+    // once, or 400 with the sentence a check refused it with.
+    clone_url?: string
+    agent_name?: string
+    random_name?: boolean
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
+  // The record of the operation a 202 named. The server holds the reply until
+  // the record has an outcome or `waitSeconds` pass (it caps the wait at 25).
+  operation: (opId: string, waitSeconds: number) =>
+    request<OperationView>(
+      "GET",
+      `/api/v1/operations/${encodeURIComponent(opId)}?wait_seconds=${waitSeconds}`,
+    ),
   remove: (id: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",
