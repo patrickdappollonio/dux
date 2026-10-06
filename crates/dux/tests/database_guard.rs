@@ -97,6 +97,16 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "reads config.toml",
     ),
     (
+        "dux_core::config::DEFAULT_CLI_WAIT_TIMEOUT_SECONDS",
+        Vetted::Data,
+        "the command line's default wait",
+    ),
+    (
+        "dux_core::control_socket::current_uid",
+        Vetted::Function("crates/dux-core/src/control_socket.rs", "current_uid"),
+        "this process's user id, which the control socket's other end must have",
+    ),
+    (
         "dux_core::config::check_global_env_var",
         Vetted::Function("crates/dux-core/src/config.rs", "check_global_env_var"),
         "checks a variable's name",
