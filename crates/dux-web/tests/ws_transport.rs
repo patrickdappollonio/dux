@@ -3802,8 +3802,8 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
 
 /// The session-nested git and file routes reach their handlers over real HTTP (a
 /// stage against an unknown session 404s), and the old body-keyed `/api/v1/git/*` /
-/// `/api/v1/file/*` paths no longer reach the handler (they fall through to the SPA
-/// fallback, which never returns the handler's 404).
+/// `/api/v1/file/*` paths no longer reach the handler (they fall through to the
+/// fallback's `{"error":"not_found"}`, never a handler's answer).
 #[tokio::test]
 async fn rest_nested_git_and_file_routes_resolve() {
     let (addr, _tmp) = boot().await;
@@ -3829,16 +3829,16 @@ async fn rest_nested_git_and_file_routes_resolve() {
         "/api/v1/sessions/:id/files/read"
     );
 
-    // The retired body-keyed paths no longer reach the handler (no 404 from it).
+    // The retired body-keyed paths no longer reach a handler.
     let old_git = client
         .post(format!("http://{addr}/api/v1/git/stage"))
         .json(&serde_json::json!({"session_id":"nope","path":"a.txt"}))
         .send()
         .await
         .unwrap();
-    assert_ne!(
-        old_git.status().as_u16(),
-        404,
+    assert_eq!(
+        old_git.text().await.unwrap(),
+        r#"{"error":"not_found"}"#,
         "the old body-keyed /api/v1/git/* path must be gone"
     );
 
@@ -3848,9 +3848,9 @@ async fn rest_nested_git_and_file_routes_resolve() {
         .send()
         .await
         .unwrap();
-    assert_ne!(
-        old_file.status().as_u16(),
-        404,
+    assert_eq!(
+        old_file.text().await.unwrap(),
+        r#"{"error":"not_found"}"#,
         "the old body-keyed /api/v1/file/* path must be gone"
     );
 }

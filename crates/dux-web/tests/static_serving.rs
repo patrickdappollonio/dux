@@ -299,7 +299,7 @@ async fn service_worker_served_no_cache_and_js_mime() {
 }
 
 #[tokio::test]
-async fn missing_hashed_asset_returns_404_not_spa_fallback() {
+async fn missing_hashed_asset_and_unknown_api_path_return_404_not_spa_fallback() {
     // A request for a hashed bundle chunk that does not exist must 404, NOT fall
     // back to index.html. Serving HTML for a `*.js` import() makes the browser
     // reject it as a module, which unmounts the React tree (white screen). This
@@ -316,27 +316,41 @@ async fn missing_hashed_asset_returns_404_not_spa_fallback() {
         !ctype.contains("html"),
         "a missing asset must not be served as text/html, got {ctype}"
     );
+
+    // An API path no route serves is an API answer, not the page: a script
+    // or the command line reading it must see that nothing is there.
+    for path in ["/api/v1/no-such-route", "/api/nothing/here"] {
+        let (_tmp, app) = test_router();
+        let resp = get(app, path).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes)));
+        assert_eq!(body, serde_json::json!({"error": "not_found"}), "{path}");
+    }
 }
 
 #[tokio::test]
 async fn unknown_non_asset_path_still_serves_spa_shell() {
     // Client-side routes (anything outside `assets/`) must keep falling back to
     // the SPA index so deep links and the router keep working.
-    let (_tmp, app) = test_router();
-    let resp = get(app, "/some/client/route").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let ctype = header(&resp, "content-type").unwrap_or_default();
-    assert!(
-        ctype.contains("html"),
-        "an unknown non-asset path must serve the SPA shell as text/html, got {ctype}"
-    );
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_is_spa_shell(
-        &String::from_utf8_lossy(&bytes),
-        "an unknown non-asset path",
-    );
+    // A path that merely starts with the letters "api" is still a page.
+    for path in ["/some/client/route", "/apiary"] {
+        let (_tmp, app) = test_router();
+        let resp = get(app, path).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        let ctype = header(&resp, "content-type").unwrap_or_default();
+        assert!(
+            ctype.contains("html"),
+            "an unknown non-asset path must serve the SPA shell as text/html, got {ctype}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_is_spa_shell(&String::from_utf8_lossy(&bytes), path);
+    }
 }
 
 #[tokio::test]

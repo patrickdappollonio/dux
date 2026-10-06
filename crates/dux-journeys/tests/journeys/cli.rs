@@ -408,11 +408,12 @@ async fn cli_a_remote_with_and_without_a_password() {
 ///
 /// Action: open a standalone terminal; open the browser's terminal socket on it
 /// and type into it; list the connections. Start `dux server logs -f`; ask the
-/// server for a path nobody links to; read what the follow printed; print the
-/// last lines with `dux server logs`.
+/// server for an API path no route serves; read what the follow printed; print
+/// the last lines with `dux server logs`.
 ///
 /// Result: the connections list has the browser as "Chrome on Linux", driving
-/// that terminal. The follow prints the request's line while it runs, and
+/// that terminal. The unknown API path answers 404 `not_found`, not the web
+/// UI's page. The follow prints the request's line while it runs, and
 /// `dux server logs` shows it too.
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_server_logs_follow_and_connections() {
@@ -457,9 +458,11 @@ async fn cli_server_logs_follow_and_connections() {
             (!out.is_empty()).then_some(())
         })
         .await;
-        // A path nobody links to, so its line can only be this request's.
-        let marker = format!("/journey-marker-{}", dux_journeys::util::suffix());
-        browser.get(&marker).await;
+        // An API path no route serves, so its line can only be this request's.
+        let marker = format!("/api/v1/journey-marker-{}", dux_journeys::util::suffix());
+        let answer = browser.get(&marker).await;
+        assert_eq!(answer.status, 404, "{}", answer.describe());
+        assert_eq!(answer.json(), serde_json::json!({ "error": "not_found" }));
         eventually(
             "the follow to print the request",
             Duration::from_secs(20),
