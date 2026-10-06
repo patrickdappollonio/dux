@@ -4,7 +4,9 @@
 //! (`dux_core::web_sessions`), so a quick restart does not sign an open tab out.
 //!
 //! A session is good while its generation is the current one and it is not
-//! idle: idle means no request for `session_idle_seconds` AND no open socket.
+//! idle: idle means no request for `session_idle_seconds` (a browser's) or
+//! `cli_token_idle_days` (the command line's, [`SessionKind::Cli`]) AND no open
+//! socket.
 //! An open socket holds a [`SessionLease`]; while any lease is held the session
 //! cannot go idle, and when the last one is released the idle clock starts
 //! from that moment. The socket loops keep a lease only while the peer answers
@@ -16,14 +18,14 @@
 //! leased sessions' with them), so a crash loses at most that much of a
 //! session's freshness. Every SQLite call runs on a blocking thread.
 //!
-//! The session layer knows nothing about cookies; a bearer token could carry
-//! the same token later without changing anything here.
+//! The session layer knows nothing about how a token travels: a browser sends
+//! it in a cookie and the command line as a bearer header.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dux_core::web_sessions::{NewToken, StoredSession, TokenDigest, WebSessionStore};
+use dux_core::web_sessions::{NewToken, SessionKind, StoredSession, TokenDigest, WebSessionStore};
 
 /// Milliseconds since the Unix epoch, injectable so tests can move time.
 pub(crate) type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
@@ -38,7 +40,24 @@ pub(crate) fn system_clock() -> Clock {
     })
 }
 
+/// How long a session may sit unused before it ends, per kind, in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Idle {
+    pub(crate) browser_ms: i64,
+    pub(crate) cli_ms: i64,
+}
+
+impl Idle {
+    fn of(self, kind: SessionKind) -> i64 {
+        match kind {
+            SessionKind::Browser => self.browser_ms,
+            SessionKind::Cli => self.cli_ms,
+        }
+    }
+}
+
 struct Live {
+    kind: SessionKind,
     generation: String,
     last_seen_ms: i64,
     leases: u32,
@@ -92,16 +111,18 @@ impl Sessions {
     }
 
     /// Open the table at `db`, drop what can no longer be used (another
-    /// generation, idle past `idle_ms`), and adopt the rest. Runs on a blocking
+    /// generation, idle past `idle`), and adopt the rest. Runs on a blocking
     /// thread; a database that cannot be opened is said in dux.log and the
     /// sessions live in memory for this run.
-    pub(crate) async fn load(&self, db: PathBuf, generation: String, idle_ms: i64) {
-        let cutoff = self.now().saturating_sub(idle_ms);
+    pub(crate) async fn load(&self, db: PathBuf, generation: String, idle: Idle) {
+        let now = self.now();
+        let browser_cutoff = now.saturating_sub(idle.browser_ms);
+        let cli_cutoff = now.saturating_sub(idle.cli_ms);
         let inner = Arc::clone(&self.0);
         let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let store = WebSessionStore::open(&db)?;
             store.delete_other_generations(&generation)?;
-            store.delete_idle_since(cutoff)?;
+            store.delete_idle_since(browser_cutoff, cli_cutoff)?;
             let rows = store.load()?;
             // The table is put in place under its own lock, the one `issue`
             // writes under, so a session issued while this ran is either
@@ -119,9 +140,11 @@ impl Sessions {
                     digest,
                     generation,
                     last_seen_ms,
+                    kind,
                 } in rows
                 {
                     map.entry(digest).or_insert(Live {
+                        kind,
                         generation,
                         last_seen_ms,
                         leases: 0,
@@ -136,6 +159,7 @@ impl Sessions {
                             digest: *digest,
                             generation: live.generation.clone(),
                             last_seen_ms: live.last_seen_ms,
+                            kind: live.kind,
                         })
                     })
                     .collect()
@@ -171,13 +195,18 @@ impl Sessions {
     /// Issue a session under `generation` and store it before answering. One
     /// issued before the table is open is never dropped (decided, after
     /// review): it is marked, and the load that opens the table writes it.
-    pub(crate) async fn issue(&self, generation: &str) -> anyhow::Result<NewToken> {
+    pub(crate) async fn issue(
+        &self,
+        generation: &str,
+        kind: SessionKind,
+    ) -> anyhow::Result<NewToken> {
         let token = dux_core::web_sessions::new_token()?;
         let now = self.now();
         let row = StoredSession {
             digest: token.digest,
             generation: generation.to_string(),
             last_seen_ms: now,
+            kind,
         };
         let inner = Arc::clone(&self.0);
         let written = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -195,6 +224,7 @@ impl Sessions {
                 .insert(
                     row.digest,
                     Live {
+                        kind,
                         generation: row.generation.clone(),
                         last_seen_ms: row.last_seen_ms,
                         leases: 0,
@@ -235,7 +265,7 @@ impl Sessions {
         &self,
         digest: &TokenDigest,
         generation: &str,
-        idle_ms: i64,
+        idle: Idle,
         touch: bool,
     ) -> bool {
         let now = self.now();
@@ -247,7 +277,7 @@ impl Sessions {
             map.remove(digest);
             return false;
         }
-        if live.leases == 0 && now.saturating_sub(live.last_seen_ms) > idle_ms {
+        if live.leases == 0 && now.saturating_sub(live.last_seen_ms) > idle.of(live.kind) {
             map.remove(digest);
             return false;
         }
@@ -312,12 +342,12 @@ impl Sessions {
 
     /// Write the last-use times that moved (and every leased session's, as of
     /// now) and forget what went idle, in memory and in the table.
-    pub(crate) async fn flush(&self, idle_ms: i64) {
+    pub(crate) async fn flush(&self, idle: Idle) {
         let now = self.now();
         let touched: Vec<(TokenDigest, i64)> = {
             let mut map = self.map();
             map.retain(|_, live| {
-                live.leases > 0 || now.saturating_sub(live.last_seen_ms) <= idle_ms
+                live.leases > 0 || now.saturating_sub(live.last_seen_ms) <= idle.of(live.kind)
             });
             map.iter_mut()
                 .filter_map(|(digest, live)| {
@@ -329,10 +359,13 @@ impl Sessions {
                 })
                 .collect()
         };
-        let cutoff = now.saturating_sub(idle_ms);
+        let browser_cutoff = now.saturating_sub(idle.browser_ms);
+        let cli_cutoff = now.saturating_sub(idle.cli_ms);
         self.with_store(move |store| {
             store.touch(&touched)?;
-            store.delete_idle_since(cutoff).map(|_| ())
+            store
+                .delete_idle_since(browser_cutoff, cli_cutoff)
+                .map(|_| ())
         })
         .await;
     }
@@ -396,6 +429,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    fn idle(ms: i64) -> Idle {
+        Idle {
+            browser_ms: ms,
+            cli_ms: ms,
+        }
+    }
+
     fn clock_at(start: i64) -> (Clock, Arc<AtomicI64>) {
         let now = Arc::new(AtomicI64::new(start));
         let reads = Arc::clone(&now);
@@ -406,18 +446,18 @@ mod tests {
     async fn a_session_is_good_until_it_goes_idle_and_any_use_refreshes_it() {
         let (clock, now) = clock_at(1_000_000);
         let sessions = Sessions::in_memory(clock);
-        let token = sessions.issue("g").await.unwrap();
-        assert!(sessions.check(&token.digest, "g", 60_000, true));
+        let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
+        assert!(sessions.check(&token.digest, "g", idle(60_000), true));
         now.fetch_add(59_000, Ordering::SeqCst);
         assert!(
-            sessions.check(&token.digest, "g", 60_000, true),
+            sessions.check(&token.digest, "g", idle(60_000), true),
             "refreshed"
         );
         now.fetch_add(59_000, Ordering::SeqCst);
-        assert!(sessions.check(&token.digest, "g", 60_000, false));
+        assert!(sessions.check(&token.digest, "g", idle(60_000), false));
         now.fetch_add(2_000, Ordering::SeqCst);
         assert!(
-            !sessions.check(&token.digest, "g", 60_000, true),
+            !sessions.check(&token.digest, "g", idle(60_000), true),
             "a check that does not touch refreshes nothing"
         );
         assert_eq!(sessions.len(), 0);
@@ -427,31 +467,34 @@ mod tests {
     async fn another_generation_is_never_good_and_is_forgotten() {
         let (clock, _) = clock_at(0);
         let sessions = Sessions::in_memory(clock);
-        let token = sessions.issue("old").await.unwrap();
-        assert!(!sessions.check(&token.digest, "new", 60_000, true));
-        let token = sessions.issue("old").await.unwrap();
+        let token = sessions.issue("old", SessionKind::Browser).await.unwrap();
+        assert!(!sessions.check(&token.digest, "new", idle(60_000), true));
+        let token = sessions.issue("old", SessionKind::Browser).await.unwrap();
         assert!(sessions.retain_generation("new"));
-        assert!(!sessions.check(&token.digest, "old", 60_000, true));
+        assert!(!sessions.check(&token.digest, "old", idle(60_000), true));
     }
 
     #[tokio::test]
     async fn a_lease_keeps_a_session_alive_and_its_release_starts_the_idle_clock() {
         let (clock, now) = clock_at(0);
         let sessions = Sessions::in_memory(clock);
-        let token = sessions.issue("g").await.unwrap();
+        let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
         let lease = sessions.lease(token.digest).expect("known");
         now.store(10 * 60_000, Ordering::SeqCst);
-        assert!(sessions.check(&token.digest, "g", 3_000, false), "leased");
-        sessions.flush(3_000).await;
+        assert!(
+            sessions.check(&token.digest, "g", idle(3_000), false),
+            "leased"
+        );
+        sessions.flush(idle(3_000)).await;
         assert_eq!(sessions.len(), 1, "a flush keeps a leased session");
         drop(lease);
         now.fetch_add(2_000, Ordering::SeqCst);
         assert!(
-            sessions.check(&token.digest, "g", 3_000, false),
+            sessions.check(&token.digest, "g", idle(3_000), false),
             "idle from the release"
         );
         now.fetch_add(2_000, Ordering::SeqCst);
-        assert!(!sessions.check(&token.digest, "g", 3_000, false));
+        assert!(!sessions.check(&token.digest, "g", idle(3_000), false));
         assert!(sessions.lease([9; 32]).is_none());
     }
 
@@ -464,8 +507,8 @@ mod tests {
         let db = dir.path().join("sessions.sqlite3");
         let (clock, now) = clock_at(1_000_000);
         let sessions = Sessions::new(clock);
-        sessions.load(db.clone(), "g".into(), 60_000).await;
-        let token = sessions.issue("g").await.unwrap();
+        sessions.load(db.clone(), "g".into(), idle(60_000)).await;
+        let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
         now.fetch_add(5_000, Ordering::SeqCst);
         let _lease = sessions.lease(token.digest).unwrap();
         let stored = || WebSessionStore::open(&db).unwrap().load().unwrap()[0].last_seen_ms;
@@ -482,9 +525,9 @@ mod tests {
     async fn revoking_forgets_a_session() {
         let (clock, _) = clock_at(0);
         let sessions = Sessions::in_memory(clock);
-        let token = sessions.issue("g").await.unwrap();
+        let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
         sessions.revoke(token.digest).await;
-        assert!(!sessions.check(&token.digest, "g", 60_000, true));
+        assert!(!sessions.check(&token.digest, "g", idle(60_000), true));
     }
 
     #[tokio::test]
@@ -493,30 +536,30 @@ mod tests {
         let db = dir.path().join("sessions.sqlite3");
         let (clock, now) = clock_at(1_000_000);
         let first = Sessions::new(Arc::clone(&clock));
-        first.load(db.clone(), "g".into(), 8_000).await;
-        let kept = first.issue("g").await.unwrap();
-        let other = first.issue("g").await.unwrap();
+        first.load(db.clone(), "g".into(), idle(8_000)).await;
+        let kept = first.issue("g", SessionKind::Browser).await.unwrap();
+        let other = first.issue("g", SessionKind::Browser).await.unwrap();
         let lease = first.lease(other.digest).unwrap();
         now.fetch_add(5_000, Ordering::SeqCst);
-        first.check(&kept.digest, "g", 8_000, true);
-        first.flush(8_000).await;
+        first.check(&kept.digest, "g", idle(8_000), true);
+        first.flush(idle(8_000)).await;
         drop(lease);
         drop(first);
 
         // A quick restart: both are still good.
         now.fetch_add(2_000, Ordering::SeqCst);
         let second = Sessions::new(Arc::clone(&clock));
-        second.load(db.clone(), "g".into(), 8_000).await;
+        second.load(db.clone(), "g".into(), idle(8_000)).await;
         second.ready().await;
-        assert!(second.check(&kept.digest, "g", 8_000, false));
-        assert!(second.check(&other.digest, "g", 8_000, false));
+        assert!(second.check(&kept.digest, "g", idle(8_000), false));
+        assert!(second.check(&other.digest, "g", idle(8_000), false));
         drop(second);
 
         // A long outage: gone, and gone from the table too.
         now.fetch_add(20_000, Ordering::SeqCst);
         let third = Sessions::new(Arc::clone(&clock));
-        third.load(db.clone(), "g".into(), 8_000).await;
-        assert!(!third.check(&kept.digest, "g", 8_000, false));
+        third.load(db.clone(), "g".into(), idle(8_000)).await;
+        assert!(!third.check(&kept.digest, "g", idle(8_000), false));
         assert!(
             WebSessionStore::open(&db)
                 .unwrap()
@@ -533,13 +576,13 @@ mod tests {
         let db = dir.path().join("sessions.sqlite3");
         let (clock, _) = clock_at(0);
         let first = Sessions::new(Arc::clone(&clock));
-        first.load(db.clone(), "before".into(), 60_000).await;
-        let token = first.issue("before").await.unwrap();
+        first.load(db.clone(), "before".into(), idle(60_000)).await;
+        let token = first.issue("before", SessionKind::Browser).await.unwrap();
         drop(first);
         let second = Sessions::new(clock);
-        second.load(db, "after".into(), 60_000).await;
-        assert!(!second.check(&token.digest, "after", 60_000, false));
-        assert!(!second.check(&token.digest, "before", 60_000, false));
+        second.load(db, "after".into(), idle(60_000)).await;
+        assert!(!second.check(&token.digest, "after", idle(60_000), false));
+        assert!(!second.check(&token.digest, "before", idle(60_000), false));
     }
 
     #[tokio::test]
@@ -549,11 +592,11 @@ mod tests {
         let sessions = Sessions::new(clock);
         // A directory is not a database.
         sessions
-            .load(dir.path().to_path_buf(), "g".into(), 60_000)
+            .load(dir.path().to_path_buf(), "g".into(), idle(60_000))
             .await;
         sessions.ready().await;
-        let token = sessions.issue("g").await.unwrap();
-        assert!(sessions.check(&token.digest, "g", 60_000, true));
+        let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
+        assert!(sessions.check(&token.digest, "g", idle(60_000), true));
     }
 
     /// A session issued before the stored sessions finished loading is still
@@ -564,13 +607,60 @@ mod tests {
         let db = dir.path().join("sessions.sqlite3");
         let (clock, _now) = clock_at(1_000_000);
         let sessions = Sessions::new(Arc::clone(&clock));
-        let early = sessions.issue("g").await.unwrap();
-        sessions.load(db.clone(), "g".into(), 60_000).await;
-        assert!(sessions.check(&early.digest, "g", 60_000, false));
+        let early = sessions.issue("g", SessionKind::Browser).await.unwrap();
+        sessions.load(db.clone(), "g".into(), idle(60_000)).await;
+        assert!(sessions.check(&early.digest, "g", idle(60_000), false));
         let stored = WebSessionStore::open(&db).unwrap().load().unwrap();
         assert!(
             stored.iter().any(|row| row.digest == early.digest),
             "the session issued before the load was never written to the table"
         );
+    }
+
+    fn idle_of(browser_ms: i64, cli_ms: i64) -> Idle {
+        Idle { browser_ms, cli_ms }
+    }
+
+    #[tokio::test]
+    async fn a_cli_session_outlasts_the_browser_idle_window_and_a_browser_session_does_not() {
+        let (clock, now) = clock_at(0);
+        let sessions = Sessions::in_memory(clock);
+        let browser = sessions.issue("g", SessionKind::Browser).await.unwrap();
+        let cli = sessions.issue("g", SessionKind::Cli).await.unwrap();
+        let windows = idle_of(60_000, 30 * 86_400_000);
+        now.store(10 * 60_000, Ordering::SeqCst);
+        assert!(!sessions.check(&browser.digest, "g", windows, false));
+        assert!(sessions.check(&cli.digest, "g", windows, true));
+        // A flush keeps what is still inside its own window.
+        sessions.flush(windows).await;
+        assert_eq!(sessions.len(), 1);
+        // Thirty days and a millisecond with no use ends it.
+        now.fetch_add(30 * 86_400_000 + 1, Ordering::SeqCst);
+        assert!(!sessions.check(&cli.digest, "g", windows, false));
+    }
+
+    #[tokio::test]
+    async fn stored_sessions_are_judged_by_their_kind_when_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let (clock, now) = clock_at(1_000_000);
+        let first = Sessions::new(Arc::clone(&clock));
+        first
+            .load(db.clone(), "g".into(), idle_of(8_000, 100_000))
+            .await;
+        let browser = first.issue("g", SessionKind::Browser).await.unwrap();
+        let cli = first.issue("g", SessionKind::Cli).await.unwrap();
+        drop(first);
+
+        now.fetch_add(20_000, Ordering::SeqCst);
+        let second = Sessions::new(clock);
+        second
+            .load(db.clone(), "g".into(), idle_of(8_000, 100_000))
+            .await;
+        assert!(!second.check(&browser.digest, "g", idle_of(8_000, 100_000), false));
+        assert!(second.check(&cli.digest, "g", idle_of(8_000, 100_000), false));
+        let stored = WebSessionStore::open(&db).unwrap().load().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, SessionKind::Cli);
     }
 }

@@ -6450,6 +6450,7 @@ mod tests {
             max_failed_logins: 9,
             blocked_addresses: vec!["198.51.100.0/24".to_string()],
             session_idle_seconds: 120,
+            cli_token_idle_days: 7,
             disable_no_auth_warning: true,
             cookie_secure: dux_core::config::CookieSecure::Always,
             max_concurrent_password_checks: 4,
