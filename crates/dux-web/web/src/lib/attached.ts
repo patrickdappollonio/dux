@@ -1,11 +1,5 @@
-// Who a destructive change would cut off. The server refuses a delete, stop,
-// tab or terminal close, or project removal that somebody else is attached to
-// with `409 {"error":"attached","blockers":[...]}`; the dialog that asked lists
-// them and offers to go ahead anyway, which resends with `force_connected=true`.
-//
-// The sentences are the terminal UI's too: dux-core's `attached_prose` builds
-// the same segments, and `crates/dux-core/tests/fixtures/prose_cross_language.json`
-// pins the two together.
+// Who a destructive change would cut off, read from the server's `409 attached`
+// refusal. dux-core's `attached_prose` builds the same sentences; prose_cross_language.json pins both.
 
 import { sessionLabel } from "./agentWorkspace"
 import { tabProseLabel } from "./agentTabs"
@@ -65,10 +59,8 @@ function blockerFrom(value: unknown): AttachedBlocker | null {
   }
 }
 
-/** The query a guarded route takes to go ahead over exactly the blockers a
- * dialog showed (their keys): the server refuses again, naming everybody,
- * when anybody else is in the way by then. Nothing when `accepted` is null, so
- * a plain request reads exactly as before. */
+/** The query that goes ahead over exactly the blockers a dialog showed (their
+ * keys); the server refuses again when anybody else is in the way by then. */
 export function forceConnectedQuery(
   accepted: readonly string[] | null,
   first: boolean,
@@ -103,9 +95,7 @@ export interface AttachedEntry {
   agentLabel: string | null
 }
 
-/** The blockers with the names a dialog shows: the device's short label, the
- * tab's strip label or the terminal's label (its id once it is gone), and the
- * agent's name. */
+/** The blockers with the names a dialog shows; a target that is gone shows its id. */
 export function attachedEntries(
   blockers: readonly AttachedBlocker[],
   spine: { sessions: SessionView[]; terminals: TerminalView[] } | null,

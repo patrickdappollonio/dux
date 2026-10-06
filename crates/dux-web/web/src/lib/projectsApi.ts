@@ -54,8 +54,6 @@ export const projectsApi = {
     // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
-  // Both removals take `accepted`, the keys of the blockers a dialog showed, to go
-  // ahead over exactly them.
   remove: (id: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",

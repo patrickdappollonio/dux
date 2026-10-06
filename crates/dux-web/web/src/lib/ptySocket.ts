@@ -16,12 +16,8 @@
 //     only when the PTY is unowned. Adding `"takeover":true` transfers ownership,
 //     and is the only frame this client sends while it knows it is not the owner.
 //   - Close = detach.
-//   - Every open names this tab's events connection as `?events=<id>`, read at
-//     that moment, so the server counts the terminal as part of this browser
-//     tab: the tab is not in its own way when it deletes or stops what it shows,
-//     and a reconnected events socket is named by the next reopen. While the
-//     events socket is opening with no id yet, an open waits for it, for at
-//     most `CONNECTION_ID_WAIT_MS` (`connection.ts`).
+//   - Every open names this tab's events connection as `?events=<id>`, waiting up to
+//     `CONNECTION_ID_WAIT_MS` for one, so the tab is never in its own way.
 //
 // Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at

@@ -20,10 +20,9 @@
 //! changes, leaving the rest of the set alone; an entry that is not there is a
 //! `404`, and `?operation=1` answers an operation record.
 //!
-//! Three reads list what the command line's `dux providers ls`, `dux keys ls`
-//! and `dux themes ls` print through a remote, built from this dux's own
-//! `config.toml` by [`dux_core::config_resources`], the code that lists them
-//! on the command line's own machine.
+//! The `/api/v1/config/*` listings are what `dux providers ls`, `dux keys ls` and
+//! `dux themes ls` print through a remote, built from this dux's own `config.toml` by
+//! [`dux_core::config_resources`], as the command line lists them locally.
 
 use std::collections::BTreeMap;
 
@@ -104,9 +103,8 @@ struct UpdateMacrosBody {
     /// matching the frontend's `MacroView`. The engine validates wholesale
     /// (empty/duplicate names, empty text, unknown surface all rejected).
     entries: Vec<WireMacroEntry>,
-    /// The bootstrap's `macros_version` the edit started from. Present, a list
-    /// that changed since is refused with `409 {"error":"changed"}` and nothing
-    /// is written; absent, the save replaces whatever is there.
+    /// The bootstrap's `macros_version` the edit started from; absent, the save
+    /// replaces whatever is there.
     #[serde(default)]
     version: Option<String>,
 }
@@ -258,9 +256,8 @@ struct SetVersion {
     version: Option<String>,
 }
 
-/// Run a whole-set save: `200 {"version"}`, `409 {"error":"changed",
-/// "message"}` when the set moved since the version it was based on, `409`
-/// while another change holds the set, and `400` with the reason otherwise.
+/// Run a whole-set save: `200 {"version"}` with the version the set is at now, or
+/// [`config_refusal`]'s answer.
 async fn save_whole_set(state: &AppState, headers: &HeaderMap, cmd: WireCommand) -> Response {
     match state
         .engine
@@ -275,9 +272,8 @@ async fn save_whole_set(state: &AppState, headers: &HeaderMap, cmd: WireCommand)
     }
 }
 
-/// Run a one-entry change. With `?operation=1` it answers its operation
-/// record, which the change finishes inside the call; without, `200
-/// {"version"}` as a whole-set save does.
+/// Run a one-entry change. It finishes inside the call, so a followed change's
+/// record is already final when it answers.
 async fn change_one_entry(
     state: &AppState,
     headers: &HeaderMap,
@@ -318,9 +314,8 @@ fn config_refusal(error: String) -> Response {
 
 // ── Config-file listings ─────────────────────────────────────────────────────
 
-/// Build a listing from this dux's own `config.toml` off the async runtime:
-/// `200` with its JSON array, or `500` with the sentence saying why the file
-/// could not be read.
+/// Build a listing from this dux's own `config.toml` on a blocking thread; a file
+/// that cannot be read is a `500` with the reason.
 async fn config_listing<T: Serialize + Send + 'static>(
     state: &AppState,
     build: impl FnOnce(&dux_core::config::DuxPaths) -> Result<T, String> + Send + 'static,
@@ -394,13 +389,8 @@ async fn set_changes_pane(
 
 // ── Reload ─────────────────────────────────────────────────────────────────────
 
-/// `POST /api/v1/config/reload`. No body is required (the frontend sends `{}`),
-/// so no `Json` extractor is used. A config reload re-reads `config.toml` from disk.
-///
-/// With `?operation=1` it answers `202` and an operation record that ends when
-/// the reload's owner says how it went, which is how `dux config set` learns
-/// whether its change took effect. Without it, a bare `200` once the reload is
-/// under way.
+/// `POST /api/v1/config/reload`, no body needed. With `?operation=1`, a `202` whose record ends
+/// when the reload's owner says how it went; without, a bare `200` once it is under way.
 async fn reload_config(
     State(state): State<AppState>,
     Query(operation): Query<OperationQuery>,

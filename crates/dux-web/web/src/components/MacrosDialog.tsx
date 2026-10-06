@@ -217,9 +217,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
 }
 
 // A save the server refused because the list changed after the dialog read it.
-// A choice, not an error, as in the config editor: reloading throws these
-// edits away, so "Keep editing" has focus and the reload is styled as the
-// destructive one.
+// Reloading throws these edits away, so "Keep editing" has focus.
 function StaleSaveNotice({ message }: { message: string }) {
   return (
     <div

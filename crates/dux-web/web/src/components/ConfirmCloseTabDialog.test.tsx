@@ -225,7 +225,7 @@ describe("ConfirmCloseTabDialog", () => {
 
   // Through the real store and client: the server's refusal because somebody
   // else is attached keeps the dialog open naming them, focus goes back to
-  // Cancel, and only Close tab anyway sends `force_connected=true`.
+  // Cancel, and only Close tab anyway sends `force_connected` with the keys shown.
   it("names who is attached when the close is refused, and closes over them only through the override", async () => {
     seed("s1", [tab({ id: "s1", provider: "claude" })])
     Object.assign(mockState.spine!.sessions[0], { title: "fix-auth" })

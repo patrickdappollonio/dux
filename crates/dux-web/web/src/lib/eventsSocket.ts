@@ -24,10 +24,8 @@ export class EventsSocket extends ReconnectingSocket {
     return [...this.subscriptions].sort()
   }
 
-  // Every open is a new connection with no id yet, so terminal sockets wait
-  // for its `connected` frame (briefly; see `connection.ts`). After a drop it
-  // names the id it had (`?after=`), so the server hands what the lost
-  // connection still counted as attached to over to this one.
+  // Every open is a new connection with no id yet, so terminal sockets wait for its
+  // `connected` frame; `?after=` hands the lost connection's attachments to this one.
   protected override openUrl(): string {
     noteConnectionIdPending()
     const previous = getPreviousConnectionId()

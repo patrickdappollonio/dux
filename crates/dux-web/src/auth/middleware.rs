@@ -45,9 +45,7 @@ const PUBLIC_FILES: &[&str] = &[
     "/healthz",
 ];
 
-/// Whether a request is to a declared public route: the files above and
-/// `/assets/*` by GET or HEAD, the auth status by GET or HEAD, and the two
-/// logins (the browser's and the command line's) by POST. Any other method on those paths is an ordinary protected request.
+/// Whether a request is to a declared public route, judged by method as well as path.
 pub(crate) fn is_public(method: &Method, path: &str) -> bool {
     let read = method == Method::GET || method == Method::HEAD;
     if read && (PUBLIC_FILES.contains(&path) || is_asset(path)) {

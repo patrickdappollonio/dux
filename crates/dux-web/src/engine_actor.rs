@@ -61,11 +61,9 @@ pub struct ProjectWorktreeInputs {
     pub busy: Vec<dux_core::worktree_manager::BusyFolder>,
 }
 
-/// A client's request to follow a tab or terminal change as an operation: the
-/// record's id, minted before the request is sent so the reply can stay the
-/// shape it has always been, and its kind. The engine thread opens the record
-/// before it makes the change, so nothing the change raises can land first,
-/// and leaves the record as the change left it in `record` before it replies.
+/// A request to follow a tab or terminal change as an operation, its id minted
+/// before dispatch. The engine opens the record before making the change, so
+/// nothing the change raises lands first, and fills `record` before replying.
 pub struct OperationTicket {
     pub id: String,
     pub kind: OperationKind,
@@ -95,9 +93,6 @@ impl OperationTicket {
 pub struct Followed {
     pub kind: OperationKind,
     pub answered: bool,
-    /// The browser tab asking, exempt from its own attachments: its events
-    /// connection, when the request named one from its own address (see
-    /// `rest_common::exempt_requester`). `None` exempts nobody.
     /// Go ahead even though somebody else is attached to what the change
     /// would end (`force_connected` on the route). Only that refusal is
     /// skipped; the reservation and every other check still run.
@@ -106,6 +101,9 @@ pub struct Followed {
     /// ([`dux_core::attachments::Blocker::key`]), the ones the asking dialog
     /// showed. `None` goes ahead over everybody.
     pub accepted_connected: Option<std::collections::BTreeSet<String>>,
+    /// The browser tab asking, exempt from its own attachments: its events
+    /// connection, when the request named one from its own address (see
+    /// `rest_common::exempt_requester`). `None` exempts nobody.
     pub requester: Option<String>,
 }
 
@@ -127,9 +125,8 @@ impl From<String> for WireError {
     }
 }
 
-/// What a route says when the engine made a followed change and handed back no
-/// record. The engine opens the record before the change and sets it before it
-/// replies, so this means something broke between the two.
+/// What a route says when a followed change came back without its record,
+/// which the engine sets before replying: something broke in between.
 pub const MISSING_OPERATION_RECORD: &str =
     "the change was made, but its operation record did not come back with the reply";
 
@@ -143,12 +140,10 @@ pub enum EngineRequest {
         /// resets it to [`StatusScope::All`] after, so a web operation's toasts
         /// reach only the originating connection. `All` is the broadcast default.
         StatusScope,
-        /// Set for a change a route covers with an operation record: the
-        /// actor dispatches it through
-        /// [`dux_core::engine::Engine::apply_wire_operation`] when the client
-        /// asked to follow it, and the reply carries the record's id, or
-        /// through [`dux_core::engine::Engine::apply_wire_recorded`] when it
-        /// did not, which records and holds it but answers as it always has.
+        /// Set for a change a route covers with an operation record: dispatched
+        /// through [`dux_core::engine::Engine::apply_wire_operation`] (the reply
+        /// carries the record's id) when the client follows it, otherwise through
+        /// [`dux_core::engine::Engine::apply_wire_recorded`] with the plain reply.
         Option<Followed>,
     ),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
@@ -1203,11 +1198,6 @@ impl EngineHandle {
         self.apply_wire_scoped(command, StatusScope::All).await
     }
 
-    /// Like [`apply_wire`](Self::apply_wire) but tags the command with the
-    /// originating connection's [`StatusScope`], so any statuses it mints (the
-    /// synchronous outcome, deferred busies/finals, worker busies) are delivered
-    /// only to that connection. `apply_wire` delegates here with
-    /// [`StatusScope::All`] (broadcast), so existing callers are unchanged.
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
     /// operation of `kind`: answers the outcome and the id of the record a
     /// client polls with [`Self::operations`].
@@ -1245,10 +1235,8 @@ impl EngineHandle {
         Ok((outcome, record))
     }
 
-    /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), for a change a
-    /// route covers with an operation record although the client did not ask
-    /// to follow it: the record is kept and holds what the change changes,
-    /// and the outcome is the one `apply_wire_scoped` would have answered.
+    /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), with the same answer,
+    /// for a change a route records as an operation the client did not follow.
     pub async fn apply_wire_recorded(
         &self,
         command: WireCommand,
@@ -1276,13 +1264,9 @@ impl EngineHandle {
             .map_err(|e| e.message)
     }
 
-    /// A change that would end terminals somebody may be attached to (an
-    /// agent delete, stop or forced restart, a tab or terminal close, a
-    /// project removal), covered by an operation record of `kind` like
-    /// [`Self::apply_wire_recorded`] (or followed, like
-    /// [`Self::apply_wire_operation`], when `answered`). Refused with who is
-    /// attached unless `force_connected`; the record's view rides
-    /// `outcome.operation`.
+    /// A change that would end terminals somebody may be attached to, recorded
+    /// as an operation of `kind` (followed when `answered`). Refused with who is
+    /// attached unless `force_connected`; the record's view rides `outcome.operation`.
     pub async fn apply_wire_guarded(
         &self,
         command: WireCommand,
@@ -1313,6 +1297,10 @@ impl EngineHandle {
         &self.operations
     }
 
+    /// Like [`apply_wire`](Self::apply_wire) but tags the command with the
+    /// originating connection's [`StatusScope`], so every status it mints (the
+    /// synchronous outcome, deferred busies and finals, worker busies) reaches
+    /// only that connection.
     pub async fn apply_wire_scoped(
         &self,
         command: WireCommand,
@@ -2902,23 +2890,9 @@ impl EngineService {
         }
     }
 
-    /// The reload's follow-up on this loop, which owns the reload for `dux
-    /// server` and the flip. `ApplyReloadedConfig` and
-    /// `ProjectPersistenceOutcome` are distinct variants, so consuming the
-    /// reaction here never skips the project sync.
-    ///
-    /// The reaction may arrive WRAPPED in a `Multi` when config-mutating
-    /// commands were deferred during the reload (the engine folds the
-    /// `ApplyReloadedConfig` in with the deferred saves' status reactions), so
-    /// both forms are searched. The deferred saves' own status reactions were
-    /// already surfaced by the fan-out (it flattens `Multi`). A config in force
-    /// after a failed apply (this loop's own, or the engine's, which arrives as
-    /// `ConfigAdopted`) gets everything a reload owes the running server, as a
-    /// successful one does, so nothing stays on the config it replaced.
-    ///
-    /// This is the reload's owner for these two ways of serving, so it also
-    /// says how the reload ended to any client that asked for it as an
-    /// operation: applied, adopted with a step failed, or refused.
+    /// The reload's follow-up for `dux server` and the flip, whose reload this loop owns; the
+    /// reaction may arrive wrapped in a `Multi`. A config in force after a failed apply gets
+    /// everything a successful reload owes, and a client following the reload learns how it ended.
     pub(crate) fn apply_reload_followup(&mut self, engine: &mut Engine, reaction: EventReaction) {
         let adopted = find_config_adopted(&reaction);
         let refused = find_config_reload_refused(&reaction).map(str::to_string);
@@ -3005,12 +2979,8 @@ impl EngineService {
         Ok(())
     }
 
-    /// Everything a reload owes the running server once `engine.config` is
-    /// in force, compared with `before`, the config it replaced, the same
-    /// pull-request sync the terminal UI's reload runs included.
-    /// `github_was_enabled` is whether the integration was on before. Answers
-    /// the sentence about the settings only a restart applies, which it has
-    /// also raised as a warning, or `None` when nothing needs one.
+    /// Everything a reload owes the running server once `engine.config` replaces `before`, the
+    /// terminal UI's pull-request sync included. Answers the restart warning it raised, if any.
     fn config_in_force(
         &mut self,
         engine: &mut Engine,
@@ -3551,18 +3521,14 @@ struct StatusEmitter {
     /// the guard that deregisters it, so the two cannot come apart.
     watchers: Arc<AtomicUsize>,
     controller: KeyedStatusController,
-    /// The engine's operation registry. A keyed final landing here finishes
-    /// the records waiting on its key: this is the one place every final the
-    /// web raises passes through, so it is the completion point for every
-    /// worker-run change a client follows (see [`dux_core::operations`]).
+    /// A keyed final landing here finishes the operation records waiting on its key, since
+    /// every final the web raises passes through this emitter (see [`dux_core::operations`]).
     operations: dux_core::operations::Operations,
     /// The engine's attachment registry: a final also ends the reservations
     /// waiting on its key (see [`dux_core::attachments::Life::Key`]).
     attachments: dux_core::attachments::Attachments,
-    /// Statuses kept for the terminal UI's status line, while a terminal UI
-    /// services this emitter (`None` otherwise, so `dux server` keeps none):
-    /// those a change made by a client with no connection here raised for
-    /// every surface, which no browser stands in for.
+    /// Statuses for the terminal UI's status line while one services this emitter (`None` for
+    /// `dux server`): those raised for every surface by a client with no connection here.
     for_terminal: Option<Vec<WireStatus>>,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
@@ -4207,16 +4173,14 @@ fn handle_apply_wire_request(
     config_disk_ahead: &mut bool,
 ) {
     let mutates_config = cmd.mutates_config_static();
-    // A client with no connection here (the command line) is not a status
-    // surface: what its change raises for every surface reaches the terminal
-    // UI's line too.
+    // A client with no connection here (the command line) is no status surface,
+    // so what its change raises for every surface reaches the terminal UI's line too.
     let for_every_surface = matches!(origin.scope, StatusScope::All);
     // A file a raw save left ahead of memory is taken on before this runs,
     // by the loop that owns the reload (`EngineService::adopt_disk_config`).
     debug_assert!(!(mutates_config && *config_disk_ahead));
-    // Whoever sent this is not the terminal UI: a browser tab when the route
-    // vouched for the events connection the request named, otherwise a client
-    // with no connection here (the command line).
+    // Not the terminal UI: a browser tab when the route vouched for the events
+    // connection the request named, otherwise the command line.
     engine.dispatch_policy = Some(dux_core::attachments::Policy {
         requester: origin
             .operation
@@ -4511,9 +4475,8 @@ fn handle_request(
                 .and_then(|()| create_agent_tab_inner(engine, &session_id, provider));
             if let Some(ticket) = &ticket {
                 match &res {
-                    // The tab exists now; whether it came up is its launch's to
-                    // say, so the record waits for that report, holding the
-                    // tab until then.
+                    // Whether the tab came up is its launch report's to say, so
+                    // the record holds the tab until that report.
                     Ok((tab_id, _)) => {
                         engine.operations.hold(
                             &ticket.id,
@@ -4572,10 +4535,8 @@ fn handle_request(
                         );
                         ticket.hand_back(engine);
                     }
-                    // A launch it started, or one already in flight for this
-                    // tab: either way the tab's launch report is the outcome.
-                    // The slot tab is named by its stored id, which is what
-                    // that report carries, whichever spelling the route used.
+                    // A launch started here or already in flight: its report is the
+                    // outcome, keyed by the slot tab's stored id whatever the route's spelling.
                     Ok(()) => {
                         let launched = engine
                             .session_for_slot_tab(TabIdRef::new(&tab_id))
@@ -4997,10 +4958,8 @@ fn handle_subscribe(
         let _ = reply.send(Err(last_run_failed_refusal()));
         return;
     }
-    // Nor a tab another change still holds, or whose agent it holds: a stop
-    // in flight must not be undone by a page that happens to have the pane
-    // open. Joining a launch already running starts nothing new, so that is
-    // not asked; the change that holds the tab drives its own launch.
+    // Nor a tab another change holds, directly or through its agent, so an open
+    // pane cannot undo a stop in flight. Joining a running launch starts nothing.
     let launching = engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
         tab_id.clone(),
     )));
@@ -5024,12 +4983,8 @@ fn handle_subscribe(
     }
 }
 
-/// Resolve `provider` (or the session's project default) and create a Support
-/// tab, replying `(tab_id, provider)`. Mirrors the `create_terminal` direct
-/// return: the launch is dispatched fire-and-forget inside `Engine::create_tab`.
-/// Create a terminal through `create`, following it as an operation when a
-/// client asked to: the record opens before the terminal exists and ends with
-/// it, since a terminal is created whole inside the call and raises no status.
+/// Create a terminal through `create`, followed as an operation when a client
+/// asked: the record opens before the call and ends with it (a terminal raises no status).
 fn create_terminal_operation(
     engine: &mut Engine,
     owner: dux_core::model::TerminalOwner,
@@ -5068,6 +5023,9 @@ fn create_terminal_operation(
     res
 }
 
+/// Resolve `provider` (or the session's project default) and create a Support
+/// tab, replying `(tab_id, provider)`. Mirrors the `create_terminal` direct
+/// return: the launch is dispatched fire-and-forget inside `Engine::create_tab`.
 fn create_agent_tab_inner(
     engine: &mut Engine,
     session_id: &str,

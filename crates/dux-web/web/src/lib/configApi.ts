@@ -93,9 +93,7 @@ async function request(method: string, path: string, body: unknown): Promise<Res
 }
 
 /// A whole-set save (the macro list, the global environment) met a set that
-/// changed since the dialog read it (a `dux macros add` from a shell, another
-/// browser). The server wrote nothing; the message is its sentence, and the
-/// dialog offers to reload the set or keep editing.
+/// changed since the dialog read it. The server wrote nothing; the message is its sentence.
 export class SetChangedError extends Error {
   constructor(message: string) {
     super(message)
@@ -122,10 +120,8 @@ export interface RawConfig {
 }
 
 export const configApi = {
-  // Replace the entire `[macros]` map (the macro editor saves wholesale).
-  // `version` is the bootstrap's `macros_version` the edit started from: a list
-  // that changed since throws `SetChangedError` and nothing is written. Answers
-  // the version the list is at after the save.
+  // Replace the entire `[macros]` map; a list that moved past `version` (the
+  // bootstrap's `macros_version`) throws `SetChangedError`. Resolves the new version.
   updateMacros: (entries: MacroView[], version?: string) =>
     sendSet("PUT", "/api/v1/macros", { entries, version }),
   // Persist the workspace-wide env map (replace-wholesale), with the same

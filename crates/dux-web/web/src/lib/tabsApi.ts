@@ -48,8 +48,7 @@ export const tabsApi = {
     ),
   // Close a tab. The agent detaches when it was the last live one, and closing the slot tab
   // promotes the next tab in strip order; the 200 body carries both outcomes. The agent's
-  // only tab is refused with a 400, because an agent always has a slot. `accepted` goes ahead
-  // over exactly those blockers (their keys), the ones a dialog showed.
+  // only tab is refused with a 400, because an agent always has a slot.
   remove: (sessionId: string, tabId: string, accepted: readonly string[] | null = null) =>
     request<ClosedTab | undefined>(
       "DELETE",
@@ -65,9 +64,7 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/start`,
     ),
   // Stop a tab: its process ends and the tab stays, dormant. The agent detaches
-  // when it was the last running tab. Refused with a 409 while somebody else is
-  // attached to the tab.
-  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
+  // when it was the last running tab.
   stop: (sessionId: string, tabId: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "POST",

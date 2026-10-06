@@ -2,14 +2,10 @@
 //! ended. Every change route answers `?operation=1` with the id of a record in
 //! the engine's registry (see [`dux_core::operations`]); this route reads it.
 //!
-//! `?wait_seconds=N` holds the reply until the record has an outcome or `N`
-//! seconds pass, whichever is first, and then answers the record as it stands.
-//! The wait is capped at [`MAX_WAIT`], so a client polls in short waits and a
-//! dropped connection never loses more than one of them: the id is what it
-//! keeps. A record still running past its unknown threshold is still waited
-//! on, since it has no outcome yet. An id the registry does not know (never
-//! opened, or finished longer ago than its retention) is
-//! `404 {"error":"unknown_operation"}`.
+//! `?wait_seconds=N` holds the reply until the record has an outcome (a record
+//! past its unknown threshold has none yet) or `N` seconds pass, capped at
+//! [`MAX_WAIT`], then answers the record as it stands. An id the registry does
+//! not know (never opened, or past its retention) is `404 {"error":"unknown_operation"}`.
 
 use std::time::{Duration, Instant};
 
@@ -50,9 +46,8 @@ async fn get_operation(
         return unknown_operation();
     }
     let deadline = wait_deadline(Instant::now(), query.wait_seconds);
-    // The core serving this request is handing the engine over: answer the
-    // record as it stands rather than hold the reply into a teardown. The
-    // client polls again by id and reaches the next core.
+    // While this core hands the engine over, answer the record as it stands rather
+    // than hold the reply into a teardown; the client polls the next core by id.
     let mut handing_over = state.hand_over.subscribe();
     loop {
         let Some(view) = state.engine.operations().view(&id, Instant::now()) else {
@@ -69,8 +64,7 @@ async fn get_operation(
     }
 }
 
-/// When a read asked to wait `wait_seconds` from `now` answers at the latest:
-/// never later than [`MAX_WAIT`] away, whatever was asked.
+/// When a read asked at `now` to wait `wait_seconds` answers at the latest.
 fn wait_deadline(now: Instant, wait_seconds: u64) -> Instant {
     now + Duration::from_secs(wait_seconds).min(MAX_WAIT)
 }

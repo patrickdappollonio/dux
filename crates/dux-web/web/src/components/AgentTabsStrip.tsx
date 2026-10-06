@@ -249,10 +249,8 @@ function TabPill({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
-            {/* Stopping ends the tab's process and keeps the tab, so the only
-                tab stops like any other. Absent, not disabled, on a tab with
-                nothing running, as the agent menu's Detach is: there is no
-                process to ask to go. */}
+            {/* Unlike Close, the only tab can stop too, since the tab stays.
+                Absent rather than disabled with no process, like Detach. */}
             {tab.has_live_process ? (
               <DropdownMenuItem onClick={() => openStopTab(session.id, tab.id)}>
                 <CircleStop />

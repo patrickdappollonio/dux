@@ -2,19 +2,10 @@ import { useEffect, useRef, useState } from "react"
 
 import type { AttachedBlocker } from "@/lib/attached"
 
-// A guarded confirmation's state: a delete, detach, stop, tab or terminal
-// close, or project removal that the server refused because somebody else is
-// attached stays open, names them, and turns its confirm into the override.
-//
-// `confirm(send)` makes the request and resolves whether the change went ahead
-// and the dialog may close. `send(accepted)` resolves the blockers of a
-// refusal, or `null`; `accepted` is null on a plain confirm and, on the
-// override, the keys of exactly the blockers on screen, so the server refuses
-// again rather than cut off anybody the person has not seen.
-//
-// Everything is keyed to one opening of the dialog on one target: closing it,
-// or pointing it at another target, starts afresh, and an answer to a request
-// sent from an earlier opening is dropped whole, its pending flag included.
+/** A guarded confirmation's state, reset per opening and target: a refusal keeps
+ * the dialog open, names who is attached, and turns its confirm into the override.
+ * @returns `confirm(send)`, resolving true when the dialog may close; `send` gets
+ * the on-screen blockers' keys (null on a plain confirm) and resolves new blockers or null. */
 export function useAttachedOverride(open: boolean, target: string | null) {
   const [blockers, setBlockers] = useState<AttachedBlocker[] | null>(null)
   const [pending, setPending] = useState(false)

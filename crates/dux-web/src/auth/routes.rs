@@ -196,10 +196,8 @@ async fn login(
     response
 }
 
-/// `POST /api/v1/auth/cli-login` with `{password, label}`: the same password
-/// check, slow-down and ban as the browser's login, answering a token for the
-/// `Authorization` header instead of a cookie. It ends only after
-/// `cli_token_idle_days` without use, so there is no fixed expiry to report.
+/// `POST /api/v1/auth/cli-login` with `{password, label}`: a bearer token instead of a
+/// cookie. `expires_at` is null because the token ends only after `cli_token_idle_days` unused.
 async fn cli_login(
     State(state): State<AppState>,
     Extension(auth): Extension<RequestAuth>,
@@ -222,9 +220,8 @@ async fn cli_login(
     }
 }
 
-/// `POST /api/v1/auth/cli-logout`: end the token this request carried. Answers
-/// 204 even when it carried none, because the caller asked for exactly that
-/// outcome.
+/// `POST /api/v1/auth/cli-logout`: end every bearer token the request carried;
+/// `204` even when it carried none.
 async fn cli_logout(
     State(state): State<AppState>,
     Extension(auth): Extension<RequestAuth>,
@@ -242,9 +239,8 @@ enum SignIn {
     Refused(Response),
 }
 
-/// The password check every sign-in shares: reads the body, checks the
-/// password under the slow-down and ban, and starts a session of `kind`. A
-/// refusal is the finished response.
+/// The password check every sign-in route shares, ending in a session of `kind`;
+/// a refusal is the finished response to send.
 async fn sign_in(
     state: &AppState,
     auth: &RequestAuth,

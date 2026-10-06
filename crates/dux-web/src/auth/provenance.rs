@@ -60,10 +60,8 @@ pub enum Arrival {
         /// a wildcard listener the specific local address the connection used.
         local: SocketAddr,
     },
-    /// The control socket: the connecting process's user, which the listener
-    /// already checked is this process's own. This machine's owner, trusted
-    /// without a Host check, an Origin check or a password, and never slowed
-    /// or banned, since it names no address.
+    /// The control socket, whose `uid` the listener already checked is this
+    /// process's own: trusted as this machine's owner, with no Host, Origin or password check.
     Unix { uid: u32 },
 }
 
@@ -84,7 +82,6 @@ impl Arrival {
         }
     }
 
-    /// Whether this came over the control socket.
     pub fn is_control_socket(self) -> bool {
         matches!(self, Self::Unix { .. })
     }
@@ -513,9 +510,8 @@ struct Tcp {
     local: SocketAddr,
 }
 
-/// This machine's own user over the control socket: encrypted (it never
-/// leaves the machine), naming no address, so nothing about it can be slowed,
-/// banned or written anywhere.
+/// This machine's own user over the control socket: counted as encrypted because it
+/// never leaves the machine, and naming no address, so nothing can slow or ban it.
 fn control_socket_client() -> Classification {
     Classification {
         class: ClientClass::ThisMachine,

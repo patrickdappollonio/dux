@@ -110,10 +110,8 @@ impl Sessions {
         (self.0.clock)()
     }
 
-    /// Open the table at `db`, drop what can no longer be used (another
-    /// generation, idle past `idle`), and adopt the rest. Runs on a blocking
-    /// thread; a database that cannot be opened is said in dux.log and the
-    /// sessions live in memory for this run.
+    /// Open the table at `db`, drop sessions of another generation or idle past `idle`,
+    /// and adopt the rest. One that cannot be opened is logged and sessions live in memory.
     pub(crate) async fn load(&self, db: PathBuf, generation: String, idle: Idle) {
         let now = self.now();
         let browser_cutoff = now.saturating_sub(idle.browser_ms);

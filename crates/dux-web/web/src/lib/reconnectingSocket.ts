@@ -559,15 +559,14 @@ export abstract class ReconnectingSocket {
 
   // ---- Subclass extension hooks ----------------------------------------------
 
-  // Tweak the freshly-constructed WebSocket before handlers are attached. Default:
-  // no-op. (`void ws` keeps the param in the base signature without tripping
-  // no-unused-vars.)
-  // The address each open dials. The base is `url` itself; a subclass that
-  // has to say something that can change between opens says it here.
+  // The address each open dials; a subclass adds what can change between opens.
   protected openUrl(): string {
     return this.url
   }
 
+  // Tweak the freshly-constructed WebSocket before handlers are attached. Default:
+  // no-op. (`void ws` keeps the param in the base signature without tripping
+  // no-unused-vars.)
   protected configureSocket(ws: WebSocket): void {
     void ws
   }

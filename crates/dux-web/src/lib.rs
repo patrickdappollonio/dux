@@ -176,9 +176,8 @@ fn build_console(config: &dux_core::config::Config, paths: &DuxPaths) -> (Consol
     (console, config.server.access_log)
 }
 
-/// Open `server.log` for a serve. A log that cannot be opened is a warning in
-/// `dux.log` and a serve without the file, never a reason not to serve: the
-/// terminal (or the flip's viewer) still shows every line.
+/// Open `server.log` for a serve. One that cannot be opened is a warning in `dux.log`
+/// and never stops the serve: the terminal (or the flip's viewer) still shows every line.
 pub(crate) fn open_server_log(
     config: &dux_core::config::Config,
     paths: &DuxPaths,
@@ -2288,19 +2287,16 @@ pub(crate) struct ServeCore {
     hand_over: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-/// One core's serve task over its clone of the control socket, with a stop
-/// lane of its own so the owner can stop it accepting and let the requests it
-/// already took finish before the engine moves on to the next core.
+/// One core's serve task over its clone of the control socket, with its own stop lane so
+/// the owner can stop it accepting and let taken requests finish before the next core.
 struct ControlLeg {
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl ControlLeg {
-    /// Serve `app` on `listener` until this leg's own lane or the serve's
-    /// parent lane trips. Needs an entered runtime. A listener that cannot be
-    /// adopted is logged and leaves the core without the socket; the web
-    /// listeners, when there are any, serve on.
+    /// Serve `app` on `listener` until this leg's lane or the serve's parent lane trips;
+    /// needs an entered runtime. A listener that cannot be adopted is logged and skipped.
     fn spawn(
         app: Router,
         listener: std::os::unix::net::UnixListener,
@@ -2478,10 +2474,8 @@ impl ServeCore {
         };
         let leg_commands = tailscale_loop.take_leg_receiver();
 
-        // One serve leg per listener plus the loop that acts on the watcher, all
-        // as ONE supervisor task, so teardown is a single bounded join and a leg
-        // the watcher added later winds down through the same trigger. The
-        // control socket's leg stands apart, so it can be stopped first.
+        // Every web leg and the watcher loop run as one supervisor task, so teardown is one
+        // bounded join; the control socket's leg stands apart so it can be stopped first.
         let control;
         let supervisor = {
             let shutdown = shutdown.clone();
@@ -2582,9 +2576,8 @@ impl ServeCore {
         })
     }
 
-    /// Serve the control socket and nothing else: the plain terminal UI's
-    /// core. No web listener, no Tailscale watcher, no signal handlers, and no
-    /// access log, because nothing here is on a screen.
+    /// Serve the control socket and nothing else: the plain terminal UI's core, with no web
+    /// listener, Tailscale watcher, signal handlers or access log.
     pub(crate) fn start_control_only(
         handle: engine_actor::EngineHandle,
         control_socket: std::os::unix::net::UnixListener,
@@ -2593,9 +2586,8 @@ impl ServeCore {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        // A mode handle no loop answers: nothing here serves the web, so a
-        // mode change has nothing to move, and it is never handed to the
-        // router or the engine.
+        // A mode handle no loop answers: nothing here serves the web, and it is never
+        // handed to the router or the engine.
         let (mode_control, _no_loop) = TailscaleModeControl::new(
             runtime.handle().clone(),
             Arc::new(AtomicBool::new(false)),
@@ -2629,15 +2621,9 @@ impl ServeCore {
         })
     }
 
-    /// Stop accepting on the control socket, leaving the requests already
-    /// accepted to finish. Connections that arrive from now on wait in the
-    /// socket's backlog for the next core.
-    ///
-    /// This is where a hand-over begins, so every operation wait this core's
-    /// router holds answers now with the record as it stands. Anything else
-    /// still held open (a request that is not an operation wait) has the
-    /// owner's bound to finish, and is cut past it; the command line sends
-    /// every change with `operation=1` and polls, so it never holds one.
+    /// Stop accepting on the control socket and begin the hand-over: accepted requests finish,
+    /// new connections wait in the backlog for the next core, and every operation wait this
+    /// core's router holds answers now with the record as it stands.
     pub(crate) fn stop_control_socket(&self) {
         self.hand_over.send_replace(true);
         if let Some(control) = &self.control {
@@ -2872,14 +2858,8 @@ pub fn serve_with_engine(
         BackgroundHooks::default(),
     )?;
 
-    // Run the engine loop on the CURRENT thread. The control closure decides the
-    // exit reason: a serve failure or a tripped signal flag wins (both exit the
-    // loop), otherwise the caller's tick result maps straight through.
-    //
-    // Once it has decided, the control socket stops accepting and the loop
-    // keeps servicing until the requests it already took are answered (bounded),
-    // so a command-line client is never cut off by the hand-over; a connection
-    // that arrives meanwhile waits in the socket's backlog for the terminal UI.
+    // A serve failure or a tripped signal flag exits; otherwise the tick result maps through.
+    // Once decided, the loop services on until the control socket's taken requests are answered.
     let mut exit = ServerExit::ReturnToTui;
     let mut draining_until: Option<std::time::Instant> = None;
     let mut engine = engine_actor::run_engine_loop(
@@ -2921,9 +2901,8 @@ pub fn serve_with_engine(
             if core.control_socket_drained() {
                 return LoopControl::Exit;
             }
-            // Operation waits answered as the socket stopped; anything else
-            // still open gets this bound and is cut past it. The command line
-            // never holds such a request: it polls operations by id.
+            // Operation waits answered as the socket stopped; any other request
+            // still open is cut past this bound.
             draining_until = Some(std::time::Instant::now() + SERVER_JOIN_TIMEOUT);
             LoopControl::Continue
         },

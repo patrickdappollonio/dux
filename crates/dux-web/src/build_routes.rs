@@ -3,21 +3,12 @@
 //! its code no longer matches the server, so it hard reloads instead of
 //! reconnecting a tab into a build that may disagree about the wire shape.
 //!
-//! Both fields are needed. `version` is the literal `development` for every
-//! untagged build, so a rebuild-and-restart never moves it; `process` moves on
-//! every restart, and `version` is the half a human recognises and the half that
-//! names what changed in a release. Matching fields mean a network blip returned
-//! to the same process, so the client keeps its tab rather than reloading.
-//!
-//! Deliberately narrow: this identifies the server run, and must not grow into a
-//! schema or data-shape version. The interface ships inside the server binary, so
-//! a shape change cannot reach a browser without a restart this already catches.
-//! The one exception is `api`, the REST API's version, for the command line: it
-//! ships in a separate binary, possibly another version on another machine.
+//! It identifies the server run and is not a schema version: the body is exactly
+//! `version`, `process` and `api`, the REST API version the separately shipped
+//! command line checks.
 //!
 //! Always 200: it answers from process-local data with no engine round-trip, so
-//! it is available while the engine is still coming up, which is exactly when a
-//! reconnecting client asks.
+//! it is available while the engine is still coming up.
 
 use axum::{
     Json, Router,
@@ -29,9 +20,8 @@ use serde::Serialize;
 
 use crate::server::AppState;
 
-/// What this server reports about itself. `version` and `process` together are
-/// the identity the browser compares; either one moving means "not the server
-/// this tab loaded against".
+/// What this server reports about itself. The browser reads a change in
+/// `version` or `process` as a different server run.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BuildIdentity {
     /// The binary's display version, the same string shown under the logo
@@ -41,9 +31,8 @@ pub struct BuildIdentity {
     /// life of the process, so it is stable across every request a client makes
     /// and different on the other side of a restart.
     pub process: String,
-    /// The version of the REST API, which the command line checks against
-    /// its own before anything else. The browser ignores it: its code ships
-    /// in this binary.
+    /// The REST API version, which the command line checks before anything
+    /// else; the browser ignores it.
     pub api: u64,
 }
 
