@@ -40,8 +40,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
-    unknown_session,
+    OperationQuery, id_within_bound, operation_accepted, refusal, scope_from_headers,
+    ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
 use std::sync::Arc;
@@ -128,7 +128,7 @@ async fn create_tab(
             )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -218,7 +218,7 @@ async fn delete_tab(
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
         Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -240,7 +240,7 @@ async fn start_tab(
     match state.engine.start_agent_tab(tab, ticket).await {
         Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 

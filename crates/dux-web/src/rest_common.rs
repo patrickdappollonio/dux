@@ -21,11 +21,17 @@
 //!
 //! A client that would rather learn the real outcome than any of these asks
 //! with `?operation=1` ([`OperationQuery`]): the project add and remove, the
-//! agent create, delete, stop and start, the tab create, close and start, and
-//! the terminal create and close then answer at once with
-//! [`operation_accepted`], and the outcome is read from
-//! `GET /api/v1/operations/{id}` (see [`crate::operation_routes`]). Refusals
-//! answer exactly as they do without it.
+//! agent create, delete, stop and start, the tab create, close and start, the
+//! terminal create and close, and the one-entry macro and global environment
+//! changes then answer at once with [`operation_accepted`], and the outcome is
+//! read from `GET /api/v1/operations/{id}` (see [`crate::operation_routes`]).
+//! Refusals answer exactly as they do without it.
+//!
+//! Every one of those changes, asked with `?operation=1` or not, is refused
+//! with a `409` and a sentence naming the operation in the way while another
+//! followed change still holds what it would change (see
+//! [`dux_core::operations`]); [`refusal`] is how a route tells that refusal
+//! from an invalid request.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -274,6 +280,17 @@ pub(crate) fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
         .is_some_and(|status| status.tone == "error")
 }
 
+/// Answer an engine refusal: `409` when another change still holds what this
+/// one wanted ([`dux_core::operations::is_in_the_way`]), else `otherwise`.
+pub(crate) fn refusal(error: String, otherwise: StatusCode) -> Response {
+    let status = if dux_core::operations::is_in_the_way(&error) {
+        StatusCode::CONFLICT
+    } else {
+        otherwise
+    };
+    (status, error).into_response()
+}
+
 /// Map a delete command's accepted, soft-refused, and hard-error outcomes.
 pub(crate) fn delete_wire_response(result: Result<WireCommandOutcome, String>) -> Response {
     match result {
@@ -283,7 +300,7 @@ pub(crate) fn delete_wire_response(result: Result<WireCommandOutcome, String>) -
             }
             _ => StatusCode::NO_CONTENT.into_response(),
         },
-        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => refusal(error, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -349,7 +366,7 @@ pub(crate) fn delete_operation_response(
         )
             .into_response(),
         Ok((_, record)) => operation_accepted(&record),
-        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => refusal(error, StatusCode::BAD_REQUEST),
     }
 }
 

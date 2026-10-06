@@ -4,6 +4,7 @@
 //! embeds it and calls it directly, and the web server reaches it through its
 //! engine actor.
 
+mod admission;
 pub mod command;
 mod companion;
 pub mod config_saver;
@@ -71,6 +72,7 @@ pub(crate) mod test_support;
 mod worktree_removal_race_tests;
 
 pub use crate::destructive::DestructiveCheck;
+pub use admission::Admission;
 pub use command::{COMMIT_EMPTY_MESSAGE, COMMIT_NOTHING_STAGED, Command};
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
@@ -2097,6 +2099,12 @@ impl Engine {
                 created: vec![session_id.clone()],
                 ..Default::default()
             },
+        );
+        // ...and holds it from now until the create finishes, so nothing else
+        // changes the agent while it is still coming up.
+        self.operations.hold(
+            &op_id,
+            crate::operations::Hold::exclusive(InFlightKey::Agent(session_id.clone())),
         );
         map.insert(op_id, (session_id, now));
     }
@@ -6247,12 +6255,6 @@ impl Engine {
         session_id: &SessionIdRef,
         outgoing_tab_id: &TabIdRef,
     ) -> anyhow::Result<TabId> {
-        // Mid-deletion the agent's worktree is about to go and every one of its
-        // tabs is already being torn down; moving the slot around inside it
-        // would be re-pointing at a tab that is itself about to vanish.
-        if self.closing_sessions.contains(session_id.as_str()) {
-            anyhow::bail!("this agent is being deleted; its tabs cannot hand the slot around");
-        }
         let (new_slot, provider) = self
             .successor_slot_tab(session_id)
             .map(|t| (TabId::new(t.id.clone()), t.provider.clone()))
@@ -6307,6 +6309,14 @@ impl Engine {
     /// state untouched), then the PTY is torn down gracefully and every runtime
     /// map the tab keyed is cleared.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
+        // Mid-deletion the agent's worktree is about to go and every one of its
+        // tabs is already being torn down with it: closing one on its own would
+        // race that teardown, and moving the slot around inside it would be
+        // re-pointing at a tab that is itself about to vanish.
+        if self.closing_sessions.contains(session_id) || self.pending_deletions.contains(session_id)
+        {
+            anyhow::bail!("this agent is being deleted, and its tabs go with it");
+        }
         // Transport-facing: two path segments arrive as bare strings, which is
         // exactly the pair a caller can swap unnoticed. Named here, at the door.
         //
@@ -11999,7 +12009,7 @@ mod tab_ops_tests {
     }
 
     #[test]
-    fn close_tab_refuses_to_promote_while_the_agent_is_being_deleted() {
+    fn close_tab_refuses_any_tab_while_the_agent_is_being_deleted() {
         let (mut engine, _tmp) = test_engine();
         agent_with_tabs(&mut engine, &[("t2", "codex")]);
         engine.closing_sessions.insert("s1".to_string());
@@ -12008,6 +12018,13 @@ mod tab_ops_tests {
 
         assert!(err.to_string().contains("being deleted"), "err: {err}");
         assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
+
+        // An extra tab is refused the same way: the delete takes it with it.
+        let err = engine.close_tab("s1", "t2").unwrap_err();
+
+        assert!(err.to_string().contains("being deleted"), "err: {err}");
         assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
     }

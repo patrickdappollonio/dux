@@ -163,11 +163,22 @@ pub(crate) async fn resolve_worktree(
     state: &AppState,
     session_id: String,
 ) -> Result<PathBuf, RouteRejection> {
-    match state.engine.session_worktree(session_id).await {
+    match state.engine.session_worktree(session_id.clone()).await {
         Some(w) => Ok(PathBuf::from(w)),
-        None => Err((StatusCode::NOT_FOUND, "unknown session")
-            .into_response()
-            .into()),
+        // An agent a delete has taken off the list while it still runs is not
+        // unknown: the change in the way is named, as for any other refusal.
+        None => match state
+            .engine
+            .operations()
+            .holder_of(&dux_core::engine::InFlightKey::Agent(session_id))
+        {
+            Some(in_the_way) => Err((StatusCode::CONFLICT, in_the_way.to_string())
+                .into_response()
+                .into()),
+            None => Err((StatusCode::NOT_FOUND, "unknown session")
+                .into_response()
+                .into()),
+        },
     }
 }
 

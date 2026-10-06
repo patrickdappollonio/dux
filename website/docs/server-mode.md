@@ -435,7 +435,8 @@ You do not need shell access to the machine to change settings:
   turns into one of them: those stay a change you make in the file from a terminal.
 - **Global environment…** opens a dialog for workspace-wide environment variables that
   every project inherits, which any project can override with its own project-level
-  environment settings.
+  environment settings. Like the macro editor, it refuses to save over variables that
+  changed elsewhere while it was open, and offers to reload them or keep your edits.
 - The common `[ui]` and `[capabilities]` preferences have rows in **Preferences…**.
 
 ## Where to go next

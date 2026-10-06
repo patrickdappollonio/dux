@@ -8,29 +8,45 @@
 //! same-origin check are not authentication.
 //!
 //! A successful config change makes the engine emit `config.changed`, so clients
-//! refetch `/api/v1/bootstrap`; no handler here echoes the new state.
+//! refetch `/api/v1/bootstrap`; no handler here echoes the new state, except the
+//! version a macro or global environment save leaves its set at.
+//!
+//! The macro list and the global environment each have two ways in. The whole
+//! set (`PUT /api/v1/macros`, `PUT /api/v1/global-env`) is what the browser's
+//! dialogs save: they send the `macros_version` or `global_env_version` they
+//! read, and a set that changed since is refused with `409 {"error":"changed",
+//! "message"}`, nothing written. One entry (`PUT` and `DELETE` on
+//! `/api/v1/macros/{name}` and `/api/v1/global-env/{name}`) is what a script
+//! changes, leaving the rest of the set alone; an entry that is not there is a
+//! `404`, and `?operation=1` answers an operation record.
 
 use std::collections::BTreeMap;
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 
+use dux_core::operations::OperationKind;
 use dux_core::wire::{SettingsPatch, WireCommand, WireMacroEntry};
 
-use crate::rest_common::scope_from_headers;
+use crate::rest_common::{OperationQuery, operation_accepted, refusal, scope_from_headers};
 use crate::server::AppState;
 
 /// The config-mutation routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/macros", put(update_macros))
+        .route("/api/v1/macros/{name}", put(set_macro).delete(remove_macro))
         .route("/api/v1/global-env", put(persist_global_env))
+        .route(
+            "/api/v1/global-env/{name}",
+            put(set_global_env_var).delete(remove_global_env_var),
+        )
         .route("/api/v1/ui/changes-pane", put(set_changes_pane))
         .route("/api/v1/config/reload", post(reload_config))
         .route(
@@ -80,19 +96,74 @@ struct UpdateMacrosBody {
     /// matching the frontend's `MacroView`. The engine validates wholesale
     /// (empty/duplicate names, empty text, unknown surface all rejected).
     entries: Vec<WireMacroEntry>,
+    /// The bootstrap's `macros_version` the edit started from. Present, a list
+    /// that changed since is refused with `409 {"error":"changed"}` and nothing
+    /// is written; absent, the save replaces whatever is there.
+    #[serde(default)]
+    version: Option<String>,
 }
 
+/// `PUT /api/v1/macros`: replace the whole list. `200 {"version"}` with the
+/// version the list is at now, for the editor's next save.
 async fn update_macros(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<UpdateMacrosBody>,
 ) -> Response {
-    dispatch(
+    save_whole_set(
         &state,
         &headers,
         WireCommand::UpdateMacros {
             entries: body.entries,
+            version: body.version,
         },
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct SetMacroBody {
+    text: String,
+    /// `agent` | `terminal` | `both`.
+    surface: String,
+}
+
+/// `PUT /api/v1/macros/{name}`: add the macro, or replace it in place. The
+/// command line's `macros add`; the rest of the list is untouched.
+async fn set_macro(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(body): Json<SetMacroBody>,
+) -> Response {
+    change_one_entry(
+        &state,
+        &headers,
+        &operation,
+        WireCommand::SetMacro {
+            name,
+            text: body.text,
+            surface: body.surface,
+        },
+        OperationKind::MacroSet,
+    )
+    .await
+}
+
+/// `DELETE /api/v1/macros/{name}`: remove one macro; `404` when there is none.
+async fn remove_macro(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+) -> Response {
+    change_one_entry(
+        &state,
+        &headers,
+        &operation,
+        WireCommand::RemoveMacro { name },
+        OperationKind::MacroRemove,
     )
     .await
 }
@@ -103,19 +174,138 @@ async fn update_macros(
 struct GlobalEnvBody {
     /// The whole workspace-wide env map (replace-wholesale).
     env: BTreeMap<String, String>,
+    /// The bootstrap's `global_env_version` the edit started from, with the
+    /// same meaning as the macro list's.
+    #[serde(default)]
+    version: Option<String>,
 }
 
+/// `PUT /api/v1/global-env`: replace the whole table. Answers as
+/// `PUT /api/v1/macros` does.
 async fn persist_global_env(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<GlobalEnvBody>,
 ) -> Response {
-    dispatch(
+    save_whole_set(
         &state,
         &headers,
-        WireCommand::PersistGlobalEnv { env: body.env },
+        WireCommand::PersistGlobalEnv {
+            env: body.env,
+            version: body.version,
+        },
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct SetGlobalEnvVarBody {
+    value: String,
+}
+
+/// `PUT /api/v1/global-env/{name}`: set one variable. The value is never
+/// echoed in the answer or in any status.
+async fn set_global_env_var(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(body): Json<SetGlobalEnvVarBody>,
+) -> Response {
+    change_one_entry(
+        &state,
+        &headers,
+        &operation,
+        WireCommand::SetGlobalEnvVar {
+            name,
+            value: body.value,
+        },
+        OperationKind::EnvSet,
+    )
+    .await
+}
+
+/// `DELETE /api/v1/global-env/{name}`: remove one variable; `404` when there
+/// is none.
+async fn remove_global_env_var(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+) -> Response {
+    change_one_entry(
+        &state,
+        &headers,
+        &operation,
+        WireCommand::RemoveGlobalEnvVar { name },
+        OperationKind::EnvRemove,
+    )
+    .await
+}
+
+/// The version a set is at after a change, as both kinds of save answer it.
+#[derive(Serialize)]
+struct SetVersion {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// Run a whole-set save: `200 {"version"}`, `409 {"error":"changed",
+/// "message"}` when the set moved since the version it was based on, `409`
+/// while another change holds the set, and `400` with the reason otherwise.
+async fn save_whole_set(state: &AppState, headers: &HeaderMap, cmd: WireCommand) -> Response {
+    match state
+        .engine
+        .apply_wire_scoped(cmd, scope_from_headers(headers, &state.connections))
+        .await
+    {
+        Ok(outcome) => Json(SetVersion {
+            version: outcome.version,
+        })
+        .into_response(),
+        Err(e) => config_refusal(e),
+    }
+}
+
+/// Run a one-entry change. With `?operation=1` it answers its operation
+/// record, which the change finishes inside the call; without, `200
+/// {"version"}` as a whole-set save does.
+async fn change_one_entry(
+    state: &AppState,
+    headers: &HeaderMap,
+    operation: &OperationQuery,
+    cmd: WireCommand,
+    kind: OperationKind,
+) -> Response {
+    let scope = scope_from_headers(headers, &state.connections);
+    if operation.asked() {
+        return match state.engine.apply_wire_operation(cmd, scope, kind).await {
+            Ok((_, record)) => operation_accepted(&record),
+            Err(e) => config_refusal(e),
+        };
+    }
+    match state.engine.apply_wire_scoped(cmd, scope).await {
+        Ok(outcome) => Json(SetVersion {
+            version: outcome.version,
+        })
+        .into_response(),
+        Err(e) => config_refusal(e),
+    }
+}
+
+/// How a macro or environment change's refusal answers.
+fn config_refusal(error: String) -> Response {
+    if dux_core::wire::is_stale_set(&error) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "changed", "message": error })),
+        )
+            .into_response();
+    }
+    if error.starts_with("unknown macro") || error.starts_with("unknown global environment") {
+        return (StatusCode::NOT_FOUND, error).into_response();
+    }
+    refusal(error, StatusCode::BAD_REQUEST)
 }
 
 // ── Changes pane ───────────────────────────────────────────────────────────────
@@ -751,18 +941,75 @@ mod tests {
         );
     }
 
+    /// Send `req` and answer its status and body, parsed as JSON when it is.
+    async fn answer(
+        app: &Router,
+        req: Request<axum::body::Body>,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into()));
+        (status, body)
+    }
+
+    async fn bootstrap(app: &Router) -> serde_json::Value {
+        let req = Request::builder()
+            .uri("/api/v1/bootstrap")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        answer(app, req).await.1
+    }
+
     #[tokio::test]
     async fn update_macros_accepts_a_valid_set() {
         let (_tmp, app) = router_no_auth();
-        let resp = app
-            .oneshot(json_req(
+        let (status, body) = answer(
+            &app,
+            json_req(
                 "PUT",
                 "/api/v1/macros",
                 r#"{"entries":[{"name":"greet","text":"hi","surface":"agent"}]}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The browser saves the list it read, and says which version that was.
+        let read_at = bootstrap(&app).await["macros_version"].clone();
+        assert_eq!(
+            body["version"], read_at,
+            "a save answers the version it left"
+        );
+        // The command line adds a macro in the meantime.
+        let (status, _) = answer(
+            &app,
+            json_req(
+                "PUT",
+                "/api/v1/macros/deploy",
+                r#"{"text":"ship it","surface":"terminal"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let stale = serde_json::json!({
+            "entries": [{"name": "greet", "text": "hello", "surface": "agent"}],
+            "version": read_at,
+        });
+        let (status, body) =
+            answer(&app, json_req("PUT", "/api/v1/macros", &stale.to_string())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "changed");
+        let names: Vec<serde_json::Value> = bootstrap(&app).await["macros"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].clone())
+            .collect();
+        assert_eq!(names, vec!["greet", "deploy"], "the added macro survives");
     }
 
     #[tokio::test]
@@ -782,15 +1029,112 @@ mod tests {
     #[tokio::test]
     async fn persist_global_env_accepts_a_map() {
         let (_tmp, app) = router_no_auth();
-        let resp = app
-            .oneshot(json_req(
+        let (status, _) = answer(
+            &app,
+            json_req("PUT", "/api/v1/global-env", r#"{"env":{"FOO":"bar"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let read_at = bootstrap(&app).await["global_env_version"].clone();
+        let (status, _) = answer(
+            &app,
+            json_req("PUT", "/api/v1/global-env/TOKEN", r#"{"value":"abc"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let stale = serde_json::json!({"env": {"FOO": "baz"}, "version": read_at});
+        let (status, body) = answer(
+            &app,
+            json_req("PUT", "/api/v1/global-env", &stale.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "changed");
+        assert_eq!(
+            bootstrap(&app).await["global_env"],
+            serde_json::json!({"FOO": "bar", "TOKEN": "abc"})
+        );
+    }
+
+    /// The per-entry routes change one macro or one variable, refuse what is
+    /// not there, and answer an operation record when asked, finished inside
+    /// the call.
+    #[tokio::test]
+    async fn the_per_entry_routes_change_one_entry_and_answer_an_operation_when_asked() {
+        let (_tmp, app) = router_no_auth();
+        let (status, record) = answer(
+            &app,
+            json_req(
                 "PUT",
-                "/api/v1/global-env",
-                r#"{"env":{"FOO":"bar"}}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+                "/api/v1/macros/Review%20it?operation=1",
+                r#"{"text":"review this","surface":"agent"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(record["kind"], "macro.set");
+        assert_eq!(record["state"], "succeeded");
+        assert!(
+            record["message"].as_str().unwrap().contains("Review it"),
+            "{record}"
+        );
+
+        let (status, _) = answer(
+            &app,
+            json_req(
+                "PUT",
+                "/api/v1/macros/bad",
+                r#"{"text":"","surface":"agent"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a macro needs text");
+
+        let (status, record) = answer(
+            &app,
+            json_req("DELETE", "/api/v1/macros/Review%20it?operation=1", ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(record["kind"], "macro.remove");
+        assert_eq!(record["state"], "succeeded");
+        assert_eq!(bootstrap(&app).await["macros"], serde_json::json!([]));
+        let (status, _) = answer(&app, json_req("DELETE", "/api/v1/macros/Review%20it", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, record) = answer(
+            &app,
+            json_req(
+                "PUT",
+                "/api/v1/global-env/API_KEY?operation=1",
+                r#"{"value":"secret"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(record["kind"], "env.set");
+        assert_eq!(record["state"], "succeeded");
+        assert!(
+            !record.to_string().contains("secret"),
+            "a value is never echoed: {record}"
+        );
+        let (status, _) = answer(
+            &app,
+            json_req("PUT", "/api/v1/global-env/1BAD", r#"{"value":"x"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "not a variable name");
+        let (status, record) = answer(
+            &app,
+            json_req("DELETE", "/api/v1/global-env/API_KEY?operation=1", ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(record["kind"], "env.remove");
+        assert_eq!(bootstrap(&app).await["global_env"], serde_json::json!({}));
+        let (status, _) = answer(&app, json_req("DELETE", "/api/v1/global-env/API_KEY", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

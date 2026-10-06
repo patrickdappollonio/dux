@@ -1343,6 +1343,27 @@ impl Engine {
                 ],
             )));
         }
+        // Removing the project removes its agents' records, so an agent still
+        // coming up in it would come up with no record behind it.
+        if self.project_has_launching_tab(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(
+                crate::status_text![
+                    "Cannot remove project ",
+                    q(project_name),
+                    " while an agent tab is still launching. Wait a moment, then try again."
+                ],
+            )));
+        }
+        if self.project_has_create_in_flight(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(
+                crate::status_text![
+                    "Cannot remove project ",
+                    q(project_name),
+                    " while an agent is being created in it. \
+                 Wait for the create to finish, then try again."
+                ],
+            )));
+        }
         let was_real = self.projects.iter().any(|project| project.id == project_id);
         let removed = self.session_store.remove_project_records(project_id)?;
         // What became of each worktree, decided here: kept on disk.
@@ -2186,6 +2207,50 @@ mod tests {
             vec!["p2"],
             "only the removed project is gone",
         );
+    }
+
+    #[test]
+    fn removing_a_project_is_refused_while_one_of_its_agents_launches_or_is_being_created() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let remove = |engine: &mut Engine| {
+            engine
+                .apply(Command::RemoveProject {
+                    project_id: "p1".to_string(),
+                    project_name: "p1".to_string(),
+                })
+                .expect("the command answers")
+        };
+        let still_there = |engine: &Engine| {
+            engine.projects.iter().any(|p| p.id == "p1")
+                && engine.sessions.iter().any(|s| s.id == "s1")
+        };
+
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+        let reaction = remove(&mut engine);
+        let EventReaction::Status(status) = reaction else {
+            panic!("a refusal status")
+        };
+        assert_eq!(status.tone, StatusTone::Error);
+        assert!(status.message.contains("launching"), "{}", status.message);
+        assert!(still_there(&engine));
+        engine.clear_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+
+        engine.note_create_started("op-c", Some("p1"));
+        let reaction = remove(&mut engine);
+        let EventReaction::Status(status) = reaction else {
+            panic!("a refusal status")
+        };
+        assert_eq!(status.tone, StatusTone::Error);
+        assert!(
+            status.message.contains("being created"),
+            "{}",
+            status.message
+        );
+        assert!(still_there(&engine));
     }
 
     #[test]

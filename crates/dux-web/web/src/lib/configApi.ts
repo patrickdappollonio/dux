@@ -25,7 +25,48 @@ function asConfigChanged(e: unknown): unknown {
   return e
 }
 
+/// A refusal whose body is the 409 `changed` answer of a whole-set save becomes
+/// a `SetChangedError`; anything else is passed through as it was.
+function asSetChanged(e: unknown): unknown {
+  if (!(e instanceof Error)) return e
+  try {
+    const parsed = JSON.parse(e.message) as { error?: unknown; message?: unknown }
+    if (parsed.error === "changed" && typeof parsed.message === "string") {
+      return new SetChangedError(parsed.message)
+    }
+  } catch {
+    // Not JSON: an ordinary refusal.
+  }
+  return e
+}
+
 async function send(method: string, path: string, body: unknown): Promise<void> {
+  await request(method, path, body)
+}
+
+/// `send`, answering the version a whole-set save left the set at, when the
+/// server said.
+async function sendSet(
+  method: string,
+  path: string,
+  body: unknown,
+): Promise<string | undefined> {
+  let resp: Response
+  try {
+    resp = await request(method, path, body)
+  } catch (e) {
+    throw asSetChanged(e)
+  }
+  const text = await resp.text().catch(() => "")
+  try {
+    const parsed = JSON.parse(text) as { version?: unknown }
+    return typeof parsed.version === "string" ? parsed.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function request(method: string, path: string, body: unknown): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" }
   const id = getConnectionId()
   if (id) headers["x-connection-id"] = id
@@ -47,6 +88,18 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
   if (!resp.ok) {
     const detail = (await resp.text().catch(() => "")).trim()
     throw new Error(detail || `request failed (${resp.status})`)
+  }
+  return resp
+}
+
+/// A whole-set save (the macro list, the global environment) met a set that
+/// changed since the dialog read it (a `dux macros add` from a shell, another
+/// browser). The server wrote nothing; the message is its sentence, and the
+/// dialog offers to reload the set or keep editing.
+export class SetChangedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SetChangedError"
   }
 }
 
@@ -70,11 +123,15 @@ export interface RawConfig {
 
 export const configApi = {
   // Replace the entire `[macros]` map (the macro editor saves wholesale).
-  updateMacros: (entries: MacroView[]) =>
-    send("PUT", "/api/v1/macros", { entries }),
-  // Persist the workspace-wide env map (replace-wholesale).
-  persistGlobalEnv: (env: Record<string, string>) =>
-    send("PUT", "/api/v1/global-env", { env }),
+  // `version` is the bootstrap's `macros_version` the edit started from: a list
+  // that changed since throws `SetChangedError` and nothing is written. Answers
+  // the version the list is at after the save.
+  updateMacros: (entries: MacroView[], version?: string) =>
+    sendSet("PUT", "/api/v1/macros", { entries, version }),
+  // Persist the workspace-wide env map (replace-wholesale), with the same
+  // `version` rule against `global_env_version`.
+  persistGlobalEnv: (env: Record<string, string>, version?: string) =>
+    sendSet("PUT", "/api/v1/global-env", { env, version }),
   // Persist the Changes-pane visibility flag (`config.ui.show_changes_pane`).
   setChangesPaneVisible: (visible: boolean) =>
     send("PUT", "/api/v1/ui/changes-pane", { visible }),

@@ -24,6 +24,9 @@ export interface Bootstrap {
   provider_drop_paste?: Record<string, DropPasteProfile>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
+  /** The version of `macros`, sent back on the macro editor's whole-list save
+   * so a list that changed since is refused instead of overwritten. */
+  macros_version?: string
   /** The rotating welcome tips shown on the empty-state screen. */
   welcome_tips: string[]
   /** The binary's display version ('vX.Y.Z' or 'development'); shown in the sidebar. */
@@ -113,6 +116,9 @@ export interface Bootstrap {
   tab_reaches_agent?: boolean
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
+  /** The version of `global_env`, sent back on its dialog's save for the same
+   * reason as `macros_version`. */
+  global_env_version?: string
   /** Mirrors `config.ui.status_clear_seconds`: the base window every tone is scaled
    * off in `lib/notify.ts`, not info/success alone. 0 never auto-clears a final
    * state; absent is 6. */

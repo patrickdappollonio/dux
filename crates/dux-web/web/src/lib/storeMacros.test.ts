@@ -33,11 +33,20 @@ let bootstrapMacros: MacroView[] = []
 let failBootstrap = false
 // When set, the macros PUT returns a 400, exercising the reorder rollback path.
 let failMacrosPut = false
+// The bootstrap's `macros_version`, absent unless a test sets it.
+let bootstrapMacrosVersion: string | undefined
+// When set, the macros PUT answers the 409 a list that changed since is given.
+let staleMacrosPut = false
+// The version a successful macros PUT answers with, absent unless set.
+let savedMacrosVersion: string | undefined
 
 function makeBootstrap(macros: MacroView[]): Bootstrap {
   return {
     available_providers: [],
     macros,
+    ...(bootstrapMacrosVersion === undefined
+      ? {}
+      : { macros_version: bootstrapMacrosVersion }),
     welcome_tips: [],
     dux_version: "development",
     randomize_agent_names_by_default: false,
@@ -73,6 +82,19 @@ const fetchMock = vi.fn(async (url: string) => {
   }
   // The macro editor persists via a REST PUT.
   if (u.includes("/api/v1/macros")) {
+    if (staleMacrosPut) {
+      const body = JSON.stringify({
+        error: "changed",
+        message: "The macro list changed after this dialog read it.",
+      })
+      return {
+        ok: false,
+        status: 409,
+        json: async () => JSON.parse(body),
+        text: async () => body,
+        headers: { get: () => null },
+      } as unknown as Response
+    }
     if (failMacrosPut) {
       return {
         ok: false,
@@ -82,11 +104,15 @@ const fetchMock = vi.fn(async (url: string) => {
         headers: { get: () => null },
       } as unknown as Response
     }
+    const saved =
+      savedMacrosVersion === undefined
+        ? ""
+        : JSON.stringify({ version: savedMacrosVersion })
     return {
       ok: true,
-      status: 204,
-      json: async () => null,
-      text: async () => "",
+      status: 200,
+      json: async () => (saved ? JSON.parse(saved) : null),
+      text: async () => saved,
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -115,6 +141,9 @@ beforeEach(() => {
   bootstrapMacros = []
   failBootstrap = false
   failMacrosPut = false
+  bootstrapMacrosVersion = undefined
+  staleMacrosPut = false
+  savedMacrosVersion = undefined
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -311,7 +340,8 @@ describe("store macros commands", () => {
     expect(pty.sent).toHaveLength(1)
   })
 
-  it("saveMacros PUTs the FULL ordered entries to /api/v1/macros and closes", async () => {
+  it("saveMacros PUTs the FULL ordered entries with the version it read, closes, and comes back on a stale refusal", async () => {
+    bootstrapMacrosVersion = "v1"
     const mod = await loadStore()
     mod.openMacrosDialog()
 
@@ -327,7 +357,7 @@ describe("store macros commands", () => {
       "/api/v1/macros",
       expect.objectContaining({
         method: "PUT",
-        body: JSON.stringify({ entries: edited }),
+        body: JSON.stringify({ entries: edited, version: "v1" }),
       }),
     )
     // Order is preserved exactly (wholesale replace, not a delta).
@@ -340,9 +370,32 @@ describe("store macros commands", () => {
     expect(sent.map((m) => m.name)).toEqual(["Build", "Review", "New"])
     // The dialog closes after dispatching the save.
     expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
+
+    // The list changed after the dialog read it: the dialog comes back with
+    // the edits and the server's sentence, and nothing typed is lost.
+    staleMacrosPut = true
+    mod.openMacrosDialog()
+    mod.saveMacros(edited)
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+    })
+    expect(mod.getSnapshot().macrosConflict).toBe(
+      "The macro list changed after this dialog read it.",
+    )
+    expect(mod.getSnapshot().macrosDraft).toEqual(edited)
+
+    // Reloading reseeds the draft and its version from the server's list.
+    staleMacrosPut = false
+    bootstrapMacros = [{ name: "Shell", text: "dux macros add", surface: "both" }]
+    bootstrapMacrosVersion = "v2"
+    await mod.reloadMacrosDraft()
+    expect(mod.getSnapshot().macrosConflict).toBeNull()
+    expect(mod.getSnapshot().macrosDraft).toEqual(bootstrapMacros)
+    expect(mod.getSnapshot().macrosDraftVersion).toBe("v2")
   })
 
   it("persistMacroOrder PUTs the reordered entries, keeps the dialog open, resolves true", async () => {
+    savedMacrosVersion = "v3"
     bootstrapMacros = [
       { name: "Review", text: "review this", surface: "agent" },
       { name: "Build", text: "cargo build", surface: "terminal" },
@@ -367,6 +420,8 @@ describe("store macros commands", () => {
     // Unlike saveMacros, a reorder save must NOT close the dialog: the user is
     // still arranging the list.
     expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+    // The dialog's next save is based on the list this one left.
+    expect(mod.getSnapshot().macrosDraftVersion).toBe("v3")
   })
 
   it("persistMacroOrder resolves false and toasts when the PUT is rejected", async () => {

@@ -4179,19 +4179,22 @@ fn handle_request(
         EngineRequest::CreateTerminal(session_id, ticket, reply) => {
             // Headless spawn: seed a default 24x80 and let the first attaching
             // client resize the PTY to its real viewport.
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_companion_terminal(&session_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateProjectTerminal(project_id, ticket, reply) => {
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Project(project_id.clone());
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_project_terminal(&project_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateStandaloneTerminal(ticket, reply) => {
-            let res = create_terminal_operation(engine, ticket, |engine| {
+            let owner = dux_core::model::TerminalOwner::Standalone;
+            let res = create_terminal_operation(engine, owner, ticket, |engine| {
                 engine.create_standalone_terminal(24, 80)
             });
             let _ = reply.send(res);
@@ -4214,12 +4217,26 @@ fn handle_request(
             if let Some(ticket) = &ticket {
                 engine.open_operation(&ticket.id, ticket.kind);
             }
-            let res = create_agent_tab_inner(engine, &session_id, provider);
+            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
+            let res = engine
+                .admit(
+                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
+                    &engine.inside_admission(&owner),
+                )
+                .map_err(|e| e.to_string())
+                .and_then(|()| create_agent_tab_inner(engine, &session_id, provider));
             if let Some(ticket) = &ticket {
                 match &res {
                     // The tab exists now; whether it came up is its launch's to
-                    // say, so the record waits for that report.
+                    // say, so the record waits for that report, holding the
+                    // tab until then.
                     Ok((tab_id, _)) => {
+                        engine.operations.hold(
+                            &ticket.id,
+                            dux_core::operations::Hold::exclusive(
+                                dux_core::engine::InFlightKey::Tab(TabId::new(tab_id.clone())),
+                            ),
+                        );
                         engine.operations.note(
                             &ticket.id,
                             dux_core::operations::OperationNotes {
@@ -4242,13 +4259,21 @@ fn handle_request(
             if let Some(ticket) = &ticket {
                 engine.open_operation(&ticket.id, ticket.kind);
             }
+            // Refused while another change holds the tab or its agent.
+            let admitted = match engine.owning_session_for_tab(&tab_id) {
+                Some(session_id) => engine.admit(
+                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
+                    &engine.tab_admission(&session_id, TabId::new(tab_id.clone())),
+                ),
+                None => Ok(()),
+            };
             // Already running is success, not a second launch: the card can be
             // pressed from a page whose spine has not caught up yet.
             let running = engine.providers.contains_key(TabIdRef::new(&tab_id));
-            let res = if running {
-                Ok(())
-            } else {
-                launch_agent(engine, &tab_id)
+            let res = match admitted {
+                Err(in_the_way) => Err(in_the_way.to_string()),
+                Ok(()) if running => Ok(()),
+                Ok(()) => launch_agent(engine, &tab_id),
             };
             if let Some(ticket) = &ticket {
                 match &res {
@@ -4708,13 +4733,21 @@ fn handle_subscribe(
 /// it, since a terminal is created whole inside the call and raises no status.
 fn create_terminal_operation(
     engine: &mut Engine,
+    owner: dux_core::model::TerminalOwner,
     ticket: Option<OperationTicket>,
     create: impl FnOnce(&mut Engine) -> anyhow::Result<(String, String)>,
 ) -> Result<(String, String), String> {
     if let Some(ticket) = &ticket {
         engine.open_operation(&ticket.id, ticket.kind);
     }
-    let res = create(engine).map_err(|e| e.to_string());
+    // Refused while another change holds the agent or project it opens in.
+    let admitted = engine.admit(
+        ticket.as_ref().map(|ticket| ticket.id.as_str()),
+        &engine.inside_admission(&owner),
+    );
+    let res = admitted
+        .map_err(|e| e.to_string())
+        .and_then(|()| create(engine).map_err(|e| e.to_string()));
     if let Some(ticket) = &ticket {
         match &res {
             Ok((terminal_id, _)) => {
@@ -8644,7 +8677,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("API".to_string(), "k".to_string());
         handle
-            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .apply_wire(WireCommand::PersistGlobalEnv { env, version: None })
             .await
             .expect("save");
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
@@ -8680,7 +8713,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("API".to_string(), "k".to_string());
         handle
-            .apply_wire(WireCommand::PersistGlobalEnv { env })
+            .apply_wire(WireCommand::PersistGlobalEnv { env, version: None })
             .await
             .expect("the command adopts the file and applies");
         let after = handle.read_raw_config().await.expect("read").content;
@@ -8729,7 +8762,7 @@ mod tests {
         let env = || {
             let mut env = std::collections::BTreeMap::new();
             env.insert("API".to_string(), "k".to_string());
-            WireCommand::PersistGlobalEnv { env }
+            WireCommand::PersistGlobalEnv { env, version: None }
         };
         let refused = handle.apply_wire(env()).await;
         let message = refused.expect_err("a file dux server refuses is not adopted");

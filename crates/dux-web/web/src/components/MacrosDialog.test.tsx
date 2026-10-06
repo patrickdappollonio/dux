@@ -45,6 +45,8 @@ vi.mock("@dnd-kit/sortable", () => ({
 }))
 
 const persistMacroOrderMock = vi.fn<(macros: MacroView[]) => Promise<boolean>>()
+const reloadMacrosDraftMock = vi.fn<() => Promise<void>>()
+const dismissMacrosConflictMock = vi.fn<() => void>()
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -54,6 +56,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     closeMacrosDialog: vi.fn(),
     saveMacros: vi.fn(),
     persistMacroOrder: (macros: MacroView[]) => persistMacroOrderMock(macros),
+    reloadMacrosDraft: () => reloadMacrosDraftMock(),
+    dismissMacrosConflict: () => dismissMacrosConflictMock(),
   }
 })
 
@@ -94,10 +98,18 @@ const seedMacros: MacroView[] = [
   { name: "Deploy", text: "deploy it", surface: "both" },
 ]
 
-function seed(macros: MacroView[], { bootstrap = true } = {}) {
+function seed(
+  macros: MacroView[],
+  {
+    bootstrap = true,
+    conflict = null,
+  }: { bootstrap?: boolean; conflict?: string | null } = {},
+) {
   mockState = {
     macrosDialogOpen: true,
     macrosDraft: macros,
+    macrosConflict: conflict,
+    macrosDraftEpoch: 0,
     bootstrap: bootstrap ? { macros } : null,
   } as unknown as DuxState
 }
@@ -127,6 +139,9 @@ beforeEach(() => {
   dragEndHandlers.length = 0
   persistMacroOrderMock.mockReset()
   persistMacroOrderMock.mockResolvedValue(true)
+  reloadMacrosDraftMock.mockReset()
+  reloadMacrosDraftMock.mockResolvedValue(undefined)
+  dismissMacrosConflictMock.mockReset()
 })
 
 afterEach(() => {
@@ -208,5 +223,37 @@ describe("MacrosDialog reorder", () => {
 
     expect(renderedNames()).toEqual(["Deploy", "Review", "Build"])
     expect(persistMacroOrderMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("MacrosDialog stale save", () => {
+  const stale =
+    "The macro list changed after this dialog read it, so nothing was saved. Reload to see the change, then make your edit again."
+
+  it("says the list changed and offers to reload it or keep editing", async () => {
+    seed(seedMacros, { conflict: stale })
+    render(<MacrosDialog />)
+
+    const notice = screen.getByRole("alert")
+    expect(notice.textContent).toContain("changed after this dialog read it")
+    // Reloading throws the edits away, so keeping them is what has focus.
+    const keep = screen.getByRole("button", { name: "Keep editing" })
+    expect(document.activeElement).toBe(keep)
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Reload macros" }).click()
+    })
+    expect(reloadMacrosDraftMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      keep.click()
+    })
+    expect(dismissMacrosConflictMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows no notice while nothing was refused", () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    expect(screen.queryByRole("alert")).toBeNull()
   })
 })

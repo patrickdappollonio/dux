@@ -118,6 +118,12 @@ pub enum WireCommand {
     },
     PersistGlobalEnv {
         env: BTreeMap<String, String>,
+        /// The [`global_env_version`] of the table this save was based on.
+        /// When present and the table has changed since, the save is refused
+        /// with [`StaleSet::GlobalEnv`] and nothing is written; absent, the
+        /// save replaces whatever is there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     UpdateProjectProvider {
         project_id: String,
@@ -588,6 +594,34 @@ pub enum WireCommand {
     /// strings are all rejected.
     UpdateMacros {
         entries: Vec<WireMacroEntry>,
+        /// The [`macros_version`] of the list this save was based on. When
+        /// present and the list has changed since, the save is refused with
+        /// [`StaleSet::Macros`] and nothing is written; absent, the save
+        /// replaces whatever is there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// Add the macro `name`, or replace it in place, keeping every other
+    /// macro and the list's order. Validated as a whole-list save is.
+    SetMacro {
+        name: String,
+        text: String,
+        surface: String,
+    },
+    /// Remove the macro `name`; an unknown name is an error.
+    RemoveMacro {
+        name: String,
+    },
+    /// Set one global environment variable, keeping the rest of `[env]`. The
+    /// name must be a valid variable name; the value never appears in any
+    /// status.
+    SetGlobalEnvVar {
+        name: String,
+        value: String,
+    },
+    /// Remove one global environment variable; an unknown name is an error.
+    RemoveGlobalEnvVar {
+        name: String,
     },
     /// Point the changed-files watch at a session's worktree, mirroring the TUI's
     /// selection-driven `reload_changed_files`. `session_id` is nullable: `null`
@@ -778,7 +812,11 @@ impl WireCommand {
         matches!(
             self,
             WireCommand::UpdateMacros { .. }
+                | WireCommand::SetMacro { .. }
+                | WireCommand::RemoveMacro { .. }
                 | WireCommand::PersistGlobalEnv { .. }
+                | WireCommand::SetGlobalEnvVar { .. }
+                | WireCommand::RemoveGlobalEnvVar { .. }
                 | WireCommand::SetChangesPaneVisible { .. }
                 | WireCommand::ToggleRandomizedPetNameDefault {}
                 | WireCommand::TogglePrBannerPosition {}
@@ -790,6 +828,66 @@ impl WireCommand {
                 | WireCommand::SetTailscaleMode { .. }
         )
     }
+}
+
+/// The version of a macro list a client read, carried back on its whole-list
+/// save so a list that changed since is refused rather than overwritten. A
+/// digest of the list's content and order: two reads of the same list agree,
+/// and any edit, a reorder included, moves it.
+pub fn macros_version(macros: &crate::config::MacrosConfig) -> String {
+    let entries: Vec<(&String, &str, &crate::config::MacroSurface)> = macros
+        .entries
+        .iter()
+        .map(|(name, entry)| (name, entry.text.as_str(), &entry.surface))
+        .collect();
+    content_version(&entries)
+}
+
+/// [`macros_version`] for the global `[env]` table.
+pub fn global_env_version(env: &BTreeMap<String, String>) -> String {
+    content_version(env)
+}
+
+fn content_version(value: &impl Serialize) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    Sha256::digest(&bytes)
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A whole-set save refused because the set changed after the client read it.
+/// Nothing was written; the client reads the set again and redoes its edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaleSet {
+    Macros,
+    GlobalEnv,
+}
+
+impl std::fmt::Display for StaleSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Self::Macros => "The macro list",
+            Self::GlobalEnv => "The global environment",
+        };
+        write!(
+            f,
+            "{what} changed after this dialog read it, so nothing was saved. \
+             Reload to see the change, then make your edit again."
+        )
+    }
+}
+
+impl std::error::Error for StaleSet {}
+
+/// Whether an engine error's text is a [`StaleSet`] refusal, which a route
+/// answers `409 {"error":"changed"}` rather than `400`.
+pub fn is_stale_set(message: &str) -> bool {
+    [StaleSet::Macros, StaleSet::GlobalEnv]
+        .iter()
+        .any(|stale| stale.to_string() == message)
 }
 
 /// A single macro in a [`WireCommand::UpdateMacros`] payload. `surface` is the
@@ -980,8 +1078,15 @@ impl WireStatus {
 /// What one dispatch group did with a command: answered it, or handed it back
 /// untouched for the next group (or the shared tail) to answer.
 enum WireDispatch {
-    Handled(WireCommandOutcome),
+    /// Boxed: an outcome is several times the size of a command.
+    Handled(Box<WireCommandOutcome>),
     Unhandled(WireCommand),
+}
+
+impl WireDispatch {
+    fn handled(outcome: WireCommandOutcome) -> Self {
+        Self::Handled(Box::new(outcome))
+    }
 }
 
 /// What the client learns synchronously from applying a command. Fresh domain
@@ -1030,6 +1135,11 @@ pub struct WireCommandOutcome {
     /// reply holds it even when the record is kept for no time at all.
     #[serde(skip)]
     pub operation: Option<Box<crate::operations::OperationView>>,
+    /// The version the macro list or the global environment is at after a
+    /// command that changes it, for the client to send back on its next
+    /// whole-set save. `None` for every other command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl WireCommandOutcome {
@@ -1608,7 +1718,21 @@ impl Engine {
         // Clear the create-op correlation slot before dispatch, so the value read
         // back reflects only THIS command's create.
         self.last_created_op_id = None;
+        self.admit_wire(&command)?;
+        let set = match &command {
+            WireCommand::UpdateMacros { .. }
+            | WireCommand::SetMacro { .. }
+            | WireCommand::RemoveMacro { .. } => Some(StaleSet::Macros),
+            WireCommand::PersistGlobalEnv { .. }
+            | WireCommand::SetGlobalEnvVar { .. }
+            | WireCommand::RemoveGlobalEnvVar { .. } => Some(StaleSet::GlobalEnv),
+            _ => None,
+        };
         let mut outcome = self.apply_wire_inner(command)?;
+        outcome.version = set.map(|set| match set {
+            StaleSet::Macros => macros_version(&self.config.macros),
+            StaleSet::GlobalEnv => global_env_version(&self.config.env),
+        });
         if let Some(status) = outcome.status.as_mut() {
             status.scope = self.current_origin.clone();
         }
@@ -1628,9 +1752,10 @@ impl Engine {
             Self::dispatch_agent_command,
             Self::dispatch_preference_command,
             Self::dispatch_pull_request_command,
+            Self::dispatch_config_entry_command,
         ] {
             match dispatch(self, pending)? {
-                WireDispatch::Handled(outcome) => return Ok(outcome),
+                WireDispatch::Handled(outcome) => return Ok(*outcome),
                 WireDispatch::Unhandled(command) => pending = command,
             }
         }
@@ -1652,31 +1777,31 @@ impl Engine {
         match command {
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ChangeProjectBaseBranch { project_id, branch } => {
                 let update = self.change_project_base_branch(&project_id, &branch)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::from_update(&update),
                 )))
             }
             WireCommand::AddProjectCheckoutDefault { path, name } => {
                 let status = self.add_project_checkout_default(&path, name)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::AddProjectCreateInitialCommit { path, name } => {
                 let status = self.add_project_create_initial_commit(&path, name)?;
-                Ok(WireDispatch::Handled(
+                Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
             }
             WireCommand::AddProjectInitRepo { path, name } => {
                 let status = self.add_project_init_repo(&path, name)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1688,7 +1813,7 @@ impl Engine {
                 let status = added_status_message(&reaction)
                     .map(|message| WireStatus::new("info", message))
                     .or_else(|| wire_status_from_reaction(&reaction));
-                Ok(WireDispatch::Handled(
+                Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
             }
@@ -1702,19 +1827,19 @@ impl Engine {
         match command {
             WireCommand::RenameSession { session_id, title } => {
                 let status = self.rename_session(&session_id, &title)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ReconnectSession { session_id, force } => {
                 let status = self.reconnect_session(&session_id, force)?;
-                Ok(WireDispatch::Handled(
+                Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
             }
             WireCommand::RerunStartupCommand { session_id } => {
                 let status = self.rerun_startup_command(&session_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1723,7 +1848,7 @@ impl Engine {
                 provider,
             } => {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1733,31 +1858,31 @@ impl Engine {
                 name,
             } => {
                 let status = self.create_agent_from_pr(&project_id, &pr, name)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::KillSessionPty { session_id } => {
                 let (status, detached) = self.kill_session_pty(&session_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_detached(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_detached(
                     status, detached,
                 )))
             }
             WireCommand::DetachAgent { session_id, force } => {
                 let status = self.detach_agent(&session_id, force)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::RecreateWorkingCopy { session_id } => {
                 let status = self.recreate_working_copy_wire(&session_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::CloseAgentTab { session_id, tab_id } => {
                 let (status, outcome) = self.close_agent_tab_wire(&session_id, &tab_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_close_tab(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_close_tab(
                     status, &outcome,
                 )))
             }
@@ -1767,7 +1892,7 @@ impl Engine {
                 provider,
             } => {
                 let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1775,7 +1900,7 @@ impl Engine {
                 self.set_last_focused_tab(&session_id, tab_id.as_deref())?;
                 // Focus changes are high-frequency and user-paced, so they do
                 // not surface a toast or status.
-                Ok(WireDispatch::Handled(WireCommandOutcome::quiet()))
+                Ok(WireDispatch::handled(WireCommandOutcome::quiet()))
             }
             other => Ok(WireDispatch::Unhandled(other)),
         }
@@ -1790,13 +1915,13 @@ impl Engine {
         match command {
             WireCommand::SetChangesPaneVisible { visible } => {
                 let status = self.set_changes_pane_visible(visible);
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::SetInstanceIdentity { title, favicon } => {
                 let status = self.set_instance_identity(title, favicon)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1804,43 +1929,43 @@ impl Engine {
                 // `set_settings` decides its own status presence: a quiet
                 // accessory-bar-only patch succeeds with `None` (no toast).
                 let status = self.set_settings(patch)?;
-                Ok(WireDispatch::Handled(
+                Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
             }
             WireCommand::ToggleRandomizedPetNameDefault {} => {
                 let status = self.toggle_randomized_pet_name_default();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::TogglePrBannerPosition {} => {
                 let status = self.toggle_pr_banner_position();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::SetAgentSort { sort } => {
                 let status = self.set_agent_sort(&sort);
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ToggleCopyOnSelect {} => {
                 let status = self.toggle_copy_on_select();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ToggleAlwaysShowTabStrip {} => {
                 let status = self.toggle_always_show_tab_strip();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ToggleTabReachesAgent {} => {
                 let status = self.toggle_tab_reaches_agent();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
@@ -1848,22 +1973,122 @@ impl Engine {
                 self.set_tailscale_mode(&mode)?;
                 // The serve layer reports the listener outcome; a status here
                 // would produce two toasts for one gesture.
-                Ok(WireDispatch::Handled(WireCommandOutcome::quiet()))
+                Ok(WireDispatch::handled(WireCommandOutcome::quiet()))
             }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::RecheckGithub {} => {
                 let update = self.request_gh_recheck();
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::from_update(&update),
                 )))
             }
             other => Ok(WireDispatch::Unhandled(other)),
         }
+    }
+
+    /// Answer the commands that change one macro or one global environment
+    /// variable. Each builds the whole set with its one change and saves it
+    /// through the same command a whole-set save runs, so validation and the
+    /// write are shared; only the sentence it answers with is its own.
+    fn dispatch_config_entry_command(
+        &mut self,
+        command: WireCommand,
+    ) -> anyhow::Result<WireDispatch> {
+        let (core, done) = match command {
+            WireCommand::SetMacro {
+                name,
+                text,
+                surface,
+            } => {
+                let name = name.trim().to_string();
+                let entry = WireMacroEntry {
+                    name: name.clone(),
+                    text,
+                    surface,
+                };
+                let mut entries = self.macro_entries();
+                match entries.iter_mut().find(|existing| existing.name == name) {
+                    Some(existing) => *existing = entry,
+                    None => entries.push(entry),
+                }
+                (
+                    Self::update_macros_command(entries)?,
+                    crate::status_text!["Saved macro ", q(name), "."],
+                )
+            }
+            WireCommand::RemoveMacro { name } => {
+                let mut entries = self.macro_entries();
+                let before = entries.len();
+                entries.retain(|existing| existing.name != name);
+                if entries.len() == before {
+                    anyhow::bail!("unknown macro \"{name}\"");
+                }
+                (
+                    Self::update_macros_command(entries)?,
+                    crate::status_text!["Removed macro ", q(name), "."],
+                )
+            }
+            WireCommand::SetGlobalEnvVar { name, value } => {
+                if !crate::config::is_valid_env_name(&name) {
+                    anyhow::bail!(
+                        "\"{name}\" is not a valid environment variable name: use letters, \
+                         digits and underscores, not starting with a digit."
+                    );
+                }
+                let mut env = self.config.env.clone();
+                env.insert(name.clone(), value);
+                (
+                    Command::PersistGlobalEnv { env },
+                    crate::status_text![
+                        "Saved global environment variable ",
+                        q(name),
+                        ". New agents and terminals receive it unless a project overrides it."
+                    ],
+                )
+            }
+            WireCommand::RemoveGlobalEnvVar { name } => {
+                let mut env = self.config.env.clone();
+                if env.remove(&name).is_none() {
+                    anyhow::bail!("unknown global environment variable \"{name}\"");
+                }
+                (
+                    Command::PersistGlobalEnv { env },
+                    crate::status_text!["Removed global environment variable ", q(name), "."],
+                )
+            }
+            other => return Ok(WireDispatch::Unhandled(other)),
+        };
+        let reaction = self.apply(core)?;
+        // The save's own sentence counts the whole set; a success says which
+        // entry changed instead, and a failure keeps the save's words.
+        let status = match wire_status_from_reaction(&reaction) {
+            Some(status) if status.tone == "info" => {
+                WireStatus::from_update(&StatusUpdate::info(done))
+            }
+            other => other.unwrap_or_else(|| WireStatus::from_update(&StatusUpdate::info(done))),
+        };
+        Ok(WireDispatch::handled(WireCommandOutcome::with_status(
+            status,
+        )))
+    }
+
+    /// The macro list as a whole-list save carries it.
+    fn macro_entries(&self) -> Vec<WireMacroEntry> {
+        self.config
+            .macros
+            .entries
+            .iter()
+            .map(|(name, entry)| WireMacroEntry {
+                name: name.clone(),
+                text: entry.text.clone(),
+                surface: entry.surface.as_config_str().to_string(),
+            })
+            .collect()
     }
 
     /// Answer the commands that change which pull request an agent's branch
@@ -1891,19 +2116,19 @@ impl Engine {
                     &state,
                     &url,
                 )?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::new("info", message),
                 )))
             }
             WireCommand::ClearPullRequestOverride { session_id } => {
                 let message = self.clear_pull_request_override(&session_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::new("info", message),
                 )))
             }
             WireCommand::ResumePullRequestAutodetection { session_id } => {
                 let message = self.resume_pr_autodetection(&session_id)?;
-                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::new("info", message),
                 )))
             }
@@ -4967,7 +5192,12 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
             },
-            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
+            WireCommand::PersistGlobalEnv { env, version } => {
+                if version.is_some_and(|read| read != global_env_version(&self.config.env)) {
+                    return Err(StaleSet::GlobalEnv.into());
+                }
+                Command::PersistGlobalEnv { env }
+            }
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
             // Rename, Reconnect, CheckoutProjectDefaultBranch and
@@ -5024,9 +5254,13 @@ impl Engine {
             | WireCommand::RecreateWorkingCopy { .. }
             | WireCommand::CloseAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. }
-            | WireCommand::SetLastFocusedTab { .. } => {
+            | WireCommand::SetLastFocusedTab { .. }
+            | WireCommand::SetMacro { .. }
+            | WireCommand::RemoveMacro { .. }
+            | WireCommand::SetGlobalEnvVar { .. }
+            | WireCommand::RemoveGlobalEnvVar { .. } => {
                 unreachable!(
-                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
+                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/change-agent-tab-provider/set-last-focused-tab/set-macro/remove-macro/set-global-env-var/remove-global-env-var are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -5044,7 +5278,12 @@ impl Engine {
                 Command::ReorderTerminals { terminal_ids }
             }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
-            WireCommand::UpdateMacros { entries } => Self::update_macros_command(entries)?,
+            WireCommand::UpdateMacros { entries, version } => {
+                if version.is_some_and(|read| read != macros_version(&self.config.macros)) {
+                    return Err(StaleSet::Macros.into());
+                }
+                Self::update_macros_command(entries)?
+            }
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }
             }
@@ -6452,7 +6691,7 @@ mod tests {
         let json = r#"{"command":"persist_global_env","args":{"env":{"FOO":"bar"}}}"#;
         let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
         match cmd {
-            WireCommand::PersistGlobalEnv { env } => {
+            WireCommand::PersistGlobalEnv { env, .. } => {
                 assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
             }
             _ => panic!("expected WireCommand::PersistGlobalEnv variant"),
@@ -12813,6 +13052,7 @@ mod tests {
                     text: "hi".to_string(),
                     surface: "both".to_string(),
                 }],
+                version: None,
             }
         );
     }
@@ -12879,10 +13119,17 @@ mod tests {
     fn mutates_config_static_flags_only_bootstrap_config_writes() {
         // The eager-save config mutations that have no disk-reload to drive a
         // `config.changed` signal: the web actor fires it for these.
-        assert!(WireCommand::UpdateMacros { entries: vec![] }.mutates_config_static());
+        assert!(
+            WireCommand::UpdateMacros {
+                entries: vec![],
+                version: None,
+            }
+            .mutates_config_static()
+        );
         assert!(
             WireCommand::PersistGlobalEnv {
                 env: std::collections::BTreeMap::new(),
+                version: None,
             }
             .mutates_config_static()
         );
@@ -13817,6 +14064,7 @@ mod tests {
                         surface: "terminal".to_string(),
                     },
                 ],
+                version: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -13836,7 +14084,10 @@ mod tests {
     /// `Err` arm directly rather than using `expect_err`/`unwrap_err` (which
     /// require the `Ok` type to be `Debug`).
     fn update_macros_err(engine: &Engine, entries: Vec<WireMacroEntry>) -> String {
-        match engine.wire_to_command(WireCommand::UpdateMacros { entries }) {
+        match engine.wire_to_command(WireCommand::UpdateMacros {
+            entries,
+            version: None,
+        }) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("expected an error"),
         }
@@ -13924,6 +14175,7 @@ mod tests {
                     text: "hello\nworld".to_string(),
                     surface: "agent".to_string(),
                 }],
+                version: None,
             })
             .expect("apply_wire");
         // The eager save reports success synchronously.

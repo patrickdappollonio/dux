@@ -6117,6 +6117,7 @@ mod tests {
                     text: "hi".to_string(),
                     surface: "agent".to_string(),
                 }],
+                version: None,
             })
             .await
             .expect("update macros command");
@@ -6143,7 +6144,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
         handle
-            .apply_wire(dux_core::wire::WireCommand::PersistGlobalEnv { env })
+            .apply_wire(dux_core::wire::WireCommand::PersistGlobalEnv { env, version: None })
             .await
             .expect("persist global env command");
 

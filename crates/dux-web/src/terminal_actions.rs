@@ -33,8 +33,8 @@ use dux_core::wire::WireCommand;
 use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
-    unknown_session,
+    OperationQuery, id_within_bound, operation_accepted, refusal, scope_from_headers,
+    ticket_accepted, unknown_session,
 };
 use crate::server::AppState;
 
@@ -102,7 +102,7 @@ async fn create_terminal(
             )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -136,7 +136,7 @@ async fn create_project_terminal(
             )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -161,7 +161,7 @@ async fn create_standalone_terminal(
             )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -282,12 +282,12 @@ async fn dispatch_delete(
             .await
         {
             Ok((_, op)) => operation_accepted(&op),
-            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            Err(e) => refusal(e, StatusCode::BAD_REQUEST),
         };
     }
     match state.engine.apply_wire_scoped(command, scope).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }
 

@@ -78,6 +78,48 @@ pub(crate) async fn boot_plain_test_server() -> (ScratchDir, SocketAddr) {
     (tmp, addr)
 }
 
+/// A managed agent of project `p1`, for a test that puts it in an engine by
+/// hand before the actor starts. Its worktree path does not exist.
+pub(crate) fn sample_agent(id: &str) -> dux_core::model::AgentSession {
+    let now = chrono::Utc::now();
+    dux_core::model::AgentSession {
+        id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
+        provider: dux_core::model::ProviderKind::new("claude"),
+        title: Some(format!("{id}-title")),
+        started_providers: Vec::new(),
+        desired_running: false,
+        auto_reopen_enabled: false,
+        status: dux_core::model::SessionStatus::Detached,
+        created_at: now,
+        updated_at: now,
+        last_focused_tab: None,
+        workspace: dux_core::model::AgentWorkspace::Managed(dux_core::model::ManagedWorkspace {
+            project_id: "p1".to_string(),
+            project_path: None,
+            source_branch: "main".to_string(),
+            branch_name: "feat".to_string(),
+            initial_branch: "feat".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            worktree_path: format!("/tmp/{id}-worktree"),
+        }),
+    }
+}
+
+/// [`bootstrap_test_engine`] rooted at `tmp`, before an actor owns it, so a
+/// test can put state in it by hand first.
+pub(crate) fn unstarted_test_engine(tmp: &Path) -> dux_core::engine::Engine {
+    let paths = dux_core::config::DuxPaths {
+        root: tmp.to_path_buf(),
+        config_path: tmp.join("config.toml"),
+        sessions_db_path: tmp.join("sessions.sqlite3"),
+        worktrees_root: tmp.join("worktrees"),
+        lock_path: tmp.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    bootstrap_test_engine(&paths).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

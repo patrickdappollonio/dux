@@ -65,6 +65,10 @@ pub struct BootstrapView {
     /// web session is authenticated). A config reload that changes `[macros]`
     /// rebuilds this, delivered by a `config.changed` refetch.
     pub macros: Vec<MacroView>,
+    /// The version of `macros` ([`crate::wire::macros_version`]). The macro
+    /// editor sends it back on its whole-list save, which is refused when the
+    /// list changed in the meantime instead of overwriting that change.
+    pub macros_version: String,
     /// Web-surface welcome-screen tips, from the shared `dux_core::welcome` list.
     pub welcome_tips: Vec<String>,
     /// Mirrors the binary's display version ('vX.Y.Z' or 'development'); the web shows it in the sidebar brand block.
@@ -194,6 +198,9 @@ pub struct BootstrapView {
     /// every spawned provider/terminal. Surfaced so a client can pre-fill an
     /// edit dialog.
     pub global_env: std::collections::BTreeMap<String, String>,
+    /// The version of `global_env` ([`crate::wire::global_env_version`]), sent
+    /// back on the global environment dialog's save for the same reason.
+    pub global_env_version: String,
     /// Mirrors `config.ui.status_clear_seconds`. The web honors it for toast
     /// auto-dismiss, and every tone dismisses: an info/success toast clears
     /// this many seconds after it arrives, a warning at
@@ -1502,6 +1509,7 @@ impl Engine {
                 .iter()
                 .map(|(name, entry)| MacroView::from_entry(name, entry))
                 .collect(),
+            macros_version: crate::wire::macros_version(&self.config.macros),
             welcome_tips: crate::welcome::web_tips(),
             dux_version: crate::display_version().to_string(),
             randomize_agent_names_by_default: self
@@ -1563,6 +1571,7 @@ impl Engine {
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
             global_env: self.config.env.clone(),
+            global_env_version: crate::wire::global_env_version(&self.config.env),
             status_clear_seconds: self.config.ui.status_clear_seconds,
             // Through the same clamp every shutdown path uses, so the browser
             // quotes the wait it will actually get.
