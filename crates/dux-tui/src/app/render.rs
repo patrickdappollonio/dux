@@ -9203,14 +9203,7 @@ impl App {
             )
             .height
             .saturating_add(1);
-        // The project's name is the folder the clone lands in; the line is
-        // absent while the destination ends in a separator and names none.
-        let project_name = Some(destination.text.trim())
-            .filter(|text| !text.ends_with('/'))
-            .and_then(|text| Path::new(text).file_name())
-            .and_then(|name| name.to_str())
-            .map(str::to_string);
-        let area = centered_rect_exact(dialog_width, 19 + checkbox_height, frame.area());
+        let area = centered_rect_exact(dialog_width, 17 + checkbox_height, frame.area());
         let inner = self
             .open_modal_frame(frame, "Clone a Repository", area)
             .inner;
@@ -9225,8 +9218,6 @@ impl App {
             _,
             checkbox_area,
             _,
-            project_area,
-            _,
             hint_area,
         ] = Layout::default()
             .direction(Direction::Vertical)
@@ -9239,8 +9230,6 @@ impl App {
                 Constraint::Length(3),
                 Constraint::Length(1),
                 Constraint::Length(checkbox_height),
-                Constraint::Length(1),
-                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
             ])
@@ -9307,24 +9296,6 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             ))),
         );
-
-        if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
-            let hint = Style::default().fg(self.theme.hint_desc_fg);
-            // One row: the name gives up its middle so the sentence and the
-            // chip's two pads still fit.
-            let lead = " Adds the project ";
-            let tail = " on the remote's default branch.";
-            let room = usize::from(inner.width)
-                .saturating_sub(display_width(lead))
-                .saturating_sub(display_width(tail))
-                .saturating_sub(2);
-            Paragraph::new(Line::from(vec![
-                Span::styled(lead, hint),
-                name_chip(&ellipsize_middle(&project_name, room), &self.theme),
-                Span::styled(tail, hint),
-            ]))
-            .render(project_area, frame.buffer_mut());
-        }
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);

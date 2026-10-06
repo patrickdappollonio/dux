@@ -1139,8 +1139,10 @@ fn the_new_agent_dialog_chips_the_worktree_it_starts_in() {
     assert_chipped(&app, &buf, "/srv/wt-na");
 }
 
+/// The clone form shows its names only inside its own fields, which are
+/// typed text rather than prose, so its body carries no name to chip.
 #[test]
-fn the_clone_dialog_chips_the_project_it_adds() {
+fn the_clone_dialog_shows_names_only_in_its_fields() {
     let mut app = test_app(default_bindings());
     let buf = open(
         &mut app,
@@ -1155,7 +1157,24 @@ fn the_clone_dialog_chips_the_project_it_adds() {
             focus: CloneProjectFocus::Address,
         },
     );
-    assert_chipped_on_row(&app, &buf, "Adds the project", "widget-cl");
+    let OverlayMouseLayout::CloneProject {
+        address,
+        destination,
+        ..
+    } = app.overlay_layout.active
+    else {
+        panic!("expected the clone form's layout");
+    };
+    let rows: Vec<u16> = occurrences(&buf, "widget-cl")
+        .into_iter()
+        .map(|(_, y)| y)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![address.y, destination.y],
+        "the name appears outside the fields:\n{}",
+        screen(&buf)
+    );
 }
 
 #[test]
