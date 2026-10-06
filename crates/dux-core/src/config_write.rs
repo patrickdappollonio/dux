@@ -2035,6 +2035,12 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "serve_while_tui",
         config.server.serve_while_tui,
     );
+    patch_table_str(
+        doc,
+        "server",
+        "control_socket",
+        &config.server.control_socket,
+    );
     // The single WebSocket cap was split into three per-class caps; drop the
     // obsolete key from any existing config block on every save so saves stop
     // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when

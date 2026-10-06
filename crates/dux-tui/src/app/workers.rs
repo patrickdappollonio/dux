@@ -929,6 +929,7 @@ impl App {
         }
         // The listener's bind settings and the server log's are both read when a
         // serve starts, so a running one cannot adopt either.
+        let mut owed: Vec<String> = Vec::new();
         if dux_core::config::server_bind_settings_changed(
             &before.server,
             &self.engine.config.server,
@@ -937,7 +938,14 @@ impl App {
             &self.engine.config.server,
         ) {
             let serving = self.background_server_is_serving();
-            self.set_pinned_warning(server_restart_warning(serving));
+            owed.push(server_restart_warning(serving).to_string());
+        }
+        owed.extend(dux_core::control_socket::moved_warning(
+            &before.server,
+            &self.engine.config.server,
+        ));
+        if !owed.is_empty() {
+            self.set_pinned_warning(owed.join(" "));
         }
     }
 
@@ -3376,6 +3384,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
             root: tmp.path().to_path_buf(),
         };
         let project = Project {
@@ -3563,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_terminal_ui_gets_the_next_start_wording_on_a_bind_change() {
+    fn an_idle_terminal_ui_gets_the_next_start_wording_on_a_bind_or_socket_change() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         assert!(!app.background_server_is_serving());
@@ -3574,6 +3583,18 @@ mod tests {
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
         assert_eq!(message, server_restart_warning(false));
+
+        // The control socket is bound once per process: a new path waits for
+        // dux itself to start again, serving or not.
+        let mut config = app.engine.config.clone();
+        config.server.control_socket = "/run/user/1000/dux.sock".to_string();
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Warning);
+        assert!(message.contains("control_socket"), "{message}");
+        assert!(message.contains("next time dux starts"), "{message}");
     }
 
     /// The restart is owed until the user performs it, so unlike an ordinary
@@ -3626,6 +3647,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
             root: tmp.path().to_path_buf(),
         };
         let project = Project {

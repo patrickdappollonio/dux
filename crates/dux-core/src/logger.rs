@@ -1277,6 +1277,7 @@ mod tests {
                 sessions_db_path: dir.path().join("sessions.sqlite3"),
                 worktrees_root: dir.path().join("worktrees"),
                 lock_path: dir.path().join("dux.lock"),
+                socket_path: dir.path().join("dux.sock"),
             };
             let server_log = open_server_log(&server, &paths).expect("open the server log");
             for n in 1..=6 {

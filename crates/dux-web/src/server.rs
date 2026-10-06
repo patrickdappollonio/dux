@@ -158,6 +158,10 @@ pub struct AppState {
     /// password checks. Every request passes its layer; every open socket
     /// holds a watch on it (see [`crate::auth`]).
     pub auth: Arc<crate::auth::AuthState>,
+    /// Flips to `true` when the core serving this router starts handing the
+    /// engine over to the next one. A long wait on an operation record answers
+    /// at once when it does, so a hand-over never waits it out or cuts it.
+    pub hand_over: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -411,6 +415,9 @@ pub struct RouterParams {
     /// anything connects. `None` for every serve path but the background one,
     /// which is the only one with a terminal UI beside it to show the count on.
     pub(crate) connections_gauge: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// The hand-over signal of the core that serves this router (see
+    /// [`AppState::hand_over`]). A router nobody hands over gets its own.
+    pub(crate) hand_over: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
 impl RouterParams {
@@ -453,6 +460,7 @@ impl RouterParams {
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
             connections_gauge: None,
+            hand_over: None,
         }
     }
 
@@ -462,6 +470,15 @@ impl RouterParams {
     /// Only the background serve calls this, for the same reason as
     /// [`Self::with_ownership_publisher`]: it is the one path with a second surface
     /// that has somewhere to show the number.
+    /// Answer the router's operation waits when `hand_over` flips.
+    pub(crate) fn with_hand_over(
+        mut self,
+        hand_over: Arc<tokio::sync::watch::Sender<bool>>,
+    ) -> Self {
+        self.hand_over = Some(hand_over);
+        self
+    }
+
     pub(crate) fn with_connections_gauge(
         mut self,
         gauge: Arc<std::sync::atomic::AtomicUsize>,
@@ -872,6 +889,10 @@ pub fn build_app(
         tailscale_mode: params.tailscale_mode_control.clone(),
         tailscale_forced_no: params.tailscale_forced_no,
         auth,
+        hand_over: params
+            .hand_over
+            .clone()
+            .unwrap_or_else(|| Arc::new(tokio::sync::watch::Sender::new(false))),
     };
 
     // Every route sits behind the auth layer added below. `extra_gated` is
@@ -916,7 +937,7 @@ pub fn build_app(
         .merge(crate::auth::routes::routes())
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
-        .fallback(crate::web_assets::static_handler)
+        .fallback(crate::control_socket::fallback)
         // REST mutation same-origin check (cross-site request forgery defense).
         // Rejects POST/PATCH/PUT/DELETE when an `Origin` header is present but
         // its `host:port` authority does not match the `Host` header. A missing
@@ -973,6 +994,11 @@ pub fn build_app(
             allowlist = allowlist.without_host_rules();
         }
         crate::host_guard::host_allowlist_layer(router, allowlist)
+            // Outermost of all: the control socket's route set is decided
+            // before anything else reads the request.
+            .layer(middleware::from_fn(
+                crate::control_socket::control_socket_routes,
+            ))
     }
 }
 
@@ -1021,10 +1047,16 @@ async fn log_request(
     // operator may persist, so dropping the query avoids leaking them. The session
     // id is an opaque path segment now, so it still appears in the logged path.
     let path = request.uri().path().to_string();
+    let over_socket = crate::auth::provenance::over_control_socket(&request);
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let latency_ms = started.elapsed().as_millis();
-    console.access(&method, &path, response.status().as_u16(), latency_ms);
+    let status = response.status().as_u16();
+    if over_socket {
+        console.access_over_control_socket(&method, &path, status, latency_ms);
+    } else {
+        console.access(&method, &path, status, latency_ms);
+    }
     response
 }
 
@@ -1107,7 +1139,11 @@ async fn rest_mutation_origin_check(request: Request, next: Next) -> Response {
         *request.method(),
         Method::POST | Method::PATCH | Method::PUT | Method::DELETE
     );
-    if is_mutation && !same_origin_allowed(request.headers()) {
+    // No browser reaches the control socket, so no other site can either.
+    if is_mutation
+        && !crate::auth::provenance::over_control_socket(&request)
+        && !same_origin_allowed(request.headers())
+    {
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     next.run(request).await
@@ -3894,6 +3930,7 @@ mod tests {
             sessions_db_path: tmp.join("sessions.sqlite3"),
             worktrees_root: tmp.join("worktrees"),
             lock_path: tmp.join("dux.lock"),
+            socket_path: tmp.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
@@ -4209,6 +4246,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {
@@ -6927,6 +6965,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {

@@ -12,6 +12,7 @@ fn get_all(body: &str, key: &str) -> String {
         sessions_db_path: tmp.path().join("sessions.sqlite3"),
         worktrees_root: tmp.path().join("worktrees"),
         lock_path: tmp.path().join("dux.lock"),
+        socket_path: tmp.path().join("dux.sock"),
     };
     std::fs::write(&paths.config_path, body).expect("seed");
     let (mut out, mut err) = (Vec::new(), Vec::new());

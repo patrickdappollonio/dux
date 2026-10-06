@@ -167,9 +167,12 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let config_writer =
         ConfigWriteQueue::with_status_lane(paths.config_path.clone(), worker_tx.clone(), &config);
 
+    let socket_paths = paths
+        .clone()
+        .with_control_socket(&config.server.control_socket);
     let mut engine = Engine {
         config,
-        paths: paths.clone(),
+        paths: socket_paths,
         session_store,
         projects,
         sessions,
@@ -288,6 +291,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         (tmp, paths)

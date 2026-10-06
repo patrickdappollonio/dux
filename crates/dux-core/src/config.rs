@@ -225,6 +225,10 @@ pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
 /// scrollback is the host terminal's; this is the flip's equivalent.
 pub const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
 
+/// Where the control socket lives unless `[server] control_socket` says
+/// otherwise, relative to the config folder.
+pub const DEFAULT_CONTROL_SOCKET: &str = "dux.sock";
+
 /// The most lines the flip's log viewer keeps, whatever `log_viewer_lines` says.
 /// The viewer keeps every line wrapped and ready to draw, so the bound is what
 /// keeps its memory and a resize's re-wrap small.
@@ -905,6 +909,13 @@ pub struct ServerConfig {
     /// is covered by the take-over card until somebody presses that card's
     /// button.
     pub serve_while_tui: bool,
+    /// Where dux serves its API to command-line clients on this machine: a Unix
+    /// socket only this user can open. A relative path is read from the config
+    /// folder, an absolute one is used as is. Bound once when dux starts, by the
+    /// dux holding `dux.lock`, so a change applies the next time dux starts. A
+    /// path longer than the system allows (103 bytes on macOS, 107 on Linux)
+    /// starts dux without the socket and says why. Default `"dux.sock"`.
+    pub control_socket: String,
     /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
     /// the status/changed-files event stream every browser tab opens. Once this
     /// many are live, further upgrade attempts are rejected with HTTP 503 until a
@@ -2141,6 +2152,7 @@ impl Default for ServerConfig {
             log_compress: true,
             qr_codes: true,
             serve_while_tui: false,
+            control_socket: DEFAULT_CONTROL_SOCKET.to_string(),
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
             max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
@@ -2348,6 +2360,11 @@ pub struct DuxPaths {
     /// Path to the lockfile that enforces a single dux instance per
     /// config directory. Contains the PID of the holder.
     pub lock_path: PathBuf,
+    /// Where the control socket is bound: `[server] control_socket` resolved
+    /// against the config folder. [`DuxPaths::discover`] fills in the default,
+    /// and a start that has read the config replaces it through
+    /// [`DuxPaths::with_control_socket`].
+    pub socket_path: PathBuf,
 }
 
 impl DuxPaths {
@@ -2362,8 +2379,16 @@ impl DuxPaths {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: resolve_control_socket(&root, DEFAULT_CONTROL_SOCKET),
             root,
         })
+    }
+
+    /// These paths with the control socket the `[server] control_socket`
+    /// setting names.
+    pub fn with_control_socket(mut self, setting: &str) -> Self {
+        self.socket_path = resolve_control_socket(&self.root, setting);
+        self
     }
 
     /// Create the config root and the worktrees directory.
@@ -2400,6 +2425,12 @@ impl DuxPaths {
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
         Ok(())
     }
+}
+
+/// `[server] control_socket` as a path: relative to the config folder, or
+/// as written when absolute.
+pub fn resolve_control_socket(root: &Path, setting: &str) -> PathBuf {
+    root.join(setting)
 }
 
 pub fn resolve_root(
@@ -6723,6 +6754,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.to_path_buf(),
         }
     }
@@ -6745,6 +6777,33 @@ mod tests {
         assert_eq!(root, PathBuf::from("/example/home/.dux"));
         #[cfg(not(target_os = "macos"))]
         assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[test]
+    fn the_control_socket_resolves_from_the_config_folder_unless_absolute() {
+        let root = Path::new("/home/me/.config/dux");
+        for (setting, want) in [
+            ("dux.sock", "/home/me/.config/dux/dux.sock"),
+            ("run/control.sock", "/home/me/.config/dux/run/control.sock"),
+            ("/tmp/dux-ctl.sock", "/tmp/dux-ctl.sock"),
+        ] {
+            assert_eq!(
+                resolve_control_socket(root, setting),
+                PathBuf::from(want),
+                "{setting}"
+            );
+        }
+        let paths = DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+        }
+        .with_control_socket("/run/user/1000/dux.sock");
+        assert_eq!(paths.socket_path, PathBuf::from("/run/user/1000/dux.sock"));
+        assert_eq!(ServerConfig::default().control_socket, "dux.sock");
     }
 
     // ── expand_path tests ────────────────────────────────────────────────
@@ -7531,6 +7590,7 @@ auth = { minimum_password_score = 9 }
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.to_path_buf(),
         }
     }

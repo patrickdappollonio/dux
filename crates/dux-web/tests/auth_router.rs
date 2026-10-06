@@ -43,7 +43,7 @@ fn hash_of(password: &str) -> String {
 }
 
 /// Who a request is, by the two ends of its connection.
-const NETWORK: Arrival = Arrival {
+const NETWORK: Arrival = Arrival::Tcp {
     peer: SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 7)),
         50000,
@@ -53,11 +53,13 @@ const NETWORK: Arrival = Arrival {
         3890,
     ),
 };
-const THIS_MACHINE: Arrival = Arrival {
+const THIS_MACHINE: Arrival = Arrival::Tcp {
     peer: SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 50000),
     local: SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 3890),
 };
-const TAILNET: Arrival = Arrival {
+/// A request over the control socket, from this machine's own user.
+const CONTROL_SOCKET: Arrival = Arrival::Unix { uid: 1000 };
+const TAILNET: Arrival = Arrival::Tcp {
     peer: SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 101, 102, 104)),
         50000,
@@ -101,7 +103,7 @@ impl dux_core::engine::ConfigSurface for TerminalUiSurface {
 
 /// This machine's Tailscale address, as a successful look reports it.
 fn own_tailscale_ips() -> Vec<std::net::IpAddr> {
-    vec![TAILNET.local.ip()]
+    vec![TAILNET.local().unwrap().ip()]
 }
 
 /// What every router here starts with unless a test says otherwise: a
@@ -145,6 +147,7 @@ impl Dux {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         std::fs::write(
@@ -837,7 +840,7 @@ async fn blocked_addresses_apply_with_no_password_and_close_sockets_with_4403() 
         let answer = dux.get(NETWORK, path).await;
         assert_eq!(answer.error().as_deref(), Some("blocked"), "{path}");
     }
-    let mapped = Arrival {
+    let mapped = Arrival::Tcp {
         peer: "[::ffff:203.0.113.5]:4000".parse().unwrap(),
         local: "[::ffff:192.0.2.10]:3890".parse().unwrap(),
     };
@@ -1325,12 +1328,12 @@ async fn a_login_flood_leaves_ordinary_requests_answering() {
         .map(|n| {
             let dux = Arc::clone(&dux);
             tokio::spawn(async move {
-                let from = Arrival {
+                let from = Arrival::Tcp {
                     peer: SocketAddr::new(
                         std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, n as u8)),
                         40000,
                     ),
-                    local: NETWORK.local,
+                    local: NETWORK.local().unwrap(),
                 };
                 let started = std::time::Instant::now();
                 let answer = dux.login(from, "not the password at all").await;
@@ -1470,7 +1473,13 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
     let unchecked = ExposureCell::new(FunnelState::Unchecked);
     let guarded = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
         let cell = unchecked.clone();
-        move |p| p.with_live_exposure(cell)
+        move |p| {
+            p.with_live_exposure(cell).with_host_allowlist(
+                vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+                Vec::new(),
+                false,
+            )
+        }
     });
     assert_auth_required(
         &guarded.get(THIS_MACHINE, "/api/v1/projects").await,
@@ -1488,6 +1497,50 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
     assert!(reason.contains("`[server] tailscale`"), "{reason}");
     assert!(reason.ends_with('.') && reason.len() < 200, "{reason}");
     assert!(guarded.status(NETWORK, None).await["required_reason"].is_null());
+
+    // The control socket is this machine's own user whatever the exposure
+    // says: no session, and no Host or Origin check.
+    let foreign_host = Req::new(Method::GET, "/api/v1/projects").header("host", "evil.example");
+    assert_eq!(
+        guarded.send(THIS_MACHINE, foreign_host).await.status,
+        StatusCode::FORBIDDEN,
+        "the Host guard is on for TCP"
+    );
+    let socket = guarded
+        .send(
+            CONTROL_SOCKET,
+            Req::new(Method::GET, "/api/v1/projects").header("host", "evil.example"),
+        )
+        .await;
+    assert_eq!(socket.status, StatusCode::OK, "{}", socket.body);
+    let socket_status = guarded.status(CONTROL_SOCKET, None).await;
+    assert_eq!(socket_status["required_here"], json!(false));
+    assert_eq!(socket_status["client_class"], json!("this_machine"));
+    let cross_site = guarded
+        .send(
+            CONTROL_SOCKET,
+            Req::new(Method::POST, "/api/v1/auth/logout").header("origin", "http://evil.example"),
+        )
+        .await;
+    assert_ne!(
+        cross_site.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        cross_site.body
+    );
+    let everywhere = Dux::with_password("require = \"everywhere\"");
+    assert_auth_required(
+        &everywhere.get(THIS_MACHINE, "/api/v1/projects").await,
+        "loopback, when every client must sign in",
+    );
+    assert_eq!(
+        everywhere
+            .get(CONTROL_SOCKET, "/api/v1/projects")
+            .await
+            .status,
+        StatusCode::OK,
+        "the control socket never asks for the password"
+    );
 
     let open = Dux::start_tuned("", move |p| p.with_live_exposure(unchecked));
     let open_status = open.status(THIS_MACHINE, None).await;
@@ -1570,7 +1623,7 @@ async fn https_paths_dux_knows_of_are_not_warned_about_plain_http() {
 async fn a_connection_from_dux_own_tailscale_address_is_the_network() {
     let dux = Dux::with_password("");
     let ts: std::net::IpAddr = "100.101.102.103".parse().unwrap();
-    let relayed = Arrival {
+    let relayed = Arrival::Tcp {
         peer: SocketAddr::new(ts, 41000),
         local: SocketAddr::new(ts, 3890),
     };
@@ -2049,12 +2102,12 @@ async fn a_known_forward_never_bans_the_tailnet_address_forged_headers_name() {
 }
 
 fn network_peer(last: u8) -> Arrival {
-    Arrival {
+    Arrival::Tcp {
         peer: SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, last)),
             50000,
         ),
-        local: NETWORK.local,
+        local: NETWORK.local().unwrap(),
     }
 }
 
@@ -2121,7 +2174,7 @@ async fn a_flood_from_less_trusted_clients_never_slows_a_verified_device() {
 
 // ── Claimed against verified, the tailnet by look, own addresses ─────────
 
-const MY_LAPTOP: Arrival = Arrival {
+const MY_LAPTOP: Arrival = Arrival::Tcp {
     peer: SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 7)),
         50000,
@@ -2218,7 +2271,7 @@ async fn a_cgnat_peer_on_a_non_tailscale_address_is_not_the_tailnet() {
     });
     // dux bound to every address; this connection arrived on the machine's
     // carrier-grade NAT interface address, from another host on that segment.
-    let cgnat = Arrival {
+    let cgnat = Arrival::Tcp {
         peer: "100.72.9.9:50000".parse().unwrap(),
         local: "100.64.20.5:3890".parse().unwrap(),
     };
@@ -2239,7 +2292,7 @@ async fn without_tailscale_a_cgnat_peer_is_not_the_tailnet() {
     let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
         move |p| p.with_live_exposure(exposure)
     });
-    let cgnat = Arrival {
+    let cgnat = Arrival::Tcp {
         peer: "100.72.9.9:50000".parse().unwrap(),
         local: "100.64.20.5:3890".parse().unwrap(),
     };
@@ -2257,7 +2310,7 @@ async fn this_machine_through_its_own_lan_address_is_never_written_to_the_blockl
     let dux = Dux::with_password(
         "max_failed_logins = 2\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
     );
-    let own = Arrival {
+    let own = Arrival::Tcp {
         peer: "192.0.2.10:50000".parse().unwrap(),
         local: "192.0.2.10:3890".parse().unwrap(),
     };
@@ -2369,7 +2422,7 @@ async fn a_funnel_flood_never_locks_out_the_owner_on_this_machine() {
 #[tokio::test]
 async fn this_machine_through_its_own_lan_address_is_never_refused_by_the_blocklist() {
     let dux = Dux::start("blocked_addresses = [\"192.0.2.0/24\"]");
-    let own = Arrival {
+    let own = Arrival::Tcp {
         peer: "192.0.2.10:50000".parse().unwrap(),
         local: "192.0.2.10:3890".parse().unwrap(),
     };
@@ -2434,7 +2487,7 @@ async fn a_funnel_flood_never_locks_out_this_machine_on_its_own_address() {
             )
             .await;
     }
-    let own = Arrival {
+    let own = Arrival::Tcp {
         peer: "192.0.2.10:50000".parse().unwrap(),
         local: "192.0.2.10:3890".parse().unwrap(),
     };
@@ -2656,7 +2709,7 @@ async fn a_right_password_racing_a_block_gets_no_session() {
 // ── IPv6 prefixes, planted cookies, the first-password route ────────────
 
 fn v6(peer: &str) -> Arrival {
-    Arrival {
+    Arrival::Tcp {
         peer: SocketAddr::new(peer.parse().unwrap(), 50000),
         local: "[2001:db8:ffff::10]:3890".parse().unwrap(),
     }
@@ -2715,12 +2768,12 @@ async fn a_shared_limit_never_says_from_this_address() {
         "max_failed_logins = 0\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 2",
     );
     for n in 1..=2u8 {
-        let peer = Arrival {
+        let peer = Arrival::Tcp {
             peer: SocketAddr::new(
                 std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, n)),
                 50000,
             ),
-            local: NETWORK.local,
+            local: NETWORK.local().unwrap(),
         };
         let _ = dux.login(peer, "wrong").await;
     }
@@ -2811,7 +2864,7 @@ async fn the_first_password_refusal_never_says_loopback_for_a_connection_that_wa
         ..IdentityFacts::default()
     }));
     let dux = Dux::start_tuned("", |params| params.with_live_exposure(unconfirmed));
-    let own_lan = Arrival {
+    let own_lan = Arrival::Tcp {
         peer: "192.0.2.10:40000".parse().unwrap(),
         local: "192.0.2.10:3890".parse().unwrap(),
     };
@@ -2855,7 +2908,7 @@ async fn the_first_password_refusal_never_says_loopback_for_a_connection_that_wa
 async fn a_tailnet_guesser_over_ipv6_never_gets_the_owners_device_banned() {
     use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
     let own: std::net::IpAddr = "fd7a:115c:a1e0:ab12:4843:cd96:6265:6501".parse().unwrap();
-    let arrival = |peer: &str| Arrival {
+    let arrival = |peer: &str| Arrival::Tcp {
         peer: SocketAddr::new(peer.parse().unwrap(), 50000),
         local: SocketAddr::new(own, 3890),
     };
@@ -3034,6 +3087,7 @@ async fn a_ban_held_in_memory_survives_a_new_serve_in_the_same_dux() {
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     std::fs::write(
@@ -3491,7 +3545,7 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
 /// A device on dux's own LAN, where SLAAC hands every host an address in the
 /// same /64 dux itself is on.
 fn lan(peer: &str) -> Arrival {
-    Arrival {
+    Arrival::Tcp {
         peer: SocketAddr::new(peer.parse().unwrap(), 50000),
         local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
     }
@@ -3539,7 +3593,7 @@ async fn a_slash64_dux_is_not_on_still_gets_the_range_ban() {
     let dux = Dux::with_password(
         "max_failed_logins = 3\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 30",
     );
-    let outside = |peer: &str| Arrival {
+    let outside = |peer: &str| Arrival::Tcp {
         peer: SocketAddr::new(peer.parse().unwrap(), 50000),
         local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
     };

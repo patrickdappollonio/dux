@@ -20,6 +20,7 @@ fn child_runs_a_preview() {
         config_path: root.join("config.toml"),
         sessions_db_path: root.join("sessions.sqlite3"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
         worktrees_root: root.join("worktrees"),
         root: root.clone(),
     };

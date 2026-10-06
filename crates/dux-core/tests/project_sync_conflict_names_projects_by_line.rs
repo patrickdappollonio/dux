@@ -18,6 +18,7 @@ fn a_project_path_edited_by_hand_is_named_by_its_line() {
         sessions_db_path: dir.path().join("sessions.sqlite3"),
         worktrees_root: dir.path().join("worktrees"),
         lock_path: dir.path().join("dux.lock"),
+        socket_path: dir.path().join("dux.sock"),
     };
     let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
     store

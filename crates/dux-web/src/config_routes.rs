@@ -1023,7 +1023,7 @@ mod tests {
         // From this machine, which the default `require` asks for nothing: the
         // editor is open to it, and this is about what the editor may write.
         let put = |app: Router, content: String| async move {
-            let local = axum::extract::ConnectInfo(crate::auth::Arrival {
+            let local = axum::extract::ConnectInfo(crate::auth::Arrival::Tcp {
                 peer: "127.0.0.1:40000".parse().unwrap(),
                 local: "127.0.0.1:3890".parse().unwrap(),
             });

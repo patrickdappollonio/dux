@@ -1469,6 +1469,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let default_grace = dux_core::config::shutdown_grace(
             dux_core::config::Config::default().shutdown_timeout_seconds,
@@ -1500,6 +1501,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let worktree = paths.worktrees_root.join("proj").join("feat");
         fs::create_dir_all(&worktree).expect("worktree");
@@ -1584,6 +1586,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let project_repo = paths.worktrees_root.join("vendor");
         fs::create_dir_all(&project_repo).expect("project dir");
@@ -1655,6 +1658,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo");
@@ -1725,6 +1729,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo");
@@ -1806,6 +1811,7 @@ mod tests {
             sessions_db_path: tmp.path().join("dux").join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("dux").join("worktrees"),
             lock_path: tmp.path().join("dux").join("dux.lock"),
+            socket_path: tmp.path().join("dux").join("dux.sock"),
         };
         fs::create_dir_all(&paths.root).expect("root");
         let folder = tmp.path().join("my-notes");
@@ -1902,6 +1908,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         // A managed worktree dux made, and a standalone folder the user chose
         // that happens to live beside it under the same root.
@@ -1969,6 +1976,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let managed_worktree = paths.worktrees_root.join("proj").join("feat");
         let occupied = managed_worktree.join("notes");
@@ -2049,6 +2057,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let managed_worktree = paths.worktrees_root.join("proj").join("feat");
         let project_repo = managed_worktree.join("vendor");
@@ -2893,6 +2902,7 @@ mod tests {
             sessions_db_path: PathBuf::from("/tmp/test/sessions.sqlite3"),
             worktrees_root: PathBuf::from("/tmp/test/worktrees"),
             lock_path: PathBuf::from("/tmp/test/dux.lock"),
+            socket_path: PathBuf::from("/tmp/test/dux.sock"),
         };
         let result = run(&["path".to_string()], &paths);
         assert!(result.is_ok());
@@ -3127,6 +3137,7 @@ mod tests {
                 sessions_db_path: root.join("sessions.sqlite3"),
                 worktrees_root: root.join("worktrees"),
                 lock_path: root.join("dux.lock"),
+                socket_path: root.join("dux.sock"),
                 root,
             };
             Self {
@@ -3236,6 +3247,7 @@ mod tests {
             sessions_db_path: tempdir.path().join("sessions.sqlite3"),
             worktrees_root: worktrees_root.clone(),
             lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
             root: tempdir.path().to_path_buf(),
         };
         let now = Utc::now();
@@ -3331,6 +3343,7 @@ mod tests {
             sessions_db_path: tempdir.path().join("sessions.sqlite3"),
             worktrees_root: worktrees_root.clone(),
             lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
             root: tempdir.path().to_path_buf(),
         };
         let now = Utc::now();
@@ -3450,6 +3463,7 @@ mod tests {
             sessions_db_path: tempdir.path().join("sessions.sqlite3"),
             worktrees_root: worktrees_root.clone(),
             lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
             root: tempdir.path().to_path_buf(),
         };
         let now = Utc::now();
@@ -3545,6 +3559,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let elsewhere = tmp.path().join("elsewhere");
         fs::create_dir_all(&elsewhere).expect("elsewhere");
@@ -3605,6 +3620,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo");

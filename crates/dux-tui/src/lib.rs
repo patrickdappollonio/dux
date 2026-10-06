@@ -253,6 +253,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
 
         let lock = lock_for_config_subcommand(&["reset".to_string()], &paths).unwrap();
@@ -265,6 +266,7 @@ mod tests {
         let absent = config::DuxPaths {
             root: missing.clone(),
             lock_path: missing.join("dux.lock"),
+            socket_path: missing.join("dux.sock"),
             ..paths
         };
         assert!(matches!(
@@ -285,6 +287,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
 
         create_private_root(&paths).unwrap();

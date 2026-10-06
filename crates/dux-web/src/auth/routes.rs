@@ -669,6 +669,9 @@ fn route_refusal(via: super::provenance::Via, cause: &str) -> String {
             "This browser reached dux through tailscale serve, but {cause}, so dux cannot treat \
              it as the tailnet."
         ),
+        Via::ControlSocket => {
+            format!("This client reached dux over its control socket, but {cause}.")
+        }
     }
 }
 

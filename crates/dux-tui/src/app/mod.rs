@@ -4131,6 +4131,7 @@ fn boot_status(
     orientation: impl Into<String>,
     trap_warning: Option<String>,
     theme_warning: Option<String>,
+    socket_warning: Option<String>,
 ) -> KeyedStatusController {
     // Sharing the engine's live-key set is what lets the status line tell a slow
     // operation from an abandoned one; without it every busy is timed out on
@@ -4147,6 +4148,11 @@ fn boot_status(
         status.set(Instant::now(), None, StatusTone::Warning, message);
         status.pin();
     }
+    // True until dux starts again, so it holds the line like the theme's.
+    if let Some(message) = socket_warning {
+        status.set(Instant::now(), None, StatusTone::Warning, message);
+        status.pin();
+    }
     status
 }
 
@@ -4157,7 +4163,7 @@ impl App {
     /// subcommands) and that a losing process never touches shared state.
     pub fn bootstrap_with_lock(
         paths: DuxPaths,
-        single_instance_lock: SingleInstanceLock,
+        mut single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
         let mut config = ensure_config(&paths)?;
 
@@ -4174,6 +4180,13 @@ impl App {
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
+
+        // The lock is held and the config read and accepted: bind the control
+        // socket now, before anything can ask for it. A dux without it still
+        // starts.
+        let paths = paths.with_control_socket(&config.server.control_socket);
+        let socket_warning =
+            dux_core::control_socket::open(&mut single_instance_lock, &paths.socket_path);
 
         // Register the SIGWINCH handler (so resizes are seen even when bypassing
         // crossterm's event reader during interactive mode) and the shutdown
@@ -4217,6 +4230,7 @@ impl App {
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
             theme_warning,
+            socket_warning,
         );
         let gh_integration_val = config.ui.github_integration;
         let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
@@ -4545,6 +4559,7 @@ impl App {
             "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
             theme_warning,
+            None,
         );
         Self::assemble(
             engine,
@@ -4592,6 +4607,7 @@ impl App {
 
         // Stop PTY forwarders while the engine and terminal screen are still owned here.
         self.stop_background_server_quietly();
+        self.release_companion();
         let _ = execute!(
             stdout(),
             DisableMouseCapture,
@@ -4612,6 +4628,7 @@ impl App {
         self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
         // The background server assumes these process-wide workers are already running.
+        self.start_control_socket();
         self.start_background_server_from_config();
     }
 
@@ -8875,6 +8892,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees");
@@ -8925,6 +8943,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -8964,6 +8983,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9012,6 +9032,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9091,6 +9112,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9138,6 +9160,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9188,6 +9211,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -9252,6 +9276,7 @@ leading_branch = "main"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root: root.clone(),
         };
         paths.ensure_dirs().expect("dirs");
@@ -10279,7 +10304,14 @@ mod pinned_warning_tests {
     #[test]
     fn the_boot_status_holds_the_orientation_hint_past_every_window() {
         let t0 = Instant::now();
-        let mut status = boot_status(WINDOW, Default::default(), "Press ? for help.", None, None);
+        let mut status = boot_status(
+            WINDOW,
+            Default::default(),
+            "Press ? for help.",
+            None,
+            None,
+            None,
+        );
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert_eq!(
             status.message(),
@@ -10297,11 +10329,37 @@ mod pinned_warning_tests {
             "Press ? for help.",
             None,
             Some("Theme 'nope' could not be loaded.".to_string()),
+            None,
         );
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert!(
             status.message().contains("could not be loaded"),
             "a theme that will not load is still true tomorrow: {}",
+            status.message()
+        );
+    }
+
+    /// A dux that started without its control socket says so on the line, and
+    /// keeps saying it: it stays true until dux starts again.
+    #[test]
+    fn the_boot_status_holds_the_missing_control_socket_warning_past_every_window() {
+        let t0 = Instant::now();
+        let mut status = boot_status(
+            WINDOW,
+            Default::default(),
+            "Press ? for help.",
+            None,
+            None,
+            Some("dux is running without its control socket: the path is too long.".to_string()),
+        );
+        let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert_eq!(
+            status.most_recent_tui().map(|(tone, _)| tone),
+            Some(StatusTone::Warning)
+        );
+        assert!(
+            status.message().contains("without its control socket"),
+            "{}",
             status.message()
         );
     }

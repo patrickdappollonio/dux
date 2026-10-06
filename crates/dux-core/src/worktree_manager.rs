@@ -599,6 +599,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("lock"),
+            socket_path: root.join("dux.sock"),
         };
         (project, paths)
     }

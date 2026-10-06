@@ -411,7 +411,9 @@ async fn host_allowlist_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    if !allowlist.host_rules {
+    // The control socket is not reachable by a browser, so there is no
+    // rebinding to defend against and no Host worth reading.
+    if !allowlist.host_rules || crate::auth::provenance::over_control_socket(&request) {
         return next.run(request).await;
     }
     let host = request

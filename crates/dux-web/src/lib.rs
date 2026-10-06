@@ -27,6 +27,7 @@ pub mod changes_routes;
 pub mod compressible_exts;
 pub mod config_routes;
 pub mod console;
+pub mod control_socket;
 pub mod engine_actor;
 pub mod event_bus;
 pub mod exposure;
@@ -540,7 +541,13 @@ fn run_plain_http(
         forced_no,
     } = plan;
     warn_if_ui_not_built();
-    let engine = bootstrap_or_report(&paths, &startup_warnings, &mut std::io::stderr())?;
+    let mut engine = bootstrap_or_report(&paths, &startup_warnings, &mut std::io::stderr())?;
+    // The lock is held and the config read, so the control socket is bound
+    // now, before anything is served; a dux without it still serves the web.
+    let socket_path = engine.paths.socket_path.clone();
+    let socket_warning =
+        dux_core::control_socket::open(&mut engine.single_instance_lock, &socket_path);
+    let control_listener = control_socket::listener_of(&engine);
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config, &paths);
@@ -552,6 +559,9 @@ fn run_plain_http(
         } else {
             console.warn(&warning.text);
         }
+    }
+    if let Some(warning) = &socket_warning {
+        console.warn(warning);
     }
     // A second stop signal and the engine's shutdown share this, so a forced
     // quit kills the children and logs what the flip logs.
@@ -677,6 +687,25 @@ fn run_plain_http(
                 shutdown.subscribe(),
             ));
 
+            // The control socket, served by the same router as every web leg
+            // and stopped by the same trigger.
+            let control_leg = control_listener.and_then(|listener| {
+                control_socket::spawn_control_leg(
+                    app.clone(),
+                    listener,
+                    crate::serve_legs::wait_for_shutdown(shutdown.subscribe()),
+                )
+                .inspect_err(|err| {
+                    let message = format!(
+                        "could not serve the control socket: {err}. Command-line clients \
+                         cannot reach this dux until it restarts."
+                    );
+                    dux_core::logger::error(&format!("[server] {message}"));
+                    console.warn(&message);
+                })
+                .ok()
+            });
+
             // Serve every BOUND address, each on its own leg (its own stop lane), so
             // the Tailscale leg can be added and dropped later without disturbing the
             // required one.
@@ -763,6 +792,9 @@ fn run_plain_http(
             // SIGTERM the agents (they save state for a later resume), mark their
             // sessions Detached, then exit; Drop hard-kills any straggler.
             shutdown.trigger();
+            if let Some(control_leg) = control_leg {
+                let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, control_leg).await;
+            }
             handle.shutdown().await;
             match shutdown.take_error() {
                 Some(e) => Err(e),
@@ -2248,6 +2280,48 @@ pub(crate) struct ServeCore {
     /// "the background server installs no signal handlers" is a checkable fact
     /// about the code path rather than a claim in a comment.
     installed_signal_handlers: bool,
+    /// The control socket's serve task, when this core serves the socket.
+    control: Option<ControlLeg>,
+    /// Flipped when this core starts handing the engine over, so the operation
+    /// waits its router holds answer at once (see `AppState::hand_over`).
+    hand_over: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+/// One core's serve task over its clone of the control socket, with a stop
+/// lane of its own so the owner can stop it accepting and let the requests it
+/// already took finish before the engine moves on to the next core.
+struct ControlLeg {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ControlLeg {
+    /// Serve `app` on `listener` until this leg's own lane or the serve's
+    /// parent lane trips. Needs an entered runtime. A listener that cannot be
+    /// adopted is logged and leaves the core without the socket; the web
+    /// listeners, when there are any, serve on.
+    fn spawn(
+        app: Router,
+        listener: std::os::unix::net::UnixListener,
+        shutdown: &ServeShutdown,
+    ) -> Option<Self> {
+        let (stop, own_lane) = tokio::sync::watch::channel(false);
+        let parent_lane = shutdown.subscribe();
+        match control_socket::spawn_control_leg(
+            app,
+            listener,
+            wait_for_leg_shutdown(parent_lane, own_lane),
+        ) {
+            Ok(task) => Some(Self { stop, task }),
+            Err(err) => {
+                dux_core::logger::error(&format!(
+                    "[server] could not serve the control socket: {err}. Command-line clients \
+                     cannot reach this dux until it restarts."
+                ));
+                None
+            }
+        }
+    }
 }
 
 impl ServeCore {
@@ -2262,9 +2336,11 @@ impl ServeCore {
     /// `handle` is consumed: the router keeps its own clones, so holding one here
     /// would keep the request channel alive past the point where the serve is
     /// meant to be over.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         handle: engine_actor::EngineHandle,
         listeners: Vec<std::net::TcpListener>,
+        control_socket: Option<std::os::unix::net::UnixListener>,
         config: &dux_core::config::Config,
         console: Console,
         access_log: bool,
@@ -2348,6 +2424,7 @@ impl ServeCore {
         // path uses. Its watch is the graceful-shutdown lane every serve task and
         // the sweep await; a dying listener flips it via `record_failure`.
         let shutdown = ServeShutdown::new(mode_control.watched());
+        let hand_over = Arc::new(tokio::sync::watch::Sender::new(false));
 
         // Build ONE app, shared across listeners (the router is a cheap
         // `Arc`-backed service). `build_app` constructs the `ChangesService`,
@@ -2359,6 +2436,7 @@ impl ServeCore {
                 handle.clone(),
                 axum::Router::new(),
                 router_params(config, console.clone(), access_log, bound_ips, hooks)
+                    .with_hand_over(Arc::clone(&hand_over))
                     .with_live_tailscale_host_literals(mode_control.host_literals())
                     .with_live_own_magicdns_name(mode_control.own_magicdns_name())
                     .with_live_exposure(mode_control.exposure())
@@ -2401,7 +2479,9 @@ impl ServeCore {
 
         // One serve leg per listener plus the loop that acts on the watcher, all
         // as ONE supervisor task, so teardown is a single bounded join and a leg
-        // the watcher added later winds down through the same trigger.
+        // the watcher added later winds down through the same trigger. The
+        // control socket's leg stands apart, so it can be stopped first.
+        let control;
         let supervisor = {
             let shutdown = shutdown.clone();
             let app = app.clone();
@@ -2444,6 +2524,11 @@ impl ServeCore {
                 );
             }
             drop(guard);
+            control = {
+                let _guard = runtime.enter();
+                control_socket
+                    .and_then(|listener| ControlLeg::spawn(app.clone(), listener, &shutdown))
+            };
             runtime.spawn(run_serve_loop(
                 legs,
                 shutdown,
@@ -2491,7 +2576,80 @@ impl ServeCore {
             tailscale_mode: mode_control,
             supervisor: Some(supervisor),
             installed_signal_handlers,
+            control,
+            hand_over,
         })
+    }
+
+    /// Serve the control socket and nothing else: the plain terminal UI's
+    /// core. No web listener, no Tailscale watcher, no signal handlers, and no
+    /// access log, because nothing here is on a screen.
+    pub(crate) fn start_control_only(
+        handle: engine_actor::EngineHandle,
+        control_socket: std::os::unix::net::UnixListener,
+        config: &dux_core::config::Config,
+    ) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        // A mode handle no loop answers: nothing here serves the web, so a
+        // mode change has nothing to move, and it is never handed to the
+        // router or the engine.
+        let (mode_control, _no_loop) = TailscaleModeControl::new(
+            runtime.handle().clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let shutdown = ServeShutdown::new(mode_control.watched());
+        let hand_over = Arc::new(tokio::sync::watch::Sender::new(false));
+        let guard = runtime.enter();
+        let app = server::build_app(
+            handle,
+            axum::Router::new(),
+            router_params(
+                config,
+                Console::noop(),
+                false,
+                Vec::new(),
+                BackgroundHooks::default(),
+            )
+            .with_hand_over(Arc::clone(&hand_over)),
+        );
+        let control = ControlLeg::spawn(app, control_socket, &shutdown);
+        drop(guard);
+        Ok(Self {
+            runtime,
+            shutdown,
+            tailscale_mode: mode_control,
+            supervisor: None,
+            installed_signal_handlers: false,
+            control,
+            hand_over,
+        })
+    }
+
+    /// Stop accepting on the control socket, leaving the requests already
+    /// accepted to finish. Connections that arrive from now on wait in the
+    /// socket's backlog for the next core.
+    ///
+    /// This is where a hand-over begins, so every operation wait this core's
+    /// router holds answers now with the record as it stands. Anything else
+    /// still held open (a request that is not an operation wait) has the
+    /// owner's bound to finish, and is cut past it; the command line sends
+    /// every change with `operation=1` and polls, so it never holds one.
+    pub(crate) fn stop_control_socket(&self) {
+        self.hand_over.send_replace(true);
+        if let Some(control) = &self.control {
+            let _ = control.stop.send(true);
+        }
+    }
+
+    /// Whether the control socket's serve task has finished, every request it
+    /// accepted answered. True when this core never served the socket.
+    pub(crate) fn control_socket_drained(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_none_or(|control| control.task.is_finished())
     }
 
     /// Whether a required leg's accept loop died, so the caller can stop serving
@@ -2549,6 +2707,7 @@ impl ServeCore {
     /// watcher and take the operator's escape hatch with it.
     pub(crate) fn wind_down(&mut self, shutdown_flag: &Arc<AtomicBool>) {
         shutdown_flag.store(true, Ordering::SeqCst);
+        self.hand_over.send_replace(true);
 
         // Trigger graceful axum shutdown and wait (bounded) for the supervisor to
         // reap every leg. `trigger` fans out over the leg registry, so a Tailscale
@@ -2556,11 +2715,19 @@ impl ServeCore {
         // its listener into the surface that resumes. The bound keeps a wedged
         // client connection on any listener from hanging the caller.
         self.shutdown.trigger();
-        if let Some(supervisor) = self.supervisor.take() {
-            self.runtime.block_on(async {
-                let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, supervisor).await;
-            });
-        }
+        let control = self.control.take().map(|control| control.task);
+        let supervisor = self.supervisor.take();
+        self.runtime.block_on(async {
+            let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
+                if let Some(control) = control {
+                    let _ = control.await;
+                }
+                if let Some(supervisor) = supervisor {
+                    let _ = supervisor.await;
+                }
+            })
+            .await;
+        });
     }
 
     /// Tear the runtime down and report the first listener failure, if any.
@@ -2686,6 +2853,7 @@ pub fn serve_with_engine(
     let mut core = ServeCore::start(
         handle,
         listeners,
+        control_socket::listener_of(&engine),
         &engine.config,
         console.clone(),
         // `[server] access_log` governs the flip exactly as it does `dux server`:
@@ -2706,7 +2874,13 @@ pub fn serve_with_engine(
     // Run the engine loop on the CURRENT thread. The control closure decides the
     // exit reason: a serve failure or a tripped signal flag wins (both exit the
     // loop), otherwise the caller's tick result maps straight through.
+    //
+    // Once it has decided, the control socket stops accepting and the loop
+    // keeps servicing until the requests it already took are answered (bounded),
+    // so a command-line client is never cut off by the hand-over; a connection
+    // that arrives meanwhile waits in the socket's backlog for the terminal UI.
     let mut exit = ServerExit::ReturnToTui;
+    let mut draining_until: Option<std::time::Instant> = None;
     let mut engine = engine_actor::run_engine_loop(
         engine,
         ends,
@@ -2717,28 +2891,40 @@ pub fn serve_with_engine(
         engine_actor::ShutdownEcho::Silent,
         engine_actor::ServeSurface::Flip,
         || {
-            if core.is_failed() {
+            if let Some(deadline) = draining_until {
+                return if core.control_socket_drained() || std::time::Instant::now() >= deadline {
+                    LoopControl::Exit
+                } else {
+                    LoopControl::Continue
+                };
+            }
+            let decided = if core.is_failed() {
                 // A listener died: exit the loop. We RETURN to the TUI rather than
                 // quit the process (PTYs stay intact) and surface the captured error
                 // below so the caller knows the server could not keep serving.
-                exit = ServerExit::ReturnToTui;
+                Some(ServerExit::ReturnToTui)
+            } else if signal_quit.load(Ordering::SeqCst) {
+                Some(ServerExit::QuitProcess)
+            } else {
+                match on_tick() {
+                    ServerTick::Continue => None,
+                    ServerTick::ReturnToTui => Some(ServerExit::ReturnToTui),
+                    ServerTick::QuitProcess => Some(ServerExit::QuitProcess),
+                }
+            };
+            let Some(decided) = decided else {
+                return LoopControl::Continue;
+            };
+            exit = decided;
+            core.stop_control_socket();
+            if core.control_socket_drained() {
                 return LoopControl::Exit;
             }
-            if signal_quit.load(Ordering::SeqCst) {
-                exit = ServerExit::QuitProcess;
-                return LoopControl::Exit;
-            }
-            match on_tick() {
-                ServerTick::Continue => LoopControl::Continue,
-                ServerTick::ReturnToTui => {
-                    exit = ServerExit::ReturnToTui;
-                    LoopControl::Exit
-                }
-                ServerTick::QuitProcess => {
-                    exit = ServerExit::QuitProcess;
-                    LoopControl::Exit
-                }
-            }
+            // Operation waits answered as the socket stopped; anything else
+            // still open gets this bound and is cut past it. The command line
+            // never holds such a request: it polls operations by id.
+            draining_until = Some(std::time::Instant::now() + SERVER_JOIN_TIMEOUT);
+            LoopControl::Continue
         },
     );
 
@@ -3226,6 +3412,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -3287,6 +3474,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -3366,6 +3554,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -3865,6 +4054,7 @@ mod tests {
             sessions_db_path: file_root.join("sessions.sqlite3"),
             worktrees_root: file_root.join("worktrees"),
             lock_path: file_root.join("dux.lock"),
+            socket_path: file_root.join("dux.sock"),
         };
         let mut err = Vec::new();
         let result = super::bootstrap_or_report(
@@ -3909,6 +4099,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -4038,6 +4229,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -4064,6 +4256,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -4154,6 +4347,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
@@ -4224,6 +4418,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         }
     }
 
@@ -5372,7 +5567,7 @@ mod live_tailscale_mode_tests {
             .unwrap();
         request
             .extensions_mut()
-            .insert(axum::extract::ConnectInfo(crate::auth::Arrival {
+            .insert(axum::extract::ConnectInfo(crate::auth::Arrival::Tcp {
                 peer: "127.0.0.1:40000".parse().unwrap(),
                 local: "127.0.0.1:3890".parse().unwrap(),
             }));
@@ -6392,6 +6587,7 @@ mod config_surface_tests {
                 sessions_db_path: std::path::PathBuf::from("/tmp/dux-web-test/sessions.sqlite3"),
                 worktrees_root: std::path::PathBuf::from("/tmp/dux-web-test/worktrees"),
                 lock_path: std::path::PathBuf::from("/tmp/dux-web-test/dux.lock"),
+                socket_path: std::path::PathBuf::from("/tmp/dux-web-test/dux.sock"),
             },
             tx,
         );
@@ -6429,6 +6625,7 @@ mod auth_warning_mode_tests {
             sessions_db_path: tmp.join("sessions.sqlite3"),
             worktrees_root: tmp.join("worktrees"),
             lock_path: tmp.join("dux.lock"),
+            socket_path: tmp.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         crate::test_support::bootstrap_test_engine(&paths).unwrap()
@@ -6483,6 +6680,38 @@ mod auth_warning_mode_tests {
         );
     }
 
+    /// `dux server` has no status line, so a reload that moves the control
+    /// socket says on its console that the new path waits for the next start.
+    #[test]
+    fn dux_server_says_on_its_console_that_a_new_control_socket_waits_for_a_restart() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = engine_in(tmp.path());
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (handle, _join) = engine_actor::spawn_engine_thread_with_console(
+            engine,
+            console,
+            Arc::new(QuitForce::default()),
+        );
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[server]\ncontrol_socket = \"/run/user/1000/dux.sock\"\n",
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(handle.apply_wire(dux_core::wire::WireCommand::ReloadConfig {}))
+            .expect("the reload runs");
+        until(
+            "dux server's console never said the socket moves at the next start",
+            || sink.contents().contains("control_socket"),
+        );
+        assert!(
+            sink.contents().contains("next time dux starts"),
+            "{}",
+            sink.contents()
+        );
+    }
+
     /// The flip serves through `ServeCore` with a capturing console; its log
     /// shows the alarm once the Tailscale leg puts dux on the tailnet.
     #[test]
@@ -6496,6 +6725,7 @@ mod auth_warning_mode_tests {
         let core = ServeCore::start(
             handle,
             vec![listener],
+            None,
             &config,
             Console::capture(ring.clone()),
             false,

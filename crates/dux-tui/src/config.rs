@@ -1184,6 +1184,23 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.server.serve_while_tui),
         },
         ConfigEntry::Field {
+            key: "control_socket",
+            comment: Some(CommentSource::Static(
+                "# Where dux answers command-line clients on this machine: a socket\n\
+                 # file that only your user can open, served by every running dux (the\n\
+                 # terminal UI, the flip, background serving and `dux server` alike).\n\
+                 # It carries no password; your user account is the credential. A\n\
+                 # relative path is read from this config folder, an absolute one is\n\
+                 # used as written, but its folder must be yours alone (owned by you,\n\
+                 # and nobody else can write to it), as this config folder is. A\n\
+                 # leftover socket from a dux that crashed is replaced when dux starts. A path longer than the system allows (103\n\
+                 # bytes on macOS, 107 on Linux) starts dux without the socket, and dux\n\
+                 # says why on its status line and in dux.log; pick a shorter path here.\n\
+                 # Read once when dux starts, so a change applies the next time it does.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.control_socket.clone()),
+        },
+        ConfigEntry::Field {
             key: "max_websocket_events_connections",
             comment: Some(CommentSource::Static(
                 "# Maximum number of concurrent EVENTS WebSocket (/ws) connections to\n\
@@ -1886,6 +1903,7 @@ pub fn install_canonical_renderer() {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         crate::theme::load(name, &paths).is_ok()
     });
@@ -4483,6 +4501,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4515,6 +4534,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4551,6 +4571,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4582,6 +4603,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root: root.clone(),
         };
@@ -4650,6 +4672,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4676,6 +4699,7 @@ args = [\"-l\"]
                 config_path: root.join("config.toml"),
                 sessions_db_path: root.join("sessions.sqlite3"),
                 lock_path: root.join("dux.lock"),
+                socket_path: root.join("dux.sock"),
                 worktrees_root: root.join("worktrees"),
                 root,
             };
@@ -4706,6 +4730,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4778,6 +4803,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4809,6 +4835,7 @@ args = [\"-l\"]
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -4870,6 +4897,7 @@ mod legacy_exit_interactive_tests {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         }
@@ -5165,6 +5193,7 @@ mod port_zero_and_deprecated_key_start_tests {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             worktrees_root: root.join("worktrees"),
             root,
         };
@@ -5194,6 +5223,7 @@ mod port_zero_and_deprecated_key_start_tests {
                 config_path: root.join("config.toml"),
                 sessions_db_path: root.join("sessions.sqlite3"),
                 lock_path: root.join("dux.lock"),
+                socket_path: root.join("dux.sock"),
                 worktrees_root: root.join("worktrees"),
                 root,
             };
@@ -5231,6 +5261,7 @@ mod entries_named_password_hash_start_tests {
                 config_path: root.join("config.toml"),
                 sessions_db_path: root.join("sessions.sqlite3"),
                 lock_path: root.join("dux.lock"),
+                socket_path: root.join("dux.sock"),
                 worktrees_root: root.join("worktrees"),
                 root,
             };

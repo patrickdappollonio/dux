@@ -14,6 +14,7 @@ fn starts_with_no_password(body: &str) -> bool {
         sessions_db_path: dir.path().join("sessions.sqlite3"),
         worktrees_root: dir.path().join("worktrees"),
         lock_path: dir.path().join("dux.lock"),
+        socket_path: dir.path().join("dux.sock"),
     };
     std::fs::write(&paths.config_path, body).unwrap();
     let refused =

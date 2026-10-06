@@ -21,6 +21,31 @@ impl App {
             .is_some_and(|companion| companion.is_serving())
     }
 
+    /// Whether a core is up, the control socket's alone included: the one
+    /// question that decides whether the engine is lent each iteration.
+    fn companion_has_core(&self) -> bool {
+        self.companion
+            .as_ref()
+            .is_some_and(|companion| companion.has_core())
+    }
+
+    /// Serve the control socket from this terminal UI, so a command-line
+    /// client reaches it while nothing serves the web. Called as the run loop
+    /// starts, before `serve_while_tui` is honoured.
+    pub(crate) fn start_control_socket(&mut self) {
+        if let Some(companion) = self.companion.as_mut() {
+            companion.start_control_socket(&mut self.engine);
+        }
+    }
+
+    /// Stop every core as the run loop ends, the control socket's included:
+    /// a quit ends the process, and the flip's own core serves the socket next.
+    pub(crate) fn release_companion(&mut self) {
+        if let Some(companion) = self.companion.as_mut() {
+            companion.release(&mut self.engine);
+        }
+    }
+
     /// Palette action: open the server log full-screen. It follows the file the
     /// background server writes, so it opens only while that server is up.
     pub(crate) fn open_server_log_viewer(&mut self) {
@@ -115,10 +140,10 @@ impl App {
     ///
     /// Pre-consume because `apply_reaction` takes the reaction by value, and
     /// per-reaction rather than per-batch so the companion sees them in the order
-    /// they were drained. A no-op when nothing is serving.
+    /// they were drained. A no-op when no core is up.
     pub(crate) fn notify_companion(&mut self, reaction: &EventReaction) {
         if let Some(companion) = self.companion.as_mut()
-            && companion.is_serving()
+            && companion.has_core()
         {
             companion.on_reaction(&mut self.engine, reaction);
         }
@@ -130,9 +155,11 @@ impl App {
     /// the web layer's own follow-ups REMOVE the pending-op entries the verdict is
     /// read from: ask afterwards and a browser's PR create or project add answers
     /// "the drainer owns this", and this surface runs its arm too. Empty when
-    /// nothing is serving, which routes every reaction here.
+    /// no core is up, which routes every reaction here. A core serving only the
+    /// control socket routes too: a command-line client's change is a web
+    /// request like a browser's.
     pub(crate) fn companion_routing(&self) -> CompanionRouting {
-        if self.background_server_is_serving() {
+        if self.companion_has_core() {
             CompanionRouting::Serving(self.engine.web_followup_ops())
         } else {
             CompanionRouting::NotServing
@@ -156,7 +183,7 @@ impl App {
         maintenance: &dux_core::background_serve::DrainedMaintenance,
     ) {
         if let Some(companion) = self.companion.as_mut()
-            && companion.is_serving()
+            && companion.has_core()
         {
             companion.note_maintenance(maintenance);
         }
@@ -165,7 +192,7 @@ impl App {
     /// Lend the engine to the companion for its per-iteration work, and do this
     /// surface's own follow-up when the companion changed shared state.
     ///
-    /// Called once per run-loop iteration. A no-op when nothing is serving.
+    /// Called once per run-loop iteration. A no-op when no core is up.
     pub(crate) fn service_companion(&mut self) {
         let applies = self.engine.command_applies;
         // A web-owned follow-up ran during this iteration's drain, which can have
@@ -175,7 +202,7 @@ impl App {
         // anything is serving, so the flag never survives into a later iteration.
         let followup_ran = std::mem::take(&mut self.companion_followup_ran);
         let outcome = match self.companion.as_mut() {
-            Some(companion) if companion.is_serving() => {
+            Some(companion) if companion.has_core() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
                 // here reaches a browser on the same iteration rather than waiting
                 // for the fingerprint backstop.
@@ -961,6 +988,9 @@ pub(crate) mod tests {
     /// real runtime; none of that is what these tests are about.
     pub(crate) struct FakeCompanion {
         serving: bool,
+        /// A core that serves only the control socket, with nothing served on
+        /// the web: the plain terminal UI's.
+        control_core: bool,
         recorded: Arc<Mutex<Recorded>>,
         /// A REAL ownership registry, because the gate's whole job is to obey one
         /// and a fake verdict would test nothing. Shared with the test so it can
@@ -986,6 +1016,7 @@ pub(crate) mod tests {
             (
                 Box::new(Self {
                     serving: true,
+                    control_core: false,
                     recorded: Arc::clone(&recorded),
                     ownership: ownership.clone(),
                 }),
@@ -1064,6 +1095,19 @@ pub(crate) mod tests {
             self.serving
         }
 
+        fn has_core(&self) -> bool {
+            self.serving || self.control_core
+        }
+
+        fn start_control_socket(&mut self, _engine: &mut Engine) {
+            self.control_core = true;
+        }
+
+        fn release(&mut self, _engine: &mut Engine) {
+            self.serving = false;
+            self.control_core = false;
+        }
+
         fn urls(&self) -> Vec<String> {
             vec!["http://127.0.0.1:8080".to_string()]
         }
@@ -1117,6 +1161,7 @@ pub(crate) mod tests {
 
         fn stop(&mut self, _engine: &mut Engine) {
             self.serving = false;
+            self.control_core = true;
         }
 
         fn ownership(&self) -> Option<TuiOwnership> {
@@ -1526,28 +1571,47 @@ pub(crate) mod tests {
         );
     }
 
-    /// Nothing serving means nothing is lent the engine, and no cost is paid.
+    /// No core at all means nothing is lent the engine, and no cost is paid. A
+    /// core that serves only the control socket is lent it like a serving one,
+    /// because a command-line client's request waits on it.
     #[test]
-    fn a_companion_that_is_not_serving_is_never_lent_the_engine() {
+    fn a_companion_with_no_core_is_never_lent_the_engine_and_a_socket_core_is() {
         let mut app = test_app(default_bindings());
+        let companion = |control_core: bool, recorded: &Arc<Mutex<Recorded>>| {
+            let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
+            Box::new(FakeCompanion {
+                serving: false,
+                control_core,
+                recorded: Arc::clone(recorded),
+                ownership: TuiOwnership {
+                    conn_id: owners.next_conn_id(),
+                    owners,
+                },
+            })
+        };
         let recorded = Arc::new(Mutex::new(Recorded::default()));
-        let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
-        app.companion = Some(Box::new(FakeCompanion {
-            serving: false,
-            recorded: Arc::clone(&recorded),
-            ownership: TuiOwnership {
-                conn_id: owners.next_conn_id(),
-                owners,
-            },
-        }));
+        app.companion = Some(companion(false, &recorded));
 
         app.notify_companion(&EventReaction::Nothing);
         app.service_companion();
 
-        let recorded = recorded.lock().expect("not poisoned");
-        assert!(recorded.reactions.is_empty());
-        assert_eq!(recorded.serviced, 0);
-        assert!(recorded.activity.is_empty());
+        {
+            let recorded = recorded.lock().expect("not poisoned");
+            assert!(recorded.reactions.is_empty());
+            assert_eq!(recorded.serviced, 0);
+            assert!(recorded.activity.is_empty());
+        }
+
+        let socket_core = Arc::new(Mutex::new(Recorded::default()));
+        app.companion = Some(companion(true, &socket_core));
+
+        app.notify_companion(&EventReaction::Nothing);
+        app.service_companion();
+
+        let recorded = socket_core.lock().expect("not poisoned");
+        assert_eq!(recorded.reactions, vec!["Nothing".to_string()]);
+        assert_eq!(recorded.serviced, 1);
+        assert_eq!(recorded.activity.len(), 1);
     }
 
     /// The poll interval IS a browser's request latency while serving, so it is
@@ -1559,6 +1623,22 @@ pub(crate) mod tests {
             app.max_poll_ms(),
             u64::MAX,
             "not serving, nothing constrains the poll"
+        );
+
+        // The plain terminal UI's core serves the control socket and nothing a
+        // browser opens: no crumb, no count, no seat, and the lazy poll stands.
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        recorded.lock().expect("not poisoned").connections = 3;
+        assert!(app.companion.as_ref().is_some_and(|c| c.has_core()));
+        assert_eq!(app.max_poll_ms(), u64::MAX);
+        assert_eq!(app.serving_chip(), None);
+        assert_eq!(app.companion.as_ref().map(|c| c.connections()), Some(0));
+        assert!(
+            app.companion
+                .as_ref()
+                .is_some_and(|c| c.ownership().is_none())
         );
 
         let (companion, _recorded) = FakeCompanion::serving();

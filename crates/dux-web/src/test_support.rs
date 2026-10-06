@@ -43,6 +43,7 @@ pub(crate) fn test_engine_handle(tmp: &Path) -> EngineHandle {
         sessions_db_path: tmp.join("sessions.sqlite3"),
         worktrees_root: tmp.join("worktrees"),
         lock_path: tmp.join("dux.lock"),
+        socket_path: tmp.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
@@ -89,6 +90,7 @@ mod tests {
             sessions_db_path: tmp.path().join("sessions.sqlite3"),
             worktrees_root: tmp.path().join("worktrees"),
             lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         let engine = super::bootstrap_test_engine(&paths).unwrap();

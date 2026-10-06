@@ -180,13 +180,13 @@ pub(crate) async fn auth_layer(
         .extensions()
         .get::<ConnectInfo<Arrival>>()
         .map(|info| info.0);
-    if let Some(arrival) = arrival
+    if let Some(peer) = arrival.and_then(Arrival::peer)
         && request
             .extensions()
             .get::<ConnectInfo<std::net::SocketAddr>>()
             .is_none()
     {
-        request.extensions_mut().insert(ConnectInfo(arrival.peer));
+        request.extensions_mut().insert(ConnectInfo(peer));
     }
     let facts = RequestFacts::of(arrival, request.headers());
     let assessment = state.auth.assess(facts, request.headers()).await;

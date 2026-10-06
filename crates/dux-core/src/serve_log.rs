@@ -201,6 +201,20 @@ impl LogLine {
         }
     }
 
+    /// [`Self::access`] for a request over the control socket: the same line,
+    /// saying it came that way.
+    pub fn access_over_control_socket(
+        hms: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        latency_ms: u128,
+    ) -> Self {
+        let mut line = Self::access(hms, method, path, status, latency_ms);
+        line.segments.push(LogSegment::plain(" via socket"));
+        line
+    }
+
     /// A line shown exactly as written, with no styling: how a viewer shows a
     /// line it read back from `server.log`, which keeps only the plain spelling.
     pub fn plain_text(text: &str) -> Self {

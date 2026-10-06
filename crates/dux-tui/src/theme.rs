@@ -976,6 +976,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root,
         };
         let listings = discover_available(&paths);
@@ -1011,6 +1012,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root,
         };
         let listings = discover_available(&paths);
@@ -1436,6 +1438,7 @@ variant = "dark"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root,
         };
         let listings = discover_available(&paths);
@@ -1472,6 +1475,7 @@ variant = "dark"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root,
         };
         let listings = discover_available(&paths);
@@ -1568,6 +1572,7 @@ info = "info"
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
             root,
         };
         (tmp, paths)

@@ -66,6 +66,7 @@ fn engine_with_an_agent_and_a_terminal_running()
         sessions_db_path: root.join("sessions.sqlite3"),
         worktrees_root: root.join("worktrees"),
         lock_path: root.join("dux.lock"),
+        socket_path: root.join("dux.sock"),
     };
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
@@ -183,7 +184,9 @@ fn run_browser(
     browser: std::thread::JoinHandle<()>,
     asks: mpsc::Receiver<Ask>,
 ) {
-    let seat = server.ownership();
+    let seat = server
+        .ownership()
+        .expect("a web serve gives the terminal UI a seat");
     let deadline = Instant::now() + Duration::from_secs(60);
     while !browser.is_finished() {
         assert!(
@@ -293,7 +296,9 @@ async fn browser(
 fn a_browser_finds_everything_running_driven_by_the_tui_until_it_takes_over() {
     let (mut engine, terminal, _tmp) = engine_with_an_agent_and_a_terminal_running();
     let (mut server, addr) = serve(&mut engine, true);
-    let seat = server.ownership();
+    let seat = server
+        .ownership()
+        .expect("a web serve gives the terminal UI a seat");
 
     // Before anything has connected, and before the run loop has turned once.
     assert!(seat.owners.is_owner("s1-slot", seat.conn_id));
@@ -329,7 +334,9 @@ fn a_browser_finds_everything_running_driven_by_the_tui_until_it_takes_over() {
 fn a_serve_started_without_the_claim_leaves_everything_free() {
     let (mut engine, terminal, _tmp) = engine_with_an_agent_and_a_terminal_running();
     let (mut server, addr) = serve(&mut engine, false);
-    let seat = server.ownership();
+    let seat = server
+        .ownership()
+        .expect("a web serve gives the terminal UI a seat");
 
     assert_eq!(seat.owners.current_owner("s1-slot").0, None);
     assert_eq!(seat.owners.current_owner(&terminal).0, None);

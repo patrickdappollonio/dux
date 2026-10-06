@@ -469,6 +469,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {
@@ -607,6 +608,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {
@@ -1228,6 +1230,7 @@ mod tests {
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
             lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         {
