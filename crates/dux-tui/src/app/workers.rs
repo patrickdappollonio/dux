@@ -1,5 +1,6 @@
 use std::sync::mpsc::Sender;
 
+use dux_core::config_reload_status::ConfigReloadOutcome;
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
@@ -882,6 +883,7 @@ impl App {
         let before = self.engine.config.clone();
         let github_was_enabled = self.engine.github_integration_enabled;
         let fallback = config.clone();
+        let mut apply_error = None;
         let outcome = match self.apply_reloaded_config(config) {
             Err(error) => {
                 // The view could not take the new config, but the engine still
@@ -893,18 +895,25 @@ impl App {
                 self.engine.keep_reloaded_config(fallback);
                 self.run_config_swap_effects(&before, github_was_enabled);
                 self.note_config_adopted(&before);
-                TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
+                let error = format!("{error:#}");
+                apply_error = Some(error.clone());
+                TuiConfigReloadOutcome::ApplyFailed(error)
             }
             Ok(()) => TuiConfigReloadOutcome::Applied,
         };
-        let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
         self.post_config_reload_outcome(&outcome);
-        if applied {
-            self.note_config_adopted(&before);
-        }
+        // This surface owns the reload here, so a client that asked for it
+        // hears how it ended.
+        let told = match apply_error {
+            Some(error) => ConfigReloadOutcome::ApplyFailed(error),
+            None => ConfigReloadOutcome::Applied {
+                notes: self.note_config_adopted(&before).into_iter().collect(),
+            },
+        };
+        self.engine.finish_config_reload_operations(&told);
     }
 
     /// The engine adopted a reloaded config its own apply could not finish
@@ -921,39 +930,46 @@ impl App {
         let _ = self.take_reload_view_state(&adopted);
         self.run_config_swap_effects(&before, github_was_enabled);
         self.note_config_adopted(&before);
-        let outcome = TuiConfigReloadOutcome::ApplyFailed(error);
+        let outcome = TuiConfigReloadOutcome::ApplyFailed(error.clone());
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
         self.post_config_reload_outcome(&outcome);
+        self.engine
+            .finish_config_reload_operations(&ConfigReloadOutcome::ApplyFailed(error));
     }
 
     /// A new config is in force: the background server adopts its
     /// `[server]` section, and a change only a restart applies says so.
-    fn note_config_adopted(&mut self, before: &Config) {
+    /// Answers the warning sentence it raised, so a client that asked for the
+    /// reload hears it too.
+    fn note_config_adopted(&mut self, before: &Config) -> Option<String> {
         if let Some(companion) = self.companion.as_mut() {
             companion.note_config_applied(&self.engine.config);
         }
         // The listener's bind settings and the server log's are both read when a
         // serve starts, so a running one cannot adopt either.
         let mut owed: Vec<String> = Vec::new();
-        if dux_core::config::server_bind_settings_changed(
+        let mut changed =
+            dux_core::config::server_bind_setting_names(&before.server, &self.engine.config.server);
+        changed.extend(dux_core::config::server_log_file_setting_names(
             &before.server,
             &self.engine.config.server,
-        ) || dux_core::config::server_log_file_settings_changed(
-            &before.server,
-            &self.engine.config.server,
-        ) {
+        ));
+        if !changed.is_empty() {
             let serving = self.background_server_is_serving();
-            owed.push(server_restart_warning(serving).to_string());
+            owed.push(server_restart_warning(serving, &changed));
         }
         owed.extend(dux_core::control_socket::moved_warning(
             &before.server,
             &self.engine.config.server,
         ));
-        if !owed.is_empty() {
-            self.set_pinned_warning(owed.join(" "));
+        if owed.is_empty() {
+            return None;
         }
+        let warning = owed.join(" ");
+        self.set_pinned_warning(warning.clone());
+        Some(warning)
     }
 
     /// Answer the reload on the worker lane, so the browsers that were told to
@@ -977,6 +993,8 @@ impl App {
     }
 
     fn apply_open_config_reload_failed_modal(&mut self, message: String) {
+        self.engine
+            .finish_config_reload_operations(&ConfigReloadOutcome::Refused(message.clone()));
         self.open_config_reload_failed_modal(message);
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(
@@ -2009,16 +2027,18 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 /// A background listener is restarted from inside dux, so the serving copy names
 /// that pair of commands; with nothing serving there is nothing to restart and
 /// the change simply waits for the next listener.
-pub(crate) fn server_restart_warning(serving_in_background: bool) -> &'static str {
+/// `settings` are the keys that changed, named in the sentence.
+pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
+    let named = settings.join(", ");
     match serving_in_background {
-        true => {
-            "Server settings changed in config, but a listener that is already bound cannot adopt \
-             them. Stop the background server and start it again to apply them."
-        }
-        false => {
-            "Server settings changed in config. Nothing is serving right now, so they apply the \
-             next time a server starts."
-        }
+        true => format!(
+            "Server settings changed in config ({named}), but a listener that is already bound \
+             cannot adopt them. Stop the background server and start it again to apply them."
+        ),
+        false => format!(
+            "Server settings changed in config ({named}). Nothing is serving right now, so they \
+             apply the next time a server starts."
+        ),
     }
 }
 
@@ -3470,6 +3490,13 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let mut config = app.engine.config.clone();
         config.server.port += 1;
+        // A client that asked for this reload waits on its record.
+        app.engine.open_operation(
+            "reload-op",
+            dux_core::operations::OperationKind::ConfigReload,
+        );
+        app.engine.operations.await_reload("reload-op", false);
+        app.engine.operations.reload_closed();
 
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
         app.drain_worker_events();
@@ -3479,6 +3506,22 @@ mod tests {
         assert!(
             message.contains("server"),
             "the warning names what needs restarting: {message}"
+        );
+        let record = app
+            .engine
+            .operations
+            .peek("reload-op", std::time::Instant::now())
+            .expect("the record is kept");
+        assert_eq!(
+            record.state,
+            dux_core::operations::OperationState::Succeeded
+        );
+        assert!(
+            record.message.starts_with(
+                "Configuration reloaded. New settings are active now. Server settings changed"
+            ),
+            "{}",
+            record.message
         );
     }
 
@@ -3524,8 +3567,36 @@ mod tests {
         // A bind setting and each of the four server log settings: the log is
         // opened when the serve starts, so a running one cannot adopt them.
         type Change = fn(&mut dux_core::config::ServerConfig);
-        let changes: [(&str, Change); 5] = [
+        let changes: [(&str, Change); 15] = [
+            ("host", |server| server.host = "0.0.0.0".into()),
             ("port", |server| server.port += 1),
+            ("max_websocket_events_connections", |server| {
+                server.max_websocket_events_connections += 1
+            }),
+            ("max_websocket_agent_connections", |server| {
+                server.max_websocket_agent_connections += 1
+            }),
+            ("max_websocket_terminal_connections", |server| {
+                server.max_websocket_terminal_connections += 1
+            }),
+            ("max_websocket_tab_connections", |server| {
+                server.max_websocket_tab_connections += 1
+            }),
+            ("max_websocket_tabs_per_agent", |server| {
+                server.max_websocket_tabs_per_agent += 1
+            }),
+            ("file_drop_max_bytes", |server| {
+                server.file_drop_max_bytes += 1
+            }),
+            ("file_drop_max_concurrency", |server| {
+                server.file_drop_max_concurrency += 1
+            }),
+            ("tree_list_max_concurrency", |server| {
+                server.tree_list_max_concurrency += 1
+            }),
+            ("release_notes_max_concurrency", |server| {
+                server.release_notes_max_concurrency += 1
+            }),
             ("log_path", |server| server.log_path = "other.log".into()),
             ("log_max_bytes", |server| server.log_max_bytes += 1),
             ("log_keep", |server| server.log_keep += 1),
@@ -3550,10 +3621,13 @@ mod tests {
 
             let (tone, message) = app.status.most_recent_tui().expect("a status");
             assert_eq!(tone, StatusTone::Warning, "{setting}");
-            assert_eq!(
-                message,
-                server_restart_warning(true),
-                "{setting}: a serving companion picks the stop-and-start copy"
+            assert!(
+                message.contains(&format!("({setting})")),
+                "{setting}: the warning names what changed: {message}"
+            );
+            assert!(
+                message.contains("Stop the background server and start it again"),
+                "{setting}: a serving companion picks the stop-and-start copy: {message}"
             );
         }
     }
@@ -3575,7 +3649,7 @@ mod tests {
         });
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
     }
 
     #[test]
@@ -3589,7 +3663,11 @@ mod tests {
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            "Server settings changed in config (port). Nothing is serving right now, so they apply the next time a server starts."
+        );
 
         // The control socket is bound once per process: a new path waits for
         // dux itself to start again, serving or not.
@@ -3625,13 +3703,13 @@ mod tests {
             .status
             .most_recent_tui()
             .expect("the restart warning must survive the warning window");
-        assert_eq!(message, server_restart_warning(false));
+        assert_eq!(message, server_restart_warning(false, &["port"]));
     }
 
     #[test]
     fn the_server_restart_warning_names_the_background_server_only_while_it_serves() {
-        let serving = server_restart_warning(true);
-        let idle = server_restart_warning(false);
+        let serving = server_restart_warning(true, &["port"]);
+        let idle = server_restart_warning(false, &["port"]);
         assert_ne!(serving, idle);
         assert!(
             serving.contains("background server"),

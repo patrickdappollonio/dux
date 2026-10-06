@@ -1229,8 +1229,6 @@ fn process_is_zombie(pid: u32) -> bool {
 /// `state` is a POSIX `ps -o` keyword and macOS prints `Z` for a zombie.
 /// Anything other than a leading `Z`, including `ps` failing to run at all,
 /// leaves the signal-0 answer standing.
-///
-/// Not exercised by dux's test suite, which runs on Linux.
 #[cfg(not(target_os = "linux"))]
 fn process_is_zombie(pid: u32) -> bool {
     let Ok(out) = std::process::Command::new("ps")
@@ -2134,6 +2132,12 @@ mod tests {
                 UnreportablePath::NotUtf8,
             ),
         ] {
+            // APFS, the macOS file system, refuses a name that is not UTF-8
+            // (EILSEQ), so that row cannot be built on a Mac and the case
+            // cannot arise on its own disk; the Linux run covers it.
+            if want == UnreportablePath::NotUtf8 && cfg!(target_os = "macos") {
+                continue;
+            }
             let (_parent, child) = dir_named(raw);
             let err = DropDir::open(&child)
                 .err()
@@ -2394,6 +2398,11 @@ mod tests {
         );
     }
 
+    // Linux only: only Linux can list a process group's members, and macOS
+    // refuses this drop rather than guessing, which
+    // `a_platform_that_cannot_enumerate_the_group_refuses_rather_than_guessing`
+    // covers there.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_surviving_group_member_answers_when_the_foreground_leader_has_exited() {
         // A pipeline whose first stage finished is ordinary: the group still owns
@@ -3093,6 +3102,10 @@ mod tests {
 
     /// A directory whose name is not valid UTF-8 is read back with its exact
     /// bytes: nothing decodes, escapes or replaces them on the way.
+    // Linux only: APFS, the macOS file system, refuses a name that is not
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
+    // cannot arise on its own disk; the Linux run covers the shared code.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_working_directory_that_is_not_valid_utf8_is_read_back_exactly() {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -3132,6 +3145,12 @@ mod independent_path_safety_check {
             b"dir\x1bname".as_slice(),
             b"dir\xffname".as_slice(),
         ] {
+            // APFS, the macOS file system, refuses a name that is not UTF-8
+            // (EILSEQ), so that row cannot be built on a Mac and the case
+            // cannot arise on its own disk; the Linux run covers it.
+            if std::str::from_utf8(raw).is_err() && cfg!(target_os = "macos") {
+                continue;
+            }
             let name = std::ffi::OsStr::from_bytes(raw);
             let dir = root.path().join(name);
             std::fs::create_dir(&dir).expect("create dir");

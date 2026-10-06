@@ -315,14 +315,27 @@ impl App {
     /// anything starts keeps a port collision to a status line with the TUI
     /// untouched.
     pub(crate) fn start_background_server(&mut self, trigger: BackgroundServerStart) {
+        if let Err(refusal) = self.try_start_background_server(trigger) {
+            match refusal.tone {
+                RefusalTone::Error => self.set_error(refusal.message),
+                RefusalTone::Warning => self.set_warning(refusal.message),
+            }
+        }
+    }
+
+    /// [`Self::start_background_server`], answering why it did not start
+    /// instead of saying it, for a caller that has to report it elsewhere too.
+    pub(crate) fn try_start_background_server(
+        &mut self,
+        trigger: BackgroundServerStart,
+    ) -> Result<(), StartRefusal> {
         if self.companion.is_none() {
-            self.set_error(
+            return Err(StartRefusal::error(
                 "This build of dux cannot serve the web UI in the background. Run dux server \
                  for the web UI, or the start-web-server command to hand this terminal over to \
                  it."
                 .to_string(),
-            );
-            return;
+            ));
         }
         if self.background_server_is_serving() {
             let urls = self
@@ -330,27 +343,24 @@ impl App {
                 .as_ref()
                 .map(|companion| companion.urls())
                 .unwrap_or_default();
-            self.set_warning(format!(
+            return Err(StartRefusal::warning(format!(
                 "The web UI is already serving in the background on {}. Use \
                  stop-background-server to stop it.",
                 join_urls(&urls)
-            ));
-            return;
+            )));
         }
         if self.background_server_preflight_pending {
-            self.set_warning(
+            return Err(StartRefusal::warning(
                 "The background web server is already starting. Wait for it to report back."
                     .to_string(),
-            );
-            return;
+            ));
         }
         if self.server_flip_preflight_pending || self.pending_server_flip.is_some() {
-            self.set_warning(
+            return Err(StartRefusal::warning(
                 "dux is already handing this terminal over to the web server. Wait for that to \
                  finish, or come back to the TUI and try again."
                     .to_string(),
-            );
-            return;
+            ));
         }
 
         let trust = trust_sentence(self.engine.config.server.auth.has_password());
@@ -407,6 +417,7 @@ impl App {
         self.background_server_preflight_pending = true;
         self.background_server_wanted = true;
         self.spawn_background_server_preflight();
+        Ok(())
     }
 
     /// Run the bind pre-flight on a worker thread, reporting back through
@@ -479,6 +490,7 @@ impl App {
         // listeners (which releases the addresses), say so, and write nothing.
         if !self.background_server_wanted {
             drop(result);
+            self.note_reload_serve_change_done(None);
             if let Some(PendingBackgroundServerStart { op, .. }) =
                 self.pending_background_server_start.take()
             {
@@ -534,9 +546,17 @@ impl App {
         // A start that failed leaves nothing wanted, so a later stop does not
         // report on a listener that never came up.
         self.background_server_wanted = self.background_server_is_serving();
+        let problem = match &outcome {
+            BackgroundServerOutcome::Failed(message) => Some(format!(
+                "The background web server could not be started: {}",
+                sentence(message)
+            )),
+            _ => None,
+        };
         if let Some(PendingBackgroundServerStart { op, .. }) = pending {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
+        self.note_reload_serve_change_done(problem);
     }
 
     /// Palette action: stop the background web server, leaving every agent
@@ -595,6 +615,11 @@ impl App {
                 pending
                     .resolve(&dux_core::config::TailscaleModeOutcome::NotServing)
                     .into_reaction(),
+            );
+            let mode = self.engine.config.server.tailscale_mode();
+            self.note_reload_tailscale_change_done(
+                mode,
+                dux_core::config::TailscaleModeOutcome::NotServing,
             );
         }
         // Let go of every pty this surface is driving FIRST, while the serve's
@@ -740,6 +765,7 @@ impl App {
         mode: dux_core::config::TailscaleMode,
         outcome: dux_core::config::TailscaleModeOutcome,
     ) {
+        self.note_reload_tailscale_change_done(mode, outcome);
         match self.pending_tailscale_mode_op.take() {
             Some(op) => self.apply_reaction(op.resolve(&outcome).into_reaction()),
             // No op waiting: the serve answered a request this surface no longer
@@ -766,6 +792,55 @@ impl App {
         }
     }
 
+    /// A reload started (or cancelled) a background-server bind that ends when
+    /// its pre-flight lands. Counted once however many reloads ask.
+    fn note_reload_serve_change_started(&mut self) {
+        if !self.reload_listener_changes.serve {
+            self.reload_listener_changes.serve = true;
+            self.engine.operations.listener_change_started();
+        }
+    }
+
+    /// The bind a reload set off ended, with `problem` saying how when it did
+    /// not work. Nothing if no reload set one off.
+    fn note_reload_serve_change_done(&mut self, problem: Option<String>) {
+        if std::mem::take(&mut self.reload_listener_changes.serve) {
+            self.engine
+                .operations
+                .listener_change_done(problem, std::time::Instant::now());
+        }
+    }
+
+    /// The serve answered (or can no longer answer) the Tailscale mode request
+    /// a reload made. Nothing if no reload made one.
+    fn note_reload_tailscale_change_done(
+        &mut self,
+        mode: dux_core::config::TailscaleMode,
+        outcome: dux_core::config::TailscaleModeOutcome,
+    ) {
+        if std::mem::take(&mut self.reload_listener_changes.tailscale) {
+            let problem = outcome
+                .failed()
+                .then(|| String::from(outcome.report(mode).message));
+            self.engine
+                .operations
+                .listener_change_done(problem, std::time::Instant::now());
+        }
+    }
+
+    /// [`Self::ask_companion_for_tailscale_mode`] for a reload that changed
+    /// the mode: the reload is not over until the serve has answered.
+    pub(crate) fn ask_companion_for_tailscale_mode_for_reload(
+        &mut self,
+        mode: dux_core::config::TailscaleMode,
+    ) {
+        if !self.reload_listener_changes.tailscale {
+            self.reload_listener_changes.tailscale = true;
+            self.engine.operations.listener_change_started();
+        }
+        self.ask_companion_for_tailscale_mode(mode);
+    }
+
     /// Honor an `[server] serve_while_tui` change that arrived through a config
     /// reload, in both directions.
     ///
@@ -780,14 +855,81 @@ impl App {
         match (on, wanted) {
             // A reload that turned it on is a live act the user just took, so it
             // reports like the palette command rather than like the startup
-            // autostart.
-            (false, true) => self.start_background_server(BackgroundServerStart::UserRequest),
-            (true, false) => self.stop_background_server(),
+            // autostart. The bind ends later; a start the terminal UI refuses
+            // is a listener change that did not happen.
+            (false, true) => {
+                match self.try_start_background_server(BackgroundServerStart::UserRequest) {
+                    Ok(()) => self.note_reload_serve_change_started(),
+                    Err(refusal) => {
+                        self.engine.operations.listener_change_failed(format!(
+                            "The background web server was not started: {}",
+                            sentence(&refusal.message)
+                        ));
+                        match refusal.tone {
+                            RefusalTone::Error => self.set_error(refusal.message),
+                            RefusalTone::Warning => self.set_warning(refusal.message),
+                        }
+                    }
+                }
+            }
+            (true, false) => {
+                // A start still binding is cancelled, not stopped: it ends when
+                // the bind lands and finds nobody wants it.
+                if !self.background_server_is_serving() {
+                    self.note_reload_serve_change_started();
+                }
+                self.stop_background_server()
+            }
             // Already where the config asks for. Nothing to say: a reload that
             // did not change this should not report on it.
             (true, true) | (false, false) => {}
         }
     }
+}
+
+/// Why the background server was not started, and how loudly to say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartRefusal {
+    pub(crate) message: String,
+    pub(crate) tone: RefusalTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefusalTone {
+    Error,
+    Warning,
+}
+
+impl StartRefusal {
+    fn error(message: String) -> Self {
+        Self {
+            message,
+            tone: RefusalTone::Error,
+        }
+    }
+
+    fn warning(message: String) -> Self {
+        Self {
+            message,
+            tone: RefusalTone::Warning,
+        }
+    }
+}
+
+/// The listener changes a config reload set off that have not ended yet. A
+/// reload's record is not finished until they have, so a failure of one is
+/// part of how the reload ended.
+#[derive(Debug, Default)]
+pub(crate) struct ReloadListenerChanges {
+    /// A background-server start (or the cancelling of one) is binding.
+    serve: bool,
+    /// A Tailscale mode change is waiting on the serve's answer.
+    tailscale: bool,
+}
+
+/// A sentence ending in exactly one full stop.
+fn sentence(text: &str) -> String {
+    format!("{}.", text.trim().trim_end_matches('.'))
 }
 
 /// What asked for the background server to start.
@@ -1812,6 +1954,30 @@ pub(crate) mod tests {
         );
     }
 
+    /// A client asked for a reload, and the reload's barrier has closed.
+    fn ask_for_a_reload(app: &mut App, id: &str) {
+        app.engine
+            .open_operation(id, dux_core::operations::OperationKind::ConfigReload);
+        app.engine.operations.await_reload(id, false);
+        app.engine.operations.reload_closed();
+    }
+
+    fn record_state(app: &App, id: &str) -> dux_core::operations::OperationState {
+        app.engine
+            .operations
+            .peek(id, std::time::Instant::now())
+            .expect("the record is kept")
+            .state
+    }
+
+    fn record_message(app: &App, id: &str) -> String {
+        app.engine
+            .operations
+            .peek(id, std::time::Instant::now())
+            .expect("the record is kept")
+            .message
+    }
+
     fn status_now(app: &App) -> (StatusTone, String) {
         app.status
             .most_recent_tui()
@@ -1982,9 +2148,22 @@ pub(crate) mod tests {
         app.companion = Some(companion);
         app.stop_background_server_quietly();
 
+        ask_for_a_reload(&mut app, "bind-ok");
         app.apply_serve_while_tui_setting(true);
         assert!(app.background_server_preflight_pending);
+        app.engine.finish_config_reload_operations(
+            &dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() },
+        );
+        assert_eq!(
+            record_state(&app, "bind-ok"),
+            dux_core::operations::OperationState::Running,
+            "the reload is not over while the listener it started is binding"
+        );
         finish_a_start(&mut app, None);
+        assert_eq!(
+            record_state(&app, "bind-ok"),
+            dux_core::operations::OperationState::Succeeded
+        );
 
         let (tone, message) = status_now(&app);
         assert_eq!(
@@ -2080,6 +2259,62 @@ pub(crate) mod tests {
         assert!(
             app.background_server_preflight_pending,
             "a reload that turned it on must dispatch the bind pre-flight"
+        );
+
+        // A start the reload set off that then fails to bind, and one the
+        // terminal UI refuses outright, each make the reload partial and say
+        // why.
+        finish_a_start(&mut app, None);
+        app.stop_background_server_quietly();
+        let applied =
+            dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() };
+        ask_for_a_reload(&mut app, "bind-fails");
+        app.apply_serve_while_tui_setting(true);
+        app.engine.finish_config_reload_operations(&applied);
+        app.apply_background_server_preflight(
+            Err("Port 8080 is in use.".to_string()),
+            None,
+            dux_core::serve_log::StartupNotes::default(),
+        );
+        assert_eq!(
+            record_state(&app, "bind-fails"),
+            dux_core::operations::OperationState::Partial
+        );
+        assert!(
+            record_message(&app, "bind-fails").contains("Port 8080 is in use."),
+            "{}",
+            record_message(&app, "bind-fails")
+        );
+
+        ask_for_a_reload(&mut app, "start-refused");
+        app.server_flip_preflight_pending = true;
+        app.apply_serve_while_tui_setting(true);
+        app.engine.finish_config_reload_operations(&applied);
+        assert_eq!(
+            record_state(&app, "start-refused"),
+            dux_core::operations::OperationState::Partial
+        );
+        assert!(
+            record_message(&app, "start-refused").contains("handing this terminal over"),
+            "{}",
+            record_message(&app, "start-refused")
+        );
+
+        // A reload that turns off a start still binding is over once that
+        // start has been cancelled.
+        app.server_flip_preflight_pending = false;
+        app.apply_serve_while_tui_setting(true);
+        ask_for_a_reload(&mut app, "cancels");
+        app.apply_serve_while_tui_setting(false);
+        app.engine.finish_config_reload_operations(&applied);
+        assert_eq!(
+            record_state(&app, "cancels"),
+            dux_core::operations::OperationState::Running
+        );
+        finish_a_start(&mut app, None);
+        assert_eq!(
+            record_state(&app, "cancels"),
+            dux_core::operations::OperationState::Succeeded
         );
     }
 
@@ -2671,6 +2906,43 @@ pub(crate) mod tests {
                 app.engine.config.server.tailscale_mode(),
                 mode,
                 "the config value saves even when the listener refuses it"
+            );
+
+            // The same answer to a reload's own request leaves the reload
+            // partial, with the refusal named, once it has come.
+            let applied =
+                dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() };
+            ask_for_a_reload(&mut app, "ts-refused");
+            app.ask_companion_for_tailscale_mode_for_reload(mode);
+            app.engine.finish_config_reload_operations(&applied);
+            assert_eq!(
+                record_state(&app, "ts-refused"),
+                dux_core::operations::OperationState::Running,
+                "{outcome:?}: the listener has not answered"
+            );
+            app.apply_tailscale_mode_outcome(mode, outcome);
+            assert_eq!(
+                record_state(&app, "ts-refused"),
+                dux_core::operations::OperationState::Partial,
+                "{outcome:?}"
+            );
+            assert!(
+                record_message(&app, "ts-refused").contains(needle),
+                "{}",
+                record_message(&app, "ts-refused")
+            );
+
+            // And one that worked leaves it as it was.
+            ask_for_a_reload(&mut app, "ts-ok");
+            app.ask_companion_for_tailscale_mode_for_reload(mode);
+            app.engine.finish_config_reload_operations(&applied);
+            app.apply_tailscale_mode_outcome(
+                mode,
+                dux_core::config::TailscaleModeOutcome::Applied { bound: None },
+            );
+            assert_eq!(
+                record_state(&app, "ts-ok"),
+                dux_core::operations::OperationState::Succeeded
             );
         }
     }

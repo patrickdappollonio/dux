@@ -1129,6 +1129,11 @@ impl Engine {
                         self.deferred_operations.push(None);
                         self.deferred_policies.push(None);
                     }
+                    // A client waiting on this one follows the reload that
+                    // reads the file after the one running.
+                    if let Some(id) = &self.operation_in_dispatch {
+                        self.operations.await_reload(id, true);
+                    }
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already running; another runs right after it, so \
                          the latest config.toml is the one that applies.",
@@ -1144,12 +1149,22 @@ impl Engine {
                 // let the caller retry.
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
+                    // The reload that was to start never will: the clients
+                    // waiting on it (a queued follow-up's) are told so, and a
+                    // later reload is a different one.
+                    self.operations.fail_reload(
+                        "Config writer is busy; please retry.",
+                        std::time::Instant::now(),
+                    );
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "Config writer is busy; please retry.",
                     )));
                 }
                 self.reloading = true;
                 self.reload_guard = Some(guard);
+                if let Some(id) = &self.operation_in_dispatch {
+                    self.operations.await_reload(id, false);
+                }
                 self.surface
                     .reload(self.paths.clone(), self.worker_tx.clone());
                 Ok(EventReaction::Nothing)
@@ -1364,16 +1379,19 @@ impl Engine {
             ConfigSetChange::RemoveEnvVar { name } => {
                 let mut env = self.config.env.clone();
                 if env.remove(&name).is_none() {
-                    anyhow::bail!("unknown global environment variable \"{name}\"");
+                    anyhow::bail!("{}", crate::config_resources::unknown_env_var(&name));
                 }
-                (
-                    Command::PersistGlobalEnv { env },
-                    Some(crate::status_text![
-                        "Removed global environment variable ",
-                        q(name),
-                        "."
-                    ]),
-                )
+                // A name that is no variable name may be a token pasted
+                // where a name goes, so the status does not repeat it.
+                let done = if crate::config::is_valid_env_name(&name) {
+                    crate::status_text!["Removed global environment variable ", q(name), "."]
+                } else {
+                    crate::status_text![
+                        "Removed a global environment variable whose name is not a variable \
+                         name, so it is not shown."
+                    ]
+                };
+                (Command::PersistGlobalEnv { env }, Some(done))
             }
         };
         let reaction = self.apply(save)?;

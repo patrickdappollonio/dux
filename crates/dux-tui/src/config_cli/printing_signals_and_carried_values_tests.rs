@@ -94,43 +94,23 @@ fn get_through_a_dangling_symlink_does_not_claim_a_value_in_use() {
     );
 }
 
-/// A dux from before the reload signal holds the lock, so `set` does not
-/// signal it and the new password applies only when it restarts. The
-/// message must not say that browsers are signed out now.
+/// A dux holds the lock but cannot be asked to reload (no control socket
+/// answers), so the new password applies only when it restarts. The message
+/// must not say that browsers are signed out now.
 #[test]
-fn a_password_set_beside_an_unsignalled_dux_does_not_claim_browsers_were_signed_out() {
-    use std::process::{Command, Stdio};
+fn a_password_set_beside_a_dux_that_cannot_be_asked_does_not_claim_browsers_were_signed_out() {
     let (_tmp, paths) = setup(Some("[server]\nport = 3890\n"));
-    std::fs::write(&paths.lock_path, "").unwrap();
-    let script = format!(
-        "import fcntl,os,sys,time\nf=open({:?},'r+')\nfcntl.flock(f,fcntl.LOCK_EX)\n\
-         f.seek(0);f.truncate();f.write(str(os.getpid()));f.flush()\n\
-         sys.stdout.write('locked\\n');sys.stdout.flush()\ntime.sleep(30)\n",
-        paths.lock_path.display().to_string()
-    );
-    let mut child = Command::new("python3")
-        .arg("-c")
-        .arg(script)
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("python3");
-    {
-        use std::io::BufRead;
-        let mut line = String::new();
-        std::io::BufReader::new(child.stdout.as_mut().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        assert_eq!(line.trim(), "locked");
-    }
-    let result = set(
+    let _running = dux_core::lockfile::SingleInstanceLock::acquire(&paths.lock_path).expect("lock");
+    let out = set(
         &paths,
         &["server.auth.password", "--stdin"],
         Some("Tr0ub4dor&3-correct-horse-battery\n"),
+    )
+    .expect("set");
+    assert!(
+        out.contains("does not answer on its control socket"),
+        "not asked:\n{out}"
     );
-    let _ = child.kill();
-    let _ = child.wait();
-    let out = result.expect("set");
-    assert!(out.contains("older version"), "not signalled:\n{out}");
     assert!(
         !out.contains("is signed out and logs in with the new password"),
         "claims browsers were signed out although nothing reloaded:\n{out}"

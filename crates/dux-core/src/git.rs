@@ -6996,6 +6996,10 @@ mod tests {
         assert!(list_dir(dir.path(), "/etc").is_err());
     }
 
+    // Linux only: APFS, the macOS file system, refuses a name that is not
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
+    // cannot arise on its own disk; the Linux run covers the shared code.
+    #[cfg(target_os = "linux")]
     #[test]
     fn list_dir_dedupes_names_that_collide_after_lossy_utf8_conversion() {
         use std::ffi::OsString;
@@ -9145,7 +9149,9 @@ mod tests {
     fn repo_with_feature_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
         let repo = init_test_repo();
         let holder_root = tempfile::tempdir().unwrap();
-        let holder = holder_root.path().join("holder");
+        // The real path, the one git lists the worktree by (macOS reaches the
+        // temp folder through a symlink).
+        let holder = holder_root.path().canonicalize().unwrap().join("holder");
         run_git(
             repo.path(),
             &[
@@ -12963,6 +12969,10 @@ mod tests {
         );
     }
 
+    // Linux only: APFS, the macOS file system, refuses a name that is not
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
+    // cannot arise on its own disk; the Linux run covers the shared code.
+    #[cfg(target_os = "linux")]
     #[test]
     fn repo_path_kind_classifies_repos_under_non_utf8_paths() {
         // Catches the fail-open gate bypass: `--show-toplevel` output for a

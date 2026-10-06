@@ -681,6 +681,9 @@ pub struct App {
     /// request, and a superseded one resolves as such, so at most one is open.
     pub(crate) pending_tailscale_mode_op:
         Option<dux_core::engine::HandlerStatusOp<dux_core::config::TailscaleModeOutcome>>,
+    /// Which listener changes a config reload set off are still running, so the
+    /// reload is not reported over until they have ended.
+    pub(crate) reload_listener_changes: background_server::ReloadListenerChanges,
     /// In-flight project-persistence status ops whose final is decided in the
     /// completion handler. Each non-`Add` persistence dispatch mints a
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
@@ -4521,6 +4524,7 @@ impl App {
             companion_followup_ran: false,
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
+            reload_listener_changes: Default::default(),
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
@@ -5999,7 +6003,7 @@ impl App {
             && before.server.tailscale_mode() != self.engine.config.server.tailscale_mode()
         {
             let mode = self.engine.config.server.tailscale_mode();
-            self.ask_companion_for_tailscale_mode(mode);
+            self.ask_companion_for_tailscale_mode_for_reload(mode);
         }
         // A config file can hand Tab to the agent while every `focus_next` and
         // `focus_prev` key is one the typeable pane types, and nobody toggled
@@ -8327,15 +8331,21 @@ mod tests {
         // best-effort, so the pre-flight must SUCCEED on loopback only, drop the
         // failed leg, and carry a warning naming the busy address.
         //
-        // The whole 127.0.0.0/8 range is loopback on Linux, so a SECOND loopback
-        // address (127.0.0.2) stands in for the Tailscale IP: hold 127.0.0.2:P,
-        // leave 127.0.0.1:P free. local_addrs builds required(127.0.0.1:P) +
-        // best_effort(127.0.0.2:P): distinct addresses (no dedupe), so the bind
-        // path is exercised exactly as production would hit it.
-        let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a second-loopback port");
+        // A SECOND loopback address stands in for the Tailscale IP: 127.0.0.2
+        // on Linux, where the whole 127.0.0.0/8 range is loopback, and IPv6
+        // loopback on macOS, which configures only 127.0.0.1 of that range.
+        // Hold it on port P and leave 127.0.0.1:P free. local_addrs builds
+        // required(127.0.0.1:P) + best_effort(second:P): distinct addresses
+        // (no dedupe), so the bind path is exercised exactly as production
+        // would hit it.
+        let ts_ip: std::net::IpAddr = if cfg!(target_os = "macos") {
+            "::1".parse().unwrap()
+        } else {
+            "127.0.0.2".parse().unwrap()
+        };
+        let held = std::net::TcpListener::bind((ts_ip, 0)).expect("hold a second-loopback port");
         let held_addr = held.local_addr().expect("held addr");
         let port = held_addr.port();
-        let ts_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
 
         let (listeners, urls, warnings) = preflight_server_listeners(port, Some(ts_ip))
             .expect("a busy Tailscale leg must NOT fail the pre-flight");
@@ -10246,7 +10256,7 @@ mod pinned_warning_tests {
 
         // No project is missing here: the restart warning is the only thing on
         // the line, and it is owed until the user restarts.
-        app.set_pinned_warning(workers::server_restart_warning(true));
+        app.set_pinned_warning(workers::server_restart_warning(true, &["port"]));
         app.select_left_agent_item(agent_row);
         app.select_left_agent_item(elsewhere);
         assert!(

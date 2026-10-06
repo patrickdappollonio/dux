@@ -30,6 +30,9 @@ pub use server_screen::{ServerScreenTick, ServerStatusScreen, restore_terminal};
 /// `dux server` path, which never goes through the TUI's `ensure_config`.
 pub use config::install_canonical_renderer;
 
+/// The hidden password prompt `dux remote login` signs in with.
+pub use config_cli::{read_env_value, read_sign_in_password};
+
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
 pub(crate) use dux_core::{
@@ -96,12 +99,12 @@ pub fn run(
 ) -> Result<TuiExit> {
     let paths = config::DuxPaths::discover()?;
 
-    // The SIGUSR1 (reload config) handler goes in BEFORE the lock: `dux
-    // config set` signals whoever holds the lock, and the signal's default
-    // action would end this process. Idempotent, so the binary having
-    // installed it already is fine.
+    // The SIGUSR1 (reload config) handler goes in BEFORE the lock: a person
+    // reloading by hand with `kill -USR1` signals whoever holds the lock, and
+    // the signal's default action would end this process. Idempotent, so the
+    // binary having installed it already is fine.
     if let Err(err) = dux_core::reload_signal::install() {
-        eprintln!("warning: {err}; `dux config set` cannot reach this dux, so reload by hand");
+        eprintln!("warning: {err}; `kill -USR1` cannot reload this dux, use Reload config in it");
     }
 
     // TUI: always create the root directory (so the lockfile can be

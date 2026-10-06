@@ -929,6 +929,22 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("cli"),
+        ConfigEntry::Field {
+            key: "wait_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a change made with the dux command line (dux agents rm, dux\n\
+                 # projects add and the rest) waits for its outcome, in seconds, before it\n\
+                 # stops waiting and says the outcome is unknown. The change keeps running\n\
+                 # either way; \"dux operations show <id>\" looks it up later. --wait-timeout\n\
+                 # overrides this for one command and --no-wait skips the wait. dux config\n\
+                 # set waits this long too, for the running dux to say whether its reload\n\
+                 # worked. Read by the command line on this machine only. Default 600 (10\n\
+                 # minutes).",
+            )),
+            value_fn: |c| FieldValue::U64(c.cli.wait_timeout_seconds),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
             "# The dux web UI: one workspace for one owner, with one optional password\n\

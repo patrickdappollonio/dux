@@ -9,6 +9,7 @@ use ratatui::text::Span;
 
 use crate::config::DuxPaths;
 use dux_core::theme::DEFAULT_THEME_NAME;
+pub use dux_core::theme::{ThemeListing, discover_available};
 
 /// Broken-circle frames for spinner animations. Shared by the loading card,
 /// status line, and left-pane streaming indicator.
@@ -288,87 +289,6 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
          {}/themes/<name>.toml",
         paths.root.display()
     ))
-}
-
-/// Where a theme came from, used by the theme picker to label entries and
-/// disambiguate same-named user themes from built-ins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeSource {
-    /// The bundled `dux-dark` theme: always present, always first in the list.
-    Bundled,
-    /// A theme compiled into the opaline crate (e.g. `nord`, `catppuccin-mocha`).
-    Opaline,
-    /// A user-authored theme found at `<config_dir>/themes/<name>.toml`.
-    User,
-}
-
-/// Metadata about an available theme, used to populate the theme picker.
-#[derive(Clone, Debug)]
-pub struct ThemeListing {
-    /// Identifier passed to [`load`]: file stem for user themes, kebab-case
-    /// id for built-ins, `dux-dark` for the bundled default.
-    pub id: String,
-    /// Human-readable label shown in the picker.
-    pub display_name: String,
-    pub source: ThemeSource,
-}
-
-/// Enumerate every theme reachable from the dux runtime: the bundled
-/// `dux-dark`, the opaline built-ins, and any TOML files the user has
-/// dropped in `<config_dir>/themes/`. Sorted with `dux-dark` first, then
-/// user themes, then built-ins alphabetically, for predictable scrolling.
-pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
-    let mut themes = Vec::new();
-
-    themes.push(ThemeListing {
-        id: DEFAULT_THEME_NAME.to_string(),
-        display_name: format!("{DEFAULT_THEME_NAME} (bundled default)"),
-        source: ThemeSource::Bundled,
-    });
-
-    let user_dir = paths.root.join("themes");
-    if let Ok(entries) = std::fs::read_dir(&user_dir) {
-        let mut user_themes: Vec<ThemeListing> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.extension().is_none_or(|ext| ext != "toml") {
-                    return None;
-                }
-                let stem = path.file_stem()?.to_str()?.to_string();
-                if stem == DEFAULT_THEME_NAME {
-                    // dux-dark stays the bundled entry; a user file with the
-                    // same name still loads first via `theme::load`, but we
-                    // don't show two "dux-dark" rows in the picker.
-                    return None;
-                }
-                Some(ThemeListing {
-                    display_name: format!("{stem} (user)"),
-                    id: stem,
-                    source: ThemeSource::User,
-                })
-            })
-            .collect();
-        user_themes.sort_by(|a, b| a.id.cmp(&b.id));
-        themes.extend(user_themes);
-    }
-
-    let mut builtin: Vec<ThemeListing> = opaline::list_available_themes()
-        .into_iter()
-        .filter(|info| info.builtin)
-        .map(|info| ThemeListing {
-            // Match the opaline TOML filenames (underscored) for the
-            // user-facing id; `theme::load` reverses the conversion before
-            // calling opaline.
-            id: info.name.replace('-', "_"),
-            display_name: info.display_name.clone(),
-            source: ThemeSource::Opaline,
-        })
-        .collect();
-    builtin.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-    themes.extend(builtin);
-
-    themes
 }
 
 /// Load a theme by name and fall back to the bundled `dux-dark` if the lookup

@@ -544,6 +544,106 @@ mod tests {
         (took, answer)
     }
 
+    /// `POST <uri>` with a JSON body over the control socket, on its own thread.
+    fn post_over_socket(
+        path: &std::path::Path,
+        uri: &str,
+        body: &str,
+    ) -> std::thread::JoinHandle<Result<String, String>> {
+        use std::io::{Read, Write};
+        let (path, uri, body) = (path.to_path_buf(), uri.to_string(), body.to_string());
+        std::thread::spawn(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)
+                .map_err(|e| format!("connect failed: {e}"))?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                .map_err(|e| e.to_string())?;
+            write!(
+                stream,
+                "POST {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .map_err(|e| format!("write failed: {e}"))?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|e| format!("read failed: {e}"))?;
+            Ok(response)
+        })
+    }
+
+    /// The reload a reaction carries, however it is wrapped.
+    fn reloaded_config(
+        reaction: dux_core::engine::EventReaction,
+    ) -> Option<Box<dux_core::config::Config>> {
+        match reaction {
+            dux_core::engine::EventReaction::ApplyReloadedConfig(config) => Some(config),
+            dux_core::engine::EventReaction::Multi(all) => {
+                all.into_iter().find_map(reloaded_config)
+            }
+            _ => None,
+        }
+    }
+
+    /// A password set from the browser makes dux reload its own config. With the
+    /// terminal UI as the engine's servicer, the reload reaches the terminal
+    /// UI's drain as the reloaded config to adopt: no signal is raised (none is
+    /// installed here), the reload rides the engine's request channel. The
+    /// terminal UI's own handling of that reaction is covered in `dux-tui`.
+    #[test]
+    fn a_password_set_in_the_browser_reaches_the_terminal_uis_reload_owner_without_a_signal() {
+        let (mut engine, _tmp) = engine_in_tempdir();
+        engine.config.server.tailscale = "no".to_string();
+        std::fs::set_permissions(
+            &engine.paths.root,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let socket = engine.paths.root.join("dux.sock");
+        assert_eq!(
+            dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),
+            None
+        );
+        let (listener, addr) = loopback_listener();
+        let mut server = BackgroundServer::start(
+            &mut engine,
+            vec![listener],
+            vec![format!("http://{addr}")],
+            false,
+            Default::default(),
+        )
+        .expect("the serve starts");
+        assert!(!engine.config.server.auth.has_password());
+
+        let request = post_over_socket(
+            &socket,
+            "/api/v1/auth/password",
+            r#"{"new":"orbit velvet quarry lantern cobalt"}"#,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut adopted = false;
+        while !adopted && std::time::Instant::now() < deadline {
+            server.service(&mut engine);
+            while let Ok(event) = engine.worker_rx.try_recv() {
+                let reaction = engine.process_worker_event(event);
+                server.on_reaction(&mut engine, &reaction);
+                if let Some(config) = reloaded_config(reaction) {
+                    engine.apply_reloaded_config(*config).expect("adopted");
+                    adopted = true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(adopted, "the reload reached the terminal UI's owner");
+        assert!(
+            engine.config.server.auth.has_password(),
+            "the owner adopted the new password"
+        );
+        let answer = request.join().expect("thread").expect("answered");
+        assert!(answer.starts_with("HTTP/1.1 2"), "{answer}");
+    }
+
     fn socket_inode(path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         std::fs::symlink_metadata(path).expect("the socket").ino()
@@ -633,6 +733,31 @@ mod tests {
                 .any(|status| status.message.contains("Deleted")),
             "{statuses:?}"
         );
+        // The command line's own wait rides the hand-over: its read is answered
+        // with the record still running, it reads again by the same id, and
+        // the next core answers that read with the outcome.
+        let cli_wait = {
+            let lock_path = engine.paths.lock_path.clone();
+            engine.operations.open(
+                "op-cli",
+                dux_core::operations::OperationKind::TabClose,
+                dux_core::operations::OperationPolicy {
+                    unknown_after: std::time::Duration::from_secs(600),
+                    retention: std::time::Duration::from_secs(600),
+                },
+                std::time::Instant::now(),
+            );
+            let wait = std::thread::spawn(move || {
+                let client = dux_core::client::connect::connect(
+                    &dux_core::client::connect::Target::Local,
+                    &lock_path,
+                )?;
+                let record = client.operation("op-cli")?;
+                client.wait(record, std::time::Duration::from_secs(30))
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            wait
+        };
         // A command-line wait on an operation answers the record as it stands
         // the moment its core hands over, and the hand-over does not wait it out.
         let wait = waiting_on_an_operation(&engine, &socket, "op-to-background");
@@ -660,6 +785,22 @@ mod tests {
             answer.starts_with("HTTP/1.1 200"),
             "a request sent between cores is answered by the next: {answer}"
         );
+        engine.operations.finish(
+            "op-cli",
+            dux_core::statusline::StatusTone::Info,
+            "Closed the tab.",
+            None,
+            std::time::Instant::now(),
+        );
+        let finished = cli_wait
+            .join()
+            .expect("the command line's wait thread")
+            .expect("the wait ends with the outcome");
+        assert_eq!(
+            finished.state,
+            dux_core::client::wait::RecordState::Succeeded
+        );
+        assert_eq!(finished.message, "Closed the tab.");
         assert_eq!(socket_inode(&socket), bound, "the same bound socket");
         let status = healthz(first_addr).expect("the first serve answers");
         assert!(

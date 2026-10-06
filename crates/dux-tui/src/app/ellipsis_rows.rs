@@ -654,7 +654,7 @@ fn the_theme_picker_pads_a_wide_id_by_columns() {
     let listing = |id: &str, display: &str| crate::theme::ThemeListing {
         id: id.to_string(),
         display_name: display.to_string(),
-        source: crate::theme::ThemeSource::User,
+        source: dux_core::theme::ThemeSource::User,
     };
     app.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
         options: vec![listing(WIDE_ID, "Wideone"), listing("plain", "Plainone")],

@@ -1,3 +1,4 @@
+mod client_commands;
 mod commands;
 mod companion;
 
@@ -5,23 +6,51 @@ use anyhow::Result;
 use clap::Parser;
 
 fn main() -> Result<()> {
-    // First of all: `dux config set` sends SIGUSR1 to whichever dux holds the
-    // single-instance lock, and the signal's default action would end a dux
-    // that had not installed its handler yet. The handler only sets a flag;
-    // each serving mode reloads on it. A failure is reported where the mode
-    // starts (both entry points install it again and say so).
+    // First of all: a person reloading by hand with `kill -USR1` signals
+    // whichever dux holds the single-instance lock, and the signal's default
+    // action would end a dux that had not installed its handler yet. The
+    // handler only sets a flag; each serving mode reloads on it. A failure is
+    // reported where the mode starts (both entry points install it again and
+    // say so).
     let _ = dux_core::reload_signal::install();
     // `dux config` owns every word after it, `--` and flag-looking words
     // included, so it is recognised before clap sees the line.
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if let Some(config) = commands::split_config(&raw) {
-        if let Err(message) = commands::check_config_target(config.remote.as_deref(), config.local)
-        {
+        let selection = client_commands::Selection {
+            remote: config.remote,
+            local: config.local,
+        };
+        let remote = dux_core::config::DuxPaths::discover()
+            .map_err(|error| {
+                dux_core::client::CliError::new(
+                    dux_core::client::Exit::Failed,
+                    format!("{error:#}"),
+                )
+            })
+            .and_then(|paths| selection.remote_name(&paths));
+        let remote = match remote {
+            Ok(remote) => remote,
+            Err(error) => client_commands::finish(Err(error)),
+        };
+        if let Err(message) = commands::check_config_target(remote.as_deref(), selection.local) {
             usage_error(&message);
         }
-        return dux_tui::run_config(&config.args);
+        // A config command that ends with one of the command line's own codes
+        // (a reload whose outcome is unknown) exits with it.
+        if let Err(error) = dux_tui::run_config(&config.args) {
+            return match error.downcast::<dux_core::client::CliError>() {
+                Ok(cli) => client_commands::finish(Err(cli)),
+                Err(error) => Err(error),
+            };
+        }
+        return Ok(());
     }
     let cli = commands::Cli::parse();
+    let selection = client_commands::Selection {
+        remote: cli.remote.clone(),
+        local: cli.local,
+    };
     match cli.command {
         None => run_tui_with_flip(),
         Some(commands::Command::Server(server)) => {
@@ -42,6 +71,27 @@ fn main() -> Result<()> {
         // Every well-formed `config` line was split off above; clap only
         // reaches here for one that names both global flags, which it refuses.
         Some(commands::Command::Config(_)) => not_built(),
+        Some(commands::Command::Remote(remote)) => {
+            client_commands::finish(client_commands::remote(remote.command, &selection))
+        }
+        Some(commands::Command::Operations(operations)) => client_commands::finish_with_code(
+            client_commands::operations(operations.command, &selection),
+        ),
+        Some(commands::Command::Macros(macros)) => {
+            client_commands::finish(client_commands::macros(macros.command, &selection))
+        }
+        Some(commands::Command::Providers(providers)) => {
+            client_commands::finish(client_commands::providers(providers.command, &selection))
+        }
+        Some(commands::Command::Keys(keys)) => {
+            client_commands::finish(client_commands::keys(keys.command, &selection))
+        }
+        Some(commands::Command::Themes(themes)) => {
+            client_commands::finish(client_commands::themes(themes.command, &selection))
+        }
+        Some(commands::Command::Env(env)) => {
+            client_commands::finish(client_commands::env(env.command, &selection))
+        }
         Some(_) => not_built(),
     }
 }

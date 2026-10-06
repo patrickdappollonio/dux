@@ -4004,6 +4004,11 @@ mod tests {
     ///
     /// Returns once the child is reaped, and ASSERTS the premise, so a shell
     /// that behaved differently fails loudly rather than passing vacuously.
+    // Linux only: macOS revokes a terminal when its session leader exits, so
+    // no grandchild can hold it open and the reader reaches end of input with
+    // the reap. The prune policy is covered on macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     fn engine_with_reaped_but_undrained_agent(
         worktree: &Path,
     ) -> (Engine, crate::test_scratch::ScratchDir) {
@@ -4069,6 +4074,11 @@ mod tests {
     /// exactly once there is no second chance to capture it later, so a crashed
     /// agent gets reported with an EMPTY excerpt, losing the very diagnostic the
     /// message exists to show.
+    // Linux only: macOS revokes a terminal when its session leader exits, so
+    // no grandchild can hold it open and the reader reaches end of input with
+    // the reap. The prune policy is covered on macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn prune_defers_a_reaped_child_until_its_reader_has_drained() {
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -4097,6 +4107,11 @@ mod tests {
     /// prune condition exists and cannot simply be deleted. Once
     /// `REAPED_DRAIN_GRACE` has elapsed since the reap, prune takes it anyway,
     /// carrying the exit status cached at reap time.
+    // Linux only: macOS revokes a terminal when its session leader exits, so
+    // no grandchild can hold it open and the reader reaches end of input with
+    // the reap. The prune policy is covered on macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn prune_takes_a_never_draining_pty_once_the_drain_grace_expires() {
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -4152,6 +4167,12 @@ mod tests {
     /// Returns once the reader has reached EOF, and ASSERTS both halves of the
     /// premise, so a shell that behaved differently fails loudly rather than
     /// passing vacuously.
+    // Linux only: on macOS the reader reaches end of input only when the
+    // session leader exits, even with every slave descriptor closed, so the
+    // child cannot be kept running past it. The prune policy is covered on
+    // macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     fn engine_with_drained_but_unreaped_agent(
         worktree: &Path,
         tab_id: &str,
@@ -4216,6 +4237,12 @@ mod tests {
     /// permanently, and every decision keyed on it silently takes its unknown
     /// branch: `clean_exit_closes_tab_row` cannot fire, so a tab that exited
     /// cleanly keeps a dead row.
+    // Linux only: on macOS the reader reaches end of input only when the
+    // session leader exits, even with every slave descriptor closed, so the
+    // child cannot be kept running past it. The prune policy is covered on
+    // macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn prune_defers_a_drained_child_until_its_exit_status_is_known() {
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -4243,6 +4270,12 @@ mod tests {
     /// would leak the provider forever. The grace is the safety valve in both
     /// directions: once it expires, prune takes the PTY with the status still
     /// unknown.
+    // Linux only: on macOS the reader reaches end of input only when the
+    // session leader exits, even with every slave descriptor closed, so the
+    // child cannot be kept running past it. The prune policy is covered on
+    // macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn prune_takes_a_never_reaped_child_once_the_drain_grace_expires() {
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -4286,6 +4319,12 @@ mod tests {
     /// the bare EOF records `exit_success: None`, `clean_exit_closes_tab_row`
     /// takes its unknown branch, and the user is left with a dormant tab that
     /// should have closed itself.
+    // Linux only: on macOS the reader reaches end of input only when the
+    // session leader exits, even with every slave descriptor closed, so the
+    // child cannot be kept running past it. The prune policy is covered on
+    // macOS by
+    // `agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn prune_waits_for_the_status_so_a_clean_extra_tab_exit_closes_its_row() {
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -5543,8 +5582,10 @@ mod tests {
     #[test]
     fn shutdown_ptys_grace_zero_force_kills_without_waiting() {
         // grace == 0 means "force immediately": the wait loop is skipped, so a
-        // straggler is SIGKILLed at once and reported timed_out, with near-zero
-        // elapsed.
+        // straggler is SIGKILLed at once and reported timed_out, without one
+        // pass of the wait. The passes are counted rather than timed, because
+        // the SIGKILL's own settle wait is in the elapsed time and takes longer
+        // than a poll on macOS.
         let (mut engine, _tmp) = test_engine();
 
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -5567,18 +5608,15 @@ mod tests {
         );
         wait_until_ready(&engine, "s1-slot");
 
-        let report = engine.shutdown_ptys(Duration::ZERO);
+        let mut waits = 0;
+        let report = engine.shutdown_ptys_waiting(Duration::ZERO, None, || waits += 1);
 
         assert!(
             report.timed_out,
             "grace 0 with a live child is a forced close"
         );
         assert_eq!(report.agents_exited, 0);
-        assert!(
-            report.elapsed < Duration::from_millis(50),
-            "grace 0 must not enter the 50ms poll loop, got {:?}",
-            report.elapsed
-        );
+        assert_eq!(waits, 0, "grace 0 must not enter the 50ms poll loop");
 
         // The child must still be reaped by the immediate SIGKILL.
         let client = engine.providers.get_mut(TabIdRef::new("s1-slot")).unwrap();
@@ -5623,14 +5661,15 @@ mod tests {
             .expect("create companion terminal");
         wait_until_terminal_ready(&engine, &terminal_id);
 
-        let report = engine.shutdown_ptys(Duration::ZERO);
+        let mut waits = 0;
+        let report = engine.shutdown_ptys_waiting(Duration::ZERO, None, || waits += 1);
 
         assert_eq!(report.agents_total, 1);
         assert_eq!(report.terminals_total, 1);
         assert_eq!(report.agents_exited, 0);
         assert_eq!(report.terminals_exited, 0);
         assert!(report.timed_out);
-        assert!(report.elapsed < Duration::from_millis(50));
+        assert_eq!(waits, 0, "grace 0 waits no pass");
     }
 
     #[test]
@@ -5644,12 +5683,16 @@ mod tests {
         wait_until_ready(&engine, "straggler");
         let abort = std::sync::atomic::AtomicBool::new(true);
 
-        let report = engine.shutdown_ptys_interruptible(Duration::from_secs(30), Some(&abort));
+        let mut waits = 0;
+        let report =
+            engine.shutdown_ptys_waiting(Duration::from_secs(30), Some(&abort), || waits += 1);
 
         assert_eq!(report.agents_total, 1);
         assert_eq!(report.agents_exited, 0);
         assert!(report.timed_out);
-        assert!(report.elapsed < Duration::from_millis(50));
+        // Counted rather than timed: the SIGKILL's settle wait is in the
+        // elapsed time and takes longer than a poll on macOS.
+        assert_eq!(waits, 0, "an abort set beforehand waits no pass");
     }
 
     #[test]

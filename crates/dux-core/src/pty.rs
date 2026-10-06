@@ -6112,6 +6112,10 @@ mod tests {
         );
     }
 
+    // Linux only: macOS revokes a terminal when its session leader exits, so
+    // no job can hold it open past the shell and the reader reaches end of
+    // input with the reap. The state this test builds cannot arise there.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_reaped_child_is_not_live_even_while_its_pty_stays_open() {
         // The launch-over-live gate asks `is_live`, and asking `is_exited`
@@ -6163,8 +6167,19 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
         let record = std::sync::Arc::clone(&seen);
         client.set_leader_exit_hook(Box::new(move || {
-            // An unreaped zombie still has its /proc entry; a reaped child has none.
-            let unreaped = std::path::Path::new(&format!("/proc/{pid}")).exists();
+            // A child not yet reaped is still this process's to wait for; a
+            // reaped one answers "no such child".
+            let unreaped = rustix::process::Pid::from_raw(pid as i32).is_some_and(|pid| {
+                !matches!(
+                    rustix::process::waitid(
+                        rustix::process::WaitId::Pid(pid),
+                        rustix::process::WaitIdOptions::EXITED
+                            | rustix::process::WaitIdOptions::NOHANG
+                            | rustix::process::WaitIdOptions::NOWAIT,
+                    ),
+                    Err(rustix::io::Errno::CHILD)
+                )
+            });
             *record.lock().unwrap() = Some(unreaped);
         }));
         thread::sleep(std::time::Duration::from_millis(100));
@@ -8017,6 +8032,10 @@ mod tests {
     /// group kill in `Drop` cannot reach it, so dropping the client must not
     /// wait for the reader thread to see end of input, or it waits for as long
     /// as the job runs: the engine thread, frozen.
+    // Linux only: macOS revokes a terminal when its session leader exits, so
+    // no job can hold it open past the shell and the reader reaches end of
+    // input with the reap. The state this test builds cannot arise there.
+    #[cfg(target_os = "linux")]
     #[test]
     fn dropping_a_pty_never_waits_on_a_disowned_job_holding_it_open() {
         let dir = tempfile::tempdir().expect("tempdir");

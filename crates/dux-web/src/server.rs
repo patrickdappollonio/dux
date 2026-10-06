@@ -453,9 +453,10 @@ pub struct RouterParams {
     pub live_exposure: Option<crate::exposure::ExposureCell>,
     /// What the auth layer calls after dux wrote `config.toml` itself (a
     /// password, a ban, the no-password warning's dismissal), so the running
-    /// config catches up the way it does after `dux config set`. Defaults to
-    /// raising SIGUSR1 at this process, which every serving mode reloads on.
-    pub auth_reload: Arc<dyn Fn() + Send + Sync>,
+    /// config catches up the way it does after `dux config set`. `None` sends
+    /// the engine the same `ReloadConfig` the reload route sends, so each way of
+    /// serving's own reload owner handles it.
+    pub auth_reload: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Test seam: awaited by a PTY or events socket right before it checks its
     /// session for its opening frames, so a test can revoke the session in
     /// exactly that window. `None` everywhere else.
@@ -527,9 +528,7 @@ impl RouterParams {
             live_tailscale_host_literals: None,
             live_own_magicdns_name: None,
             live_exposure: None,
-            auth_reload: Arc::new(|| {
-                dux_core::reload_signal::request_reload();
-            }),
+            auth_reload: None,
             socket_opening_hook: None,
             tailscale_mode_control: None,
             tailscale_forced_no: false,
@@ -753,9 +752,32 @@ impl RouterParams {
 
     /// Replace what the auth layer calls after it writes `config.toml`.
     pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.auth_reload = reload;
+        self.auth_reload = Some(reload);
         self
     }
+}
+
+/// What the auth layer calls after dux wrote `config.toml` itself: ask the
+/// engine to reload, the way `POST /api/v1/config/reload` does. Whichever way
+/// of serving this is, its own reload owner then handles the reload.
+pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        let engine = engine.clone();
+        let ask = async move {
+            let _ = engine
+                .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
+                .await;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(ask);
+            }
+            Err(_) => dux_core::logger::warn(
+                "dux wrote config.toml but could not ask the engine to reload it: no runtime \
+                 is running here. Use Reload config in dux to apply it.",
+            ),
+        }
+    })
 }
 
 /// Build the dux web router. `extra_gated` is merged into the router as-is (a
@@ -898,7 +920,10 @@ pub fn build_app(
         sessions_db: Some(paths.sessions_db_path.clone()),
         console: params.console.clone(),
         engine: Some(engine.clone()),
-        reload: Arc::clone(&params.auth_reload),
+        reload: params
+            .auth_reload
+            .clone()
+            .unwrap_or_else(|| reload_through_the_engine(engine.clone())),
         opening_hook: params.socket_opening_hook.clone(),
     });
     let state = AppState {
@@ -1105,6 +1130,8 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// `dux server` stdout an operator may forward to a file or aggregator, so the
 /// query is dropped to avoid leaking secrets. The session id is an opaque `:id`
 /// path segment (not a query parameter) and so still appears in the logged path.
+/// A macro or global environment name that breaks its table's rule is replaced
+/// (see [`dux_core::config_resources::logged_path`]).
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -1123,7 +1150,7 @@ async fn log_request(
     // (e.g. /api/v1/sessions/<id>/files/raw?path=…), and this log is stdout an
     // operator may persist, so dropping the query avoids leaking them. The session
     // id is an opaque path segment now, so it still appears in the logged path.
-    let path = request.uri().path().to_string();
+    let path = dux_core::config_resources::logged_path(request.uri().path()).into_owned();
     let over_socket = crate::auth::provenance::over_control_socket(&request);
     let started = std::time::Instant::now();
     let response = next.run(request).await;
@@ -5665,6 +5692,7 @@ mod tests {
         // the fallback catches everything, so assert on whatever status the
         // fallback returns for a bogus asset path.
         let missing = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/definitely-not-a-real-asset.zzz")
@@ -5675,7 +5703,36 @@ mod tests {
             .unwrap();
         let missing_status = missing.status().as_u16();
 
+        // A config entry's name is logged only where its table's rule allows
+        // it: one that breaks the rule may be a token pasted where a name goes.
+        for uri in [
+            "/api/v1/global-env/API_KEY",
+            "/api/v1/global-env/zzLEAK%20one.x",
+            "/api/v1/macros/zzLEAK%2Etwo%20x?operation=1",
+        ] {
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
         let out = sink.contents();
+        assert!(out.contains("/api/v1/global-env/API_KEY 404"), "{out}");
+        assert!(
+            !out.contains("zzLEAK"),
+            "a rule-breaking name was logged: {out}"
+        );
+        assert!(
+            out.contains("DELETE /api/v1/global-env/(name not shown) 404")
+                && out.contains("DELETE /api/v1/macros/(name not shown) 404"),
+            "{out}"
+        );
         assert!(
             out.contains("/api/me 200"),
             "the 200 request must be logged: {out}"
@@ -6720,6 +6777,29 @@ mod tests {
             .expect("a config reload must emit config.changed")
             .expect("bus recv");
         assert_eq!(ev, config_changed_event());
+    }
+
+    /// After dux writes `config.toml` itself (a password, a ban), the reload
+    /// it asks for is the engine's own `ReloadConfig`, the command the reload
+    /// route sends, handled by whichever surface owns the reload; it is not a
+    /// signal raised at the process.
+    #[tokio::test]
+    async fn dux_reloads_after_its_own_config_write_by_asking_the_engine() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let mut reloads = handle.subscribe_config_reloads();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[ui]\nleft_width_pct = 30\n",
+        )
+        .expect("write config.toml");
+
+        (reload_through_the_engine(handle))();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), reloads.recv())
+            .await
+            .expect("the engine reloaded")
+            .expect("config reload broadcast");
     }
 
     /// A reload that is refused (here, config.toml does not exist) changes

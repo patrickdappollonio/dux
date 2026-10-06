@@ -101,6 +101,50 @@ pub struct MacroEntry {
     pub surface: MacroSurface,
 }
 
+/// One macro as a change asks for it, checked the way every surface checks
+/// it: the name trimmed and not empty, some text, and a surface dux knows.
+/// Returns the name as it is saved, with its entry.
+pub fn checked_macro(
+    name: &str,
+    text: String,
+    surface: &str,
+) -> anyhow::Result<(String, MacroEntry)> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("Macro name cannot be empty.");
+    }
+    if text.is_empty() {
+        anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
+    }
+    let surface = MacroSurface::from_config_str(surface).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Macro \"{name}\" has an unknown surface \"{surface}\". Use \"agent\", \"terminal\", or \"both\"."
+        )
+    })?;
+    Ok((name, MacroEntry { text, surface }))
+}
+
+/// Whether `name` may be set to `value` in the global environment, by the
+/// rule a project's env lines follow. The value may be a secret, so a
+/// refusal never quotes it.
+pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
+    // A name that is no variable name may be a token pasted where a name
+    // goes, so it is never repeated either.
+    if !is_valid_env_name(name) {
+        anyhow::bail!(
+            "That is not a valid environment variable name: use letters, digits and \
+             underscores, not starting with a digit. Nothing was changed."
+        );
+    }
+    if value.contains('\0') || expand_env_vars(value).is_none() {
+        anyhow::bail!(
+            "The value for \"{name}\" was not saved: it holds a NUL byte or a \
+             $NAME reference that is not a valid variable name."
+        );
+    }
+    Ok(())
+}
+
 /// Text macros: a map from name to entry.
 /// Each entry is triggered from the macro bar (Ctrl+\).
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -183,6 +227,28 @@ pub struct LoggingConfig {
 #[serde(default)]
 pub struct EditorConfig {
     pub default: String,
+}
+
+/// Default for `[cli] wait_timeout_seconds`: how long a command-line change
+/// waits for its outcome before saying it is unknown.
+pub const DEFAULT_CLI_WAIT_TIMEOUT_SECONDS: u64 = 600;
+
+/// `[cli]`: how the `dux` command line behaves on this machine. Read by the
+/// command line only; a running dux never uses it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CliConfig {
+    /// Seconds a change waits for its outcome; `--wait-timeout` overrides it
+    /// for one command.
+    pub wait_timeout_seconds: u64,
+}
+
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            wait_timeout_seconds: DEFAULT_CLI_WAIT_TIMEOUT_SECONDS,
+        }
+    }
 }
 
 /// Default cap on concurrent events (`/ws`) WebSocket connections; see
@@ -641,6 +707,20 @@ pub struct TailscaleModeReport {
 }
 
 impl TailscaleModeOutcome {
+    /// Whether the change did not do what was asked: the mode saved, but the
+    /// listener could not follow it. A later request replacing this one, or
+    /// nothing serving, is not a failure.
+    pub fn failed(self) -> bool {
+        matches!(
+            self,
+            Self::NothingDetected
+                | Self::NoPrimary
+                | Self::BindFailed
+                | Self::RefusedForcedNo
+                | Self::TimedOut
+        )
+    }
+
     /// The sentence both surfaces show for this outcome, given the mode that was
     /// requested. Every sentence says what happened to the listener AND that the
     /// choice is saved, because those are two different questions a user has.
@@ -1148,10 +1228,23 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// True when a config reload changed a setting of `server.log`, which is opened
 /// when a serve starts, in every way of serving.
 pub fn server_log_file_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    prev.log_path != next.log_path
-        || prev.log_max_bytes != next.log_max_bytes
-        || prev.log_keep != next.log_keep
-        || prev.log_compress != next.log_compress
+    !server_log_file_setting_names(prev, next).is_empty()
+}
+
+/// The `server.log` settings a reload changed, by key.
+pub fn server_log_file_setting_names(
+    prev: &ServerConfig,
+    next: &ServerConfig,
+) -> Vec<&'static str> {
+    [
+        ("log_path", prev.log_path != next.log_path),
+        ("log_max_bytes", prev.log_max_bytes != next.log_max_bytes),
+        ("log_keep", prev.log_keep != next.log_keep),
+        ("log_compress", prev.log_compress != next.log_compress),
+    ]
+    .into_iter()
+    .filter_map(|(name, moved)| moved.then_some(name))
+    .collect()
 }
 
 /// True when a config reload changed a `[server]` setting read once, as the
@@ -1195,22 +1288,60 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 /// frozen into `RouterParams`. The deprecated `bind` field is migrated into
 /// `host`/`port` on load, so a change to it surfaces through those fields.
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    prev.host != next.host
-        || prev.port != next.port
-        || prev.max_websocket_events_connections != next.max_websocket_events_connections
-        || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
-        || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
-        || prev.max_websocket_tab_connections != next.max_websocket_tab_connections
-        || prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent
+    !server_bind_setting_names(prev, next).is_empty()
+}
+
+/// The settings [`server_bind_settings_changed`] compares that a reload
+/// changed, by key. Every surface names them in its restart sentence.
+pub fn server_bind_setting_names(prev: &ServerConfig, next: &ServerConfig) -> Vec<&'static str> {
+    [
+        ("host", prev.host != next.host),
+        ("port", prev.port != next.port),
+        (
+            "max_websocket_events_connections",
+            prev.max_websocket_events_connections != next.max_websocket_events_connections,
+        ),
+        (
+            "max_websocket_agent_connections",
+            prev.max_websocket_agent_connections != next.max_websocket_agent_connections,
+        ),
+        (
+            "max_websocket_terminal_connections",
+            prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections,
+        ),
+        (
+            "max_websocket_tab_connections",
+            prev.max_websocket_tab_connections != next.max_websocket_tab_connections,
+        ),
+        (
+            "max_websocket_tabs_per_agent",
+            prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent,
+        ),
         // The file-drop caps are frozen into RouterParams at bind time and the
         // routes enforce that frozen copy, while the viewmodel projects the
-        // reloaded value live. Without this row a reload silently leaves the
+        // reloaded value live. Without these rows a reload silently leaves the
         // browser believing a cap the server no longer enforces.
-        || prev.file_drop_max_bytes != next.file_drop_max_bytes
-        || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
+        (
+            "file_drop_max_bytes",
+            prev.file_drop_max_bytes != next.file_drop_max_bytes,
+        ),
+        (
+            "file_drop_max_concurrency",
+            prev.file_drop_max_concurrency != next.file_drop_max_concurrency,
+        ),
         // Both are semaphores sized once in `build_app`.
-        || prev.tree_list_max_concurrency != next.tree_list_max_concurrency
-        || prev.release_notes_max_concurrency != next.release_notes_max_concurrency
+        (
+            "tree_list_max_concurrency",
+            prev.tree_list_max_concurrency != next.tree_list_max_concurrency,
+        ),
+        (
+            "release_notes_max_concurrency",
+            prev.release_notes_max_concurrency != next.release_notes_max_concurrency,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, moved)| moved.then_some(name))
+    .collect()
 }
 
 /// True when a config reload changed a `[server]` setting that is read once, as
@@ -2742,6 +2873,7 @@ pub struct Config {
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
     pub editor: EditorConfig,
+    pub cli: CliConfig,
     #[serde(default)]
     pub server: ServerConfig,
     pub keys: KeysConfig,
@@ -2898,6 +3030,7 @@ impl Default for Config {
             },
             capabilities: CapabilitiesConfig::default(),
             editor: EditorConfig::default(),
+            cli: CliConfig::default(),
             server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),

@@ -11,9 +11,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dux_core::config::{
-    server_bind_settings_changed, server_log_file_settings_changed,
+    server_bind_setting_names, server_log_file_setting_names, server_log_file_settings_changed,
     server_log_viewer_settings_changed,
 };
+use dux_core::config_reload_status::ConfigReloadOutcome;
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -581,6 +582,16 @@ fn find_config_adopted(
     }
 }
 
+/// The reason a refused reload carries, whether the reaction is bare or inside
+/// a `Multi`.
+fn find_config_reload_refused(reaction: &EventReaction) -> Option<&str> {
+    match reaction {
+        EventReaction::OpenConfigReloadFailedModal(message) => Some(message),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(find_config_reload_refused),
+        _ => None,
+    }
+}
+
 /// Which way of serving a reload arrived at, because each owes a different set of
 /// restart sentences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,12 +618,16 @@ fn server_restart_warning_copy(
 ) -> Option<String> {
     let background = surface == ServeSurface::Background;
     let log_sentence: String;
+    let bind_sentence: String;
     let mut sentences: Vec<&str> = Vec::new();
-    if server_bind_settings_changed(prev, next) {
-        sentences.push(
-            "Server settings changed in config that are read only when a listener binds; \
-             restart the server to apply them.",
+    let bind_names = server_bind_setting_names(prev, next);
+    if !bind_names.is_empty() {
+        bind_sentence = format!(
+            "Server settings changed in config that are read only when a listener binds \
+             ({}); restart the server to apply them.",
+            bind_names.join(", ")
         );
+        sentences.push(&bind_sentence);
         if background {
             sentences
                 .push("With the background server, stopping and starting it again is the restart.");
@@ -635,15 +650,7 @@ fn server_restart_warning_copy(
         );
     }
     if server_log_file_settings_changed(prev, next) {
-        let changed: Vec<&str> = [
-            ("log_path", prev.log_path != next.log_path),
-            ("log_max_bytes", prev.log_max_bytes != next.log_max_bytes),
-            ("log_keep", prev.log_keep != next.log_keep),
-            ("log_compress", prev.log_compress != next.log_compress),
-        ]
-        .into_iter()
-        .filter_map(|(name, moved)| moved.then_some(name))
-        .collect();
+        let changed = server_log_file_setting_names(prev, next);
         log_sentence = format!(
             "The [server] {} setting changed; server.log is opened when a server starts, \
              so it applies the next time one starts.",
@@ -2902,38 +2909,51 @@ impl EngineService {
     /// after a failed apply (this loop's own, or the engine's, which arrives as
     /// `ConfigAdopted`) gets everything a reload owes the running server, as a
     /// successful one does, so nothing stays on the config it replaced.
+    ///
+    /// This is the reload's owner for these two ways of serving, so it also
+    /// says how the reload ended to any client that asked for it as an
+    /// operation: applied, adopted with a step failed, or refused.
     pub(crate) fn apply_reload_followup(&mut self, engine: &mut Engine, reaction: EventReaction) {
         let adopted = find_config_adopted(&reaction);
+        let refused = find_config_reload_refused(&reaction).map(str::to_string);
         if let Some(config) = take_apply_reloaded_config(reaction) {
             let before = engine.config.clone();
             let github_was_enabled = engine.github_integration_enabled;
-            match engine.apply_reloaded_config(*config) {
+            let outcome = match engine.apply_reloaded_config(*config) {
                 Ok(()) => {
                     let _ = self.status.send(WireStatus::from_update(
                         &dux_core::config_reload_status::applied(),
                     ));
-                    self.config_in_force(engine, &before, github_was_enabled);
+                    let notes = self.config_in_force(engine, &before, github_was_enabled, true);
+                    ConfigReloadOutcome::Applied {
+                        notes: notes.into_iter().collect(),
+                    }
                 }
                 Err(e) => {
                     // The engine kept the new config anyway, so it is in
                     // force; the failure is said last, so it holds the line.
-                    self.config_in_force(engine, &before, github_was_enabled);
+                    self.config_in_force(engine, &before, github_was_enabled, true);
+                    let error = format!("{e:#}");
                     let _ = self.status.send(WireStatus::from_update(
-                        &dux_core::config_reload_status::adopted_but_apply_failed(&format!(
-                            "{e:#}"
-                        )),
+                        &dux_core::config_reload_status::adopted_but_apply_failed(&error),
                     ));
+                    ConfigReloadOutcome::ApplyFailed(error)
                 }
-            }
+            };
+            engine.finish_config_reload_operations(&outcome);
         }
         if let Some((before, github_was_enabled, error)) = adopted {
             // The engine applied this config only to drain the commands it had
             // deferred, and left the `gh` probe a reload owes to this apply.
             engine.probe_gh_after_reload(github_was_enabled);
-            self.config_in_force(engine, &before, github_was_enabled);
+            self.config_in_force(engine, &before, github_was_enabled, true);
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&error),
             ));
+            engine.finish_config_reload_operations(&ConfigReloadOutcome::ApplyFailed(error));
+        }
+        if let Some(reason) = refused {
+            engine.finish_config_reload_operations(&ConfigReloadOutcome::Refused(reason));
         }
     }
 
@@ -2970,7 +2990,7 @@ impl EngineService {
         let applied = engine.apply_reloaded_config(reloaded);
         // In force either way: the engine keeps the config even when its
         // apply fails, as on a reload.
-        self.config_in_force(engine, &before, github_was_enabled);
+        self.config_in_force(engine, &before, github_was_enabled, false);
         if let Err(error) = applied {
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&format!("{error:#}")),
@@ -2982,13 +3002,16 @@ impl EngineService {
     /// Everything a reload owes the running server once `engine.config` is
     /// in force, compared with `before`, the config it replaced, the same
     /// pull-request sync the terminal UI's reload runs included.
-    /// `github_was_enabled` is whether the integration was on before.
+    /// `github_was_enabled` is whether the integration was on before. Answers
+    /// the sentence about the settings only a restart applies, which it has
+    /// also raised as a warning, or `None` when nothing needs one.
     fn config_in_force(
         &mut self,
         engine: &mut Engine,
         before: &dux_core::config::Config,
         github_was_enabled: bool,
-    ) {
+        for_reload: bool,
+    ) -> Option<String> {
         engine.retune_pr_sync_after_reload(github_was_enabled);
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
@@ -3003,10 +3026,12 @@ impl EngineService {
         // The `[server]` bind section only takes effect at startup; a reload
         // cannot rebind listeners. Warn so the user knows a restart is needed
         // for those specific changes to take effect.
-        if let Some(warning) =
-            server_restart_warning_copy(&before.server, &engine.config.server, self.surface)
-        {
-            let _ = self.status.send(WireStatus::new("warning", warning));
+        let restart_warning =
+            server_restart_warning_copy(&before.server, &engine.config.server, self.surface);
+        if let Some(warning) = &restart_warning {
+            let _ = self
+                .status
+                .send(WireStatus::new("warning", warning.clone()));
         }
         // `dux server` has no status line, and its operator reads the console.
         if let ShutdownEcho::Console(console, _) = &self.shutdown_echo
@@ -3027,8 +3052,20 @@ impl EngineService {
             && let Some(control) = self.tailscale_mode_control.get()
         {
             let status = self.status.tx.clone();
+            // A reload is not over until the serve has answered, and a change it
+            // could not follow is part of how the reload ended.
+            let operations = for_reload.then(|| engine.operations.clone());
+            if let Some(operations) = &operations {
+                operations.listener_change_started();
+            }
             control.set_mode_detached(next_tailscale, move |outcome| {
                 let report = outcome.report(next_tailscale);
+                if let Some(operations) = operations {
+                    let problem = outcome
+                        .failed()
+                        .then(|| String::from(report.message.clone()));
+                    operations.listener_change_done(problem, Instant::now());
+                }
                 let tone = if report.warning { "warning" } else { "info" };
                 // The same key the terminal UI's mode change uses, so one
                 // answer per change whichever surface asked for it.
@@ -3039,6 +3076,7 @@ impl EngineService {
                 ));
             });
         }
+        restart_warning
     }
 
     /// Adopt the two live `[server]` limits from a config the drainer has already
@@ -5255,6 +5293,31 @@ mod tests {
         );
 
         let mut statuses = handle.subscribe_status();
+        // A client that asked for this reload waits on its record.
+        engine.open_operation(
+            "reload-op",
+            dux_core::operations::OperationKind::ConfigReload,
+        );
+        engine.operations.await_reload("reload-op", false);
+        engine.operations.reload_closed();
+        // The adopted config also changes the Tailscale mode, which the serve
+        // refuses (it was started with --no-tailscale): the reload is not over
+        // until the serve has answered, and then says so.
+        engine.config.server.tailscale = "yes".to_string();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let (control, mut requests) = crate::serve_legs::TailscaleModeControl::new(
+            runtime.handle().clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        runtime.spawn(async move {
+            if let Some(request) = requests.recv().await {
+                let _ = request
+                    .reply
+                    .send(dux_core::config::TailscaleModeOutcome::RefusedForcedNo);
+            }
+        });
+        let _ = svc.tailscale_mode_control.set(control);
         svc.apply_reload_followup(
             &mut engine,
             EventReaction::ConfigAdopted {
@@ -5262,6 +5325,32 @@ mod tests {
                 before: Box::new(before),
                 error: "the session database could not be read".to_string(),
             },
+        );
+        let record_now = |engine: &Engine| {
+            engine
+                .operations
+                .peek("reload-op", Instant::now())
+                .expect("the record is kept")
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while record_now(&engine).state == dux_core::operations::OperationState::Running
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let record = record_now(&engine);
+        assert_eq!(record.state, dux_core::operations::OperationState::Partial);
+        assert!(
+            record
+                .message
+                .contains("the session database could not be read"),
+            "{}",
+            record.message
+        );
+        assert!(
+            record.message.contains("--no-tailscale"),
+            "the refused listener change is named: {}",
+            record.message
         );
         let said = std::iter::from_fn(|| statuses.try_recv().ok())
             .find(|status| {
@@ -7312,8 +7401,60 @@ mod tests {
     }
 
     #[test]
-    fn the_restart_warning_adds_the_background_remedy_only_for_a_bind_change() {
+    fn the_restart_warning_names_each_bind_setting_and_adds_the_background_remedy_only_for_them() {
+        type Change = fn(&mut dux_core::config::ServerConfig);
         let prev = dux_core::config::ServerConfig::default();
+        let rows: [(&str, Change); 11] = [
+            ("host", |c| c.host = "0.0.0.0".into()),
+            ("port", |c| c.port += 1),
+            ("max_websocket_events_connections", |c| {
+                c.max_websocket_events_connections += 1
+            }),
+            ("max_websocket_agent_connections", |c| {
+                c.max_websocket_agent_connections += 1
+            }),
+            ("max_websocket_terminal_connections", |c| {
+                c.max_websocket_terminal_connections += 1
+            }),
+            ("max_websocket_tab_connections", |c| {
+                c.max_websocket_tab_connections += 1
+            }),
+            ("max_websocket_tabs_per_agent", |c| {
+                c.max_websocket_tabs_per_agent += 1
+            }),
+            ("file_drop_max_bytes", |c| c.file_drop_max_bytes += 1),
+            ("file_drop_max_concurrency", |c| {
+                c.file_drop_max_concurrency += 1
+            }),
+            ("tree_list_max_concurrency", |c| {
+                c.tree_list_max_concurrency += 1
+            }),
+            ("release_notes_max_concurrency", |c| {
+                c.release_notes_max_concurrency += 1
+            }),
+        ];
+        for (setting, change) in rows {
+            let mut next = prev.clone();
+            change(&mut next);
+            for surface in [
+                ServeSurface::DuxServer,
+                ServeSurface::Flip,
+                ServeSurface::Background,
+            ] {
+                let copy = server_restart_warning_copy(&prev, &next, surface).expect("a warning");
+                assert!(
+                    copy.contains(&format!("({setting})")),
+                    "{setting} on {surface:?}: {copy}"
+                );
+            }
+        }
+        // Two moved settings are both named, in the order the file lists them.
+        let mut two = prev.clone();
+        two.port += 1;
+        two.host = "0.0.0.0".into();
+        let copy = server_restart_warning_copy(&prev, &two, ServeSurface::DuxServer).unwrap();
+        assert!(copy.contains("(host, port)"), "{copy}");
+
         let mut bind = prev.clone();
         bind.port += 1;
         let mut console = prev.clone();

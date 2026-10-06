@@ -285,9 +285,8 @@ fn read_holder_pid_once(file: &mut File) -> Option<u32> {
 }
 
 /// The line a dux adds to its lock file, after its PID, once it handles the
-/// reload signal (see [`crate::reload_signal`]). `dux config set` signals
-/// only a holder that wrote it: a dux from before the reload signal has no
-/// handler, and the signal's default action would terminate it.
+/// reload signal (see [`crate::reload_signal`]): the process says its SIGUSR1
+/// handler is in place, so `kill -USR1` reloads it instead of ending it.
 pub const RELOAD_SIGNAL_MARKER: &str = "reload-signal=usr1";
 
 /// What this process writes into the lock file it holds: its PID on the
@@ -471,12 +470,12 @@ mod tests {
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
-        let leftover = fs::symlink_metadata(&socket).unwrap().ino();
 
         let mut lock = SingleInstanceLock::acquire(&path).unwrap();
         lock.open_control_socket(&socket)
             .expect("a dead socket is replaced");
-        assert_ne!(fs::symlink_metadata(&socket).unwrap().ino(), leftover);
+        // The leftover refused every connection, so one that is accepted proves
+        // it was replaced (a filesystem may hand the new file the old inode).
         std::os::unix::net::UnixStream::connect(&socket).expect("the new socket accepts");
         drop(lock);
 
