@@ -279,13 +279,23 @@ pub trait BackgroundServeCompanion {
     /// Seeding the registry first is the whole point: a browser tab already
     /// reconnecting cannot win a plain-attach claim in between, and its handshake
     /// reads the owner from the seeded registry.
+    ///
+    /// `startup` is what the bind pre-flight learned (warnings, best-effort bind
+    /// failures, whether a Tailscale address was found), so the serve's log
+    /// opens with the banner `dux server` prints.
     fn start(
         &mut self,
         engine: &mut Engine,
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
         claim_before_serving: bool,
+        startup: crate::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String>;
+
+    /// The log file the running serve opened, or `None` when it is not serving
+    /// or could not open one. The viewer follows this file and not the config's
+    /// `log_path`, which a reload may have changed since the serve started.
+    fn server_log_path(&self) -> Option<std::path::PathBuf>;
 
     /// Change `[server] tailscale` on the running listener.
     ///

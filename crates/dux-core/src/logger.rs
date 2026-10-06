@@ -488,6 +488,29 @@ impl RotatingLog {
     }
 }
 
+/// What the part of a file name after `<log>.` says it is.
+enum CopyName {
+    /// `<n>` or `<n>.gz`: a rotated copy at position `n`.
+    Copy(u32),
+    /// `<n>.gz.<pid>.tmp`: the file a compression was writing.
+    Temporary,
+}
+
+/// Only the names rotation itself makes, with their numbers validated, so a file
+/// the user keeps beside the log (`server.log.notes.tmp`, `server.log.old`) is
+/// never taken for a copy.
+fn copy_name(rest: &str) -> Option<CopyName> {
+    let all_digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = rest.split('.');
+    let position = parts.next().filter(|text| all_digits(text))?;
+    let position = position.parse::<u32>().ok()?;
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (None, ..) | (Some("gz"), None, ..) => Some(CopyName::Copy(position)),
+        (Some("gz"), Some(pid), Some("tmp"), None) if all_digits(pid) => Some(CopyName::Temporary),
+        _ => None,
+    }
+}
+
 /// The rotated copies of the log at `path` found beside it: their positions,
 /// ascending, and the abandoned temporary files.
 fn scan_copies(path: &Path) -> (Vec<u32>, Vec<PathBuf>) {
@@ -505,13 +528,10 @@ fn scan_copies(path: &Path) -> (Vec<u32>, Vec<PathBuf>) {
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if rest.ends_with(".tmp") {
-            temps.push(entry.path());
-            continue;
-        }
-        let digits = rest.strip_suffix(".gz").unwrap_or(rest);
-        if let Ok(n) = digits.parse::<u32>() {
-            positions.push(n);
+        match copy_name(rest) {
+            Some(CopyName::Copy(n)) => positions.push(n),
+            Some(CopyName::Temporary) => temps.push(entry.path()),
+            None => {}
         }
     }
     positions.sort_unstable();
@@ -656,7 +676,14 @@ fn report_rotation_failure(reported: &'static std::sync::Once, message: &str) {
 /// Separate from [`init`] because `init` installs a process-global logger and a
 /// panic hook, neither of which a test can do twice.
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    // Private from the first instant: a dangling symlink at the log path makes
+    // this open create its target, which tightening afterwards would leave
+    // alone (it never follows a link) and readable by everyone.
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(crate::file_modes::PRIVATE_FILE_MODE)
+        .open(path)?;
     // A warning about the log file itself may have nowhere to go: `init`
     // installs the logger it warns through just after this returns.
     crate::file_modes::restrict_to_owner_best_effort(path, "log file");
@@ -795,6 +822,15 @@ mod tests {
         drop(open_log_file(&path).unwrap());
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode & 0o077, 0, "expected owner-only, got {mode:o}");
+
+        // A dangling symlink at the log path makes the open create its target,
+        // which must be private from the first instant, not tightened after.
+        let target = dir.path().join("created-through-the-link.log");
+        let link = dir.path().join("linked.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop(open_log_file(&link).unwrap());
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
     }
 
     #[test]
@@ -1434,11 +1470,25 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let log = log_in(dir.path(), settings(8, 3, false));
             fs::write(dir.path().join("dux.log.1.gz.999999.tmp"), "half a gzip").unwrap();
+            // Names that only look like a copy or a temporary are somebody else's.
+            let lookalikes = [
+                "dux.log.notes.tmp",
+                "dux.log.1.gz.abc.tmp",
+                "dux.log.1x",
+                "dux.log.-1",
+                "dux.log.2.bz2",
+            ];
+            for name in lookalikes {
+                fs::write(dir.path().join(name), "mine").unwrap();
+            }
 
             log.write_line("line one\n");
             log.write_line("line two\n");
 
-            assert_eq!(names_in(dir.path()), vec!["dux.log", "dux.log.1"]);
+            let mut expected = vec!["dux.log".to_string(), "dux.log.1".to_string()];
+            expected.extend(lookalikes.map(String::from));
+            expected.sort();
+            assert_eq!(names_in(dir.path()), expected);
         }
 
         /// Rotation reads the directory once instead of probing every position

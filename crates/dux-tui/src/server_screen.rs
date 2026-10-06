@@ -1146,7 +1146,8 @@ const TAIL_CHUNK: u64 = 64 * 1024;
 /// whatever was appended. It keeps the file it is reading open, so when a
 /// rotation moves that file away it finishes the old file's remaining bytes
 /// first and only then switches to the file the name now means, starting it
-/// from its first line.
+/// from its first line. Two rotations inside one poll (over 10 MiB written in
+/// 200 ms at the default size) lose the file in between; that is accepted.
 struct FileFollower {
     path: std::path::PathBuf,
     file: Option<std::fs::File>,
@@ -1253,10 +1254,17 @@ impl FileFollower {
 
     /// The complete lines written since the last look.
     fn poll(&mut self) -> Vec<String> {
+        self.poll_after_snapshot(|| {})
+    }
+
+    /// [`Self::poll`] with a hook that runs between the first read of the held
+    /// file and the look at its name, so a test can write in that window.
+    fn poll_after_snapshot(&mut self, between: impl FnOnce()) -> Vec<String> {
         // The file in hand first, to its end, so nothing written before a
         // rotation is lost to it.
         self.read_held();
         let mut lines = self.take_lines();
+        between();
         // Then the name: another file under it means a rotation.
         let renamed = std::fs::File::open(&self.path).ok().filter(|opened| {
             let current = opened.metadata().ok().map(|meta| identity_of(&meta));
@@ -1268,6 +1276,10 @@ impl FileFollower {
             current.is_some() && current != held
         });
         if let Some(next) = renamed {
+            // What the old file got between the first read and the look at the
+            // name is still its own.
+            self.read_held();
+            lines.extend(self.take_lines());
             self.file = Some(next);
             self.position = 0;
             // A line the old file never finished has no ending to wait for.
@@ -1760,6 +1772,21 @@ mod tests {
         std::fs::rename(&path, dir.path().join("server.log.1")).unwrap();
         std::fs::write(&path, "fresh\n").unwrap();
         assert_eq!(follower.poll(), ["last before rotation", "fresh"]);
+
+        // A line the old file gets after the first read of it, while the name is
+        // being looked at, is shown too.
+        let (mut follower, _) = FileFollower::start(path.clone(), 10);
+        let rotated = dir.path().join("server.log.2");
+        let lines = follower.poll_after_snapshot(|| {
+            let mut old = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            std::io::Write::write_all(&mut old, b"late\n").unwrap();
+            std::fs::rename(&path, &rotated).unwrap();
+            std::fs::write(&path, "newest\n").unwrap();
+        });
+        assert_eq!(lines, ["late", "newest"]);
     }
 
     /// A log that does not exist yet is followed from its first byte once it

@@ -6539,6 +6539,7 @@ mod auth_warning_mode_tests {
             vec![listener],
             Vec::new(),
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .unwrap();
         *server.tailscale_mode_control().bound_leg().lock().unwrap() =
