@@ -352,45 +352,74 @@ pub fn set_macro(
     text: String,
     surface: &str,
 ) -> Result<String, CliError> {
-    match writer {
+    let label = resources::macro_label(name.trim());
+    let result = match writer {
         Writer::Dux { client, wait } => through_dux(
             client,
             wait,
             Method::Put,
             &entry_path("macros", name),
             Some(serde_json::json!({ "text": text, "surface": surface })),
-        ),
-        Writer::File(paths) => {
-            let saved =
-                resources::set_macro_in_file(paths, name, text, surface).map_err(edit_failed)?;
-            Ok(format!(
-                "Saved macro {} in {}. {APPLIES_AT_START}\n",
-                resources::macro_label(&saved),
-                paths.config_path.display()
-            ))
-        }
-    }
+        )
+        .map(|said| own_outcome(said, wait, format!("Saved macro {label}.\n"))),
+        Writer::File(paths) => resources::set_macro_in_file(paths, name, text, surface)
+            .map_err(edit_failed)
+            .map(|_| {
+                format!(
+                    "Saved macro {label} in {}. {APPLIES_AT_START}\n",
+                    paths.config_path.display()
+                )
+            }),
+    };
+    result.map_err(|error| macro_named_by_label(name, error))
 }
 
 /// `dux macros rm`.
 pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
-    match writer {
+    let label = resources::macro_label(name);
+    let result = match writer {
         Writer::Dux { client, wait } => through_dux(
             client,
             wait,
             Method::Delete,
             &entry_path("macros", name),
             None,
-        ),
-        Writer::File(paths) => {
-            resources::remove_macro_in_file(paths, name).map_err(edit_failed)?;
-            Ok(format!(
-                "Removed macro {} from {}. {APPLIES_AT_START}\n",
-                resources::macro_label(name),
-                paths.config_path.display()
-            ))
+        )
+        .map(|said| own_outcome(said, wait, format!("Removed macro {label}.\n"))),
+        Writer::File(paths) => resources::remove_macro_in_file(paths, name)
+            .map_err(edit_failed)
+            .map(|()| {
+                format!(
+                    "Removed macro {label} from {}. {APPLIES_AT_START}\n",
+                    paths.config_path.display()
+                )
+            }),
+    };
+    result.map_err(|error| macro_named_by_label(name, error))
+}
+
+/// What a macro change that went through a running dux prints: its
+/// operation's id when it did not wait, else this command line's own
+/// sentence (`done`), never the record's, which names the macro as it was
+/// given whatever its name.
+fn own_outcome(said: String, wait: Option<Duration>, done: String) -> String {
+    if wait.is_none() { said } else { done }
+}
+
+/// `error` with the macro `name` replaced by its label wherever it appears,
+/// when the name is outside the `[macros]` rule. A running dux and the
+/// shared checks name a macro as it was given; the command line never
+/// prints such a name.
+fn macro_named_by_label(name: &str, mut error: CliError) -> CliError {
+    let (label, hidden) = resources::shown_name("", "macros", name.trim());
+    if hidden {
+        for given in [name, name.trim()] {
+            if !given.is_empty() {
+                error.message = error.message.replace(given, &label);
+            }
         }
     }
+    error
 }
 
 /// What `dux env set` asks before it changes anything.

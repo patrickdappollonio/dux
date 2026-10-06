@@ -79,16 +79,6 @@ pub fn macro_label(name: &str) -> String {
     shown_name("", "macros", name).0
 }
 
-/// A macro as the subject of a sentence: `Macro "name"` when its name may be
-/// shown, else `The macro`, so a token typed where a name goes is never
-/// repeated.
-pub fn macro_subject(name: &str) -> String {
-    match shown_name("", "macros", name) {
-        (name, false) => format!("Macro \"{name}\""),
-        (_, true) => "The macro".to_string(),
-    }
-}
-
 /// The refusal for removing a macro the list does not hold.
 pub fn unknown_macro(name: &str) -> String {
     match shown_name("", "macros", name) {
