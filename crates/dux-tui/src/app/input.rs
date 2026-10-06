@@ -29530,23 +29530,39 @@ cyan = "#00ffff"
             *agent_name = TextInput::with_text("agent-text".to_string());
             *randomize_name = false;
         }
-        app.overlay_layout.active = OverlayMouseLayout::CloneProject {
-            address: Rect::new(24, 5, 30, 1),
-            destination: Rect::new(24, 8, 30, 1),
-            agent_name: Rect::new(24, 11, 30, 1),
-            checkbox: OverlayCheckbox {
-                id: OverlayCheckboxId::CloneProjectRandomizedPetName,
-                rect: Rect::new(24, 13, 34, 2),
-            },
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        let OverlayMouseLayout::CloneProject { checkbox, .. } = app.overlay_layout.active else {
+            panic!("expected the clone form's layout");
+        };
+        // Where the renderer drew `text`: the cell of its first character.
+        let drawn_at = |text: &str| -> (u16, u16) {
+            let cells: Vec<String> = text.chars().map(String::from).collect();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width.saturating_sub(cells.len() as u16) {
+                    if cells
+                        .iter()
+                        .enumerate()
+                        .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c)
+                    {
+                        return (x, y);
+                    }
+                }
+            }
+            panic!("{text:?} is not on screen");
         };
 
-        // The field renders one leading space, so column 28 is text char 3.
-        for (row, want_focus) in [
-            (11, CloneProjectFocus::AgentName),
-            (8, CloneProjectFocus::Destination),
-            (5, CloneProjectFocus::Address),
+        // A click on the fourth character drawn puts the caret before it.
+        for (text, want_focus) in [
+            ("agent-text", CloneProjectFocus::AgentName),
+            ("/dest-text", CloneProjectFocus::Destination),
+            ("address-text", CloneProjectFocus::Address),
         ] {
-            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 28, row));
+            let (x, y) = drawn_at(text);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x + 3, y));
             match &app.prompt {
                 PromptState::CloneProject {
                     address,
@@ -29567,7 +29583,11 @@ cyan = "#00ffff"
             }
         }
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 13));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            checkbox.rect.x,
+            checkbox.rect.y,
+        ));
         match &app.prompt {
             PromptState::CloneProject {
                 randomize_name,
