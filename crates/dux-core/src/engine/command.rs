@@ -62,7 +62,7 @@ pub enum Command {
 
     /// Clone `url` into `path` as a new project on the remote's default branch,
     /// then start an agent named `agent_name` there (a random name when it is
-    /// blank and `random_name` is set). Returns the clone's busy, or an error
+    /// blank; `random_name` is the New agent dialog's checkbox). Returns the clone's busy, or an error
     /// status saying which check refused it; see [`crate::clone_project`].
     CloneProject {
         url: String,

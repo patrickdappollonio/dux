@@ -23,8 +23,9 @@ use crate::status_text::StatusText;
 use crate::worker::WorkerEvent;
 
 /// What a client asks for: clone `url` into `path` and start an agent named
-/// `agent_name` there, or a random name when it is blank and `random_name`
-/// is set.
+/// `agent_name` there, or a random name when it is blank, as in the New agent
+/// dialog. `random_name` is that dialog's checkbox, as the client sent it; a
+/// blank name gets a random one either way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneRequest {
     pub url: String,
@@ -85,8 +86,8 @@ pub struct PreparedClone {
 }
 
 /// Check `request` without git or the destination itself, resolving the agent
-/// name: a blank one with `random_name` set gets a random name here, so
-/// nothing later sees an empty one. `projects` are the workspace's project
+/// name: a blank one gets a random name here, so nothing later sees an empty
+/// one. `projects` are the workspace's project
 /// paths and `home` expands a leading `~`.
 pub fn prepare_clone(
     request: &CloneRequest,
@@ -108,10 +109,8 @@ pub fn prepare_clone(
             ]);
         }
         typed.to_string()
-    } else if request.random_name {
-        crate::git::docker_style_name()
     } else {
-        return Err("Type a name for the first agent, or ask for a random one.".into());
+        crate::git::docker_style_name()
     };
     let destination = destination_identity(&request.path, home)?;
     if projects

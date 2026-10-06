@@ -359,8 +359,8 @@ pub enum WireCommand {
         name: String,
     },
     /// Clone `url` into `path` as a new project, then start an agent named
-    /// `agent_name` there, or a random name when it is blank and `random_name`
-    /// is set. The same request as `Command::CloneProject`: the checks that
+    /// `agent_name` there, or a random name when it is blank (`random_name` is
+    /// the New agent dialog's checkbox). The same request as `Command::CloneProject`: the checks that
     /// need no git refuse it at once, and the rest runs on a worker under the
     /// returned busy (see [`crate::clone_project`]).
     CloneProject {
@@ -9816,14 +9816,18 @@ mod tests {
     /// follow-up that adds the project and dispatches the agent, and, when one
     /// was dispatched, the create to its end.
     fn drive_clone_chain(engine: &mut Engine) -> WebFollowupStatuses {
-        let event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .expect("the clone worker's event");
-        assert!(
-            matches!(event, WorkerEvent::RepositoryCloned { .. }),
-            "the first event is not the clone's"
-        );
+        // Whatever an earlier agent still reports is processed on the way, as a
+        // surface would.
+        let event = loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the clone worker's event");
+            if matches!(event, WorkerEvent::RepositoryCloned { .. }) {
+                break event;
+            }
+            engine.process_worker_event(event);
+        };
         let reaction = engine.process_worker_event(event);
         let mut chain = engine.drive_clone_followup(&reaction);
         chain
@@ -10097,6 +10101,32 @@ mod tests {
             engine.mark_in_flight(InFlightKey::Clone(dest)),
             "the clone's gate must be cleared"
         );
+
+        // A blank agent name is a random one, as in the New agent dialog,
+        // whether or not a random name was asked for.
+        let blank = std::fs::canonicalize(tmp.path()).unwrap().join("blank");
+        engine
+            .apply_wire(WireCommand::CloneProject {
+                url: remote.to_string_lossy().into_owned(),
+                path: blank.to_string_lossy().into_owned(),
+                agent_name: Some("  ".to_string()),
+                random_name: false,
+            })
+            .expect("a blank name is not refused");
+        drive_clone_chain(&mut engine);
+        let project = engine
+            .projects
+            .iter()
+            .find(|p| Path::new(&p.path) == blank)
+            .expect("the clone is a project");
+        let names: Vec<&str> = engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .filter_map(|s| s.branch_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(crate::git::is_valid_agent_name(names[0]), "{names:?}");
     }
 
     #[test]
@@ -10501,12 +10531,6 @@ mod tests {
                 request(&url, &dest, Some("not a name")),
                 &dest,
                 &["Invalid agent name", "not a name"],
-            ),
-            (
-                "no agent name at all",
-                request(&url, &dest, None),
-                &dest,
-                &["name for the first agent"],
             ),
             (
                 "a name only git's own rules refuse",

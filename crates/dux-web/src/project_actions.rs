@@ -85,8 +85,9 @@ struct AddProjectBody {
     #[serde(default)]
     init_repo: bool,
     /// Clone this address into `path` as a new project instead of adding a
-    /// folder, then start an agent there named `agent_name` (or a random name
-    /// when it is blank and `random_name` is set). Outranks every other flag.
+    /// folder, then start an agent there named `agent_name` (a random name when
+    /// it is blank; `random_name` is the dialog's checkbox). Outranks every
+    /// other flag.
     #[serde(default)]
     clone_url: Option<String>,
     #[serde(default)]
