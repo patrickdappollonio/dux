@@ -1020,7 +1020,7 @@ fn end_recorded_processes(
 ) -> std::result::Result<Vec<ResetLeftover>, ResetRefused> {
     use dux_core::process_sessions as ps;
     let stored = store
-        .load_process_registry()
+        .load_process_registry_strict()
         .map_err(|error| ResetRefused::unknown(format_args!("{error}")))?;
     let recorded: Vec<_> = stored
         .into_iter()
@@ -1823,28 +1823,34 @@ mod tests {
     /// running, so the reset deletes nothing and says why.
     #[test]
     fn a_factory_reset_deletes_nothing_when_the_recorded_programs_cannot_be_read() {
-        let harness = ResetHarness::new();
-        harness.write_config_with_log_path("logs/custom.log");
-        let worktree = harness.create_session("agent-1");
-        let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
-        store.replace_process_registry(&[]).expect("registry row");
-        drop(store);
-        let conn = rusqlite::Connection::open(&harness.paths.sessions_db_path).expect("raw");
-        conn.execute("update process_registry set body = x'ff' where id = 1", [])
-            .expect("make the body unreadable as text");
-        drop(conn);
+        // A body that is not text, and a text body that is not a registry.
+        for body in ["x'ff'", "'this is not json'"] {
+            let harness = ResetHarness::new();
+            harness.write_config_with_log_path("logs/custom.log");
+            let worktree = harness.create_session("agent-1");
+            let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
+            store.replace_process_registry(&[]).expect("registry row");
+            drop(store);
+            let conn = rusqlite::Connection::open(&harness.paths.sessions_db_path).expect("raw");
+            conn.execute(
+                &format!("update process_registry set body = {body} where id = 1"),
+                [],
+            )
+            .expect("make the body unreadable");
+            drop(conn);
 
-        let refusal = run_reset(&harness.paths, true).expect_err("the reset refuses");
+            let refusal = run_reset(&harness.paths, true).expect_err("the reset refuses");
 
-        let message = format!("{refusal:#}");
-        assert!(
-            message.contains("could not check which programs are still running"),
-            "{message}"
-        );
-        assert!(message.contains("deleted nothing"), "{message}");
-        assert!(worktree.exists());
-        assert!(harness.paths.config_path.exists());
-        assert!(harness.paths.sessions_db_path.exists());
+            let message = format!("{refusal:#}");
+            assert!(
+                message.contains("could not check which programs are still running"),
+                "{body}: {message}"
+            );
+            assert!(message.contains("deleted nothing"), "{body}: {message}");
+            assert!(worktree.exists(), "{body}");
+            assert!(harness.paths.config_path.exists(), "{body}");
+            assert!(harness.paths.sessions_db_path.exists(), "{body}");
+        }
     }
 
     #[test]

@@ -3082,6 +3082,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_strict_registry_loader_errors_on_a_body_that_does_not_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let store = crate::storage::SessionStore::open(&db).unwrap();
+        assert!(store.load_process_registry_strict().unwrap().is_empty());
+        store
+            .replace_process_registry(&[StoredSession {
+                owner: Some("a1".to_string()),
+                session: session(4242),
+                folder: tmp.path().to_path_buf(),
+                standalone: false,
+                survivors: Vec::new(),
+                label: None,
+            }])
+            .unwrap();
+        assert_eq!(store.load_process_registry_strict().unwrap().len(), 1);
+
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute(
+            "update process_registry set body = 'not json' where id = 1",
+            [],
+        )
+        .unwrap();
+        assert!(store.load_process_registry_strict().is_err());
+        assert!(store.load_process_registry().unwrap().is_empty());
+    }
+
     /// review9: the persisted registry entry carries the session's label, so a
     /// refusal after a restart still names WHAT is standing in the folder
     /// (here a project terminal), not "a process dux started".
