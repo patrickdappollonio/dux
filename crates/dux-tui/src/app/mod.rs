@@ -2533,6 +2533,16 @@ pub(crate) enum NameNewAgentFocus {
     CopyChangesCheckbox,
 }
 
+/// Which control has focus in the Clone modal, in Tab order: the three
+/// single-line fields, then the random-name checkbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloneProjectFocus {
+    Address,
+    Destination,
+    AgentName,
+    RandomizedNameCheckbox,
+}
+
 /// What the folder browser is picking a directory for.
 ///
 /// One prompt with a purpose rather than two prompts, because the browsing
@@ -2945,6 +2955,23 @@ pub(crate) enum PromptState {
         /// Absolute path of the folder the browser committed to.
         folder: String,
         input: TextInput,
+    },
+    /// Clone a repository as a new project and start an agent on it: the remote's
+    /// address, where the clone goes, and the first agent's name. Three
+    /// single-line fields and one checkbox, so Enter submits from any control.
+    CloneProject {
+        address: TextInput,
+        /// Filled from `start_folder` and the address's repository name until
+        /// the user edits it, after which it is theirs.
+        destination: TextInput,
+        destination_edited: bool,
+        /// The folder the default destination is built in: the add-project
+        /// browser's start directory.
+        start_folder: PathBuf,
+        agent_name: TextInput,
+        randomize_name: bool,
+        randomized_name: Option<String>,
+        focus: CloneProjectFocus,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -3595,6 +3622,7 @@ pub(crate) enum OverlayCheckboxId {
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
     NameNewAgentCopyChanges,
+    CloneProjectRandomizedPetName,
     ConfigReloadRecoverOldConfig,
 }
 
@@ -3835,6 +3863,13 @@ pub(crate) enum OverlayMouseLayout {
     /// The standalone-agent name modal's single text field (its only control).
     NameStandaloneAgent {
         input: Rect,
+    },
+    /// The clone form's three single-line fields and its random-name checkbox.
+    CloneProject {
+        address: Rect,
+        destination: Rect,
+        agent_name: Rect,
+        checkbox: OverlayCheckbox,
     },
     NameNewAgent {
         input: Rect,
@@ -5579,6 +5614,7 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
+            "clone-project" => self.open_clone_project_prompt(),
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
             "manage-worktrees" => self.manage_project_worktrees(),

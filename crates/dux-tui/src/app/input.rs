@@ -277,6 +277,9 @@ enum PromptMouseTarget {
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
+    CloneAddressInput,
+    CloneDestinationInput,
+    CloneAgentNameInput,
     PullRequestInput,
     PullRequestChooseProject,
     AttachPullRequestInput,
@@ -459,6 +462,9 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::Checkbox(_)
             | PromptMouseTarget::RenameInput
             | PromptMouseTarget::NameNewAgentInput
+            | PromptMouseTarget::CloneAddressInput
+            | PromptMouseTarget::CloneDestinationInput
+            | PromptMouseTarget::CloneAgentNameInput
             | PromptMouseTarget::PullRequestInput
             | PromptMouseTarget::AttachPullRequestInput
             | PromptMouseTarget::NameStandaloneAgentInput
@@ -1904,6 +1910,9 @@ impl App {
                 if matches!(focus, NameNewAgentFocus::Input) {
                     input.insert_str(text);
                 }
+            }
+            PromptState::CloneProject { .. } => {
+                self.edit_clone_field(|input| input.insert_str(text));
             }
 
             // Full-text modal fields take a paste only while ENGAGED: an
@@ -5547,6 +5556,143 @@ impl App {
         Ok(Some(false))
     }
 
+    fn handle_clone_project_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::CloneProject { focus, .. } = &self.prompt else {
+            return None;
+        };
+        let checkbox_focused = *focus == CloneProjectFocus::RandomizedNameCheckbox;
+        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, !checkbox_focused) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Confirm => self.confirm_clone_project(),
+            ModalKeyStep::MoveFocus(forward) => self.focus_next_clone_project_control(forward),
+            ModalKeyStep::ActivateFocus if checkbox_focused => self.toggle_clone_randomized_name(),
+            ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::FallThroughToField => {
+                self.edit_clone_field(|input| {
+                    input.handle_key(key);
+                });
+            }
+        }
+        Some(false)
+    }
+
+    /// Run an edit on the clone form's focused text field (nothing happens
+    /// while the checkbox has focus). Typing in the address re-derives the
+    /// destination until the user has edited the destination themselves, and
+    /// any change to the destination counts as that edit.
+    fn edit_clone_field(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        let PromptState::CloneProject {
+            address,
+            destination,
+            destination_edited,
+            start_folder,
+            agent_name,
+            focus,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        match *focus {
+            CloneProjectFocus::Address => {
+                let before = address.text.clone();
+                edit(address);
+                if address.text != before && !*destination_edited {
+                    destination.set_text(super::sessions::clone_destination_for(
+                        start_folder,
+                        &address.text,
+                    ));
+                }
+            }
+            CloneProjectFocus::Destination => {
+                let before = destination.text.clone();
+                edit(destination);
+                if destination.text != before {
+                    *destination_edited = true;
+                }
+            }
+            CloneProjectFocus::AgentName => edit(agent_name),
+            CloneProjectFocus::RandomizedNameCheckbox => {}
+        }
+    }
+
+    fn focus_next_clone_project_control(&mut self, forward: bool) {
+        if let PromptState::CloneProject { focus, .. } = &mut self.prompt {
+            *focus = next_focus(
+                &[
+                    (CloneProjectFocus::Address, true),
+                    (CloneProjectFocus::Destination, true),
+                    (CloneProjectFocus::AgentName, true),
+                    (CloneProjectFocus::RandomizedNameCheckbox, true),
+                ],
+                *focus,
+                forward,
+            );
+        }
+    }
+
+    /// Flip the random-name box, filling the name field with a fresh pet name
+    /// when it turns on and clearing it again when it turns off, as the New
+    /// agent dialog's box does. Focus follows, so a click is visibly acted on.
+    fn toggle_clone_randomized_name(&mut self) {
+        if let PromptState::CloneProject {
+            agent_name,
+            randomize_name,
+            randomized_name,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            *focus = CloneProjectFocus::RandomizedNameCheckbox;
+            *randomize_name = !*randomize_name;
+            if *randomize_name {
+                let name = crate::git::docker_style_name();
+                agent_name.set_text(name.clone());
+                *randomized_name = Some(name);
+            } else if randomized_name.as_deref() == Some(agent_name.text.as_str()) {
+                agent_name.clear();
+                *randomized_name = None;
+            } else {
+                *randomized_name = None;
+            }
+        }
+    }
+
+    fn set_clone_cursor_from_mouse(&mut self, field: CloneProjectFocus, column: u16) {
+        let OverlayMouseLayout::CloneProject {
+            address,
+            destination,
+            agent_name,
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
+        };
+        if let PromptState::CloneProject {
+            address: address_input,
+            destination: destination_input,
+            agent_name: agent_name_input,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            let (input, area) = match field {
+                CloneProjectFocus::Address => (address_input, address),
+                CloneProjectFocus::Destination => (destination_input, destination),
+                CloneProjectFocus::AgentName => (agent_name_input, agent_name),
+                CloneProjectFocus::RandomizedNameCheckbox => return,
+            };
+            // The single-line renderer pads by one leading space.
+            input.cursor = cursor_from_single_line_position(&input.text, area, 1, column);
+            *focus = field;
+        }
+    }
+
     fn handle_form_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
             self.handle_edit_macros_key(key)?;
@@ -5559,6 +5705,9 @@ impl App {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_clone_project_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_standalone_agent_prompt_key(key) {
@@ -7078,6 +7227,21 @@ impl App {
                 checkbox,
                 copy_checkbox,
             } => Self::name_new_agent_target(input, checkbox, copy_checkbox, column, row),
+            OverlayMouseLayout::CloneProject {
+                address,
+                destination,
+                agent_name,
+                checkbox,
+            } => Self::checkbox_before_buttons_target(
+                Some(checkbox),
+                &[
+                    (address, PromptMouseTarget::CloneAddressInput),
+                    (destination, PromptMouseTarget::CloneDestinationInput),
+                    (agent_name, PromptMouseTarget::CloneAgentNameInput),
+                ],
+                column,
+                row,
+            ),
         }
     }
 
@@ -9080,6 +9244,9 @@ impl App {
             OverlayCheckboxId::NameNewAgentCopyChanges => {
                 self.toggle_name_new_agent_copy_changes();
             }
+            OverlayCheckboxId::CloneProjectRandomizedPetName => {
+                self.toggle_clone_randomized_name();
+            }
             OverlayCheckboxId::ConfigReloadRecoverOldConfig => {
                 if let PromptState::ConfigReloadFailed {
                     recover_old_config,
@@ -9584,6 +9751,15 @@ impl App {
             }
             PromptMouseTarget::NameNewAgentInput => {
                 self.set_name_new_agent_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::CloneAddressInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::Address, mouse.column);
+            }
+            PromptMouseTarget::CloneDestinationInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::Destination, mouse.column);
+            }
+            PromptMouseTarget::CloneAgentNameInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::AgentName, mouse.column);
             }
             PromptMouseTarget::PullRequestInput => {
                 self.set_pull_request_cursor_from_mouse(mouse.column);
@@ -11900,7 +12076,7 @@ mod tests {
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
-        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
+        CloneProjectFocus, ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
         DeleteAgentFocus, FirstLoadButton, FirstLoadPrompt, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
@@ -29179,6 +29355,229 @@ cyan = "#00ffff"
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+    }
+
+    fn clone_prompt_fields(app: &App) -> (String, String, String, CloneProjectFocus) {
+        match &app.prompt {
+            PromptState::CloneProject {
+                address,
+                destination,
+                agent_name,
+                focus,
+                ..
+            } => (
+                address.text.clone(),
+                destination.text.clone(),
+                agent_name.text.clone(),
+                *focus,
+            ),
+            other => panic!("expected the clone form, got {other:?}"),
+        }
+    }
+
+    fn app_with_start_folder(folder: &std::path::Path) -> App {
+        let mut app = test_app(default_bindings());
+        app.engine.config.defaults.start_directory = Some(folder.display().to_string());
+        app
+    }
+
+    #[test]
+    fn clone_command_opens_a_form_whose_destination_follows_the_address() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+
+        app.execute_command("clone-project".to_string()).unwrap();
+        let (address, destination, _, focus) = clone_prompt_fields(&app);
+        assert_eq!(address, "");
+        assert_eq!(destination, format!("{}/", start.path().display()));
+        assert_eq!(focus, CloneProjectFocus::Address);
+
+        type_text(&mut app, "git@github.com:acme/widget.git");
+        let (address, destination, _, _) = clone_prompt_fields(&app);
+        assert_eq!(address, "git@github.com:acme/widget.git");
+        assert_eq!(destination, format!("{}/widget", start.path().display()));
+    }
+
+    #[test]
+    fn clone_destination_stops_following_the_address_once_edited() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        type_text(&mut app, "https://example.com/acme/widget");
+
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-mine");
+        tap(&mut app, KeyCode::BackTab);
+        type_text(&mut app, ".git");
+
+        let (_, destination, _, focus) = clone_prompt_fields(&app);
+        assert_eq!(focus, CloneProjectFocus::Address);
+        assert_eq!(
+            destination,
+            format!("{}/widget-mine", start.path().display())
+        );
+    }
+
+    #[test]
+    fn clone_form_tab_order_and_space_on_the_checkbox() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = false;
+        app.execute_command("clone-project".to_string()).unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            tap(&mut app, KeyCode::Tab);
+            seen.push(clone_prompt_fields(&app).3);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                CloneProjectFocus::Destination,
+                CloneProjectFocus::AgentName,
+                CloneProjectFocus::RandomizedNameCheckbox,
+                CloneProjectFocus::Address,
+            ]
+        );
+        tap(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::RandomizedNameCheckbox
+        );
+
+        // Space toggles the box and fills the name, then clears it again.
+        tap(&mut app, KeyCode::Char(' '));
+        assert!(!clone_prompt_fields(&app).2.is_empty());
+        tap(&mut app, KeyCode::Char(' '));
+        assert_eq!(clone_prompt_fields(&app).2, "");
+
+        // In a text field the same key is a typed space.
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "a b");
+        assert_eq!(clone_prompt_fields(&app).0, "a b");
+    }
+
+    #[test]
+    fn clone_form_enter_dispatches_the_clone_and_closes_but_a_refusal_keeps_it_open() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+
+        // An empty address is refused and the form stays for a correction.
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::CloneProject { .. }));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+
+        // A local path that is no repository still starts the clone (git is
+        // what refuses it, later), from any field.
+        type_text(
+            &mut app,
+            &format!("{}/no-such-remote", start.path().display()),
+        );
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let destination = start
+            .path()
+            .canonicalize()
+            .expect("canonical start folder")
+            .join("no-such-remote");
+        assert!(app.engine.is_in_flight(&InFlightKey::Clone(destination)));
+    }
+
+    #[test]
+    fn clone_form_escape_closes_with_nothing_dispatched() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        type_text(
+            &mut app,
+            &format!("{}/no-such-remote", start.path().display()),
+        );
+
+        assert!(matches!(app.prompt, PromptState::CloneProject { .. }));
+
+        tap(&mut app, KeyCode::Esc);
+
+        assert!(matches!(app.prompt, PromptState::None));
+        let destination = start
+            .path()
+            .canonicalize()
+            .expect("canonical start folder")
+            .join("no-such-remote");
+        assert!(!app.engine.is_in_flight(&InFlightKey::Clone(destination)));
+    }
+
+    #[test]
+    fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        if let PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            randomize_name,
+            ..
+        } = &mut app.prompt
+        {
+            *address = TextInput::with_text("address-text".to_string());
+            *destination = TextInput::with_text("/dest-text".to_string());
+            *agent_name = TextInput::with_text("agent-text".to_string());
+            *randomize_name = false;
+        }
+        app.overlay_layout.active = OverlayMouseLayout::CloneProject {
+            address: Rect::new(24, 5, 30, 1),
+            destination: Rect::new(24, 8, 30, 1),
+            agent_name: Rect::new(24, 11, 30, 1),
+            checkbox: OverlayCheckbox {
+                id: OverlayCheckboxId::CloneProjectRandomizedPetName,
+                rect: Rect::new(24, 13, 34, 2),
+            },
+        };
+
+        // The field renders one leading space, so column 28 is text char 3.
+        for (row, want_focus) in [
+            (11, CloneProjectFocus::AgentName),
+            (8, CloneProjectFocus::Destination),
+            (5, CloneProjectFocus::Address),
+        ] {
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 28, row));
+            match &app.prompt {
+                PromptState::CloneProject {
+                    address,
+                    destination,
+                    agent_name,
+                    focus,
+                    ..
+                } => {
+                    let field = match want_focus {
+                        CloneProjectFocus::Address => address,
+                        CloneProjectFocus::Destination => destination,
+                        _ => agent_name,
+                    };
+                    assert_eq!(*focus, want_focus);
+                    assert_eq!(field.cursor, 3);
+                }
+                other => panic!("expected the clone form, got {other:?}"),
+            }
+        }
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 13));
+        match &app.prompt {
+            PromptState::CloneProject {
+                randomize_name,
+                focus,
+                ..
+            } => {
+                assert!(*randomize_name);
+                assert_eq!(*focus, CloneProjectFocus::RandomizedNameCheckbox);
+            }
+            other => panic!("expected the clone form, got {other:?}"),
         }
     }
 

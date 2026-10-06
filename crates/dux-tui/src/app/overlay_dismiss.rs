@@ -170,6 +170,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::AttachPullRequestInput { .. }
         | PromptState::NameStandaloneAgent { .. }
         | PromptState::NameNewAgent { .. }
+        | PromptState::CloneProject { .. }
         | PromptState::KillRunning(_) => Blink,
     }
 }
@@ -394,6 +395,7 @@ impl App {
             | PromptState::AttachPullRequestInput { .. }
             | PromptState::NameStandaloneAgent { .. }
             | PromptState::NameNewAgent { .. }
+            | PromptState::CloneProject { .. }
             | PromptState::KillRunning(_) => return false,
         }
         true
@@ -625,6 +627,19 @@ mod tests {
             ),
             ("NameNewAgent", name_new_agent_prompt(app)),
             (
+                "CloneProject",
+                PromptState::CloneProject {
+                    address: TextInput::with_text("half-typed-name".to_string()),
+                    destination: TextInput::with_text("/srv/code/widget".to_string()),
+                    destination_edited: false,
+                    start_folder: std::path::PathBuf::from("/srv/code"),
+                    agent_name: TextInput::new(),
+                    randomize_name: false,
+                    randomized_name: None,
+                    focus: crate::app::CloneProjectFocus::Address,
+                },
+            ),
+            (
                 "KillRunning",
                 PromptState::KillRunning(KillRunningPrompt {
                     runtimes: Vec::new(),
@@ -667,6 +682,7 @@ mod tests {
             | PromptState::AttachPullRequestInput { input, .. }
             | PromptState::NameStandaloneAgent { input, .. }
             | PromptState::NameNewAgent { input, .. } => input.text.clone(),
+            PromptState::CloneProject { address, .. } => address.text.clone(),
             PromptState::KillRunning(prompt) => format!("{:?}", prompt.selected_ids),
             other => panic!("not a refusing modal: {other:?}"),
         }

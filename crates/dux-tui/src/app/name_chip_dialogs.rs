@@ -1140,6 +1140,25 @@ fn the_new_agent_dialog_chips_the_worktree_it_starts_in() {
 }
 
 #[test]
+fn the_clone_dialog_chips_the_project_it_adds() {
+    let mut app = test_app(default_bindings());
+    let buf = open(
+        &mut app,
+        PromptState::CloneProject {
+            address: TextInput::with_text("https://example.com/acme/widget-cl".to_string()),
+            destination: TextInput::with_text("/srv/code/widget-cl".to_string()),
+            destination_edited: false,
+            start_folder: std::path::PathBuf::from("/srv/code"),
+            agent_name: TextInput::new(),
+            randomize_name: false,
+            randomized_name: None,
+            focus: CloneProjectFocus::Address,
+        },
+    );
+    assert_chipped_on_row(&app, &buf, "Adds the project", "widget-cl");
+}
+
+#[test]
 fn the_macro_dialogs_chip_the_macro() {
     let mut app = test_app(default_bindings());
     let buf = open(

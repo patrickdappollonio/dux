@@ -9172,6 +9172,189 @@ impl App {
         };
     }
 
+    fn render_clone_project_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            randomize_name,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let checkbox_state = if *focus == CloneProjectFocus::RandomizedNameCheckbox {
+            CheckboxState::Focused
+        } else {
+            CheckboxState::Normal
+        };
+        let checkbox_label = "Use randomized pet name";
+        let dialog_width = 80.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let checkbox = Checkbox::new(checkbox_label)
+            .checked(*randomize_name)
+            .state(checkbox_state);
+        let checkbox_height = checkbox
+            .layout(
+                inner_width,
+                checkbox.marker_style(Style::default()),
+                checkbox.label_style(Style::default()),
+            )
+            .height
+            .saturating_add(1);
+        // The project's name is the folder the clone lands in; the line is
+        // absent while the destination ends in a separator and names none.
+        let project_name = Some(destination.text.trim())
+            .filter(|text| !text.ends_with('/'))
+            .and_then(|text| Path::new(text).file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_string);
+        let area = centered_rect_exact(dialog_width, 19 + checkbox_height, frame.area());
+        let inner = self
+            .open_modal_frame(frame, "Clone a Repository", area)
+            .inner;
+
+        let [
+            address_label,
+            address_area,
+            destination_label,
+            destination_area,
+            name_label,
+            name_area,
+            _,
+            checkbox_area,
+            _,
+            project_area,
+            _,
+            hint_area,
+        ] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(checkbox_height),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .areas(inner);
+
+        let label_style = Style::default().fg(self.theme.input_label_fg);
+        let mut field_rects = Vec::new();
+        for (label_area, label, field_area, input, field) in [
+            (
+                address_label,
+                " Repository address (anything git clone accepts):",
+                address_area,
+                address,
+                CloneProjectFocus::Address,
+            ),
+            (
+                destination_label,
+                " Clone into:",
+                destination_area,
+                destination,
+                CloneProjectFocus::Destination,
+            ),
+            (
+                name_label,
+                " Name for the first agent (used as branch name):",
+                name_area,
+                agent_name,
+                CloneProjectFocus::AgentName,
+            ),
+        ] {
+            Paragraph::new(Line::from(Span::styled(label, label_style)))
+                .render(label_area, frame.buffer_mut());
+            // The caret only appears while the field has focus: a field that
+            // takes no keystrokes must not look like it does.
+            let focused = *focus == field;
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(self.theme.overlay_field_border_style(focused));
+            field_rects.push(block.inner(field_area));
+            Paragraph::new(render_single_line_cursor_input(
+                " ",
+                &input.text,
+                input.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                focused,
+            ))
+            .block(block)
+            .render(field_area, frame.buffer_mut());
+        }
+
+        let (checkbox_rect, _) = self.render_overlay_checkbox(
+            frame,
+            checkbox_area,
+            checkbox_label,
+            *randomize_name,
+            checkbox_state,
+            Some(Line::from(Span::styled(
+                format!(
+                    "{}Fills the name with a fresh pet-tool name",
+                    Checkbox::indent()
+                ),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ))),
+        );
+
+        if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
+            let hint = Style::default().fg(self.theme.hint_desc_fg);
+            // One row: the name gives up its middle so the sentence and the
+            // chip's two pads still fit.
+            let lead = " Adds the project ";
+            let tail = " on the remote's default branch.";
+            let room = usize::from(inner.width)
+                .saturating_sub(display_width(lead))
+                .saturating_sub(display_width(tail))
+                .saturating_sub(2);
+            Paragraph::new(Line::from(vec![
+                Span::styled(lead, hint),
+                name_chip(&ellipsize_middle(&project_name, room), &self.theme),
+                Span::styled(tail, hint),
+            ]))
+            .render(project_area, frame.buffer_mut());
+        }
+
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        // Name only a binding that can still move focus out of a text field.
+        let focus_key = self
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection);
+        let mut hints = vec![
+            Hint::key(confirm_key, "clone"),
+            Hint::maybe_key(focus_key, "focus"),
+        ];
+        // Space is a typed character in every field, so the hint appears only
+        // while the checkbox has focus.
+        if *focus == CloneProjectFocus::RandomizedNameCheckbox {
+            hints.push(Hint::plain("Space toggle"));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::CloneProject {
+            address: field_rects[0],
+            destination: field_rects[1],
+            agent_name: field_rects[2],
+            checkbox: OverlayCheckbox {
+                id: OverlayCheckboxId::CloneProjectRandomizedPetName,
+                rect: checkbox_rect,
+            },
+        };
+    }
+
     fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame) {
         let PromptState::ResourceMonitor {
             rows,
@@ -10843,6 +11026,7 @@ impl App {
             }
             PromptState::DebugInput { .. } => self.render_debug_input_prompt(frame),
             PromptState::NameNewAgent { .. } => self.render_name_new_agent_prompt(frame),
+            PromptState::CloneProject { .. } => self.render_clone_project_prompt(frame),
             PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
             PromptState::AttachPullRequestInput { .. } => {
                 self.render_attach_pull_request_input_prompt(frame)

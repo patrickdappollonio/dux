@@ -315,6 +315,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // No default key: cloning is an occasional start-of-project act, and
+        // the palette is where it lives.
+        action: Action::CloneProject,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::StartBackgroundServer,
         default_keys: &[],
         scopes: &[],
@@ -3340,6 +3349,7 @@ mod tests {
             "change-project-default-provider",
             "change-theme",
             "checkout-project-default-branch",
+            "clone-project",
             "close-tab",
             "configure-global-env",
             "configure-project-env",
