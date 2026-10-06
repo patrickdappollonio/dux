@@ -554,16 +554,21 @@ impl AuthState {
         };
         if !presented.is_empty() || !bearer.is_empty() {
             self.sessions.ready().await;
-            // The first value that is a valid session wins; a planted or
-            // stale one beside it changes nothing.
-            session = presented.iter().chain(&bearer).copied().find(|digest| {
-                self.sessions.check(
-                    digest,
-                    &snapshot.generation,
-                    idle_windows(&snapshot.config),
-                    true,
-                )
-            });
+            // Every valid credential is refreshed, so none idles out while it
+            // is being presented; the first valid one names the session, and
+            // a planted or stale one beside it changes nothing.
+            let idle = idle_windows(&snapshot.config);
+            session = presented
+                .iter()
+                .chain(&bearer)
+                .copied()
+                .filter(|digest| {
+                    self.sessions
+                        .check(digest, &snapshot.generation, idle, true)
+                })
+                .collect::<Vec<_>>()
+                .first()
+                .copied();
         }
         let required =
             snapshot.has_password() && required_by(snapshot.config.require, classification.class);
@@ -1410,5 +1415,80 @@ mod tests {
         assert_eq!(at(1).as_millis(), 1_000);
         assert_eq!(at(9).as_millis(), 3_000);
         assert_eq!(at(3600).as_millis(), 15_000);
+    }
+
+    /// A request carrying a cookie and a bearer token together keeps both
+    /// sessions alive, not only the one that identifies it.
+    #[tokio::test]
+    async fn a_cookie_and_a_bearer_presented_together_both_stay_alive() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "orbit velvet quarry lantern cobalt".to_string(),
+        ))
+        .unwrap();
+        let config = ServerAuthConfig {
+            password_hash: hash,
+            session_idle_seconds: 10 * 86_400,
+            cli_token_idle_days: 1,
+            ..ServerAuthConfig::default()
+        };
+        let now = Arc::new(AtomicI64::new(1_000_000));
+        let reads = Arc::clone(&now);
+        let state = AuthState::start_with_clock(
+            AuthSetup {
+                live: Arc::new(LiveAuth::new(&config)),
+                exposure: None,
+                bound_ips: Vec::new(),
+                tailscale_leg: None,
+                config_path: None,
+                sessions_db: None,
+                console: crate::console::Console::noop(),
+                engine: None,
+                reload: Arc::new(|| {}),
+                opening_hook: None,
+            },
+            Arc::new(move || reads.load(Ordering::SeqCst)),
+        );
+        let generation = state.snapshot().generation.clone();
+        let browser = state
+            .sessions
+            .issue(&generation, SessionKind::Browser)
+            .await
+            .unwrap();
+        let cli = state
+            .sessions
+            .issue(&generation, SessionKind::Cli)
+            .await
+            .unwrap();
+        let both = |headers: &mut HeaderMap| {
+            headers.insert(
+                "cookie",
+                format!("dux_session_0={}", browser.cookie_value)
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", cli.cookie_value).parse().unwrap(),
+            );
+        };
+        // Thirty-six hours, twelve at a time, each request carrying both.
+        for _ in 0..3 {
+            now.fetch_add(12 * 3_600_000, Ordering::SeqCst);
+            let mut headers = HeaderMap::new();
+            both(&mut headers);
+            let facts = RequestFacts::of(None, &headers);
+            assert!(state.assess(facts, &headers).await.session.is_some());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", cli.cookie_value).parse().unwrap(),
+        );
+        let facts = RequestFacts::of(None, &headers);
+        assert!(
+            state.assess(facts, &headers).await.session.is_some(),
+            "the bearer was presented every twelve hours, so it is not a day idle"
+        );
     }
 }
