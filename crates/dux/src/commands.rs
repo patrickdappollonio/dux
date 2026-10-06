@@ -185,11 +185,15 @@ pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), Stri
 
 #[derive(Subcommand, Debug)]
 pub enum ServerSub {
-    /// Show the server's log.
+    /// Show the server's log: the last lines of server.log, read from the
+    /// file when dux is not running.
     Logs {
-        /// Keep printing new lines as they are written.
+        /// Keep printing new lines as they are written, until interrupted.
         #[arg(short = 'f', long)]
         follow: bool,
+        /// How many of the last lines to start from.
+        #[arg(long, value_name = "N", default_value_t = dux_core::client::server_inspect::DEFAULT_LINES)]
+        lines: usize,
     },
     /// The connections attached to the server.
     Connections {
@@ -670,6 +674,13 @@ mod tests {
     fn server_inspection_commands_carry_no_listener_flags() {
         assert!(parse(&["server", "logs", "-f"]).is_ok());
         assert!(parse(&["server", "connections", "ls"]).is_ok());
+        let logs = |args: &[&str]| match server(args).command {
+            Some(ServerSub::Logs { follow, lines }) => (follow, lines),
+            other => panic!("expected logs, got {other:?}"),
+        };
+        assert_eq!(logs(&["logs"]), (false, 100));
+        assert_eq!(logs(&["logs", "-f", "--lines", "5"]), (true, 5));
+        assert!(error_text(&["server", "logs", "--lines", "many"]).contains("--lines"));
     }
 
     #[test]

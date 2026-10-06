@@ -250,6 +250,23 @@ Like `dux.log`, it rotates by size and keeps a bounded number of copies, so it c
 without end; see the `log_*` settings in the table below. The file and every copy are readable only by
 you. A server that cannot open its log still serves, and says why in `dux.log`.
 
+From a shell, `dux server logs` prints the last 100 lines of `server.log` (`--lines N`
+changes how many). `dux server logs -f` keeps printing each new line as it is written,
+across rotations, until you press `Ctrl-c`. With a dux running it asks that dux, and
+`--remote <name>` asks a saved remote one. With none running it reads the file itself, and
+says so when the file does not exist yet. A followed log also ends when the server stops
+or the sign-in it was opened with ends.
+
+### Who is connected
+
+`dux server connections ls` lists what is connected to the server right now, oldest first:
+each browser tab and, when it is serving, the terminal UI, with the device (the browser and
+system the tab says it is), the address, when it connected, and the agent tabs and terminals
+it is streaming, marked `(driving)` where it is the one typing. An address is shown
+`(unverified)` when dux could only see the connection's nearest hop, which a proxy in between
+may be. The word is connections, not devices: it counts browser tabs, so one laptop with two
+tabs open is two. Add `--format json` for the whole record, or `-q` for the ids alone.
+
 ## Who can get in
 
 dux is a single-tenant, trusted-access tool: one owner, one workspace. It is safe to put on

@@ -65,7 +65,12 @@ fn main() -> Result<()> {
             }
             match server.command {
                 None => run_server(server.into_overrides()),
-                Some(_) => not_built(),
+                Some(commands::ServerSub::Logs { follow, lines }) => {
+                    client_commands::finish(client_commands::server_logs(follow, lines, &selection))
+                }
+                Some(commands::ServerSub::Connections { command }) => client_commands::finish(
+                    client_commands::server_connections(command, &selection),
+                ),
             }
         }
         // Every well-formed `config` line was split off above; clap only

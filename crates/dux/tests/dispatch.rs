@@ -198,8 +198,7 @@ fn resource_commands_answer_with_no_dux_running_and_never_create_the_database() 
             "no macro has the id or name m\n",
         ),
         (&["env", "ls", "--show"][..], 0, "NAME   VALUE\n", ""),
-        (&["server", "logs", "-f"][..], 2, "", NOT_BUILT),
-        (&["server", "connections", "ls"][..], 2, "", NOT_BUILT),
+        (&["server", "connections", "ls"][..], 4, "", NOT_RUNNING),
         (&["operations", "show", "op1"][..], 4, "", NOT_RUNNING),
     ] {
         let dir = home("no-dux");
@@ -316,8 +315,42 @@ fn config_with_local_runs_as_normal() {
 #[test]
 fn global_flags_work_beside_a_server_subcommand() {
     let run = dux("server-remote-logs", &["server", "--remote", "box", "logs"]);
-    assert_eq!(run.stderr(), "this command is not built yet\n");
+    assert_eq!(
+        run.stderr(),
+        "no remote is saved as box; \"dux remote ls\" lists the saved ones\n"
+    );
     assert_eq!(run.code(), 2);
+}
+
+#[test]
+fn server_logs_with_dux_stopped_print_the_files_last_lines_from_the_file_the_config_names() {
+    let dir = home("stopped-logs");
+    // Before dux has ever served there is no file: nothing is printed, and
+    // the person is told why.
+    let run = dux_in(&dir, &["server", "logs"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(run.stdout(), "");
+    assert!(
+        run.stderr().contains("There is no server log at"),
+        "{}",
+        run.stderr()
+    );
+
+    std::fs::write(dir.join("server.log"), "one\ntwo\nthree\nfour\n").unwrap();
+    let run = dux_in(&dir, &["server", "logs", "--lines", "2"], &[]);
+    assert_eq!((run.code(), run.stdout().as_str()), (0, "three\nfour\n"));
+    let run = dux_in(&dir, &["server", "logs"], &[]);
+    assert_eq!(run.stdout(), "one\ntwo\nthree\nfour\n");
+
+    std::fs::write(
+        dir.join("config.toml"),
+        "[server]\nlog_path = \"elsewhere.log\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("elsewhere.log"), "named\n").unwrap();
+    let run = dux_in(&dir, &["server", "logs"], &[]);
+    assert_eq!(run.stdout(), "named\n");
+    assert!(!dir.join("sessions.sqlite3").exists());
 }
 
 #[test]

@@ -52,6 +52,88 @@ fn dux(home: &Path, args: &[&str], input: &str) -> Run {
     }
 }
 
+/// The `PATH` this test process started with, before it points every program
+/// the serve might run at nothing.
+static SHELL_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+
+fn append(path: &Path, text: &str) {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+}
+
+/// A `dux … logs -f` that keeps running: its stdout lines arrive on a
+/// channel as it prints them.
+struct Follower {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl Follower {
+    fn start(home: &Path, args: &[&str]) -> Self {
+        use std::io::BufRead;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dux"))
+            .args(args)
+            .env("DUX_HOME", home)
+            .env_remove("DUX_REMOTE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("the dux binary runs");
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                if sender.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    /// Read lines until `want` is printed, failing after ten seconds.
+    fn wait_for(&mut self, want: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(want) => return,
+                Ok(_) => {}
+                Err(_) => panic!("{want:?} was never printed"),
+            }
+        }
+    }
+
+    /// Press Ctrl-C on it and answer the signal that ended it.
+    fn interrupt(&mut self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill")
+            .args(["-INT", &pid])
+            .env("PATH", SHELL_PATH.get().unwrap())
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.signal();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        panic!("the follow did not end on Ctrl-C");
+    }
+}
+
 /// An empty, owner-only config folder.
 fn home(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dux-cfgres-{}-{name}", std::process::id()));
@@ -65,7 +147,7 @@ fn home(name: &str) -> PathBuf {
     dir
 }
 
-const CONFIG: &str = "# kept by hand\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" }\n\n[ui]\ngithub_integration = false\n\n[server]\ntailscale = \"no\"\n";
+const CONFIG: &str = "# kept by hand\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" }\n\n[ui]\ngithub_integration = false\n\n[server]\ntailscale = \"no\"\naccess_log = false\n";
 
 /// Serve dux on `root` in this process, on a loopback port, and wait until
 /// its control socket answers. Returns the port.
@@ -114,6 +196,10 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     std::fs::write(root.join("config.toml"), CONFIG).unwrap();
     std::fs::create_dir_all(root.join("themes")).unwrap();
     std::fs::write(root.join("themes/alpha.toml"), "").unwrap();
+    // `kill` is found on the path the shell gave, which is replaced next.
+    SHELL_PATH
+        .set(std::env::var_os("PATH").unwrap_or_default())
+        .unwrap();
     // Nothing the serve might run (gh, tailscale, git) is the developer's own.
     // SAFETY: this binary runs this one test, and no other thread is running
     // yet.
@@ -197,6 +283,53 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
         assert_eq!(remote.code(), 0, "{listing:?}: {}", remote.stderr());
         assert!(!here.stdout().is_empty(), "{listing:?}");
         assert_eq!(remote.stdout(), here.stdout(), "{listing:?}");
+    }
+
+    // Nobody is connected to this dux, over the socket or the remote.
+    for through in [&[][..], &["--remote", "here"][..]] {
+        let with = |rest: &[&str]| {
+            let mut args = through.to_vec();
+            args.extend_from_slice(rest);
+            dux(&root, &args, "")
+        };
+        let run = with(&["server", "connections", "ls"]);
+        assert_eq!(run.code(), 0, "{through:?}: {}", run.stderr());
+        assert_eq!(
+            run.stdout(),
+            "CONNECTION   DEVICE   ADDRESS   SINCE   ATTACHED\n"
+        );
+        assert_eq!(with(&["server", "connections", "ls", "-q"]).stdout(), "");
+        assert_eq!(
+            with(&["server", "connections", "list", "--format", "json"]).stdout(),
+            "[]\n"
+        );
+    }
+
+    // The server log, a tail and a follow, over the socket and the remote.
+    for (turn, through) in [&[][..], &["--remote", "here"][..]].into_iter().enumerate() {
+        let (first, last, live) = (
+            format!("tail {turn} first"),
+            format!("tail {turn} last"),
+            format!("written while following {turn}"),
+        );
+        append(&root.join("server.log"), &format!("{first}\n{last}\n"));
+        let mut args = through.to_vec();
+        args.extend_from_slice(&["server", "logs", "--lines", "2"]);
+        let run = dux(&root, &args, "");
+        assert_eq!(run.code(), 0, "{through:?}: {}", run.stderr());
+        assert_eq!(run.stdout(), format!("{first}\n{last}\n"), "{through:?}");
+
+        let mut args = through.to_vec();
+        args.extend_from_slice(&["server", "logs", "-f", "--lines", "1"]);
+        let mut follower = Follower::start(&root, &args);
+        follower.wait_for(&last);
+        append(&root.join("server.log"), &format!("{live}\n"));
+        follower.wait_for(&live);
+        assert_eq!(
+            follower.interrupt(),
+            Some(2),
+            "{through:?}: Ctrl-C ends the follow"
+        );
     }
 
     // With no dux running the command edits the file, comments kept.

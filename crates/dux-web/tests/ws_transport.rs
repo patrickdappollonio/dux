@@ -1102,14 +1102,16 @@ async fn delete_agent_once_free(addr: SocketAddr, id: &str, connection: Option<&
     }
 }
 
-/// A browser tab's terminal sockets name its events connection, so the tab
-/// deleting the agent it is viewing is not in its own way; a second tab on the
-/// same machine, with the same address and the same `User-Agent`, is.
+/// The server's connections list names each browser tab with its address and
+/// what it streams. A browser tab's terminal sockets name its events
+/// connection, so the tab deleting the agent it is viewing is not in its own
+/// way; a second tab on the same machine, with the same address and the same
+/// `User-Agent`, is.
 #[tokio::test]
-async fn a_browser_tab_is_not_in_its_own_way_but_a_second_tab_on_the_same_machine_is() {
+async fn a_browser_tab_is_listed_and_not_in_its_own_way_but_a_second_tab_on_the_same_machine_is() {
     let (addr, _tmp) = boot().await;
-    let (_events_a, tab_a) = connect_events(addr).await;
-    let (_events_b, tab_b) = connect_events(addr).await;
+    let (_events_a, tab_a) = connect_events_as(addr, "dux-same-browser").await;
+    let (_events_b, tab_b) = connect_events_as(addr, "dux-same-browser").await;
     let _pty_a = connect_pty_as(
         addr,
         &format!("/ws/sessions/s1/pty?events={tab_a}"),
@@ -1122,6 +1124,29 @@ async fn a_browser_tab_is_not_in_its_own_way_but_a_second_tab_on_the_same_machin
         "dux-same-browser",
     )
     .await;
+
+    let listed: serde_json::Value =
+        reqwest::get(format!("http://{addr}/api/v1/server/connections"))
+            .await
+            .expect("GET connections")
+            .json()
+            .await
+            .unwrap();
+    let listed = listed.as_array().expect("an array");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    for tab in [&tab_a, &tab_b] {
+        let entry = listed
+            .iter()
+            .find(|entry| entry["id"] == tab.as_str())
+            .unwrap_or_else(|| panic!("{tab} is listed: {listed:?}"));
+        assert_eq!(entry["surface"], "browser");
+        assert_eq!(entry["device"], "dux-same-browser");
+        assert_eq!(entry["address"], "127.0.0.1");
+        assert_eq!(entry["driving"], false);
+        assert_eq!(entry["attachments"][0]["kind"], "tab");
+        assert_eq!(entry["attachments"][0]["agent"], "s1");
+        assert_eq!(entry["attachments"].as_array().map(Vec::len), Some(1));
+    }
 
     let (status, refused) = delete_agent_as(addr, "s1", Some(&tab_a)).await;
     assert_eq!(status, 409, "{refused}");

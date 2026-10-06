@@ -12,6 +12,7 @@ pub mod connect;
 pub mod output;
 pub mod reload;
 pub mod remotes;
+pub mod server_inspect;
 pub mod sign_in;
 pub mod transport;
 pub mod wait;

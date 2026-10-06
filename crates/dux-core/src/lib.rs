@@ -40,6 +40,7 @@ pub mod duration_text;
 pub mod editor;
 pub mod engine;
 pub mod file_drop;
+pub mod file_follow;
 pub mod file_modes;
 pub mod first_load;
 pub mod flat_list;

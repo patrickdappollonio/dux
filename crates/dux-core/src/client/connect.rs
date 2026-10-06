@@ -193,6 +193,19 @@ impl Client {
         self.transport.send(&request)
     }
 
+    /// [`Transport::stream`] with this client's sign-in: `request`'s reply
+    /// handed to `on_body` as it arrives. A cut stream is [`Exit::NotRunning`].
+    pub fn stream(
+        &self,
+        mut request: Request,
+        on_body: &mut dyn FnMut(u16, &[u8]) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), CliError> {
+        request.bearer = self.token.clone();
+        self.transport
+            .stream(&request, on_body)
+            .map_err(|error| self.no_reply(&error))
+    }
+
     /// The error for a request that got no reply.
     pub fn no_reply(&self, error: &TransportError) -> CliError {
         match error {

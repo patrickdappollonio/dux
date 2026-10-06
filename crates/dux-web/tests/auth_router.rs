@@ -389,6 +389,8 @@ fn protected_routes() -> Vec<Req> {
         get("/api/v1/terminals"),
         post("/api/v1/terminals"),
         get("/api/v1/resources"),
+        get("/api/v1/server/connections"),
+        get("/api/v1/server/log"),
         get("/api/v1/browse"),
         get("/api/v1/release-notes"),
         get("/api/v1/config/raw"),
@@ -1024,7 +1026,32 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
         None
     );
 
+    // A followed server log holds its session the way a socket does.
+    std::fs::write(server._dux.tmp.path().join("server.log"), "hello\n").unwrap();
     let client = reqwest::Client::new();
+    let follow = |cookie: String| {
+        let client = client.clone();
+        let url = format!("http://{}/api/v1/server/log?follow=true", server.addr);
+        async move {
+            let mut reply = client
+                .get(url)
+                .header("x-forwarded-for", "198.51.100.9")
+                .header("cookie", cookie)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), 200);
+            let first = reply.chunk().await.unwrap().expect("the log's first line");
+            assert_eq!(&first[..], b"hello\n");
+            reply
+        }
+    };
+    let ended = |mut reply: reqwest::Response, within: Duration| async move {
+        tokio::time::timeout(within, reply.chunk()).await
+    };
+    let a_follow = follow(a.clone()).await;
+    let b_follow = follow(b.clone()).await;
+
     let logout = client
         .post(format!("http://{}/api/v1/auth/logout", server.addr))
         .header("x-forwarded-for", "198.51.100.9")
@@ -1037,11 +1064,25 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
         wait_close(&mut a_events, Duration::from_secs(3)).await,
         Some(4401)
     );
+    assert!(
+        matches!(ended(a_follow, Duration::from_secs(3)).await, Ok(Ok(None))),
+        "signing out ends the log stream opened under that session"
+    );
     assert_eq!(
         wait_close(&mut b_events, Duration::from_millis(500)).await,
         None,
         "the other session is untouched"
     );
+    let b_follow = {
+        let mut b_follow = b_follow;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), b_follow.chunk())
+                .await
+                .is_err(),
+            "the other session's stream stays open and quiet"
+        );
+        b_follow
+    };
 
     let change = client
         .post(format!("http://{}/api/v1/auth/password", server.addr))
@@ -1055,6 +1096,10 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
     assert_eq!(
         wait_close(&mut b_events, Duration::from_secs(3)).await,
         Some(4401)
+    );
+    assert!(
+        matches!(ended(b_follow, Duration::from_secs(3)).await, Ok(Ok(None))),
+        "a password change ends the log stream opened under the old password"
     );
 }
 

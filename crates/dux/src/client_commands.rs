@@ -5,12 +5,12 @@ use dux_core::client::config_resources::{self as resources, Source, Writer};
 use dux_core::client::connect::{self, REMOTE_VARIABLE, Target};
 use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
-use dux_core::client::{CliError, Exit, sign_in, wait};
+use dux_core::client::{CliError, Exit, server_inspect, sign_in, wait};
 use dux_core::config::DuxPaths;
 
 use crate::commands::{
-    ChangeFlags, EnvSub, Format, ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub,
-    RemoteSub,
+    ChangeFlags, ConnectionsSub, EnvSub, Format, ListFlags, ListOnlySub, MacrosSub, NamedReadSub,
+    OperationsSub, RemoteSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
@@ -398,4 +398,69 @@ pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
             |writer| resources::remove_env(writer, &name),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The server itself
+// ---------------------------------------------------------------------------
+
+/// `dux server connections ls`.
+pub fn server_connections(
+    command: ConnectionsSub,
+    selection: &Selection,
+) -> Result<String, CliError> {
+    let ConnectionsSub::Ls(list) = command;
+    let paths = discover()?;
+    let client = connect::connect(&selection.target(&paths)?, &paths.lock_path)?;
+    server_inspect::connections_ls(&client, shape(&list))
+}
+
+/// `dux server logs`: the last lines of the server log and, with `follow`,
+/// every line after, printed as they come. A dux on this machine that is not
+/// running has left the log in its file, which is read as it stands.
+pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<String, CliError> {
+    use std::io::Write;
+    use std::ops::ControlFlow;
+    let paths = discover()?;
+    // A closed pipe (`| head`) ends the command quietly.
+    let mut print = |line: &str| {
+        let mut out = std::io::stdout().lock();
+        match writeln!(out, "{line}").and_then(|()| out.flush()) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(_) => ControlFlow::Break(()),
+        }
+    };
+    let client = match selection.target(&paths)? {
+        Target::Local => connect::connect_local_if_running(&paths.lock_path)?,
+        target @ Target::Remote { .. } => Some(connect::connect(&target, &paths.lock_path)?),
+    };
+    match client {
+        Some(client) if follow => server_inspect::log_follow(&client, lines, &mut print)?,
+        Some(client) => {
+            for line in server_inspect::log_tail(&client, lines)? {
+                if print(&line).is_break() {
+                    break;
+                }
+            }
+        }
+        None => {
+            let path = server_inspect::log_file(&paths)?;
+            if !path.exists() {
+                eprintln!(
+                    "There is no server log at {} yet: dux has not served from this machine.",
+                    path.display()
+                );
+            }
+            if follow {
+                server_inspect::file_follow(&path, lines, &mut print);
+            } else {
+                for line in server_inspect::file_tail(&path, lines) {
+                    if print(&line).is_break() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(String::new())
 }
