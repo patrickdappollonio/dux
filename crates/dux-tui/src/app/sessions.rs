@@ -1509,6 +1509,7 @@ impl App {
             .tab_prose_label(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
             .unwrap_or_else(|| Self::title_case_word(session.provider.as_str()));
         self.prompt = PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id,
             tab_id,
             provider_label,
@@ -1957,6 +1958,7 @@ impl App {
             return Ok(());
         }
         self.prompt = PromptState::ConfirmDetachAgent {
+            attached: Vec::new(),
             session_id: session.id.clone(),
             label,
             grace_seconds: dux_core::config::shutdown_grace(
@@ -2038,6 +2040,7 @@ impl App {
             .branch_provenance()
             .is_some_and(|provenance| provenance.dux_may_delete_branch());
         self.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             session_id: session.id.clone(),
             agent_label: session.display_label(),
             target,
@@ -2201,20 +2204,27 @@ impl App {
         })
     }
 
+    /// Start deleting an agent. A refusal because somebody else is attached
+    /// to it comes back for the dialog to name them; any other failure is on
+    /// the status line.
     pub(crate) fn begin_delete_session(
         &mut self,
         session_id: &str,
         delete_worktree: bool,
         delete_branch: Option<bool>,
-    ) {
+    ) -> Option<dux_core::engine::Attached> {
         match self.engine.apply(Command::BeginDeleteSession {
             session_id: session_id.to_string(),
             delete_worktree,
             delete_branch,
         }) {
             Ok(reaction) => self.apply_reaction(reaction),
-            Err(e) => self.set_error(format!("{e:#}")),
+            Err(e) => match super::attachment_presence::attached_refusal(e) {
+                Ok(refused) => return Some(refused),
+                Err(e) => self.set_error(format!("{e:#}")),
+            },
         }
+        None
     }
 
     /// Remove all local bookkeeping for a session whose git side has already been
@@ -2297,6 +2307,7 @@ impl App {
             return Ok(());
         };
         self.prompt = PromptState::ConfirmDeleteTerminal {
+            attached: Vec::new(),
             terminal_id: (*terminal_id).clone(),
             terminal_label: terminal.label.clone(),
             foreground_cmd: terminal.foreground_cmd.clone(),
@@ -2305,17 +2316,27 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn do_delete_terminal(&mut self, terminal_id: &str) {
+    /// Close a terminal. A refusal because somebody else is attached to it
+    /// comes back for the dialog to name them; any other failure is on the
+    /// status line.
+    pub(crate) fn do_delete_terminal(
+        &mut self,
+        terminal_id: &str,
+    ) -> Option<dux_core::engine::Attached> {
         let reaction = match self.engine.apply(Command::DeleteTerminal {
             terminal_id: terminal_id.to_string(),
         }) {
             Ok(r) => r,
             Err(e) => {
-                self.set_error(format!("{e:#}"));
-                return;
+                match super::attachment_presence::attached_refusal(e) {
+                    Ok(refused) => return Some(refused),
+                    Err(e) => self.set_error(format!("{e:#}")),
+                }
+                return None;
             }
         };
         self.apply_reaction(reaction);
+        None
     }
 
     fn change_agent_provider_options(
@@ -3613,6 +3634,7 @@ impl App {
             return;
         }
         self.prompt = PromptState::ConfirmRemoveProject {
+            attached: Vec::new(),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             agent_count: 0,
@@ -3631,6 +3653,7 @@ impl App {
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) {
         self.prompt = PromptState::ConfirmRemoveProject {
+            attached: Vec::new(),
             agent_count: self.project_agent_count(&project_id),
             project_name: name,
             project_id,
@@ -3655,6 +3678,7 @@ impl App {
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) {
         self.prompt = PromptState::ConfirmDeleteProject {
+            attached: Vec::new(),
             agent_count: self.project_agent_count(&project.id),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
@@ -8809,6 +8833,7 @@ mod tests {
             grace_seconds,
             live_tabs,
             focus,
+            ..
         } = &app.prompt
         else {
             panic!("a live agent raises the confirmation");
@@ -8947,19 +8972,24 @@ mod tests {
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
         release_agent_elsewhere(&mut app);
 
-        // Refused, naming who, while a browser watches it.
-        let watching = crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
+        // Refused while a browser watches it: the dialog stays open naming
+        // who, with focus back on Cancel, and nothing is stopped.
+        crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);
-        assert!(
-            app.status.text().contains("10.0.0.7"),
-            "{}",
-            app.status.text()
-        );
+        match &app.prompt {
+            PromptState::ConfirmDetachAgent {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1);
+                assert_eq!(attached[0].address.as_deref(), Some("10.0.0.7"));
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the detach dialog stays open, got {other:?}"),
+        }
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
-        crate::app::test_support::stop_watching(&app, watching);
 
-        app.confirm_detach_selected_session().expect("dispatch");
+        // Confirming again goes ahead over them.
         app.resolve_confirm_detach_agent(true);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -9127,8 +9157,28 @@ mod tests {
         let (_root, mut app, worktree) = project_with_a_real_agent();
         app.execute_command("delete-project".to_string())
             .expect("open the confirmation");
+        let agent = app.engine.sessions[0].id.clone();
+        let tab = app.engine.sessions[0].slot_tab_id().to_string();
+        crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
 
-        // Move focus from Cancel to Delete, then press it.
+        // Move focus from Cancel to Delete, then press it: refused while a
+        // browser watches the agent, naming who, with focus back on Cancel.
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ConfirmDeleteProject {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1);
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the delete dialog stays open naming who, got {other:?}"),
+        }
+        assert_eq!(app.engine.sessions.len(), 1, "nothing is deleted yet");
+
+        // The override deletes it over them.
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
@@ -9434,8 +9484,7 @@ mod tests {
             },
             None,
         );
-        let watching = app
-            .engine
+        app.engine
             .attachments
             .attach("browser-tab", watched(), None, None)
             .unwrap();
@@ -9444,15 +9493,19 @@ mod tests {
             .unwrap();
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        assert!(
-            app.status.text().contains("10.0.0.7"),
-            "{}",
-            app.status.text()
-        );
+        match &app.prompt {
+            PromptState::ConfirmRemoveProject {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1);
+                assert_eq!(attached[0].address.as_deref(), Some("10.0.0.7"));
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the removal dialog stays open naming who, got {other:?}"),
+        }
         assert_eq!(app.engine.projects.len(), 1);
-        crate::app::test_support::stop_watching(&app, watching);
 
-        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
+        // The override goes ahead over them.
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))

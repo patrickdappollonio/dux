@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView } from "@/lib/types"
@@ -221,6 +221,61 @@ describe("ConfirmCloseTabDialog", () => {
     render(<ConfirmCloseTabDialog />)
     expect(screen.getByText("Close tab?")).toBeTruthy()
     expect(closeCloseTab).not.toHaveBeenCalled()
+  })
+
+  // Through the real store and client: the server's refusal because somebody
+  // else is attached keeps the dialog open naming them, focus goes back to
+  // Cancel, and only Close tab anyway sends `force_connected=true`.
+  it("names who is attached when the close is refused, and closes over them only through the override", async () => {
+    seed("s1", [tab({ id: "s1", provider: "claude" })])
+    Object.assign(mockState.spine!.sessions[0], { title: "fix-auth" })
+    const answers = [
+      {
+        status: 409,
+        body: {
+          error: "attached",
+          blockers: [
+            {
+              surface: "browser",
+              device: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15",
+              address: "100.64.0.2",
+              verified: true,
+              driving: true,
+              target: { kind: "tab", id: "s1", agent: "s1" },
+            },
+          ],
+        },
+      },
+      { status: 200, body: { detached: true } },
+    ]
+    const fetchMock = vi.fn(async () => {
+      const answer = answers.shift()!
+      return {
+        ok: answer.status < 300,
+        status: answer.status,
+        text: async () => JSON.stringify(answer.body),
+        headers: { get: () => null },
+      }
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    render(<ConfirmCloseTabDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }))
+    const override = await screen.findByRole("button", { name: "Close tab anyway" })
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel" }),
+    )
+    expect(screen.getByText("Safari on macOS").tagName).toBe("CODE")
+    expect(screen.getByText(/at 100\.64\.0\.2, typing in tab/)).toBeTruthy()
+    expect(closeCloseTab).not.toHaveBeenCalled()
+
+    fireEvent.click(override)
+    await vi.waitFor(() => expect(closeCloseTab).toHaveBeenCalled())
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls).toEqual([
+      "/api/v1/sessions/s1/tabs/s1",
+      "/api/v1/sessions/s1/tabs/s1?force_connected=true",
+    ])
   })
 
   it("links to the docs, safely, in a new tab", () => {

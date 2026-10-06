@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -42,11 +47,15 @@ export function ConfirmDetachAgentDialog() {
     session !== undefined,
     closeStopAgent,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!stopAgentTarget) return
-    killSessionPty(stopAgentTarget)
-    closeStopAgent()
+    const target = stopAgentTarget
+    const done = await confirm((force) =>
+      killSessionPty(target, false, force),
+    )
+    if (done) closeStopAgent()
   }
 
   function handleOpenChange(next: boolean) {
@@ -64,15 +73,24 @@ export function ConfirmDetachAgentDialog() {
             )}
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeStopAgent}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeStopAgent}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Detach
-          </Button>
+          <GuardedConfirmButton
+            verb="Detach"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

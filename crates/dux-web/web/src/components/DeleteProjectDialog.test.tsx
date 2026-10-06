@@ -65,7 +65,7 @@ const sessionB = {
 function seed(target: string | null, projects: unknown[], sessions: unknown[]) {
   mockState = {
     deleteProjectTarget: target,
-    spine: { projects, sessions },
+    spine: { projects, sessions, terminals: [] },
   } as unknown as DuxState
 }
 
@@ -92,12 +92,31 @@ describe("DeleteProjectDialog", () => {
     expect(screen.getByText(/worktrees on disk/)).toBeTruthy()
   })
 
-  it("dispatches the cascade delete on confirm", () => {
+  // Refused while somebody else is attached to one of its terminals, it stays
+  // open naming them and deletes only through Delete anyway.
+  it("dispatches the cascade delete on confirm, over who is attached only once they are named", async () => {
     seed("p1", [project1], [sessionA])
+    deleteProject.mockResolvedValueOnce([
+      {
+        surface: "terminal_ui",
+        device: "the dux TUI",
+        address: null,
+        verified: true,
+        driving: true,
+        target: { kind: "terminal", id: "term-9" },
+      },
+    ])
     render(<DeleteProjectDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteProject).toHaveBeenCalledWith("p1")
-    expect(closeDeleteProject).toHaveBeenCalled()
+    expect(deleteProject).toHaveBeenCalledWith("p1", false)
+    const override = await screen.findByRole("button", { name: "Delete anyway" })
+    expect(screen.getByText("the dux TUI").tagName).toBe("CODE")
+    expect(closeDeleteProject).not.toHaveBeenCalled()
+
+    deleteProject.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(deleteProject).toHaveBeenLastCalledWith("p1", true)
+    await vi.waitFor(() => expect(closeDeleteProject).toHaveBeenCalled())
   })
 
   it("closes itself when the target project vanishes mid-open", () => {

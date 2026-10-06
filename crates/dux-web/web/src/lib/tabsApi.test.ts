@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { AttachedError } from "./attached"
 import { setConnectionId } from "./connection"
 import { TabsApiError, tabsApi } from "./tabsApi"
 
@@ -66,6 +67,12 @@ describe("tabsApi", () => {
     expect(c.method).toBe("DELETE")
     expect(c.headers["x-connection-id"]).toBe("conn-7")
     expect(result).toEqual({ detached: true })
+
+    // Going ahead over everybody attached is asked for only when told to.
+    await tabsApi.remove("s1", "b2", true)
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1/tabs/b2?force_connected=true",
+    )
   })
 
   it("remove resolves undefined for an older server's bodiless 204", async () => {
@@ -106,6 +113,30 @@ describe("tabsApi", () => {
     expect(err).toBeInstanceOf(TabsApiError)
     expect(err.status).toBe(400)
     expect(err.message).toBe('provider "nope" is not configured')
+
+    // A refusal because somebody else is attached carries who, and a sentence
+    // rather than the raw body.
+    const blocker = {
+      surface: "browser",
+      device: "Mozilla/5.0 (X11; Linux x86_64) Firefox/126.0",
+      address: "10.0.0.7",
+      verified: false,
+      driving: true,
+      target: { kind: "tab", id: "b2", agent: "s1" },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 409,
+        text: async () => JSON.stringify({ error: "attached", blockers: [blocker] }),
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+    const refused = await tabsApi.remove("s1", "b2").catch((e) => e)
+    expect(refused).toBeInstanceOf(AttachedError)
+    expect(refused.blockers).toEqual([blocker])
+    expect(refused.message).not.toContain("blockers")
   })
 
   it("setFocusedTab PUTs the focused-tab endpoint with the tab id", async () => {

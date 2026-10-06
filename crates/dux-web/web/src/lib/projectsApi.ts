@@ -1,6 +1,7 @@
 // Scoped REST client for project mutations. Requests carry the connection id so
 // server-side operation status routes back to the caller; failures are `ProjectsApiError`.
 
+import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
 import type {
@@ -53,14 +54,20 @@ export const projectsApi = {
     // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
-  remove: (id: string) =>
-    request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
-  // The destructive cascade: removes the project, its agents and their worktrees
-  // from disk, where the plain `remove` above keeps the worktrees.
-  deleteWithWorktrees: (id: string) =>
+  // Both removals take `force` to go ahead over everybody attached to a terminal
+  // the removal ends.
+  remove: (id: string, force = false) =>
     request<void>(
       "DELETE",
-      `/api/v1/projects/${encodeURIComponent(id)}?delete_worktrees=true`,
+      `/api/v1/projects/${encodeURIComponent(id)}` + forceConnectedQuery(force, true),
+    ),
+  // The destructive cascade: removes the project, its agents and their worktrees
+  // from disk, where the plain `remove` above keeps the worktrees.
+  deleteWithWorktrees: (id: string, force = false) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/projects/${encodeURIComponent(id)}?delete_worktrees=true` +
+        forceConnectedQuery(force, false),
     ),
   patch: (id: string, body: PatchProjectBody) =>
     request<void>("PATCH", `/api/v1/projects/${encodeURIComponent(id)}`, body),

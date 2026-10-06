@@ -11,6 +11,7 @@ import {
   HEURISTIC_BRANCH_NOTE_PROSE,
   worktreeBaseNoteProse,
 } from "./addProjectWarning"
+import { attachedEntryProse, attachedLeadProse } from "./attached"
 import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import { detachConfirmProse } from "./detachAgent"
@@ -149,6 +150,19 @@ describe("the sentences both surfaces print", () => {
           (args.project_name as string | null) ?? undefined,
           args.agent_count as number,
         )
+      case "attached_lead":
+        return attachedLeadProse()
+      case "attached_entry":
+        return attachedEntryProse({
+          device: args.device as string | null,
+          surface: args.surface as "browser" | "terminal_ui",
+          address: args.address as string | null,
+          verified: args.verified as boolean,
+          driving: args.driving as boolean,
+          targetKind: args.target_kind as "tab" | "terminal",
+          targetLabel: args.target_label as string,
+          agentLabel: args.agent_label as string | null,
+        })
       default:
         throw new Error(`the fixture names a sentence this test cannot build: ${sentence}`)
     }

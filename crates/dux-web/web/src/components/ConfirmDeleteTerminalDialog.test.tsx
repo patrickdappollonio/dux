@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { TerminalView } from "@/lib/types"
 
-// Override only `useDux` so the dialog reads our seeded spine + delete target,
-// while the real store exports (closeDeleteTerminal, deleteTerminal) stay intact.
+// Override `useDux` so the dialog reads our seeded spine + delete target, and spy
+// `deleteTerminal`, while the other real store exports stay intact.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return { ...actual, useDux: () => mockState, deleteTerminal: vi.fn() }
 })
 
 // The real store boots on import (localStorage + bootstrap fetch). jsdom doesn't
@@ -32,6 +32,7 @@ installBootStubs()
 const { ConfirmDeleteTerminalDialog } = await import(
   "./ConfirmDeleteTerminalDialog"
 )
+const store = await import("@/lib/store")
 
 function term(overrides: Partial<TerminalView>): TerminalView {
   return {
@@ -117,5 +118,36 @@ describe("ConfirmDeleteTerminalDialog", () => {
     expect(screen.getByRole("heading").textContent).toBe("Close Terminal 1?")
     expect(screen.getByText("Terminal 1").tagName).toBe("CODE")
     expect(screen.queryByText(/will be killed/)).toBeNull()
+  })
+
+  // Refused because somebody else is attached, the dialog names them and only
+  // Close terminal anyway asks to go ahead over them.
+  it("names who is attached when the close is refused, and closes over them only through the override", async () => {
+    seedProjectTerminal(term({}))
+    const deleteTerminal = vi.mocked(store.deleteTerminal)
+    deleteTerminal.mockResolvedValueOnce([
+      {
+        surface: "browser",
+        device: null,
+        address: "192.0.2.7",
+        verified: false,
+        driving: false,
+        target: { kind: "terminal", id: "term-1" },
+      },
+    ])
+    render(<ConfirmDeleteTerminalDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Close terminal" }))
+    expect(deleteTerminal).toHaveBeenCalledWith("term-1", false)
+    const override = await screen.findByRole("button", {
+      name: "Close terminal anyway",
+    })
+    expect(
+      screen.getByText(/a browser at 192\.0\.2\.7 \(unverified\), watching terminal/),
+    ).toBeTruthy()
+
+    deleteTerminal.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(deleteTerminal).toHaveBeenLastCalledWith("term-1", true)
   })
 })

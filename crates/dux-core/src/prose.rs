@@ -332,6 +332,28 @@ mod tests {
                 args["project_name"].as_str(),
                 args["agent_count"].as_u64().expect("agent_count") as usize,
             ),
+            "attached_lead" => crate::attached_prose::attached_lead_prose(),
+            "attached_entry" => {
+                use crate::attachments::{Surface, TargetKind};
+                crate::attached_prose::attached_entry_prose(&crate::attached_prose::AttachedEntry {
+                    device: args["device"].as_str().map(str::to_string),
+                    surface: match s("surface").as_str() {
+                        "browser" => Surface::Browser,
+                        "terminal_ui" => Surface::TerminalUi,
+                        other => panic!("unknown surface {other}"),
+                    },
+                    address: args["address"].as_str().map(str::to_string),
+                    verified: args["verified"].as_bool().expect("verified"),
+                    driving: args["driving"].as_bool().expect("driving"),
+                    target_kind: match s("target_kind").as_str() {
+                        "tab" => TargetKind::Tab,
+                        "terminal" => TargetKind::Terminal,
+                        other => panic!("unknown target kind {other}"),
+                    },
+                    target_label: s("target_label"),
+                    agent_label: args["agent_label"].as_str().map(str::to_string),
+                })
+            }
             other => panic!("the fixture names a sentence this test cannot build: {other}"),
         }
     }

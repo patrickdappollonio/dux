@@ -303,6 +303,13 @@ while anybody else is connected to what it would end, and says who: the device, 
 it connects from (marked unverified when dux cannot vouch for it), whether they are typing
 in it or watching, and which tab or terminal. Nothing is changed.
 
+The delete, detach, force stop, close tab, close terminal and project dialogs say it in place,
+on both the browser and the terminal app: the dialog stays open, lists everybody it would cut
+off, moves focus back to Cancel, and its button becomes **Delete anyway** (or **Detach
+anyway**, **Close tab anyway**, and so on). Pressing that goes ahead over them; Cancel or
+Escape changes nothing. Quitting the terminal app while somebody else is connected to one of
+its terminals asks the same way, with **Quit anyway**.
+
 Only the connection asking is left out. The browser tab you are using is never in its own
 way, and neither is the terminal app deleting the agent it shows, but a second tab open on
 the same computer counts like any other device.

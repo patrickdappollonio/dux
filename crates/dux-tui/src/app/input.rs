@@ -7972,12 +7972,17 @@ impl App {
             ),
             _ => return false,
         };
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if confirm {
             // Dispatches git work to a worker when needed, so the UI stays
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
-            self.begin_delete_session(&session_id, delete_worktree, branch_answer);
+            let refused = self.guarded_by(&asked, |app| {
+                app.begin_delete_session(&session_id, delete_worktree, branch_answer)
+            });
+            if let Some(refused) = refused {
+                self.reopen_naming_attached(asked, refused);
+            }
         }
         false
     }
@@ -7987,9 +7992,12 @@ impl App {
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => terminal_id.clone(),
             _ => return false,
         };
-        self.prompt = PromptState::None;
-        if confirm {
-            self.do_delete_terminal(&terminal_id);
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
+        if confirm
+            && let Some(refused) =
+                self.guarded_by(&asked, |app| app.do_delete_terminal(&terminal_id))
+        {
+            self.reopen_naming_attached(asked, refused);
         }
         false
     }
@@ -8003,7 +8011,7 @@ impl App {
             PromptState::ConfirmDetachAgent { session_id, .. } => session_id.clone(),
             _ => return false,
         };
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if !confirm {
             return false;
         }
@@ -8014,13 +8022,12 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
-        let reservation = match self
-            .engine
-            .reserve_destruction(self.engine.agent_scope(&session_id))
+        let scope = self.engine.agent_scope(&session_id);
+        let reservation = match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope))
         {
             Ok(reservation) => reservation,
-            Err(attached) => {
-                self.set_error(attached.to_string());
+            Err(refused) => {
+                self.reopen_naming_attached(asked, refused);
                 return false;
             }
         };
@@ -8153,7 +8160,7 @@ impl App {
         {
             return false;
         }
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if !confirm {
             self.set_info(dux_core::project_prose::delete_project_cancelled_message(
                 &project_name,
@@ -8175,9 +8182,8 @@ impl App {
             ));
             return false;
         };
-        if let Err(err) = self.run_delete_project(project) {
-            self.set_error(format!("{err:#}"));
-        }
+        let outcome = self.guarded_by(&asked, |app| app.run_delete_project(project));
+        self.settle_guarded(asked, outcome);
         false
     }
 
@@ -8245,7 +8251,7 @@ impl App {
         {
             return false;
         }
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if !confirm {
             self.set_info(dux_core::project_prose::remove_project_cancelled_message(
                 &project_name,
@@ -8262,7 +8268,9 @@ impl App {
                 self.set_warning(gone);
                 return false;
             }
-            self.run_remove_orphaned_project(project_id, project_name)
+            self.guarded_by(&asked, |app| {
+                app.run_remove_orphaned_project(project_id, project_name)
+            })
         } else {
             let Some(project) = self
                 .engine
@@ -8274,11 +8282,9 @@ impl App {
                 self.set_warning(gone);
                 return false;
             };
-            self.run_remove_project(project)
+            self.guarded_by(&asked, |app| app.run_remove_project(project))
         };
-        if let Err(err) = outcome {
-            self.set_error(format!("{err:#}"));
-        }
+        self.settle_guarded(asked, outcome);
         false
     }
 
@@ -8289,7 +8295,7 @@ impl App {
             } => (session_id.clone(), tab_id.clone()),
             _ => return false,
         };
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if !confirm {
             return false;
         }
@@ -8301,16 +8307,15 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
-        let _reservation = match self
-            .engine
-            .reserve_destruction(dux_core::engine::Engine::pty_scope(&tab_id))
-        {
-            Ok(reservation) => reservation,
-            Err(attached) => {
-                self.set_error(attached.to_string());
-                return false;
-            }
-        };
+        let scope = dux_core::engine::Engine::pty_scope(&tab_id);
+        let _reservation =
+            match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope)) {
+                Ok(reservation) => reservation,
+                Err(refused) => {
+                    self.reopen_naming_attached(asked, refused);
+                    return false;
+                }
+            };
         // Read both names off the PRE-close strip, which is the strip the
         // confirmation named its successor from: after the close the labels can
         // renumber (two tabs on one provider lose their " 2"), and the closed
@@ -8425,15 +8430,16 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
-        let PromptState::ConfirmQuit { attached, .. } = &mut self.prompt else {
+        let PromptState::ConfirmQuit { attached, .. } = &self.prompt else {
             return confirm;
         };
+        let attached = attached.clone();
         if confirm {
             // Asked again, naming everybody, when somebody attached behind the
             // open dialog; otherwise nobody can attach to anything from here
             // until dux has gone.
-            if let Err(now) = self.engine.reserve_quit(attached) {
-                *attached = now.blockers;
+            if let Err(now) = self.engine.reserve_quit(&attached) {
+                self.prompt.name_attached(now.blockers);
                 self.set_warning(
                     "Another device connected while this was open. Check who is connected now, \
                      then confirm again to quit.",
@@ -24804,6 +24810,7 @@ cyan = "#00ffff"
         // immediate feedback for cursor moves and toggles.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -27764,6 +27771,7 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_cancel_button_closes_prompt() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -27796,6 +27804,7 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_checkbox_toggles_delete_worktree() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -27841,6 +27850,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -27903,6 +27913,7 @@ cyan = "#00ffff"
         delete_branch: bool,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: "agent".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
@@ -27990,6 +28001,7 @@ cyan = "#00ffff"
                 unpushed_commits,
                 ..
             } => PromptState::ConfirmDeleteAgent {
+                attached: Vec::new(),
                 session_id,
                 agent_label,
                 target,
@@ -28022,6 +28034,7 @@ cyan = "#00ffff"
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -28075,6 +28088,7 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
@@ -32392,12 +32406,30 @@ cyan = "#00ffff"
         let terminal_id = app.terminal_items()[0].0.clone();
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
+            attached: Vec::new(),
             terminal_id: terminal_id.clone(),
             terminal_label: "test".to_string(),
             foreground_cmd: None,
             focus: ConfirmFocus::Confirm,
         };
 
+        // Refused while a browser watches it: the dialog stays open naming
+        // who, with focus back on Cancel, and the terminal keeps running.
+        let session_id = app.engine.sessions[0].id.clone();
+        crate::app::test_support::watch_from_a_browser(&app, &terminal_id, &session_id);
+        app.resolve_confirm_delete_terminal(true);
+        match &app.prompt {
+            PromptState::ConfirmDeleteTerminal {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1);
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the close dialog stays open, got {other:?}"),
+        }
+        assert_eq!(app.engine.companion_terminals.len(), 1);
+
+        // Confirming again closes it over them.
         app.resolve_confirm_delete_terminal(true);
 
         assert!(
@@ -32417,6 +32449,7 @@ cyan = "#00ffff"
         let terminal_id = app.terminal_items()[0].0.clone();
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
+            attached: Vec::new(),
             terminal_id,
             terminal_label: "test".to_string(),
             foreground_cmd: None,
@@ -34963,6 +34996,7 @@ cyan = "#00ffff"
             .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
         app.set_focused_tab(&session_id, &tab_id);
         let prompt = || PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id: session_id.clone(),
             tab_id: tab_id.clone(),
             provider_label: "Codex".to_string(),
@@ -35001,21 +35035,28 @@ cyan = "#00ffff"
             std::time::Instant::now(),
         );
 
-        // While a browser watches the tab, the close is refused naming who.
-        let watching = crate::app::test_support::watch_from_a_browser(&app, &tab_id, &session_id);
+        // While a browser watches the tab, the close is refused: the dialog
+        // stays open naming who, with focus back on Cancel.
+        crate::app::test_support::watch_from_a_browser(&app, &tab_id, &session_id);
         app.prompt = prompt();
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
-        assert!(
-            app.status.text().contains("10.0.0.7"),
-            "{}",
-            app.status.text()
-        );
+        match &app.prompt {
+            PromptState::ConfirmCloseTab {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1);
+                assert_eq!(attached[0].address.as_deref(), Some("10.0.0.7"));
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the close dialog stays open, got {other:?}"),
+        }
         assert!(app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)));
-        crate::app::test_support::stop_watching(&app, watching);
 
-        app.prompt = prompt();
-        // Space activates the focused (Close) button.
+        // Moving to the override and pressing it closes the tab over them;
+        // Space activates the focused button.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("move to the override");
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
 
@@ -35052,6 +35093,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
 
         app.prompt = PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id: session_id.clone(),
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
@@ -35193,6 +35235,7 @@ cyan = "#00ffff"
         app.set_focused_tab(&session_id, &slot_tab);
 
         app.prompt = PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id: session_id.clone(),
             tab_id: slot_tab.clone(),
             provider_label: "Claude".to_string(),
@@ -35255,6 +35298,7 @@ cyan = "#00ffff"
         app.center_mode = CenterMode::Agent;
 
         app.prompt = PromptState::ConfirmCloseTab {
+            attached: Vec::new(),
             session_id: session_id.clone(),
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
@@ -38122,6 +38166,7 @@ cyan = "#00ffff"
         // ── ConfirmDeleteAgent: Cancel -> Delete -> Checkbox.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            attached: Vec::new(),
             delete_branch: false,
             unpushed_commits: None,
             session_id: "s1".to_string(),

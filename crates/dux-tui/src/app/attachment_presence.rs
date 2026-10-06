@@ -13,7 +13,10 @@
 //! ([`Engine::attached_elsewhere`](dux_core::engine::Engine::attached_elsewhere)).
 
 use super::*;
-use dux_core::attachments::{ConnectionFacts, Surface, TERMINAL_UI_CONNECTION, Target, TargetKind};
+use dux_core::attachments::{
+    Blocker, ConnectionFacts, Surface, TERMINAL_UI_CONNECTION, Target, TargetKind,
+};
+use dux_core::engine::Attached;
 
 impl App {
     /// The pane being drawn right now streams this surface's selected
@@ -90,6 +93,55 @@ impl App {
         scope
     }
 
+    /// Run the confirm of `asked`: as its override when the dialog already
+    /// names who is attached (the person saw them and said to go ahead), as a
+    /// plain confirm the guard may refuse otherwise.
+    pub(crate) fn guarded_by<R>(
+        &mut self,
+        asked: &PromptState,
+        act: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if asked.attached().is_empty() {
+            act(self)
+        } else {
+            self.over_everybody_attached(act)
+        }
+    }
+
+    /// Run `act` as a change the person said to go ahead with over everybody
+    /// attached: the guard still reserves what it ends, and only its refusal
+    /// is skipped.
+    fn over_everybody_attached<R>(&mut self, act: impl FnOnce(&mut Self) -> R) -> R {
+        let forced = dux_core::attachments::Policy {
+            requester: Some(TERMINAL_UI_CONNECTION.to_string()),
+            force: true,
+        };
+        let previous = self.engine.dispatch_policy.replace(forced);
+        let result = act(self);
+        self.engine.dispatch_policy = previous;
+        result
+    }
+
+    /// The guard refused the confirm of `asked`: open it again naming who is
+    /// in the way, with its confirm turned into the override and focus back on
+    /// Cancel, so the keystroke that confirmed cannot also go ahead over them.
+    pub(crate) fn reopen_naming_attached(&mut self, mut asked: PromptState, refused: Attached) {
+        asked.name_attached(refused.blockers);
+        self.prompt = asked;
+    }
+
+    /// What the confirm of `asked` came to: nothing to say when it went
+    /// ahead, the dialog opened again naming who when somebody else is
+    /// attached, any other failure on the status line.
+    pub(crate) fn settle_guarded(&mut self, asked: PromptState, outcome: Result<()>) {
+        if let Err(error) = outcome {
+            match attached_refusal(error) {
+                Ok(refused) => self.reopen_naming_attached(asked, refused),
+                Err(error) => self.set_error(format!("{error:#}")),
+            }
+        }
+    }
+
     /// This surface stopped drawing anything: it is leaving the terminal (a
     /// quit, or the flip to the server).
     pub(super) fn release_drawn_attachments(&mut self) {
@@ -100,6 +152,62 @@ impl App {
         );
         self.drawn_ptys.clear();
         self.published_ptys = None;
+    }
+}
+
+/// A refusal from a guarded change, when that is what `error` is.
+pub(crate) fn attached_refusal(error: anyhow::Error) -> Result<Attached, anyhow::Error> {
+    error.downcast::<Attached>()
+}
+
+impl PromptState {
+    /// Who the guard named when it refused this dialog's confirm: nobody until
+    /// it has, and nobody for a dialog the guard does not cover.
+    pub(crate) fn attached(&self) -> &[Blocker] {
+        match self {
+            PromptState::ConfirmDeleteAgent { attached, .. }
+            | PromptState::ConfirmDeleteTerminal { attached, .. }
+            | PromptState::ConfirmCloseTab { attached, .. }
+            | PromptState::ConfirmDetachAgent { attached, .. }
+            | PromptState::ConfirmDeleteProject { attached, .. }
+            | PromptState::ConfirmRemoveProject { attached, .. }
+            | PromptState::ConfirmQuit { attached, .. } => attached,
+            _ => &[],
+        }
+    }
+
+    /// Name `blockers` in this dialog and put focus back on Cancel.
+    pub(crate) fn name_attached(&mut self, blockers: Vec<Blocker>) {
+        match self {
+            PromptState::ConfirmDeleteAgent {
+                attached, focus, ..
+            } => {
+                *attached = blockers;
+                *focus = DeleteAgentFocus::Cancel;
+            }
+            PromptState::ConfirmDeleteTerminal {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmCloseTab {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmDetachAgent {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmDeleteProject {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmRemoveProject {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmQuit {
+                attached, focus, ..
+            } => {
+                *attached = blockers;
+                *focus = ConfirmFocus::Cancel;
+            }
+            _ => {}
+        }
     }
 }
 

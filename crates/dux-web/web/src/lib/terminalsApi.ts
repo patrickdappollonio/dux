@@ -2,6 +2,7 @@
 // dedicated socket; these requests carry the connection id for status routing
 // and surface failures as `TerminalsApiError`.
 
+import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
 
 // A failed terminals REST call. `status` is the HTTP status (0 for a network/
@@ -34,10 +35,12 @@ export const terminalsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/terminals`,
     ),
-  remove: (sessionId: string, terminalId: string) =>
+  // Every close takes `force` to go ahead over everybody attached to the terminal.
+  remove: (sessionId: string, terminalId: string, force = false) =>
     request<void>(
       "DELETE",
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/terminals/${encodeURIComponent(terminalId)}`,
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/terminals/${encodeURIComponent(terminalId)}` +
+        forceConnectedQuery(force, true),
     ),
   // Project terminals (a plain shell at the project's repo root with no agent
   // attached) ride the project-nested twins of the session routes.
@@ -46,18 +49,22 @@ export const terminalsApi = {
       "POST",
       `/api/v1/projects/${encodeURIComponent(projectId)}/terminals`,
     ),
-  removeForProject: (projectId: string, terminalId: string) =>
+  removeForProject: (projectId: string, terminalId: string, force = false) =>
     request<void>(
       "DELETE",
-      `/api/v1/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}` +
+        forceConnectedQuery(force, true),
     ),
   // A standalone terminal (a plain shell in the user's home directory, owned by neither an
   // agent nor a project) rides un-nested addresses: there is no owner to nest under, and
   // nothing has to exist before it, so the create takes no id at all.
   createStandalone: () =>
     request<CreatedTerminal>("POST", "/api/v1/terminals"),
-  removeStandalone: (terminalId: string) =>
-    request<void>("DELETE", `/api/v1/terminals/${encodeURIComponent(terminalId)}`),
+  removeStandalone: (terminalId: string, force = false) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/terminals/${encodeURIComponent(terminalId)}` + forceConnectedQuery(force, true),
+    ),
   // Reorder the flat Terminals section as one global list. `terminalIds` must be the complete
   // set of every current terminal id, whatever its owner, in the desired order; the server
   // validates it as a strict permutation and rejects a stale set. Terminal order is

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -38,6 +38,7 @@ function installBootStubs() {
 installBootStubs()
 const { DeleteProjectDialog } = await import("./DeleteProjectDialog")
 const { RemoveProjectDialog } = await import("./RemoveProjectDialog")
+const store = await import("@/lib/store")
 const { CheckoutDefaultBranchDialog } = await import(
   "./CheckoutDefaultBranchDialog"
 )
@@ -96,6 +97,47 @@ describe("project confirmations name the project as a chip", () => {
       "This removes duck-pond and deletes its 1 agent from dux. Worktrees on disk are kept.",
     )
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
+  })
+
+  it("Remove project names who is attached as chips and removes over them only through Remove anyway", async () => {
+    seed({
+      removeProjectTarget: "p1",
+      spine: {
+        projects: [project],
+        sessions: [],
+        terminals: [
+          {
+            id: "term-3",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 3",
+          },
+        ],
+        sidebar: { groups: [] },
+      },
+    } as unknown as Partial<DuxState>)
+    const removeProject = vi.mocked(store.removeProject)
+    removeProject.mockResolvedValueOnce([
+      {
+        surface: "browser",
+        device: "Mozilla/5.0 (Linux; Android 14) Chrome/124.0 Mobile Safari/537.36",
+        address: "100.64.0.9",
+        verified: true,
+        driving: false,
+        target: { kind: "terminal", id: "term-3" },
+      },
+    ])
+    render(<RemoveProjectDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }))
+    expect(removeProject).toHaveBeenCalledWith("p1", false)
+    const override = await screen.findByRole("button", { name: "Remove anyway" })
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
+    const who = screen.getByText((_, el) => el?.tagName === "LI")
+    expect(chips(who)).toEqual(["Chrome on Android", "Terminal 3"])
+
+    removeProject.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(removeProject).toHaveBeenLastCalledWith("p1", true)
   })
 
   it("Check out default branch names the project and its current base", () => {

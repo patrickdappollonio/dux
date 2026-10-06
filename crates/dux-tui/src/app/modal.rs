@@ -1026,6 +1026,7 @@ pub(super) mod tests {
             (
                 "ConfirmDeleteAgent",
                 PromptState::ConfirmDeleteAgent {
+                    attached: Vec::new(),
                     delete_branch: false,
                     unpushed_commits: None,
                     session_id: "s1".to_string(),
@@ -1043,6 +1044,7 @@ pub(super) mod tests {
             (
                 "ConfirmDeleteTerminal",
                 PromptState::ConfirmDeleteTerminal {
+                    attached: Vec::new(),
                     terminal_id: "t1".to_string(),
                     terminal_label: "My Cool Terminal".to_string(),
                     foreground_cmd: None,
@@ -1052,6 +1054,7 @@ pub(super) mod tests {
             (
                 "ConfirmCloseTab",
                 PromptState::ConfirmCloseTab {
+                    attached: Vec::new(),
                     session_id: "s1".to_string(),
                     tab_id: "t1".to_string(),
                     provider_label: "Claude Code".to_string(),
@@ -1062,6 +1065,7 @@ pub(super) mod tests {
             (
                 "ConfirmDetachAgent",
                 PromptState::ConfirmDetachAgent {
+                    attached: Vec::new(),
                     session_id: "s1".to_string(),
                     label: "my cool agent".to_string(),
                     grace_seconds: 30,
@@ -1094,6 +1098,7 @@ pub(super) mod tests {
             (
                 "ConfirmDeleteProject",
                 PromptState::ConfirmDeleteProject {
+                    attached: Vec::new(),
                     project_id: "p1".to_string(),
                     project_name: "My Cool Project".to_string(),
                     agent_count: 2,
@@ -1104,6 +1109,7 @@ pub(super) mod tests {
             (
                 "ConfirmRemoveProject",
                 PromptState::ConfirmRemoveProject {
+                    attached: Vec::new(),
                     project_id: "p1".to_string(),
                     project_name: "My Cool Project".to_string(),
                     agent_count: 0,

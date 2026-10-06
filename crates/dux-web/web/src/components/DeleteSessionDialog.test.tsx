@@ -173,7 +173,7 @@ describe("DeleteSessionDialog", () => {
     })
     expect(branchBox.getAttribute("aria-checked")).toBe("true")
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", true, true)
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, true, false)
   })
 
   // The mirror, and the reason the box is a control rather than a label: it
@@ -186,17 +186,52 @@ describe("DeleteSessionDialog", () => {
       screen.getByRole("checkbox", { name: /Also delete the branch/ }),
     )
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", true, false)
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, false, false)
   })
 
   // With the worktree kept there is no branch offer on screen at all, so the
   // request must carry no branch answer either: an answer nobody was asked for
   // is the server deciding on a click that never happened.
-  it("sends no branch answer when the worktree is kept", () => {
-    seed("s1", [session1])
+  //
+  // Refused because a browser is watching the agent, the dialog stays open,
+  // names who as chips, puts focus back on Cancel and offers Delete anyway,
+  // which goes ahead over them.
+  it("sends no branch answer when the worktree is kept, and goes ahead over who is attached only once they are named", async () => {
+    seed("s1", [
+      { ...session1, tabs: [{ id: "s1-slot", provider: "claude" }] },
+    ])
+    deleteSession.mockResolvedValueOnce([
+      {
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: false,
+        driving: false,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+      },
+    ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", false, null)
+    expect(deleteSession).toHaveBeenCalledWith("s1", false, null, false)
+
+    const override = await screen.findByRole("button", { name: "Delete anyway" })
+    expect(closeDelete).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel" }),
+    )
+    const who = screen.getByText((_, el) => el?.tagName === "LI")
+    expect(chipsIn(who)).toEqual(["Firefox on Linux", "Claude", "quacky-mallard"])
+    expect(who.textContent).toContain("at 10.0.0.7 (unverified), watching tab")
+
+    // The second click of the double click that was refused lands on the
+    // override and must not go ahead.
+    fireEvent.click(override, { detail: 2 })
+    expect(deleteSession).toHaveBeenCalledTimes(1)
+
+    deleteSession.mockResolvedValueOnce(null)
+    fireEvent.click(override)
+    expect(deleteSession).toHaveBeenLastCalledWith("s1", false, null, true)
+    await vi.waitFor(() => expect(closeDelete).toHaveBeenCalled())
   })
 
   // THE PIN. There is no worktree to remove and no branch to delete, so the
@@ -243,7 +278,7 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, false)
   })
 
   // The checkbox state outlives one open: the dialog stays mounted. A box ticked
@@ -269,7 +304,7 @@ describe("DeleteSessionDialog", () => {
     seed("sa1", [session1, standalone])
     rerender(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, false)
   })
 
   // A branch that predates the agent is still offered, because the user may
@@ -285,7 +320,7 @@ describe("DeleteSessionDialog", () => {
     expect(branchBox.getAttribute("aria-checked")).toBe("false")
     expect(screen.getByText(/This branch existed before the agent\./)).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s3", true, false)
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, false, false)
   })
 
   it("sends the override when the user ticks a pre-existing branch", () => {
@@ -296,7 +331,7 @@ describe("DeleteSessionDialog", () => {
       screen.getByRole("checkbox", { name: /Also delete the branch/ }),
     )
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s3", true, true)
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, true, false)
   })
 
   it("warns about nothing for a branch dux created", () => {

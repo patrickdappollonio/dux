@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -37,11 +42,15 @@ export function ConfirmForceStopAgentDialog() {
     session !== undefined,
     closeForceStopAgent,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!forceStopAgentTarget) return
-    killSessionPty(forceStopAgentTarget, true)
-    closeForceStopAgent()
+    const target = forceStopAgentTarget
+    const done = await confirm((force) =>
+      killSessionPty(target, true, force),
+    )
+    if (done) closeForceStopAgent()
   }
 
   function handleOpenChange(next: boolean) {
@@ -57,15 +66,24 @@ export function ConfirmForceStopAgentDialog() {
             {renderProse(forceStopConfirmProse(label))}
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeForceStopAgent}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeForceStopAgent}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Force stop
-          </Button>
+          <GuardedConfirmButton
+            verb="Force stop"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -2722,6 +2722,10 @@ pub(crate) enum PromptState {
         /// dialog says nothing about commits in both cases rather than
         /// guessing a number.
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,
@@ -2732,6 +2736,10 @@ pub(crate) enum PromptState {
         /// an idle terminal merely ends the shell.
         foreground_cmd: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Delete
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Close one agent tab. Closing it ends that tab's session for good
     /// (destructive), so it defaults to Cancel. The tab in the session slot
@@ -2747,6 +2755,10 @@ pub(crate) enum PromptState {
         /// first" are two different promises and the user is owed both.
         promoted_label: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Close
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Ask the selected agent to shut down and leave it Detached. Destructive
     /// (whatever the agent is doing is interrupted), so it defaults to Cancel.
@@ -2764,6 +2776,10 @@ pub(crate) enum PromptState {
         /// the grace, for the same reason.
         live_tabs: usize,
         focus: ConfirmFocus, // Cancel (default) or Detach
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     /// The way out of a working copy the agent deleted from under itself.
     ///
@@ -2820,6 +2836,10 @@ pub(crate) enum PromptState {
         /// The project action list this was opened from; a cancel steps back
         /// to it.
         return_to: Option<Box<ProjectActionsPrompt>>,
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Asked before `remove-project` runs anything, the same question the
     /// browser's Remove project dialog asks: the project leaves dux and every
@@ -2836,6 +2856,10 @@ pub(crate) enum PromptState {
         /// The project action list this was opened from; a cancel steps back
         /// to it.
         return_to: Option<Box<ProjectActionsPrompt>>,
+        /// Everybody else attached to what confirming would end, filled in when
+        /// the guard refused the confirm: the dialog names them and its confirm
+        /// becomes the override. Empty until then.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     ConfirmQuit {
         agent_count: usize,

@@ -2,6 +2,7 @@
 // socket; these requests carry the connection id for status routing and surface
 // failures as `TabsApiError`.
 
+import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
 
 // A failed tabs REST call. `status` is the HTTP status (0 for a network/transport
@@ -47,11 +48,13 @@ export const tabsApi = {
     ),
   // Close a tab. The agent detaches when it was the last live one, and closing the slot tab
   // promotes the next tab in strip order; the 200 body carries both outcomes. The agent's
-  // only tab is refused with a 400, because an agent always has a slot.
-  remove: (sessionId: string, tabId: string) =>
+  // only tab is refused with a 400, because an agent always has a slot. `force` goes ahead
+  // over everybody attached to the tab.
+  remove: (sessionId: string, tabId: string, force = false) =>
     request<ClosedTab | undefined>(
       "DELETE",
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}` +
+        forceConnectedQuery(force, true),
     ),
   // Start a dormant tab. It is the only start that gets past a recorded launch failure, which
   // opening the tab's PTY socket refuses; dispatching the launch clears that verdict, so the

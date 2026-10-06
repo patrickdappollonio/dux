@@ -615,6 +615,7 @@ mod tests {
             (
                 "ConfirmDeleteAgent(worktree, existing branch)",
                 PromptState::ConfirmDeleteAgent {
+                    attached: Vec::new(),
                     delete_branch: false,
                     unpushed_commits: Some(dux_core::git::UnpushedCommits {
                         count: 3,
@@ -635,6 +636,7 @@ mod tests {
             (
                 "ConfirmDeleteAgent(shared worktree)",
                 PromptState::ConfirmDeleteAgent {
+                    attached: Vec::new(),
                     delete_branch: false,
                     unpushed_commits: None,
                     session_id: "s1".to_string(),
@@ -652,6 +654,7 @@ mod tests {
             (
                 "ConfirmDeleteAgent(standalone)",
                 PromptState::ConfirmDeleteAgent {
+                    attached: Vec::new(),
                     delete_branch: false,
                     unpushed_commits: None,
                     session_id: "s1".to_string(),
@@ -730,6 +733,7 @@ mod tests {
             (
                 "ConfirmDeleteTerminal(foreground)",
                 PromptState::ConfirmDeleteTerminal {
+                    attached: Vec::new(),
                     terminal_id: "t1".to_string(),
                     terminal_label: "My Cool Terminal".to_string(),
                     foreground_cmd: Some("vim".to_string()),

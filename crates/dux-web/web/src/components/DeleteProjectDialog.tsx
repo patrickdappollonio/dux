@@ -1,3 +1,8 @@
+import {
+  AttachedSection,
+  GuardedConfirmButton,
+} from "@/components/AttachedSection"
+import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -26,16 +31,18 @@ export function DeleteProjectDialog() {
     project !== undefined,
     closeDeleteProject,
   )
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(isOpen)
   const name = project?.name
   const agentCount =
     spine?.sessions.filter(
       (s) => workspaceProjectId(s.workspace) === deleteProjectTarget,
     ).length ?? 0
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!deleteProjectTarget) return
-    deleteProject(deleteProjectTarget)
-    closeDeleteProject()
+    const target = deleteProjectTarget
+    const done = await confirm((force) => deleteProject(target, force))
+    if (done) closeDeleteProject()
   }
 
   function handleOpenChange(open: boolean) {
@@ -51,13 +58,22 @@ export function DeleteProjectDialog() {
             {renderProse(deleteProjectProse(name, agentCount))}
           </DialogDescription>
         </DialogHeader>
+        <AttachedSection blockers={blockers} />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeDeleteProject}>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            autoFocus
+            onClick={closeDeleteProject}
+          >
             Cancel
           </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Delete
-          </Button>
+          <GuardedConfirmButton
+            verb="Delete"
+            blockers={blockers}
+            pending={pending}
+            onConfirm={() => void handleConfirm()}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>
