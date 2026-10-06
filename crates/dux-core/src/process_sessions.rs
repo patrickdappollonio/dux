@@ -861,11 +861,15 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
             )
         };
         if usize::try_from(written).ok() == Some(size) {
-            Ok(Some(info.pbsi_uid))
-        } else if crate::file_drop::process_can_answer(pid) {
-            Err(format!("who owns process {pid} could not be read"))
-        } else {
+            return Ok(Some(info.pbsi_uid));
+        }
+        let error = std::io::Error::last_os_error();
+        // ESRCH is the kernel saying the process is gone, which includes one
+        // already exiting that signal 0 still finds for a moment.
+        if error.raw_os_error() == Some(libc::ESRCH) || !crate::file_drop::process_can_answer(pid) {
             Ok(None)
+        } else {
+            Err(format!("who owns process {pid} could not be read: {error}"))
         }
     }
 }
