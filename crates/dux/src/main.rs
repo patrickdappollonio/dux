@@ -190,6 +190,14 @@ fn run_tui_with_flip() -> Result<()> {
     Ok(())
 }
 
+/// Creates the config folder owner-only before anything is written in it.
+/// `dux server` never runs `DuxPaths::ensure_dirs`, so without this a first run
+/// leaves the folder at the umask default.
+fn create_config_root(paths: &dux_core::config::DuxPaths) -> Result<()> {
+    dux_core::file_modes::create_private_dir_all(&paths.root)?;
+    Ok(())
+}
+
 fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let parsed = match parse_server_args(args) {
         ParsedServerArgs::HelpRequested => {
@@ -207,7 +215,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let overrides = parsed.into_overrides();
 
     let paths = dux_core::config::DuxPaths::discover()?;
-    std::fs::create_dir_all(&paths.root)?;
+    create_config_root(&paths)?;
     // `dux server` never calls `ensure_config`, so without this the bootstrap's
     // project-sync would create a comment-free config.toml on a first run that
     // starts in server mode. Registering the TUI's canonical renderer keeps
@@ -475,6 +483,31 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths_in(root: &std::path::Path) -> dux_core::config::DuxPaths {
+        dux_core::config::DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        }
+    }
+
+    #[test]
+    fn server_start_creates_a_missing_config_folder_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = std::env::temp_dir().join(format!("dux-server-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = parent.join("fresh-home");
+
+        create_config_root(&paths_in(&root)).unwrap();
+
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&parent);
+        assert_eq!(mode, 0o700);
+    }
 
     fn parse(args: &[&str]) -> ParsedServerArgs {
         parse_server_args(args.iter().map(|s| s.to_string()))

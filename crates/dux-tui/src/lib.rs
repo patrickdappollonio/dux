@@ -98,7 +98,7 @@ pub fn run(
             // any writes, preventing a concurrent TUI from starting
             // between directory creation and the config write.
             "regenerate" if config_args.iter().any(|a| a == "--yes") => {
-                std::fs::create_dir_all(&paths.root)?;
+                create_private_root(&paths)?;
                 Some(acquire_lock_or_exit(&paths.lock_path))
             }
 
@@ -126,7 +126,7 @@ pub fn run(
     // opened), acquire the lock, then let bootstrap create everything
     // else. A losing process never touches shared state beyond the
     // empty root.
-    std::fs::create_dir_all(&paths.root)?;
+    create_private_root(&paths)?;
     let lock = acquire_lock_or_exit(&paths.lock_path);
     let app = app::App::bootstrap_with_lock(paths, lock)?;
     run_app(app, companion)
@@ -242,6 +242,14 @@ pub fn help_text() -> &'static str {
            Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
 }
 
+/// Creates the config folder owner-only. Every path that is about to open the
+/// lock file calls this first, so the lock never sits in a folder other users
+/// can read.
+fn create_private_root(paths: &config::DuxPaths) -> Result<()> {
+    dux_core::file_modes::create_private_dir_all(&paths.root)?;
+    Ok(())
+}
+
 fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
     match lockfile::SingleInstanceLock::acquire(path) {
         Ok(lock) => lock,
@@ -255,6 +263,26 @@ fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_config_folder_is_created_owner_only_before_the_lock_file_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("fresh-home");
+        let paths = config::DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+
+        create_private_root(&paths).unwrap();
+
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        assert!(!paths.lock_path.exists());
+    }
 
     /// `dux server` is a real subcommand (`crates/dux/src/main.rs` dispatches on
     /// it), so `--help` must list it next to the TUI and `config`. Without this,
