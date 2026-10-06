@@ -6,11 +6,12 @@ use anyhow::Result;
 use clap::Parser;
 
 fn main() -> Result<()> {
-    // First of all: `dux config set` sends SIGUSR1 to whichever dux holds the
-    // single-instance lock, and the signal's default action would end a dux
-    // that had not installed its handler yet. The handler only sets a flag;
-    // each serving mode reloads on it. A failure is reported where the mode
-    // starts (both entry points install it again and say so).
+    // First of all: a person reloading by hand with `kill -USR1` signals
+    // whichever dux holds the single-instance lock, and the signal's default
+    // action would end a dux that had not installed its handler yet. The
+    // handler only sets a flag; each serving mode reloads on it. A failure is
+    // reported where the mode starts (both entry points install it again and
+    // say so).
     let _ = dux_core::reload_signal::install();
     // `dux config` owns every word after it, `--` and flag-looking words
     // included, so it is recognised before clap sees the line.
@@ -35,7 +36,15 @@ fn main() -> Result<()> {
         if let Err(message) = commands::check_config_target(remote.as_deref(), selection.local) {
             usage_error(&message);
         }
-        return dux_tui::run_config(&config.args);
+        // A config command that ends with one of the command line's own codes
+        // (a reload whose outcome is unknown) exits with it.
+        if let Err(error) = dux_tui::run_config(&config.args) {
+            return match error.downcast::<dux_core::client::CliError>() {
+                Ok(cli) => client_commands::finish(Err(cli)),
+                Err(error) => Err(error),
+            };
+        }
+        return Ok(());
     }
     let cli = commands::Cli::parse();
     let selection = client_commands::Selection {

@@ -36,8 +36,8 @@ The web UI password is stored (strength: good): its Argon2id hash is in server.a
 dux is not running, so the change applies the next time it starts.
 ```
 
-With dux running, the last line instead says dux was asked to reload, and that once it has,
-the new password is in force and every signed-in browser is signed out.
+With dux running, the last lines instead say that dux reloaded, and that the new password is
+in force and every signed-in browser is signed out.
 
 ![A terminal running dux config set server.auth.password: the hidden prompt with its strength meter reading weak > fair > good > strong > EXCELLENT, the second prompt, and the lines saying the hash is stored in /home/you/.config/dux/config.toml and that the change applies the next time dux starts.](/screens/config-set-password.png)
 
@@ -59,8 +59,8 @@ typed would show, and a run with no terminal to ask on tells you to use `--stdin
 
 What lands in `config.toml` is only the password's Argon2id hash, at
 `server.auth.password_hash`. `dux config get server.auth.password` prints that hash. If dux
-is running, `dux config set` asks it to reload, and the password is in force as soon as it
-has.
+is running, `dux config set` asks it to reload, waits for the answer, and the password is in
+force as soon as it has reloaded.
 
 You can also set the first password from the browser, in **Preferences…** under
 **Signing in**, but only from the machine dux runs on or from your tailnet. A browser
@@ -487,7 +487,7 @@ sign-in is misconfigured and lets nobody in until the file is fixed.
 ## Changing settings while dux runs
 
 Every `[server.auth]` setting applies on a reload; none needs a restart. `dux config set`
-asks a running dux to reload by itself and says whether it could. After editing
+asks a running dux to reload by itself and says whether the reload worked. After editing
 `config.toml` by hand, reload with the terminal UI palette's `reload-config`, the browser's
 **Reload config** in the cog menu under **Configuration**, or from a shell:
 

@@ -34,8 +34,8 @@ A handful of subcommands handle the file without you hunting for it:
 - `dux config path` prints the absolute path to the active config file.
 - `dux config get <setting>` prints one setting's value (`--show` prints one that can
   hold secrets).
-- `dux config set <setting> <value>` changes one setting and tells a running dux to pick
-  it up. For a secret, leave the value out to be asked for it, or pipe it in with
+- `dux config set <setting> <value>` changes one setting and has a running dux reload it,
+  then says whether the reload worked. For a secret, leave the value out to be asked for it, or pipe it in with
   `--stdin`.
 - `dux config diff` shows what you have changed from the defaults.
 - `dux config regenerate` previews the latest canonical template, so you can see new
@@ -123,8 +123,33 @@ dux config set providers.claude.command claude
 - A key whose own name contains a dot cannot be named this way. Edit the file for that
   one.
 
-After writing, `set` asks a running dux to reload its config, and says whether it could
-ask. The running dux reports how the reload went in its status line, in the web UI's
+After writing, `set` asks the dux running on this machine to reload its config and waits
+for the answer. It then says which of these happened:
+
+- The reload applied: the new settings are in force. If a changed setting is only read when
+  dux starts or when a server binds, the same message says so and what to restart.
+- The reload was refused: the change is saved in `config.toml` but not in force, because the
+  running dux could not take the file on, and the message gives the reason. The running dux
+  keeps its previous settings. `set` exits with status 1 after writing; fix the file and run
+  a command that reloads again, or use the reload command in dux.
+- The reload applied but one step of applying it failed: the new settings are in force, the
+  message names the step that failed and says to fix it and reload again, and `set` exits
+  with status 1. The same goes when the change also started, stopped or moved a listener
+  (the background web server, the Tailscale address) and that could not be done: `set`
+  waits for the listener to answer, and the message names what it refused or why it failed.
+- dux is not running: nothing was asked. `set` prints "dux is not running, so the change
+  applies the next time it starts." and exits with status 0.
+- dux is running but could not be asked: the change is saved, and `set` prints "The change is
+  saved, but the running dux was not asked to reload it:" followed by why (for example that
+  dux is running without a control socket, or does not answer on it), then says dux keeps its
+  current settings until you reload it from the app or restart it. It exits with status 0.
+- dux did not answer in time: `set` waits up to `[cli] wait_timeout_seconds` (10 minutes by
+  default) for the reload's answer. If none comes it prints "The change is saved, but the
+  running dux has not said whether the reload worked, so its outcome is unknown:" followed by the operation it was
+  following, which keeps running and can be looked up later with `dux operations show`, and
+  exits with status 6, the command line's code for an outcome that is not known.
+
+The running dux also reports how the reload went in its status line, in the web UI's
 notifications and in `dux.log`; two `set`s in quick succession are both picked up. If dux
 is not running, the change applies the next time it starts.
 

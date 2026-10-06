@@ -513,6 +513,106 @@ mod tests {
         (took, answer)
     }
 
+    /// `POST <uri>` with a JSON body over the control socket, on its own thread.
+    fn post_over_socket(
+        path: &std::path::Path,
+        uri: &str,
+        body: &str,
+    ) -> std::thread::JoinHandle<Result<String, String>> {
+        use std::io::{Read, Write};
+        let (path, uri, body) = (path.to_path_buf(), uri.to_string(), body.to_string());
+        std::thread::spawn(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)
+                .map_err(|e| format!("connect failed: {e}"))?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                .map_err(|e| e.to_string())?;
+            write!(
+                stream,
+                "POST {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .map_err(|e| format!("write failed: {e}"))?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|e| format!("read failed: {e}"))?;
+            Ok(response)
+        })
+    }
+
+    /// The reload a reaction carries, however it is wrapped.
+    fn reloaded_config(
+        reaction: dux_core::engine::EventReaction,
+    ) -> Option<Box<dux_core::config::Config>> {
+        match reaction {
+            dux_core::engine::EventReaction::ApplyReloadedConfig(config) => Some(config),
+            dux_core::engine::EventReaction::Multi(all) => {
+                all.into_iter().find_map(reloaded_config)
+            }
+            _ => None,
+        }
+    }
+
+    /// A password set from the browser makes dux reload its own config. With the
+    /// terminal UI as the engine's servicer, the reload reaches the terminal
+    /// UI's drain as the reloaded config to adopt: no signal is raised (none is
+    /// installed here), the reload rides the engine's request channel. The
+    /// terminal UI's own handling of that reaction is covered in `dux-tui`.
+    #[test]
+    fn a_password_set_in_the_browser_reaches_the_terminal_uis_reload_owner_without_a_signal() {
+        let (mut engine, _tmp) = engine_in_tempdir();
+        engine.config.server.tailscale = "no".to_string();
+        std::fs::set_permissions(
+            &engine.paths.root,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let socket = engine.paths.root.join("dux.sock");
+        assert_eq!(
+            dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),
+            None
+        );
+        let (listener, addr) = loopback_listener();
+        let mut server = BackgroundServer::start(
+            &mut engine,
+            vec![listener],
+            vec![format!("http://{addr}")],
+            false,
+            Default::default(),
+        )
+        .expect("the serve starts");
+        assert!(!engine.config.server.auth.has_password());
+
+        let request = post_over_socket(
+            &socket,
+            "/api/v1/auth/password",
+            r#"{"new":"orbit velvet quarry lantern cobalt"}"#,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut adopted = false;
+        while !adopted && std::time::Instant::now() < deadline {
+            server.service(&mut engine);
+            while let Ok(event) = engine.worker_rx.try_recv() {
+                let reaction = engine.process_worker_event(event);
+                server.on_reaction(&mut engine, &reaction);
+                if let Some(config) = reloaded_config(reaction) {
+                    engine.apply_reloaded_config(*config).expect("adopted");
+                    adopted = true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(adopted, "the reload reached the terminal UI's owner");
+        assert!(
+            engine.config.server.auth.has_password(),
+            "the owner adopted the new password"
+        );
+        let answer = request.join().expect("thread").expect("answered");
+        assert!(answer.starts_with("HTTP/1.1 2"), "{answer}");
+    }
+
     fn socket_inode(path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         std::fs::symlink_metadata(path).expect("the socket").ino()

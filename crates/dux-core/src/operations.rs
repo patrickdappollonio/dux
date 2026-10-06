@@ -55,6 +55,14 @@
 //! | `POST /sessions/{id}/tabs/{tab}/start` | inside the call when the tab already runs, else its launch report |
 //! | `POST` and `DELETE` on the three terminal addresses | inside the call |
 //! | `PUT` and `DELETE` on `/macros/{name}` and `/global-env/{name}` | inside the call |
+//! | `POST /config/reload` | its reload's owner saying how it ended (`Engine::finish_config_reload_operations`) |
+//!
+//! A config reload has one owner per way of serving, and each says how the
+//! reload ended: the terminal UI's handlers for a reloaded config, an adopted
+//! one and a refused one (plain terminal UI and background serving), and the
+//! web actor's reload follow-up (`dux server` and the flip). A reload asked
+//! for while another is reading waits for the follow-up that reads the file
+//! after it.
 //!
 //! A record still running past its policy's `unknown_after` reads as
 //! [`OperationState::Unknown`] but stays open, and finishes with the real
@@ -118,6 +126,8 @@ pub enum OperationKind {
     EnvSet,
     #[serde(rename = "env.remove")]
     EnvRemove,
+    #[serde(rename = "config.reload")]
+    ConfigReload,
 }
 
 impl OperationKind {
@@ -140,6 +150,7 @@ impl OperationKind {
             Self::MacroRemove => "removing a macro",
             Self::EnvSet => "saving a global environment variable",
             Self::EnvRemove => "removing a global environment variable",
+            Self::ConfigReload => "reloading the config",
         }
     }
 }
@@ -393,6 +404,37 @@ pub fn launch_failure_key(session_id: &str) -> String {
 
 /// A fresh record id, from the same minter as every keyed status, so an id
 /// minted here can never name another change's status.
+/// What a record waiting for a config reload waits on. Not a status key: the
+/// reload's own statuses (the browsers' refresh notice among them) must not
+/// end it, only its owner saying how it ended does.
+const RELOAD_KEY_PREFIX: &str = "reload-epoch:";
+
+/// A reload's outcome with the listener changes that went wrong folded in:
+/// a reload that applied becomes partial, and the sentence names each.
+fn merge_listener_problems(
+    state: OperationState,
+    message: &str,
+    problems: &mut Vec<String>,
+) -> (OperationState, String) {
+    let problems = std::mem::take(problems);
+    if problems.is_empty() {
+        return (state, message.to_string());
+    }
+    let state = match state {
+        OperationState::Succeeded => OperationState::Partial,
+        other => other,
+    };
+    let message = format!(
+        "{message} The listener changes this reload asked for did not all work: {}",
+        problems.join(" ")
+    );
+    (state, message)
+}
+
+fn reload_key(epoch: u64) -> String {
+    format!("{RELOAD_KEY_PREFIX}{epoch}")
+}
+
 pub fn mint_operation_id() -> String {
     crate::engine::status_op::next_status_id()
 }
@@ -424,6 +466,21 @@ struct Record {
 #[derive(Default)]
 struct Registry {
     records: HashMap<String, Record>,
+    /// Which reload a record asked for follows. The reload whose barrier is
+    /// open, or the next one to open, is `reload_epoch`; one asked for while a
+    /// reload is already reading waits for the follow-up, `reload_epoch + 1`.
+    reload_epoch: u64,
+    /// The epochs whose barrier has closed and whose owner has not yet said
+    /// how it ended, oldest first.
+    reloads_closed: std::collections::VecDeque<u64>,
+    /// Listener changes a reload set off that have not ended.
+    listener_pending: u32,
+    /// How listener changes that ended went wrong, until a reload's outcome
+    /// takes them.
+    listener_problems: Vec<String>,
+    /// Reloads whose owner has spoken but whose listener changes have not all
+    /// ended: their epoch, state and sentence.
+    held_reloads: Vec<(u64, OperationState, String)>,
 }
 
 impl Registry {
@@ -619,6 +676,121 @@ impl Operations {
                 record.awaiting = Some(key.to_string());
             }
         });
+    }
+
+    /// Make the running record `id` wait for the config reload that will read
+    /// the file next: the one whose barrier is open now, or, with `queued`
+    /// (a reload is already reading), the follow-up it asked for.
+    pub fn await_reload(&self, id: &str, queued: bool) {
+        self.with(|registry| {
+            let key = reload_key(registry.reload_epoch + u64::from(queued));
+            if let Some(record) = registry.records.get_mut(id)
+                && record.end.is_none()
+            {
+                record.awaiting = Some(key);
+            }
+        });
+    }
+
+    /// Whether the running record `id` waits for a config reload.
+    pub fn awaits_reload(&self, id: &str) -> bool {
+        self.with(|registry| {
+            registry
+                .records
+                .get(id)
+                .and_then(|record| record.awaiting.as_deref())
+                .is_some_and(|key| key.starts_with(RELOAD_KEY_PREFIX))
+        })
+    }
+
+    /// The reload whose barrier was open has closed: its outcome is the owner's
+    /// to say, through [`Self::finish_reload`], and the next reload is the one
+    /// after it.
+    pub fn reload_closed(&self) {
+        self.with(|registry| {
+            let closed = registry.reload_epoch;
+            registry.reloads_closed.push_back(closed);
+            registry.reload_epoch += 1;
+        });
+    }
+
+    /// The owner of the oldest closed reload says how it ended: finish every
+    /// record that waited for it, or, while a listener change the reload set
+    /// off is still running, once that change has ended too. Nothing happens
+    /// when no reload has closed.
+    pub fn finish_reload(&self, state: OperationState, message: &str, now: Instant) {
+        let (closed, waiting) = self.with(|registry| {
+            let closed = registry.reloads_closed.pop_front();
+            let waiting = registry.listener_pending > 0;
+            if let (Some(epoch), true) = (closed, waiting) {
+                registry
+                    .held_reloads
+                    .push((epoch, state, message.to_string()));
+            }
+            (closed, waiting)
+        });
+        if let Some(epoch) = closed
+            && !waiting
+        {
+            let (state, message) = self.with(|registry| {
+                merge_listener_problems(state, message, &mut registry.listener_problems)
+            });
+            self.finish_awaiting_as(&reload_key(epoch), state, &message, None, now);
+        }
+    }
+
+    /// The reload being applied started a change to a listener (the background
+    /// web server, the Tailscale leg) that ends later. Pair it with
+    /// [`Self::listener_change_done`].
+    pub fn listener_change_started(&self) {
+        self.with(|registry| registry.listener_pending += 1);
+    }
+
+    /// A listener change the reload asked for was refused before it started.
+    pub fn listener_change_failed(&self, problem: String) {
+        self.with(|registry| registry.listener_problems.push(problem));
+    }
+
+    /// A listener change started by [`Self::listener_change_started`] ended,
+    /// with `problem` saying how when it did not work. When the last one ends,
+    /// the reloads that waited for them finish.
+    pub fn listener_change_done(&self, problem: Option<String>, now: Instant) {
+        let released = self.with(|registry| {
+            registry.listener_pending = registry.listener_pending.saturating_sub(1);
+            registry.listener_problems.extend(problem);
+            if registry.listener_pending > 0 || registry.held_reloads.is_empty() {
+                return Vec::new();
+            }
+            let held = std::mem::take(&mut registry.held_reloads);
+            let problems = std::mem::take(&mut registry.listener_problems);
+            held.into_iter()
+                .map(|(epoch, state, message)| {
+                    let mut own = problems.clone();
+                    (epoch, merge_listener_problems(state, &message, &mut own))
+                })
+                .collect()
+        });
+        for (epoch, (state, message)) in released {
+            self.finish_awaiting_as(&reload_key(epoch), state, &message, None, now);
+        }
+    }
+
+    /// The reload that was about to read the file could not start, so its
+    /// waiting records fail with `message`, and that reload is over: a later
+    /// one is a different reload, and never completes them.
+    pub fn fail_reload(&self, message: &str, now: Instant) {
+        let epoch = self.with(|registry| {
+            let epoch = registry.reload_epoch;
+            registry.reload_epoch += 1;
+            epoch
+        });
+        self.finish_awaiting_as(
+            &reload_key(epoch),
+            OperationState::Failed,
+            message,
+            None,
+            now,
+        );
     }
 
     /// Every record waiting on `from` now waits on `to`: the work behind
@@ -986,9 +1158,10 @@ impl crate::engine::Engine {
             .deferred_operations
             .iter()
             .any(|op| op.as_deref() == Some(provisional.as_str()));
-        let id = if deferred {
-            // Held behind a config reload: nothing has happened yet, so the
-            // record waits for the drain that runs it.
+        let id = if deferred || self.operations.awaits_reload(&provisional) {
+            // Held behind a config reload, or itself a reload: nothing has
+            // happened yet, so the record waits for the drain that runs it, or
+            // for its reload's owner to say how it ended.
             provisional
         } else {
             self.operations
@@ -1181,6 +1354,21 @@ impl crate::engine::Engine {
             .finish_by_key(key, StatusTone::Error, message, segments, now);
     }
 
+    /// A config reload ended, and `outcome` is how its owner says it did: finish
+    /// the records of every client that asked for it. Each serving mode has
+    /// exactly one owner (the terminal UI's reload handlers, or the web
+    /// actor's reload follow-up) and each calls this once per reload, on
+    /// whichever of the three results the reload had: applied, adopted with a
+    /// step failed, or refused.
+    pub fn finish_config_reload_operations(
+        &self,
+        outcome: &crate::config_reload_status::ConfigReloadOutcome,
+    ) {
+        let (state, message) = outcome.record();
+        self.operations
+            .finish_reload(state, &message, Instant::now());
+    }
+
     /// Forget the finished records past their retention. Called from the one
     /// per-tick engine call every serving surface makes, so a registry nobody
     /// reads still lets go of what it no longer has to keep.
@@ -1200,6 +1388,60 @@ mod tests {
 
     fn state_of(ops: &Operations, id: &str, now: Instant) -> OperationState {
         ops.view(id, now).expect("record present").state
+    }
+
+    /// A reload that set a listener change going is not over until the change
+    /// is: a failure of it makes the outcome partial and names it, whether it
+    /// lands after the owner said the reload applied or before.
+    #[test]
+    fn a_reload_waits_for_the_listener_changes_it_set_off() {
+        let t0 = Instant::now();
+        let open = || {
+            let ops = Operations::default();
+            ops.open("r", OperationKind::ConfigReload, POLICY, t0);
+            ops.await_reload("r", false);
+            ops.reload_closed();
+            ops
+        };
+
+        // Still running after the owner's word, finished by the change's.
+        let ops = open();
+        ops.listener_change_started();
+        ops.finish_reload(OperationState::Succeeded, "Reloaded.", t0);
+        assert_eq!(state_of(&ops, "r", t0), OperationState::Running);
+        ops.listener_change_done(None, t0);
+        let done = ops.view("r", t0).unwrap();
+        assert_eq!(done.state, OperationState::Succeeded);
+        assert_eq!(done.message, "Reloaded.");
+
+        // A failed change makes it partial and names the failure.
+        let ops = open();
+        ops.listener_change_started();
+        ops.finish_reload(OperationState::Succeeded, "Reloaded.", t0);
+        ops.listener_change_done(Some("the port is taken.".to_string()), t0);
+        let done = ops.view("r", t0).unwrap();
+        assert_eq!(done.state, OperationState::Partial);
+        assert_eq!(
+            done.message,
+            "Reloaded. The listener changes this reload asked for did not all work: the port is taken."
+        );
+
+        // Answered before the owner spoke, and refused outright.
+        let ops = open();
+        ops.listener_change_started();
+        ops.listener_change_done(Some("refused.".to_string()), t0);
+        assert_eq!(state_of(&ops, "r", t0), OperationState::Running);
+        ops.finish_reload(OperationState::Succeeded, "Reloaded.", t0);
+        assert_eq!(state_of(&ops, "r", t0), OperationState::Partial);
+        let ops = open();
+        ops.listener_change_failed("not asked.".to_string());
+        ops.finish_reload(OperationState::Succeeded, "Reloaded.", t0);
+        assert_eq!(state_of(&ops, "r", t0), OperationState::Partial);
+
+        // A reload that failed stays failed.
+        let ops = open();
+        ops.finish_reload(OperationState::Failed, "No.", t0);
+        assert_eq!(state_of(&ops, "r", t0), OperationState::Failed);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 pub mod config_resources;
 pub mod connect;
 pub mod output;
+pub mod reload;
 pub mod remotes;
 pub mod sign_in;
 pub mod transport;

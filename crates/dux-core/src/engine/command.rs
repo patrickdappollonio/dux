@@ -1089,6 +1089,11 @@ impl Engine {
                         self.deferred_commands.push(Command::ReloadConfig);
                         self.deferred_operations.push(None);
                     }
+                    // A client waiting on this one follows the reload that
+                    // reads the file after the one running.
+                    if let Some(id) = &self.operation_in_dispatch {
+                        self.operations.await_reload(id, true);
+                    }
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already running; another runs right after it, so \
                          the latest config.toml is the one that applies.",
@@ -1104,12 +1109,22 @@ impl Engine {
                 // let the caller retry.
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
+                    // The reload that was to start never will: the clients
+                    // waiting on it (a queued follow-up's) are told so, and a
+                    // later reload is a different one.
+                    self.operations.fail_reload(
+                        "Config writer is busy; please retry.",
+                        std::time::Instant::now(),
+                    );
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "Config writer is busy; please retry.",
                     )));
                 }
                 self.reloading = true;
                 self.reload_guard = Some(guard);
+                if let Some(id) = &self.operation_in_dispatch {
+                    self.operations.await_reload(id, false);
+                }
                 self.surface
                     .reload(self.paths.clone(), self.worker_tx.clone());
                 Ok(EventReaction::Nothing)

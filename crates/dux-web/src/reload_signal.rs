@@ -1,7 +1,7 @@
 //! SIGUSR1 for the serves that own the engine: `dux server` and the
 //! start-web-server flip. Each turns the signal into the engine actor's own
-//! reload arm, exactly as the "Reload config" command does, so a
-//! `dux config set` is live at once. The background serve installs nothing
+//! reload arm, exactly as the "Reload config" command does, so a hand edit
+//! followed by `kill -USR1` is live at once. The background serve installs nothing
 //! here: the terminal UI beside it drives the engine and reloads for both
 //! (see `dux_core::reload_signal`).
 
@@ -24,8 +24,8 @@ pub(crate) async fn reload_on_signal(
             Ok(signals) => signals,
             Err(error) => {
                 dux_core::logger::error(&format!(
-                    "[server] could not listen for SIGUSR1 ({error}); `dux config set` cannot \
-                     reach this server, so reload the config from the app menu after a change"
+                    "[server] could not listen for SIGUSR1 ({error}); `kill -USR1` cannot \
+                     reload this server, so reload the config from the app menu after a hand edit"
                 ));
                 return;
             }

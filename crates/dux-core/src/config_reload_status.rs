@@ -41,6 +41,45 @@ pub fn adopted_but_apply_failed(error: &str) -> StatusUpdate {
     )
 }
 
+/// How a config reload ended, as the surface that owns it says it to a client
+/// that asked for the reload and waits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigReloadOutcome {
+    /// The new settings are in force. `notes` are what the owner says only a
+    /// restart applies, each a sentence, in the owner's own words.
+    Applied { notes: Vec<String> },
+    /// The new config is in force, but a step of applying it failed.
+    ApplyFailed(String),
+    /// The file could not be taken on, so the running settings are unchanged.
+    Refused(String),
+}
+
+impl ConfigReloadOutcome {
+    /// The state and sentence a record ends on. The sentences are the ones the
+    /// status line and the browsers' toasts say for the same outcome.
+    pub fn record(&self) -> (crate::operations::OperationState, String) {
+        use crate::operations::OperationState;
+        match self {
+            Self::Applied { notes } => {
+                let mut message = applied().message;
+                for note in notes {
+                    message.push(' ');
+                    message.push_str(note);
+                }
+                (OperationState::Succeeded, message)
+            }
+            Self::ApplyFailed(error) => (
+                OperationState::Partial,
+                adopted_but_apply_failed(error).message,
+            ),
+            Self::Refused(reason) => (
+                OperationState::Failed,
+                format!("Config reload failed: {reason}"),
+            ),
+        }
+    }
+}
+
 /// A deferred config write failed, so whatever preference was last changed is
 /// not on disk.
 ///
