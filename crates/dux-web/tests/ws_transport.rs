@@ -600,6 +600,65 @@ async fn saw_status_with(ws: &mut ClientWs, needles: &[&str], timeout: Duration)
     false
 }
 
+/// The first `status` frame carrying every one of `needles`, parsed, if one
+/// arrives within the window: [`saw_status_with`] for a test that compares
+/// what the frame says.
+async fn status_frame_with(
+    ws: &mut ClientWs,
+    needles: &[&str],
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"event\":\"status\"")
+            && needles.iter().all(|needle| t.contains(needle))
+        {
+            return serde_json::from_str(&t).ok();
+        }
+    }
+    None
+}
+
+/// Assert a change followed as an operation answered `202` with a `Location`
+/// naming its record, and hand back the record's id.
+async fn followed(resp: reqwest::Response) -> String {
+    assert_eq!(resp.status().as_u16(), 202, "a followed change answers 202");
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .expect("a Location header")
+        .to_string();
+    let record: serde_json::Value = resp.json().await.expect("the record");
+    let id = record["id"].as_str().expect("the record's id").to_string();
+    assert_eq!(location, format!("/api/v1/operations/{id}"));
+    id
+}
+
+/// Read operation `id` in short waits until it has an outcome, the way a client
+/// that asked for it does.
+async fn operation_outcome(addr: SocketAddr, id: &str) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    for _ in 0..15 {
+        let record: serde_json::Value = client
+            .get(format!(
+                "http://{addr}/api/v1/operations/{id}?wait_seconds=2"
+            ))
+            .send()
+            .await
+            .expect("GET operation")
+            .json()
+            .await
+            .expect("the record");
+        if record["state"] != "running" {
+            return record;
+        }
+    }
+    panic!("operation {id} never finished");
+}
+
 /// Whether a `status` event of the given tone arrives within the window,
 /// regardless of its wording. Used by the replay test, which cares that an
 /// outcome of that tone reached (or did not reach) a connection, not about the
@@ -878,24 +937,21 @@ async fn a_final_is_replayable_continuously_from_the_moment_it_is_broadcast() {
 /// sleep in the suite would cost more than the coverage is worth.)
 #[tokio::test]
 async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() {
-    let (addr, _tmp) = boot().await;
+    let (addr, tmp) = boot().await;
     let (mut ws_a, _id_a) = connect_events(addr).await;
 
-    // Deleting s1 with its worktree runs an async removal whose git call fails
-    // (the seeded worktree path is a plain directory, not a linked worktree).
+    // Deleting s1 with its worktree and branch runs an async removal whose git
+    // call fails (the seeded worktree path is a plain directory, not a linked
+    // worktree). Followed as an operation, it answers with an id at once.
     let client = reqwest::Client::new();
     let resp = client
         .delete(format!(
-            "http://{addr}/api/v1/sessions/s1?delete_worktree=true"
+            "http://{addr}/api/v1/sessions/s1?delete_worktree=true&delete_branch=true&operation=1"
         ))
         .send()
         .await
         .expect("DELETE session");
-    assert_eq!(
-        resp.status().as_u16(),
-        204,
-        "the delete is accepted; the failure arrives as a status"
-    );
+    let op = followed(resp).await;
 
     let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
     let seen = seen.expect("the attached connection must receive the broadcast error");
@@ -905,6 +961,24 @@ async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() 
     assert!(
         seen.contains("\"sticky\":true"),
         "a half-done delete must be marked sticky on the wire, got {seen}"
+    );
+
+    // The record ends on the same final, and says what became of each part:
+    // the agent is gone, its worktree could not be removed, and its branch was
+    // never reached.
+    let record = operation_outcome(addr, &op).await;
+    let frame: serde_json::Value = serde_json::from_str(&seen).unwrap();
+    assert_eq!(record["state"], "partial");
+    assert_eq!(record["message"], frame["message"]);
+    assert_eq!(record["removed"], serde_json::json!(["s1"]));
+    let parts = record["parts"].as_array().expect("parts");
+    assert_eq!(parts.len(), 2, "{record}");
+    assert_eq!(parts[0]["part"], "worktree");
+    assert_eq!(parts[0]["subject"], tmp.path().to_string_lossy().as_ref());
+    assert_eq!(parts[0]["outcome"], "failed");
+    assert_eq!(
+        parts[1],
+        serde_json::json!({"part": "branch", "subject": "feat", "outcome": "kept"})
     );
 }
 
@@ -1154,6 +1228,37 @@ async fn rest_create_session_returns_201_and_scopes_status() {
         .await,
         "a different connection must not receive the scoped create status"
     );
+
+    // Followed as an operation, the create answers its id at once, and the
+    // record ends on the create's own final and names the agent it made.
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions?operation=1"))
+        .header("x-connection-id", &id_a)
+        .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"followed"}))
+        .send()
+        .await
+        .expect("POST create");
+    let op = followed(resp).await;
+    let record = operation_outcome(addr, &op).await;
+    assert_eq!(record["kind"], "agent.create");
+    assert_eq!(record["state"], "succeeded");
+    let created = record["created"][0].as_str().expect("the created agent");
+    assert!(
+        wait_for_workspace(addr, |spine| spine["sessions"]
+            .as_array()
+            .is_some_and(|sessions| sessions.iter().any(|s| s["id"] == created)))
+        .await,
+        "the record names an agent the workspace lists"
+    );
+    let key = format!("\"key\":\"{op}\"");
+    let final_frame = status_frame_with(
+        &mut ws_a,
+        &[&key, "\"tone\":\"info\""],
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("the create's final reaches the posting connection");
+    assert_eq!(record["message"], final_frame["message"]);
 }
 
 /// The deferred create, end to end through a real server: a create still running
@@ -1296,6 +1401,30 @@ async fn rest_create_session_from_pr_422_when_the_lookup_fails() {
         elapsed < Duration::from_secs(5),
         "the failure must answer promptly, took {elapsed:?}"
     );
+
+    // Followed as an operation, the same create answers its id at once and
+    // the record resolves to the lookup's failure.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/v1/sessions?operation=1"))
+        .json(&serde_json::json!({
+            "kind": "from_pr",
+            "project_id": "p1",
+            "pr": "#42",
+            "name": "followed-from-pr",
+        }))
+        .send()
+        .await
+        .expect("POST create");
+    let op = followed(resp).await;
+    let record = operation_outcome(addr, &op).await;
+    assert_eq!(record["state"], "failed");
+    assert!(
+        record["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not have a GitHub origin remote"),
+        "{record}"
+    );
 }
 
 /// A worker-backed add that FAILS answers `422` with the worker's message rather
@@ -1342,7 +1471,25 @@ async fn rest_add_project_422_when_the_add_fails() {
         Duration::from_secs(8),
     )
     .await;
+    // Followed as an operation, the same add answers its id at once and the
+    // record ends on the worker's failure.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/v1/projects?operation=1"))
+        .json(&serde_json::json!({
+            "path": folder.path().to_string_lossy(),
+            "init_repo": true,
+        }))
+        .send()
+        .await
+        .expect("POST add");
+    let op = followed(resp).await;
+    let record = operation_outcome(addr, &op).await;
     restore_writable(folder.path());
+    assert_eq!(record["state"], "failed");
+    assert!(
+        record["message"].as_str().unwrap().contains("init failed"),
+        "{record}"
+    );
 
     assert_eq!(status, 422, "a failed add must not answer 202: {body}");
     assert!(
@@ -2789,6 +2936,35 @@ async fn terminal_rest_create_and_delete() {
         404,
         "create on unknown session → 404"
     );
+
+    // Followed as operations, a create and a close each finish inside the call
+    // and name the terminal.
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/terminals?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["kind"], "terminal.create");
+    assert_eq!(record["state"], "succeeded");
+    let terminal_id = record["created"][0].as_str().unwrap().to_string();
+    assert!(
+        wait_for_workspace(addr, |spine| spine_has_terminal(spine, &terminal_id)).await,
+        "the record names the terminal it created"
+    );
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/terminals/{terminal_id}?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["kind"], "terminal.close");
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(record["removed"], serde_json::json!([terminal_id]));
 }
 
 /// Create a project terminal on `project_id` over REST and return its id.
@@ -2901,6 +3077,27 @@ async fn project_terminal_rest_create_and_delete() {
         404,
         "create on unknown project → 404"
     );
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/projects/p1/terminals?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["state"], "succeeded");
+    let terminal_id = record["created"][0].as_str().unwrap().to_string();
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/p1/terminals/{terminal_id}?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(record["removed"], serde_json::json!([terminal_id]));
 }
 
 /// Create a standalone terminal over REST and return its id. No owner id,
@@ -3011,6 +3208,23 @@ async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses()
         wait_for_workspace(addr, |spine| !spine_has_standalone_terminal(spine, &tid)).await,
         "the deleted standalone terminal must leave the spine"
     );
+
+    let resp = client
+        .post(format!("http://{addr}/api/v1/terminals?operation=1"))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["state"], "succeeded");
+    let tid = record["created"][0].as_str().unwrap().to_string();
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/terminals/{tid}?operation=1"))
+        .send()
+        .await
+        .unwrap();
+    let record = operation_outcome(addr, &followed(resp).await).await;
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(record["removed"], serde_json::json!([tid]));
 }
 
 /// The un-nested address is not a back door. An OWNED terminal is a 404 there,

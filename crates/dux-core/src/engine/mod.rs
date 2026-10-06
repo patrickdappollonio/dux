@@ -835,6 +835,16 @@ pub struct Engine {
     /// (whose create op is minted later, inside the PR-lookup followup).
     pub last_created_op_id: Option<String>,
 
+    /// What a client that asked for a change can learn about how it ended. See
+    /// [`crate::operations`] for the ids and the completion points.
+    pub operations: crate::operations::Operations,
+
+    /// The record of the change [`Engine::apply_wire_operation`] is
+    /// dispatching right now, so a fact the change learns before it has a key
+    /// of its own (what an inline delete did to the worktree and the branch)
+    /// reaches that record. `None` outside that call.
+    pub operation_in_dispatch: Option<String>,
+
     /// Maps a create op's opaque id to the session it produced (and when), filled
     /// in the launch-ready Create branch once the worker-minted session lands. A
     /// REST create handler holding the op id (from `WireCommandOutcome.created_op_id`)
@@ -2074,6 +2084,15 @@ impl Engine {
             now.saturating_duration_since(*at) < CREATED_SESSION_TTL
                 && sessions.iter().any(|s| &s.id == sid)
         });
+        // The create's operation record, when a client asked for one, names
+        // the agent the create made before its final lands.
+        self.operations.note(
+            &op_id,
+            crate::operations::OperationNotes {
+                created: vec![session_id.clone()],
+                ..Default::default()
+            },
+        );
         map.insert(op_id, (session_id, now));
     }
 

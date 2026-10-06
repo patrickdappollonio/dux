@@ -909,6 +909,7 @@ pub fn build_app(
         .merge(crate::terminal_actions::routes())
         .merge(crate::file_drop_routes::routes(&state))
         .merge(crate::tab_actions::routes())
+        .merge(crate::operation_routes::routes())
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
         .merge(crate::first_load_routes::routes())

@@ -43,13 +43,15 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use dux_core::operations::OperationKind;
 use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session,
-    await_session_for_op, create_failed, delete_wire_response, id_within_bound, idempotency_key,
-    outcome_is_error, require_configured_provider, scope_from_headers, unknown_session,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, OperationQuery,
+    await_new_session, await_session_for_op, create_failed, delete_operation_response,
+    delete_wire_response, id_within_bound, idempotency_key, operation_accepted, outcome_is_error,
+    require_configured_provider, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -263,15 +265,22 @@ async fn dispatch_create(
     state: &AppState,
     body: CreateSessionBody,
     headers: &HeaderMap,
+    operation: bool,
 ) -> Result<dux_core::wire::WireCommandOutcome, (StatusCode, String)> {
-    let outcome = state
-        .engine
-        .apply_wire_scoped(
-            body.into_wire(),
-            scope_from_headers(headers, &state.connections),
-        )
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let scope = scope_from_headers(headers, &state.connections);
+    let outcome = if operation {
+        state
+            .engine
+            .apply_wire_operation(body.into_wire(), scope, OperationKind::AgentCreate)
+            .await
+            .map(|(outcome, _)| outcome)
+    } else {
+        state
+            .engine
+            .apply_wire_scoped(body.into_wire(), scope)
+            .await
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if outcome_is_error(&outcome) {
         let msg = outcome
             .status
@@ -284,6 +293,7 @@ async fn dispatch_create(
 
 async fn create_session(
     State(state): State<AppState>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
     Json(raw): Json<serde_json::Value>,
 ) -> Response {
@@ -311,6 +321,17 @@ async fn create_session(
         return response;
     }
 
+    // Followed as an operation: the record answers at once, and its id is the
+    // create op (or, for a from-PR create, the lookup that hands off to it).
+    if operation.asked() {
+        return match dispatch_create(&state, body, &headers, true).await {
+            Ok(outcome) => {
+                operation_accepted(&state.engine, outcome.operation_id.as_deref().unwrap_or(""))
+            }
+            Err(refusal) => refusal.into_response(),
+        };
+    }
+
     // The from-PR create resolves differently: its create op is minted later
     // (inside the PR-lookup followup), so it has no synchronous `created_op_id` and
     // must fall back to the set-difference await with a longer window (the
@@ -324,7 +345,7 @@ async fn create_session(
         None => return engine_unavailable(),
     };
 
-    let outcome = match dispatch_create(&state, body, &headers).await {
+    let outcome = match dispatch_create(&state, body, &headers, false).await {
         Ok(outcome) => outcome,
         Err(refusal) => return refusal.into_response(),
     };
@@ -513,6 +534,7 @@ async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -521,17 +543,26 @@ async fn delete_session(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
+    let command = WireCommand::DeleteSession {
+        session_id: id.clone(),
+        delete_worktree: q.delete_worktree,
+        delete_branch: q.delete_branch,
+    };
+    if operation.asked() {
+        let result = state
+            .engine
+            .apply_wire_operation(
+                command,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::AgentDelete,
+            )
+            .await;
+        return delete_operation_response(&state.engine, result);
+    }
     delete_wire_response(
         state
             .engine
-            .apply_wire_scoped(
-                WireCommand::DeleteSession {
-                    session_id: id,
-                    delete_worktree: q.delete_worktree,
-                    delete_branch: q.delete_branch,
-                },
-                scope_from_headers(&headers, &state.connections),
-            )
+            .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
             .await,
     )
 }
@@ -653,6 +684,7 @@ struct ReconnectBody {
 async fn reconnect_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
     body: Option<Json<ReconnectBody>>,
 ) -> Response {
@@ -663,17 +695,22 @@ async fn reconnect_session(
         return resp.into_response();
     }
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::ReconnectSession {
-                session_id: id,
-                force,
-            },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
+    let command = WireCommand::ReconnectSession {
+        session_id: id,
+        force,
+    };
+    let scope = scope_from_headers(&headers, &state.connections);
+    if operation.asked() {
+        return match state
+            .engine
+            .apply_wire_operation(command, scope, OperationKind::AgentStart)
+            .await
+        {
+            Ok((_, op)) => operation_accepted(&state.engine, &op),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+    }
+    match state.engine.apply_wire_scoped(command, scope).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -735,6 +772,7 @@ struct KillSessionBody {
 async fn kill_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
     body: Option<Json<KillSessionBody>>,
 ) -> Response {
@@ -744,18 +782,27 @@ async fn kill_session(
     // Absent body means the polite path, which is what every per-agent gesture
     // sends; only the panic button asks for `force`.
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::DetachAgent {
-                session_id: id,
-                force,
-            },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        Ok(_) => StatusCode::OK.into_response(),
+    let command = WireCommand::DetachAgent {
+        session_id: id,
+        force,
+    };
+    let scope = scope_from_headers(&headers, &state.connections);
+    let result = if operation.asked() {
+        state
+            .engine
+            .apply_wire_operation(command, scope, OperationKind::AgentStop)
+            .await
+            .map(|(_, op)| Some(op))
+    } else {
+        state
+            .engine
+            .apply_wire_scoped(command, scope)
+            .await
+            .map(|_| None)
+    };
+    match result {
+        Ok(Some(op)) => operation_accepted(&state.engine, &op),
+        Ok(None) => StatusCode::OK.into_response(),
         // The engine returns "unknown session: …" when the row is gone (e.g. a
         // concurrent delete); surface that as 404, not a generic 400.
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),

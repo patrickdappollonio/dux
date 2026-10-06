@@ -24,12 +24,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use dux_core::operations::OperationKind;
 use dux_core::wire::WireCommand;
 
 use crate::rest_common::{
-    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, await_new_project, create_failed,
-    delete_wire_response, id_within_bound, idempotency_key, require_configured_provider,
-    scope_from_headers,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, OperationQuery, await_new_project,
+    create_failed, delete_operation_response, delete_wire_response, id_within_bound,
+    idempotency_key, operation_accepted, require_configured_provider, scope_from_headers,
 };
 use crate::server::AppState;
 
@@ -121,6 +122,7 @@ fn parse_add_project_body(raw: serde_json::Value) -> Result<AddProjectBody, Stri
 
 async fn add_project(
     State(state): State<AppState>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
     Json(raw): Json<serde_json::Value>,
 ) -> Response {
@@ -146,6 +148,23 @@ async fn add_project(
     };
 
     let cmd = add_project_command(body);
+
+    // Followed as an operation: the record answers at once. A plain add has
+    // finished by then; the adds that run git first are still running.
+    if operation.asked() {
+        return match state
+            .engine
+            .apply_wire_operation(
+                cmd,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::ProjectAdd,
+            )
+            .await
+        {
+            Ok((_, op)) => operation_accepted(&state.engine, &op),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+    }
 
     let outcome = match state
         .engine
@@ -213,6 +232,7 @@ async fn remove_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<RemoveProjectQuery>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -228,6 +248,17 @@ async fn remove_project(
     } else {
         WireCommand::RemoveProject { project_id: id }
     };
+    if operation.asked() {
+        let result = state
+            .engine
+            .apply_wire_operation(
+                command,
+                scope_from_headers(&headers, &state.connections),
+                OperationKind::ProjectRemove,
+            )
+            .await;
+        return delete_operation_response(&state.engine, result);
+    }
     delete_wire_response(
         state
             .engine
@@ -504,6 +535,54 @@ mod tests {
 
     use crate::test_support::router_no_auth;
 
+    /// The JSON body of `resp`.
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Assert a change followed as an operation answered `202` with a
+    /// `Location` naming its record, and read that record until it has an
+    /// outcome.
+    async fn followed_outcome(
+        app: &axum::Router,
+        resp: axum::response::Response,
+    ) -> serde_json::Value {
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let location = resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let accepted = json_body(resp).await;
+        assert_eq!(
+            location,
+            format!("/api/v1/operations/{}", accepted["id"].as_str().unwrap())
+        );
+        for _ in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{location}?wait_seconds=2"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let record = json_body(resp).await;
+            if record["state"] != "running" {
+                return record;
+            }
+        }
+        panic!("the operation at {location} never finished");
+    }
+
     /// Init a repo with `git init` but NO commit (unborn HEAD).
     fn init_repo_no_commit(dir: &Path) {
         let run = |args: &[&str]| {
@@ -671,7 +750,7 @@ mod tests {
             "the full project view is returned, not the bare id"
         );
 
-        let resp = app.oneshot(keyed(&path)).await.unwrap();
+        let resp = app.clone().oneshot(keyed(&path)).await.unwrap();
         assert_eq!(
             resp.status(),
             axum::http::StatusCode::OK,
@@ -682,6 +761,50 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["id"].as_str(), Some(id.as_str()));
+
+        // Followed as an operation, a plain add has already finished when the
+        // route answers, and its record names the project it added.
+        let other = tempfile::tempdir().unwrap();
+        init_repo_with_commit(other.path());
+        let other_path = other.path().to_string_lossy().to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects?operation=1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"path":{}}}"#,
+                        serde_json::to_string(&other_path).unwrap()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let record = json_body(resp).await;
+        assert_eq!(record["kind"], "project.add");
+        assert_eq!(record["state"], "succeeded");
+        let added = record["created"][0].as_str().expect("the added project");
+        let projects = json_body(
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let listed = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == added)
+            .expect("the record names a project the workspace lists");
+        assert_eq!(listed["path"].as_str(), Some(other_path.as_str()));
     }
 
     #[test]
@@ -1039,6 +1162,36 @@ mod tests {
             repo.path().join(".git").exists(),
             "the source checkout must survive a project delete"
         );
+
+        // Followed as an operation, the deletion's record finishes with its
+        // final and names the project it removed.
+        let other = tempfile::tempdir().unwrap();
+        init_repo_with_commit(other.path());
+        let other_id = add_project_and_id(&app, &other.path().to_string_lossy()).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/projects/{other_id}?delete_worktrees=true&operation=1"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let record = followed_outcome(&app, resp).await;
+        assert_eq!(record["kind"], "project.remove");
+        assert_eq!(record["state"], "succeeded");
+        assert_eq!(record["removed"], serde_json::json!([other_id]));
+        assert!(
+            record["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Deleted project "),
+            "{record}"
+        );
     }
 
     #[tokio::test]
@@ -1058,6 +1211,24 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
         assert!(repo.path().join(".git").exists());
+
+        let other = tempfile::tempdir().unwrap();
+        init_repo_with_commit(other.path());
+        let other_id = add_project_and_id(&app, &other.path().to_string_lossy()).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/projects/{other_id}?operation=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let record = followed_outcome(&app, resp).await;
+        assert_eq!(record["state"], "succeeded");
+        assert_eq!(record["removed"], serde_json::json!([other_id]));
     }
 
     #[tokio::test]

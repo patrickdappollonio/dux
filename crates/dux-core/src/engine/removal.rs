@@ -524,6 +524,25 @@ impl Engine {
             .get_mut(&project_id)
         {
             deletion.pending.remove(session_id);
+            // The deletion's operation record, when a client asked for one,
+            // names each agent's worktree and what became of it.
+            if let Some(op) = deletion.op.as_ref() {
+                self.operations.note(
+                    op.id(),
+                    crate::operations::OperationNotes {
+                        parts: vec![crate::operations::OperationPart {
+                            part: crate::operations::PartKind::Worktree,
+                            subject: deletion.paths.get(session_id).cloned().unwrap_or_default(),
+                            outcome: match failure {
+                                Some(_) => crate::operations::PartOutcome::Failed,
+                                None => crate::operations::PartOutcome::Removed,
+                            },
+                            reason: failure.map(str::to_string),
+                        }],
+                        ..Default::default()
+                    },
+                );
+            }
             if let Some(reason) = failure {
                 let path = deletion
                     .paths

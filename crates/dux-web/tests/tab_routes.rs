@@ -256,6 +256,22 @@ async fn post_tabs_creates_and_returns_an_attachable_id() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(!body["tab_id"].as_str().unwrap().is_empty());
     assert_eq!(body["provider"], "claude");
+
+    // Followed as an operation, the create ends when the tab's launch reports,
+    // on the launch's own sentence, and names the tab.
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/tabs?operation=1"))
+        .json(&serde_json::json!({ "provider": "claude" }))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "tab.create");
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(record["message"], "Started a fresh claude tab.");
+    let tab = record["created"][0].as_str().expect("the created tab");
+    let session = wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, tab)).await;
+    assert!(tab_has_live_process(&session, tab), "{session}");
 }
 
 #[tokio::test]
@@ -298,6 +314,42 @@ where
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// Assert a change followed as an operation answered `202` with a `Location`
+/// naming its record, then read the record in short waits until it has an
+/// outcome, the way a client that asked for it does.
+async fn followed_outcome(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    resp: reqwest::Response,
+) -> serde_json::Value {
+    assert_eq!(resp.status(), 202, "a followed change answers 202");
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .expect("a Location header")
+        .to_string();
+    let accepted: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        location,
+        format!("/api/v1/operations/{}", accepted["id"].as_str().unwrap())
+    );
+    for _ in 0..15 {
+        let record: serde_json::Value = client
+            .get(format!("http://{addr}{location}?wait_seconds=2"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if record["state"] != "running" {
+            return record;
+        }
+    }
+    panic!("the operation at {location} never finished");
 }
 
 /// The id of the agent's session-slot tab, as the wire reports it. Never
@@ -537,6 +589,21 @@ async fn delete_extra_tab_removes_its_row() {
         .map(|t| t["id"].as_str().unwrap())
         .collect();
     assert!(!tab_ids.contains(&tab.as_str()));
+
+    // Followed as an operation, a close finishes inside the call and names the
+    // tab it removed.
+    let other = create_extra_tab(&client, addr, "s1").await;
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/tabs/{other}?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "tab.close");
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(record["removed"], serde_json::json!([other]));
 }
 
 #[tokio::test]
@@ -548,18 +615,19 @@ async fn delete_extra_tab_with_live_sibling_does_not_detach() {
     let client = reqwest::Client::new();
     let tab = create_extra_tab(&client, addr, "s1").await;
     // Launch the session-slot tab too, so a live sibling remains after the
-    // extra tab closes.
+    // extra tab closes. Followed as an operation, the start ends when the
+    // launch comes up.
     let launch_resp = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/reconnect?operation=1"
+        ))
         .json(&serde_json::json!({ "force": false }))
         .send()
         .await
         .unwrap();
-    assert!(
-        launch_resp.status().is_success(),
-        "reconnect should launch the session-slot tab: {}",
-        launch_resp.status()
-    );
+    let record = followed_outcome(&client, addr, launch_resp).await;
+    assert_eq!(record["kind"], "agent.start");
+    assert_eq!(record["state"], "succeeded");
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
 
     let resp = client
@@ -619,12 +687,15 @@ async fn patch_tab_retargets_to_a_valid_provider() {
     // (kills every tab's process but keeps the `agent_tabs` rows) so the tab is
     // dormant before retargeting.
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &tab)).await;
+    // Followed as an operation, the stop ends when the agent has exited.
     let kill_resp = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/kill"))
+        .post(format!("http://{addr}/api/v1/sessions/s1/kill?operation=1"))
         .send()
         .await
         .unwrap();
-    assert_eq!(kill_resp.status(), 200);
+    let record = followed_outcome(&client, addr, kill_resp).await;
+    assert_eq!(record["kind"], "agent.stop");
+    assert_eq!(record["state"], "succeeded");
     wait_for_session(&client, addr, "s1", |s| !tab_has_live_process(s, &tab)).await;
 
     let resp = client
@@ -1092,6 +1163,25 @@ async fn tab_with_a_failing_async_launch_never_looks_live_and_is_cleaned_up() {
         "a fresh tab whose first launch failed must be cleaned up, not left as a \
          permanently dead-looking row"
     );
+
+    // Followed as an operation, the same create fails, and a tab that was
+    // removed again is not reported as created.
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/tabs?operation=1"))
+        .json(&serde_json::json!({ "provider": "broken" }))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["state"], "failed");
+    assert_eq!(record["created"], serde_json::json!([]));
+    assert!(
+        record["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Tab launch failed for "),
+        "{record}"
+    );
 }
 
 /// A failed launch is published per tab as `last_run_failed`, and the explicit
@@ -1136,6 +1226,19 @@ async fn a_failed_launch_is_published_and_an_explicit_start_tries_again() {
     })
     .await;
     assert_eq!(session["tabs"][0]["last_run_failed"], true);
+
+    // Followed as an operation, the press ends when that launch reports, and
+    // a launch that never came up is a failure.
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/tabs/s1-slot/start?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "tab.start");
+    assert_eq!(record["state"], "failed");
 }
 
 /// The start route answers about the tab, not about a guess: an id that is not a

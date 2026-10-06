@@ -4311,6 +4311,8 @@ impl App {
             pending_web_launch_ops: HashMap::new(),
             live_status_keys,
             last_created_op_id: None,
+            operations: Default::default(),
+            operation_in_dispatch: None,
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
         };

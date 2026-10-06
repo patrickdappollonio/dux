@@ -361,6 +361,8 @@ The rest tune presentation and limits:
 | `heartbeat_seconds` | `15` | How often a visible browser tab checks its terminal connection is really alive. A Wi-Fi to cellular handoff can leave a connection that looks open and answers nothing, and this is what notices. A config reload applies it. |
 | `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check before deciding the connection is dead and reconnecting. Counted in time the page is on screen. Must be comfortably larger than `heartbeat_seconds`, or a slow network reconnects you needlessly; a value at or below it would reconnect over and over, so dux quietly uses twice `heartbeat_seconds` instead. A config reload applies it. |
 | `pty_send_timeout_seconds` | `60` | How long dux waits for the first two things it sends a browser terminal, the handshake and the screen redraw, to actually arrive, before it gives up on that connection and lets the browser try again. A send finishes when the bytes get there, so on a slow connection this is really a measure of speed, and the screen redraw can be your whole scrollback. Set it too low and a phone on a bad signal can never finish attaching. A config reload applies it to the next terminal connection. |
+| `operation_unknown_after_seconds` | `1800` | How long a change that a program is waiting on (deleting an agent with its worktree, creating one, removing a project) may keep running before dux reports its outcome as unknown. This never stops the change and never calls it failed: it keeps running, and once it ends its real outcome replaces "unknown". A config reload applies it to the changes started after it. |
+| `operation_retention_seconds` | `1800` | How long dux remembers the outcome of a finished change so the program that asked for it can still look it up. Outcomes are kept in memory only, so restarting dux forgets them. A config reload applies it to the changes started after it. |
 | `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. `0` disables the bound. Read at startup. |
 | `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. `0` disables the bound. Read at startup. |
 
@@ -384,7 +386,8 @@ The rest tune presentation and limits:
 > `heartbeat_seconds` and `heartbeat_deadline_seconds`), which a reload applies to a
 > running server. Those seven describe what the BROWSER does, and an open tab picks them up on its own
 > within a moment of the reload; you do not have to refresh the page.
-> `pty_send_timeout_seconds` applies to the next terminal you open.
+> `pty_send_timeout_seconds` applies to the next terminal you open, and the two
+> `operation_*` settings to the next change dux is asked to make.
 
 `serve_while_tui` and `tailscale` are the two binding keys that are live switches: a
 config reload that flips either acts on it there and then, in both directions.
