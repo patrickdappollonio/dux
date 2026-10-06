@@ -108,7 +108,9 @@ command returns. If part of a change failed, the command says which part and exi
 
 A second `dux agents add` that runs while another agent is still being created waits for
 that creation to finish (within the same wait time), then creates its own and says it
-waited. With `--no-wait` it is refused instead, as the browser and the terminal UI refuse it.
+waited. If the wait time runs out before the other creation finishes, it never starts its
+own: it is refused and exits 3. With `--no-wait` it is refused at once, as the browser and
+the terminal UI refuse it.
 
 - `--no-wait` prints the change's id and returns at once.
 - `--wait-timeout <seconds>` waits a different time than usual. The usual time is
