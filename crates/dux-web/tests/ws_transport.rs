@@ -1916,6 +1916,57 @@ async fn rest_create_session_idempotency_replays_same_session() {
         })
         .unwrap_or(0);
     assert_eq!(p1_count, 1, "idempotent replay must not create a duplicate");
+
+    // Followed as an operation, the key is kept just the same: a retry, while
+    // the create runs or after it ended, answers the first record and creates
+    // nothing.
+    let followed_create = || {
+        client
+            .post(format!("http://{addr}/api/v1/sessions?operation=1"))
+            .header("idempotency-key", "followed-1")
+            .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"followed"}))
+            .send()
+    };
+    let op = followed(followed_create().await.expect("followed create")).await;
+    let again = followed(followed_create().await.expect("a retry")).await;
+    assert_eq!(again, op, "the retry answers the first record");
+    let record = operation_outcome(addr, &op).await;
+    assert_eq!(record["state"], "succeeded", "{record}");
+    let after = followed(followed_create().await.expect("a later retry")).await;
+    assert_eq!(
+        after, op,
+        "a retry after it ended still answers the first record"
+    );
+    let unfollowed = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .header("idempotency-key", "followed-1")
+        .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"followed"}))
+        .send()
+        .await
+        .expect("an unfollowed retry");
+    assert_eq!(unfollowed.status().as_u16(), 200);
+    let replayed: serde_json::Value = unfollowed.json().await.unwrap();
+    assert_eq!(
+        replayed["id"], record["created"][0],
+        "an unfollowed retry answers the agent the followed create made"
+    );
+    let sessions: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let count = sessions
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(count, 2, "the followed retries created nothing");
 }
 
 /// Like `boot()`, but seeds TWO sessions (`s1`, `s2`) under `p1`, so the nested

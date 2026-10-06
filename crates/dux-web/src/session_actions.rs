@@ -5,7 +5,8 @@
 //! [`EngineHandle::apply_wire_scoped`]. The connection id is the one `/ws/events`
 //! hands the client in its `connected` handshake frame.
 //!
-//! The create route honors `Idempotency-Key` and discriminates its body on
+//! The create route honors `Idempotency-Key`, followed (`?operation=1`) or not, and
+//! discriminates its body on
 //! `new`, `fork`, `from_worktree` or `from_pr`. Delete takes `?delete_worktree=`
 //! and `?delete_branch=`, and an absent `delete_branch` keeps the provenance
 //! default. `POST /api/v1/pull-requests/resolve` is a READ among these writes: it
@@ -204,8 +205,35 @@ fn parse_create_session_body(raw: serde_json::Value) -> Result<CreateSessionBody
     serde_json::from_value(raw).map_err(|error| format!("invalid create body: {error}"))
 }
 
-async fn replay_created_session(state: &AppState, key: &str) -> Option<Response> {
+async fn replay_created_session(state: &AppState, key: &str, followed: bool) -> Option<Response> {
     let previous_id = state.idempotency.get(key)?;
+    // A followed create keeps its key under its operation: a retry answers that
+    // record, or, unfollowed, the agent it made once it is there (the record
+    // itself while it has made none).
+    if let Some(record) = state
+        .engine
+        .operations()
+        .view(&previous_id, std::time::Instant::now())
+    {
+        if followed {
+            return Some(operation_accepted(&record));
+        }
+        let Some(created) = record.created.first().cloned() else {
+            return Some(accepted(Accepted {
+                op_id: Some(record.id),
+            }));
+        };
+        let (session, terminals) = state.engine.session(created).await??;
+        return Some(
+            (
+                StatusCode::OK,
+                Json(crate::workspace_routes::SessionWithTerminals::new(
+                    session, terminals,
+                )),
+            )
+                .into_response(),
+        );
+    }
     let (session, terminals) = state.engine.session(previous_id).await??;
     Some(
         (
@@ -333,7 +361,7 @@ async fn create_session(
     // exists, return it without creating another.
     let key = idempotency_key(&headers);
     if let Some(key) = &key
-        && let Some(response) = replay_created_session(&state, key).await
+        && let Some(response) = replay_created_session(&state, key, operation.asked()).await
     {
         return response;
     }
@@ -351,7 +379,12 @@ async fn create_session(
     if operation.asked() {
         return match dispatch_create(&state, body, &headers, true).await {
             Ok(outcome) => match &outcome.operation {
-                Some(record) => operation_accepted(record),
+                Some(record) => {
+                    if let Some(key) = key {
+                        state.idempotency.record(key, record.id.clone());
+                    }
+                    operation_accepted(record)
+                }
                 None => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     crate::engine_actor::MISSING_OPERATION_RECORD,
