@@ -127,6 +127,19 @@ pub fn select<'a, T>(
     id: impl Fn(&T) -> &str,
     name: impl Fn(&T) -> &str,
 ) -> Result<&'a T, CliError> {
+    select_shown(noun, query, query, items, id, name)
+}
+
+/// [`select`] for a query that may not be repeated as typed: `shown` is how
+/// every refusal names it.
+pub fn select_shown<'a, T>(
+    noun: &str,
+    query: &str,
+    shown: &str,
+    items: &'a [T],
+    id: impl Fn(&T) -> &str,
+    name: impl Fn(&T) -> &str,
+) -> Result<&'a T, CliError> {
     if let Some(item) = items.iter().find(|item| id(item) == query) {
         return Ok(item);
     }
@@ -135,14 +148,14 @@ pub fn select<'a, T>(
         [one] => Ok(one),
         [] => Err(CliError::new(
             Exit::Failed,
-            format!("no {noun} has the id or name {query}"),
+            format!("no {noun} has the id or name {shown}"),
         )),
         many => {
             let ids: Vec<&str> = many.iter().map(|item| id(item)).collect();
             Err(CliError::new(
                 Exit::Usage,
                 format!(
-                    "{} {noun}s are named {query}; name one by its id: {}",
+                    "{} {noun}s are named {shown}; name one by its id: {}",
                     many.len(),
                     ids.join(", ")
                 ),

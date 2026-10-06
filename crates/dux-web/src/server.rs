@@ -1028,6 +1028,8 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// `dux server` stdout an operator may forward to a file or aggregator, so the
 /// query is dropped to avoid leaking secrets. The session id is an opaque `:id`
 /// path segment (not a query parameter) and so still appears in the logged path.
+/// A macro or global environment name that breaks its table's rule is replaced
+/// (see [`dux_core::config_resources::logged_path`]).
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -1046,7 +1048,7 @@ async fn log_request(
     // (e.g. /api/v1/sessions/<id>/files/raw?path=…), and this log is stdout an
     // operator may persist, so dropping the query avoids leaking them. The session
     // id is an opaque path segment now, so it still appears in the logged path.
-    let path = request.uri().path().to_string();
+    let path = dux_core::config_resources::logged_path(request.uri().path()).into_owned();
     let over_socket = crate::auth::provenance::over_control_socket(&request);
     let started = std::time::Instant::now();
     let response = next.run(request).await;
@@ -5044,6 +5046,7 @@ mod tests {
         // the fallback catches everything, so assert on whatever status the
         // fallback returns for a bogus asset path.
         let missing = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/definitely-not-a-real-asset.zzz")
@@ -5054,7 +5057,36 @@ mod tests {
             .unwrap();
         let missing_status = missing.status().as_u16();
 
+        // A config entry's name is logged only where its table's rule allows
+        // it: one that breaks the rule may be a token pasted where a name goes.
+        for uri in [
+            "/api/v1/global-env/API_KEY",
+            "/api/v1/global-env/zzLEAK%20one.x",
+            "/api/v1/macros/zzLEAK%2Etwo%20x?operation=1",
+        ] {
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
         let out = sink.contents();
+        assert!(out.contains("/api/v1/global-env/API_KEY 404"), "{out}");
+        assert!(
+            !out.contains("zzLEAK"),
+            "a rule-breaking name was logged: {out}"
+        );
+        assert!(
+            out.contains("DELETE /api/v1/global-env/(name not shown) 404")
+                && out.contains("DELETE /api/v1/macros/(name not shown) 404"),
+            "{out}"
+        );
         assert!(
             out.contains("/api/me 200"),
             "the 200 request must be logged: {out}"

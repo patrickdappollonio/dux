@@ -128,10 +128,12 @@ pub fn checked_macro(
 /// rule a project's env lines follow. The value may be a secret, so a
 /// refusal never quotes it.
 pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
+    // A name that is no variable name may be a token pasted where a name
+    // goes, so it is never repeated either.
     if !is_valid_env_name(name) {
         anyhow::bail!(
-            "\"{name}\" is not a valid environment variable name: use letters, \
-             digits and underscores, not starting with a digit."
+            "That is not a valid environment variable name: use letters, digits and \
+             underscores, not starting with a digit. Nothing was changed."
         );
     }
     if value.contains('\0') || expand_env_vars(value).is_none() {

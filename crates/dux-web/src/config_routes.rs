@@ -1242,12 +1242,20 @@ mod tests {
             !record.to_string().contains("secret"),
             "a value is never echoed: {record}"
         );
-        let (status, _) = answer(
+        let (status, refusal) = answer(
             &app,
             json_req("PUT", "/api/v1/global-env/1BAD", r#"{"value":"x"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "not a variable name");
+        assert!(
+            !refusal.to_string().contains("1BAD"),
+            "a name that is no variable name is never echoed: {refusal}"
+        );
+        let (status, refusal) =
+            answer(&app, json_req("DELETE", "/api/v1/global-env/zz%20LEAK", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!refusal.to_string().contains("LEAK"), "{refusal}");
         for bad in ["nul\u{0}inside", "${1UNCLOSED}"] {
             let body = serde_json::json!({ "value": bad }).to_string();
             let (status, refusal) =

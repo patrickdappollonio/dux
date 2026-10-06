@@ -150,6 +150,50 @@ fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
     said
 }
 
+/// What the command line prints about `name` when it is typed as a provider,
+/// a macro or an environment variable with no dux running: `providers show`,
+/// `macros show`, the questions `env set` and `env rm` ask, `env set`'s name
+/// check, and both changes on the file.
+fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
+    use dux_core::client::config_resources::{
+        Source, Writer, check_env_name, macros_show, providers_show, remove_env,
+        remove_env_question, set_env, set_env_question,
+    };
+    let text = |result: Result<String, dux_core::client::CliError>| match result {
+        Ok(text) => text,
+        Err(error) => error.message,
+    };
+    let mut said = vec![
+        ("env set question".to_string(), set_env_question(name)),
+        ("env rm question".to_string(), remove_env_question(name)),
+        (
+            "env set name check".to_string(),
+            text(check_env_name(name).map(|()| String::new())),
+        ),
+    ];
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "providers show".to_string(),
+        text(providers_show(&Source::File(paths), name)),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "macros show".to_string(),
+        text(macros_show(&Source::File(paths), name)),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "env set".to_string(),
+        text(set_env(Writer::File(paths), name, "v")),
+    ));
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "env rm".to_string(),
+        text(remove_env(Writer::File(paths), name)),
+    ));
+    said
+}
+
 /// `dux env ls` prints an environment value only with `--show`.
 #[test]
 fn env_ls_prints_a_value_only_with_show() {
@@ -219,7 +263,10 @@ fn a_name_that_is_not_a_setting_name_never_reaches_a_printer() {
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             // `env ls --show` prints values, and still no name it hides.
             let tmp = tempfile::tempdir().expect("tempdir");
-            let shown = listings(&paths_in(tmp.path()), &body, true);
+            let paths = paths_in(tmp.path());
+            let mut shown = listings(&paths, &body, true);
+            // The name typed on the command line, as the file has it.
+            shown.extend(named(&paths, &body, &token));
             for (printer, text) in printed(&body).into_iter().chain(shown) {
                 if text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));

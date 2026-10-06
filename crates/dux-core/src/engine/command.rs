@@ -1324,16 +1324,19 @@ impl Engine {
             ConfigSetChange::RemoveEnvVar { name } => {
                 let mut env = self.config.env.clone();
                 if env.remove(&name).is_none() {
-                    anyhow::bail!("unknown global environment variable \"{name}\"");
+                    anyhow::bail!("{}", crate::config_resources::unknown_env_var(&name));
                 }
-                (
-                    Command::PersistGlobalEnv { env },
-                    Some(crate::status_text![
-                        "Removed global environment variable ",
-                        q(name),
-                        "."
-                    ]),
-                )
+                // A name that is no variable name may be a token pasted
+                // where a name goes, so the status does not repeat it.
+                let done = if crate::config::is_valid_env_name(&name) {
+                    crate::status_text!["Removed global environment variable ", q(name), "."]
+                } else {
+                    crate::status_text![
+                        "Removed a global environment variable whose name is not a variable \
+                         name, so it is not shown."
+                    ]
+                };
+                (Command::PersistGlobalEnv { env }, Some(done))
             }
         };
         let reaction = self.apply(save)?;

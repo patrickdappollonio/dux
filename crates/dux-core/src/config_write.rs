@@ -2440,13 +2440,17 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
 
 /// A macro as `[macros]` holds it: `{ text = "…", surface = "…" }`.
 fn macro_item(entry: &crate::config::MacroEntry) -> Item {
+    Item::Value(macro_value(entry))
+}
+
+fn macro_value(entry: &crate::config::MacroEntry) -> Value {
     let mut inline = InlineTable::new();
     inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
     inline.insert(
         "surface",
         Value::String(Formatted::new(entry.surface.as_config_str().to_string())),
     );
-    toml_edit::value(Value::InlineTable(inline))
+    Value::InlineTable(inline)
 }
 
 /// Add the macro `name` to `[macros]` at its end, or replace it where it
@@ -2459,7 +2463,14 @@ pub fn set_macro(doc: &mut DocumentMut, name: &str, entry: &crate::config::Macro
             section["text"] = toml_edit::value(entry.text.as_str());
             section["surface"] = toml_edit::value(entry.surface.as_config_str());
         }
-        Some(item) => *item = macro_item(entry),
+        // Replaced in place, keeping the comment and spacing around it.
+        Some(item) => {
+            let mut value = macro_value(entry);
+            if let Some(old) = item.as_value() {
+                *value.decor_mut() = old.decor().clone();
+            }
+            *item = Item::Value(value);
+        }
         None => {
             table.insert(name, macro_item(entry));
         }

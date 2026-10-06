@@ -322,21 +322,27 @@ fn global_flags_work_beside_a_server_subcommand() {
 
 #[test]
 fn a_macro_or_env_change_with_no_terminal_and_no_yes_is_refused_and_writes_nothing() {
-    for args in [
-        &["macros", "add", "m", "hello"][..],
-        &["macros", "rm", "m"][..],
-        &["macros", "remove", "m"][..],
-        &["env", "set", "TOKEN", "--stdin"][..],
-        &["env", "rm", "TOKEN"][..],
+    const UNCONFIRMED: &str = "add --yes";
+    const NOT_A_NAME: &str = "That is not a valid environment variable name";
+    for (args, code, says) in [
+        (&["macros", "add", "m", "hello"][..], 3, UNCONFIRMED),
+        (&["macros", "rm", "m"][..], 3, UNCONFIRMED),
+        (&["macros", "remove", "m"][..], 3, UNCONFIRMED),
+        (&["env", "set", "TOKEN", "--stdin"][..], 3, UNCONFIRMED),
+        (&["env", "rm", "TOKEN"][..], 3, UNCONFIRMED),
+        // Refused before it is asked or sent, and never repeated.
+        (
+            &["env", "set", "zz LEAK.x", "--stdin", "--yes"][..],
+            1,
+            NOT_A_NAME,
+        ),
+        (&["env", "rm", "zz LEAK.x"][..], 3, UNCONFIRMED),
     ] {
         let dir = home("unconfirmed-edits");
         let run = dux_in(&dir, args, &[]);
-        assert_eq!(run.code(), 3, "{args:?}: {}", run.stderr());
-        assert!(
-            run.stderr().contains("add --yes"),
-            "{args:?}: {}",
-            run.stderr()
-        );
+        assert_eq!(run.code(), code, "{args:?}: {}", run.stderr());
+        assert!(run.stderr().contains(says), "{args:?}: {}", run.stderr());
+        assert!(!run.stderr().contains("LEAK"), "{args:?}: {}", run.stderr());
         assert!(!dir.join("config.toml").exists(), "{args:?}");
     }
 }

@@ -104,6 +104,20 @@ fn theme_items(source: &Source<'_>) -> Result<Vec<ThemeItem>, CliError> {
     }
 }
 
+/// What an item is looked up by: the file's own name (`key`), or for one a
+/// running dux listed, which carries none, the name it was listed under.
+fn lookup<'a>(key: &'a str, listed: &'a str) -> &'a str {
+    if key.is_empty() { listed } else { key }
+}
+
+fn macro_key(item: &MacroItem) -> &str {
+    lookup(&item.key, &item.name)
+}
+
+fn provider_key(item: &ProviderItem) -> &str {
+    lookup(&item.key, &item.name)
+}
+
 /// The most of a macro's first line a table shows.
 const TEXT_CELL_CHARS: usize = 48;
 
@@ -151,7 +165,8 @@ pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 /// `dux macros show <name>`.
 pub fn macros_show(source: &Source<'_>, name: &str) -> Result<String, CliError> {
     let items = macro_items(source)?;
-    let item = output::select("macro", name, &items, |m| &m.name, |m| &m.name)?;
+    let shown = resources::shown_name("", "macros", name).0;
+    let item = output::select_shown("macro", name, &shown, &items, macro_key, macro_key)?;
     Ok(output::details(&to_json(item)))
 }
 
@@ -216,7 +231,8 @@ fn provider_json(item: &ProviderItem) -> serde_json::Value {
 /// `dux providers show <name>`.
 pub fn providers_show(source: &Source<'_>, name: &str) -> Result<String, CliError> {
     let items = provider_items(source)?;
-    let item = output::select("provider", name, &items, |p| &p.name, |p| &p.name)?;
+    let shown = resources::shown_name("", "providers", name).0;
+    let item = output::select_shown("provider", name, &shown, &items, provider_key, provider_key)?;
     Ok(output::details(&provider_json(item)))
 }
 
@@ -365,8 +381,39 @@ pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> 
     }
 }
 
+/// What `dux env set` asks before it changes anything.
+pub fn set_env_question(name: &str) -> String {
+    format!(
+        "Set {} in the global environment",
+        resources::env_label("", name)
+    )
+}
+
+/// What `dux env rm` asks before it changes anything. It may be asked of a
+/// remote, whose file this machine cannot see, so a hidden name is named by
+/// no line.
+pub fn remove_env_question(name: &str) -> String {
+    format!(
+        "Remove {} from the global environment",
+        resources::env_label("", name)
+    )
+}
+
+/// This machine's config file as it is, empty when it cannot be read.
+fn file_text(paths: &DuxPaths) -> String {
+    std::fs::read_to_string(&paths.config_path).unwrap_or_default()
+}
+
+/// `dux env set` refuses a name that is no variable name before it asks or
+/// sends anything, without repeating it.
+pub fn check_env_name(name: &str) -> Result<(), CliError> {
+    // An empty value passes every value check, so only the name is judged.
+    crate::config::check_global_env_var(name, "").map_err(edit_failed)
+}
+
 /// `dux env set`. The value is never printed.
 pub fn set_env(writer: Writer<'_>, name: &str, value: &str) -> Result<String, CliError> {
+    check_env_name(name)?;
     match writer {
         Writer::Dux { client, wait } => through_dux(
             client,
@@ -397,9 +444,10 @@ pub fn remove_env(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
             None,
         ),
         Writer::File(paths) => {
+            let label = resources::env_label(&file_text(paths), name);
             resources::remove_env_in_file(paths, name).map_err(edit_failed)?;
             Ok(format!(
-                "Removed global environment variable {name} from {}. {APPLIES_AT_START}\n",
+                "Removed {label} from the global environment in {}. {APPLIES_AT_START}\n",
                 paths.config_path.display()
             ))
         }
@@ -420,6 +468,95 @@ mod tests {
             (long.as_str(), format!("{}…", "é".repeat(48))),
         ] {
             assert_eq!(text_cell(text), cell, "{text:?}");
+        }
+    }
+
+    /// A stand-in local dux answering `/api/v1/build` and `bootstrap`, and a
+    /// client of it.
+    fn local_dux(
+        dir: &std::path::Path,
+        bootstrap: &'static str,
+    ) -> (
+        crate::client::test_server::FakeDux,
+        crate::lockfile::SingleInstanceLock,
+        Client,
+    ) {
+        use crate::client::test_server::{FakeDux, Reply};
+        let socket = dir.join("dux.sock");
+        let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, r#"{"version":"v1","process":"p","api":1}"#),
+            "/api/v1/bootstrap" => Reply::json(200, bootstrap),
+            _ => Reply::json(404, "{}"),
+        });
+        let lock_path = dir.join("dux.lock");
+        let lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client =
+            crate::client::connect::connect(&crate::client::connect::Target::Local, &lock_path)
+                .unwrap();
+        (fake, lock, client)
+    }
+
+    #[test]
+    fn env_set_refuses_a_name_that_is_no_variable_name_without_sending_or_repeating_it() {
+        let dir = crate::client::test_server::private_dir();
+        let (fake, _lock, client) = local_dux(dir.path(), "{}");
+        let writer = Writer::Dux {
+            client: &client,
+            wait: Some(Duration::from_secs(1)),
+        };
+        let refused = set_env(writer, "zz LEAK.x", "v").unwrap_err();
+        assert_eq!(refused.exit, Exit::Failed);
+        assert!(!refused.message.contains("LEAK"), "{}", refused.message);
+        assert!(
+            fake.seen()
+                .iter()
+                .all(|seen| !seen.path.contains("global-env")),
+            "{:?}",
+            fake.seen()
+        );
+    }
+
+    #[test]
+    fn a_macro_is_found_by_the_name_it_has_here_and_through_a_running_dux() {
+        let dir = crate::client::test_server::private_dir();
+        let paths = DuxPaths {
+            root: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.toml"),
+            sessions_db_path: dir.path().join("sessions.sqlite3"),
+            worktrees_root: dir.path().join("worktrees"),
+            lock_path: dir.path().join("dux.lock"),
+            socket_path: dir.path().join("dux.sock"),
+        };
+        std::fs::write(
+            &paths.config_path,
+            "[macros]\n\"Review changes\" = { text = \"review\", surface = \"agent\" }\n\n\
+             [providers.\"my tool\"]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        // The file's own name finds a provider whose name is not shown.
+        let shown = providers_show(&Source::File(&paths), "my tool").expect("found");
+        assert_eq!(
+            shown,
+            "name: the entry on line 4 of [providers]\nsource: yours\n"
+        );
+        let (_fake, _lock, client) = local_dux(
+            dir.path(),
+            r#"{"macros":[{"name":"Review changes","text":"review","surface":"agent"}],"global_env":{}}"#,
+        );
+        for source in [Source::File(&paths), Source::Dux(&client)] {
+            let shown = macros_show(&source, "Review changes").expect("found by its name");
+            assert!(shown.contains("surface: agent"), "{shown}");
+            let missing = macros_show(&source, "Review it").unwrap_err();
+            assert_eq!(missing.exit, Exit::Failed);
         }
     }
 }

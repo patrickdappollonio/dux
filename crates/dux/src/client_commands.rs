@@ -374,21 +374,26 @@ pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
             name,
             stdin,
             change,
-        } => change_with(
-            selection,
-            &change,
-            &format!("Set global environment variable {name}"),
-            stdin,
-            |writer| {
-                let value = dux_tui::read_env_value(stdin, &name)
-                    .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
-                resources::set_env(writer, &name, value.expose())
-            },
-        ),
+        } => {
+            // A name that is no variable name is refused before anything is
+            // asked or sent, so it never reaches a dux or its access log.
+            resources::check_env_name(&name)?;
+            change_with(
+                selection,
+                &change,
+                &resources::set_env_question(&name),
+                stdin,
+                |writer| {
+                    let value = dux_tui::read_env_value(stdin, &name)
+                        .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
+                    resources::set_env(writer, &name, value.expose())
+                },
+            )
+        }
         EnvSub::Rm { name, change } => change_with(
             selection,
             &change,
-            &format!("Remove global environment variable {name}"),
+            &resources::remove_env_question(&name),
             false,
             |writer| resources::remove_env(writer, &name),
         ),

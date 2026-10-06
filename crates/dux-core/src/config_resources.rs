@@ -65,6 +65,46 @@ pub fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
     }
 }
 
+/// A global environment variable's name as a sentence names it: the name
+/// itself when it is a variable name, else the placeholder for its line in
+/// `raw` (or for no line when `raw` is empty), so a token typed or pasted
+/// where a name goes is never repeated.
+pub fn env_label(raw: &str, name: &str) -> String {
+    shown_name(raw, "env", name).0
+}
+
+/// The refusal for removing a variable the global environment does not hold.
+pub fn unknown_env_var(name: &str) -> String {
+    match shown_name("", "env", name) {
+        (name, false) => format!("unknown global environment variable \"{name}\""),
+        (label, true) => format!("unknown global environment variable: {label}"),
+    }
+}
+
+/// A request path as the access log may print it: the name in
+/// `/api/v1/global-env/{name}` or `/api/v1/macros/{name}` is replaced by
+/// `(name not shown)` when it breaks its table's rule, since such a name may
+/// be a token pasted where a name goes. Every other path is unchanged.
+pub fn logged_path(path: &str) -> std::borrow::Cow<'_, str> {
+    for (prefix, table) in [
+        ("/api/v1/global-env/", "env"),
+        ("/api/v1/macros/", "macros"),
+    ] {
+        let Some(segment) = path.strip_prefix(prefix) else {
+            continue;
+        };
+        if segment.contains('/') {
+            break;
+        }
+        let name = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+        if shown_name("", table, &name).1 {
+            return format!("{prefix}(name not shown)").into();
+        }
+        break;
+    }
+    path.into()
+}
+
 /// One macro as listed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacroItem {
@@ -72,6 +112,10 @@ pub struct MacroItem {
     pub surface: String,
     /// `None` when the name is hidden.
     pub text: Option<String>,
+    /// The name it is looked up by: the file's own, never printed. Empty for
+    /// one a running dux listed, which is looked up by `name`.
+    #[serde(skip)]
+    pub key: String,
 }
 
 /// Macros, given as name, text and surface in their order.
@@ -82,11 +126,12 @@ pub fn macros(
     entries
         .into_iter()
         .map(|(name, text, surface)| {
-            let (name, hidden) = shown_name(raw, "macros", &name);
+            let (shown, hidden) = shown_name(raw, "macros", &name);
             MacroItem {
-                name,
+                name: shown,
                 surface,
                 text: (!hidden).then_some(text),
+                key: name,
             }
         })
         .collect()
@@ -143,6 +188,9 @@ pub struct ProviderItem {
     pub source: String,
     /// `None` when the name is hidden.
     pub settings: Option<ProviderCommandConfig>,
+    /// The name it is looked up by, as [`MacroItem::key`].
+    #[serde(skip)]
+    pub key: String,
 }
 
 /// The providers of a loaded file, in its order, dux's own included.
@@ -166,6 +214,7 @@ pub fn providers(file: &ConfigFile) -> Vec<ProviderItem> {
                 }
                 .to_string(),
                 settings: (!hidden).then(|| settings.clone()),
+                key: name.clone(),
             }
         })
         .collect()
@@ -288,8 +337,13 @@ pub fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> 
 pub fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyhow::Result<()> {
     crate::config::check_global_env_var(name, value)?;
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
-        crate::config_write::ensure_table(doc, "env")[name] = toml_edit::value(value);
-        Ok(())
+        // Where `dux config set` writes, so a replaced value keeps the
+        // comment and spacing around it.
+        crate::config_keys::set_in_doc(
+            doc,
+            &["env".to_string(), name.to_string()],
+            toml_edit::Value::from(value),
+        )
     })
 }
 
@@ -298,7 +352,7 @@ pub fn remove_env_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
         let table = crate::config_write::ensure_table(doc, "env");
         if table.remove(name).is_none() {
-            anyhow::bail!("unknown global environment variable \"{name}\"");
+            anyhow::bail!("{}", unknown_env_var(name));
         }
         Ok(())
     })
@@ -350,15 +404,16 @@ mod tests {
     #[test]
     fn a_file_edit_changes_one_entry_and_keeps_the_comments_around_it() {
         let (_tmp, paths) = paths_with(Some(
-            "# my settings\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" }\n\n[env]\n# for the API\nTOKEN = \"t\"\n",
+            "# my settings\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" } # greets\n\n[env]\n# for the API\nTOKEN   = \"old\" # production credential\n# gone soon\nOLD = \"x\"\n",
         ));
         set_macro_in_file(&paths, " bye ", "see you".to_string(), "both").unwrap();
         set_macro_in_file(&paths, "hi", "hey".to_string(), "terminal").unwrap();
+        set_env_in_file(&paths, "TOKEN", "new").unwrap();
         set_env_in_file(&paths, "REGION", "eu").unwrap();
-        remove_env_in_file(&paths, "TOKEN").unwrap();
+        remove_env_in_file(&paths, "OLD").unwrap();
         assert_eq!(
             std::fs::read_to_string(&paths.config_path).unwrap(),
-            "# my settings\n[macros]\n# says hi\nhi = { text = \"hey\", surface = \"terminal\" }\nbye = { text = \"see you\", surface = \"both\" }\n\n[env]\nREGION = \"eu\"\n"
+            "# my settings\n[macros]\n# says hi\nhi = { text = \"hey\", surface = \"terminal\" } # greets\nbye = { text = \"see you\", surface = \"both\" }\n\n[env]\n# for the API\nTOKEN   = \"new\" # production credential\nREGION = \"eu\"\n"
         );
         remove_macro_in_file(&paths, "hi").unwrap();
         let text = std::fs::read_to_string(&paths.config_path).unwrap();
@@ -385,7 +440,7 @@ mod tests {
             ),
             (
                 set_env_in_file(&paths, "1BAD", "v"),
-                "\"1BAD\" is not a valid environment variable name",
+                "That is not a valid environment variable name",
             ),
             (
                 remove_env_in_file(&paths, "NOPE"),
