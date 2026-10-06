@@ -48,7 +48,14 @@ fn main() -> Result<()> {
         local: cli.local,
     };
     match cli.command {
-        None => run_tui_with_flip(),
+        None => {
+            if let Err(message) =
+                commands::check_terminal_ui_start_target(cli.remote.as_deref(), cli.local)
+            {
+                usage_error(&message);
+            }
+            run_tui_with_flip()
+        }
         Some(commands::Command::Server(server)) => {
             if let Err(message) = commands::listener_flags_with_subcommand(&server) {
                 usage_error(&message);

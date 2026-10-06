@@ -144,6 +144,15 @@ pub fn check_server_start_target(remote: Option<&str>, local: bool) -> Result<()
     Ok(())
 }
 
+/// Starting dux with no command starts the terminal UI on this machine, so
+/// naming a target is a mistake.
+pub fn check_terminal_ui_start_target(remote: Option<&str>, local: bool) -> Result<(), String> {
+    if remote.is_some() || local {
+        return Err("dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux".to_string());
+    }
+    Ok(())
+}
+
 /// What `dux [--remote x | --local] config <args>` carries: the global flags
 /// that came before the word, and everything after it, byte for byte.
 #[derive(Debug)]
@@ -988,6 +997,20 @@ mod tests {
         );
         assert_eq!(check_server_start_target(None, true), Err(msg.to_string()));
         assert_eq!(check_server_start_target(None, false), Ok(()));
+    }
+
+    #[test]
+    fn starting_the_terminal_ui_refuses_a_selected_target() {
+        let msg = "dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux";
+        assert_eq!(
+            check_terminal_ui_start_target(Some("box"), false),
+            Err(msg.to_string())
+        );
+        assert_eq!(
+            check_terminal_ui_start_target(None, true),
+            Err(msg.to_string())
+        );
+        assert_eq!(check_terminal_ui_start_target(None, false), Ok(()));
     }
 
     #[test]
