@@ -1509,6 +1509,10 @@ pub(super) mod tests {
             }
             let theme = theme.unwrap_or("default");
             app.engine.projects[0].name = "My Cool Project".to_string();
+            // The project's path is a chip in Project info. Left as the temp
+            // folder it would be longer than a row on macOS, where a name that
+            // cannot fit has to break.
+            app.engine.projects[0].path = "/home/me/code/my cool project".to_string();
             let chip_style = app.theme.name_style();
             let chip = (
                 chip_style.fg.expect("the chip names its text color"),

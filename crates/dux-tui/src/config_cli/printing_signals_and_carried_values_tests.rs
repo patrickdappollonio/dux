@@ -1,10 +1,13 @@
 //! Adversarial review probes.
 use super::*;
 
+// Only the Linux-only password test below sets a value.
+#[cfg(target_os = "linux")]
 struct Canned {
     stdin: Option<&'static str>,
 }
 
+#[cfg(target_os = "linux")]
 impl SecretSource for Canned {
     fn read_stdin(&mut self) -> Result<Password> {
         read_secret(self.stdin.expect("stdin was not expected").as_bytes())
@@ -47,6 +50,7 @@ fn get(paths: &DuxPaths, list: &[&str]) -> (String, String) {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn set(paths: &DuxPaths, list: &[&str], stdin: Option<&'static str>) -> Result<String> {
     let mut out = Vec::new();
     run_set(&args(list), paths, &mut Canned { stdin }, &mut out)?;
@@ -97,6 +101,12 @@ fn get_through_a_dangling_symlink_does_not_claim_a_value_in_use() {
 /// A dux from before the reload signal holds the lock, so `set` does not
 /// signal it and the new password applies only when it restarts. The
 /// message must not say that browsers are signed out now.
+// Linux only: the stand-in dux is a python process holding the lock, which
+// Linux's /proc/locks names as the holder. macOS has no /proc/locks and
+// trusts a holder only when its process is named dux, which python is not.
+// The sentence for an older dux is covered on every platform by the
+// `reload_sentence` and `password_sentence` tests in `config_cli.rs`.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_password_set_beside_an_unsignalled_dux_does_not_claim_browsers_were_signed_out() {
     use std::process::{Command, Stdio};

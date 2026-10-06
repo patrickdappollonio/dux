@@ -415,6 +415,10 @@ fn child_is_shut_down(client: &dux_core::pty::PtyClient) -> bool {
 /// the shutdown signals holds the PTY open past the reap, which pins the
 /// ordering the suite otherwise hits only by chance: the child reaped, the
 /// reader not yet at end of input.
+// Linux only: macOS revokes a terminal when its session leader exits, so no
+// grandchild can hold it open past the reap. The quit ending the child is
+// covered on macOS by `serve_with_engine_quit_process_shuts_down_ptys`.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down() {
     let (mut engine, _tmp) = build_engine();

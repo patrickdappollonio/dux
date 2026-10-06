@@ -3647,16 +3647,11 @@ mod tests {
         let mut job = command.spawn().expect("spawn");
         let session = dux_core::process_sessions::ProcessSession::started_now(job.id());
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let child_pid: Option<i32> = fs::read_dir("/proc").ok().and_then(|entries| {
-            entries.flatten().find_map(|entry| {
-                let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
-                let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
-                let after = stat.rsplit_once(')')?.1;
-                let ppid: u32 = after.split_whitespace().nth(1)?.parse().ok()?;
-                (ppid == job.id()).then_some(pid)
-            })
-        });
-        let child_pid = child_pid.expect("the job in the repository");
+        let child_pid = dux_core::process_sessions::read_process_table()
+            .into_iter()
+            .find(|row| row.ppid == Some(job.id()))
+            .map(|row| row.pid)
+            .expect("the job in the repository");
         let store = SessionStore::open(&paths.sessions_db_path).expect("store");
         store
             .replace_process_registry(&[dux_core::process_sessions::StoredSession {
@@ -3673,14 +3668,9 @@ mod tests {
         let _ = reset_agent_data(&paths);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let repo_job_alive = fs::read_to_string(format!("/proc/{child_pid}/stat"))
-            .map(|stat| {
-                !stat
-                    .rsplit_once(')')
-                    .map(|(_, rest)| rest.trim_start().starts_with('Z'))
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
+        let repo_job_alive = dux_core::process_sessions::read_process_table()
+            .iter()
+            .any(|row| row.pid == child_pid && !row.exited);
         let _ = rustix::process::kill_process_group(
             rustix::process::Pid::from_raw(job.id() as i32).unwrap(),
             rustix::process::Signal::KILL,

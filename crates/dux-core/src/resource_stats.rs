@@ -96,6 +96,11 @@ impl ResourceCollector {
             // Establish the "before" side of the delta, then let enough time pass
             // for sysinfo to compute a meaningful one.
             self.refresh();
+            // On macOS sysinfo records a process's CPU times from its second
+            // refresh only (the first one just creates its entry), so without
+            // this the baseline sample reads 0% for every process there.
+            #[cfg(target_os = "macos")]
+            self.refresh();
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         }
         self.refresh();
@@ -488,11 +493,15 @@ mod tests {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let mut sys = System::new();
         // Establish a CPU baseline, then refresh again so cpu_usage() is real.
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory(),
-        );
+        // macOS takes two refreshes for the baseline, as in
+        // `ResourceCollector::sample`.
+        for _ in 0..if cfg!(target_os = "macos") { 2 } else { 1 } {
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_cpu().with_memory(),
+            );
+        }
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,

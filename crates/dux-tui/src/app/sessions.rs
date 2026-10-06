@@ -5641,12 +5641,16 @@ mod tests {
         app.add_project(path.clone(), "Fresh".to_string())
             .expect("add_project");
         app.resolve_confirm_create_initial_commit(true);
+        // The gate is keyed by the repository's real path, which macOS reaches
+        // through a symlink.
+        let gate = dux_core::engine::InFlightKey::InitialCommit(
+            std::fs::canonicalize(&path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app
-            .engine
-            .is_in_flight(&dux_core::engine::InFlightKey::InitialCommit(path.clone()))
-            && std::time::Instant::now() < deadline
-        {
+        while app.engine.is_in_flight(&gate) && std::time::Instant::now() < deadline {
             app.drain_events();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -5654,8 +5658,7 @@ mod tests {
         std::fs::set_permissions(&objects, original).unwrap();
 
         assert!(
-            !app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::InitialCommit(path.clone())),
+            !app.engine.is_in_flight(&gate),
             "a failed commit must still release the in-flight gate"
         );
         assert!(
@@ -10298,6 +10301,10 @@ mod tests {
         let (_root, _repo, mut app) = project_based_on_develop();
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = Vec::new();
+        // A short path that really is missing: the header row clips at the
+        // dialog's edge, and the temp folder's path (long on macOS) would push
+        // the missing marker past it.
+        app.engine.projects[0].path = "/gone/repo".to_string();
         app.engine.projects[0].path_missing = true;
         let id = app.engine.projects[0].id.clone();
         let path = app.engine.projects[0].path.clone();

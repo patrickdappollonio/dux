@@ -383,7 +383,16 @@ async fn deleting_a_detached_worktree_with_delete_branch_still_works() {
     // simply no branch to delete, so the worktree goes and nothing else does.
     let f = boot().await;
     let repo = f._tmp.path().join("repo");
-    let loose = f._tmp.path().join("worktrees").join("repo").join("loose");
+    // The real path, the one git lists the worktree by (macOS reaches the temp
+    // folder through a symlink).
+    let loose = f
+        ._tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("worktrees")
+        .join("repo")
+        .join("loose");
     git(
         &repo,
         &[

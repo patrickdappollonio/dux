@@ -431,6 +431,7 @@ mod tests {
     /// Create a real directory whose absolute path is exactly `target_len`
     /// characters, nesting components that each stay well inside the 255-byte
     /// name limit.
+    #[cfg(target_os = "linux")]
     fn deep_dir(base: &std::path::Path, target_len: usize) -> std::path::PathBuf {
         let mut remaining = target_len - base.to_string_lossy().chars().count();
         // Every component costs one separator plus its own length, so pick a
@@ -451,6 +452,11 @@ mod tests {
         path
     }
 
+    // Linux only: the fixture is a real folder just under the 4096-character
+    // cap, and macOS refuses any path longer than its PATH_MAX of 1024, so the
+    // folder cannot be made there. The cap is the same string check on both;
+    // the Linux run covers it.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn mkdir_rejects_a_join_that_overruns_the_path_cap() {
         // Catches the gap between the two bounded strings: a parent inside the

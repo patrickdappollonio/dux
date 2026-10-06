@@ -142,18 +142,18 @@ fn pty_write_input() {
     let mut reader = pair.master.try_clone_reader().expect("reader");
     let mut writer = pair.master.take_writer().expect("writer");
 
-    // Write some text followed by EOF (Ctrl-D).
     writer.write_all(b"test-input\n").expect("write");
-    writer.write_all(b"\x04").expect("write eof");
 
     // Give it a moment to process.
     thread::sleep(Duration::from_millis(200));
 
-    // Read whatever is available.
+    // Read while `cat` still holds the terminal: macOS throws away what the
+    // master has not read yet once the last slave descriptor closes, so
+    // ending `cat` first (a kill, or an end of input) would leave nothing to
+    // read there.
     let mut output = vec![0u8; 4096];
-    // Non-blocking: try to read
-    let _ = child.kill();
     let n = reader.read(&mut output).unwrap_or(0);
+    let _ = child.kill();
     let text = String::from_utf8_lossy(&output[..n]);
 
     // The output should contain our input echoed back.

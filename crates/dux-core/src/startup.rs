@@ -1502,6 +1502,10 @@ mod tests {
     /// after the run has returned and its log is written, nothing ever reads
     /// it, no file names it, and it grows on disk in dux's config folder for
     /// as long as the job runs.
+    // Linux only: the job's output is measured through /proc, which macOS does
+    // not have, so there the size would read 0 and the test would pass without
+    // looking. The capture is the same code on both; the Linux run covers it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");
@@ -1712,10 +1716,7 @@ mod review16_tests {
             .unwrap();
         let started = Instant::now();
         std::thread::sleep(Duration::from_millis(1500));
-        let alive = std::path::Path::new(&format!("/proc/{job}")).exists()
-            && !fs::read_to_string(format!("/proc/{job}/stat"))
-                .unwrap_or_default()
-                .contains(") Z");
+        let alive = alive(job as u32);
         // Clean up the job's whole group, whatever happened.
         if let Some(pid) = rustix::process::Pid::from_raw(job) {
             if let Ok(pgid) = rustix::process::getpgid(Some(pid)) {
@@ -1731,15 +1732,9 @@ mod review16_tests {
         );
     }
 
+    /// Running and not a zombie, on any platform.
     fn alive(pid: u32) -> bool {
-        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            !stat
-                .rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
+        crate::file_drop::process_can_answer(pid)
     }
 
     fn wait_gone(pid: u32) -> bool {
@@ -1835,8 +1830,8 @@ mod review16_tests {
         for drain in &drains {
             assert!(alive(*drain), "the drain runs while the job does");
             assert_eq!(
-                fs::read_link(format!("/proc/{drain}/cwd")).unwrap(),
-                std::path::PathBuf::from("/")
+                crate::file_drop::process_cwds(&[*drain]).found.get(drain),
+                Some(&std::path::PathBuf::from("/"))
             );
         }
         // Not in the worktree's way: no tracked session holds it, and its
