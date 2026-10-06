@@ -32,9 +32,8 @@ pub enum Target {
     Remote { name: String, remote: Remote },
 }
 
-/// The name of the remote selected by `flag`, `env` (the value of
-/// [`REMOTE_VARIABLE`]) or the saved default, in that order; `None` with
-/// `--local` or when nothing names one. An empty variable names nothing.
+/// The remote named by `flag`, `env` ([`REMOTE_VARIABLE`], empty naming nothing) or the
+/// saved default, in that order; `None` with `--local` or when nothing names one.
 pub fn selected_remote(
     flag: Option<&str>,
     local: bool,
@@ -102,10 +101,8 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
     Ok(client)
 }
 
-/// The dux on this machine when one is running, ready for requests; `None`
-/// when none is (the lock is free), for a command that then works on the
-/// config file itself. A dux that holds the lock but does not answer is
-/// reported, never worked around.
+/// The dux on this machine, ready for requests; `None` when the lock is free. A dux that
+/// holds the lock but does not answer is an error, never worked around.
 pub fn connect_local_if_running(lock_path: &Path) -> Result<Option<Client>, CliError> {
     let Some(transport) = find_running_local(lock_path)? else {
         return Ok(None);

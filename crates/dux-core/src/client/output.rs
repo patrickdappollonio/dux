@@ -117,9 +117,13 @@ pub fn details(object: &serde_json::Value) -> String {
         .collect()
 }
 
-/// The one item of `items` that `query` names: the item whose id it is, or
-/// else the only item with that name. No match fails; a name several items
-/// share is refused, listing them so the caller can pick by id.
+/// The one item of `items` that `query` names: the item with that id, else the only item
+/// with that name.
+///
+/// # Errors
+///
+/// [`Exit::Failed`] when nothing matches; [`Exit::Usage`], listing their ids, when several
+/// items share the name.
 pub fn select<'a, T>(
     noun: &str,
     query: &str,
@@ -164,10 +168,12 @@ pub fn select_shown<'a, T>(
     }
 }
 
-/// Ask before a change. `--yes` answers for the user; otherwise the question
-/// is asked on `terminal` (the prompt to stderr, the answer from stdin), and
-/// with no terminal the change is refused, since nobody could have agreed to
-/// it. `question` names what changes and `target` the dux it changes on.
+/// Ask `question` about `target` before a change, on `terminal` (the prompt to stderr, the
+/// answer from stdin); `yes` answers for the user.
+///
+/// # Errors
+///
+/// [`Exit::Refused`] when the answer is no, or when there is no terminal to ask on.
 pub fn confirm(
     question: &str,
     target: &str,
@@ -197,10 +203,12 @@ pub fn confirm(
     }
 }
 
-/// `path` as the dux on the other end should read it. The local dux gets it
-/// made absolute against `cwd`, since it does not share this shell's folder;
-/// a remote (`remote` names it) refuses a relative one, since this machine's
-/// folder means nothing there.
+/// `path` as the dux on the other end should read it: absolute against `cwd` for the local
+/// dux, which does not share this shell's folder.
+///
+/// # Errors
+///
+/// [`Exit::Usage`] for a relative path sent to the remote `remote` names.
 pub fn path_for_target(path: &str, remote: Option<&str>, cwd: &Path) -> Result<String, CliError> {
     let typed = Path::new(path);
     if typed.is_absolute() {

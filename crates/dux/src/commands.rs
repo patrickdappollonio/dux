@@ -153,10 +153,8 @@ pub struct ConfigInvocation {
     pub args: Vec<String>,
 }
 
-/// Recognises a command line whose command is `config`, looking only at the
-/// global flags that may precede it. Everything after the word is the config
-/// code's, `--` and flag-looking words included, so clap never sees it. A line
-/// that is not that shape (or names both global flags) is left to clap.
+/// Splits off a command line whose command is `config`, after the global flags alone, so clap
+/// never sees its words. Any other shape, or one naming both global flags, is left to clap.
 pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
     let mut remote = None;
     let mut local = false;
@@ -186,9 +184,8 @@ pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
     None
 }
 
-/// `dux config` edits this machine's file, so it refuses when a remote is
-/// selected unless `--local` is given. `remote` is the remote selected by
-/// `--remote`, `DUX_REMOTE` or the saved default.
+/// `dux config` edits this machine's file, so a remote selected by `--remote`, `DUX_REMOTE` or
+/// the saved default is refused unless `--local` is given.
 pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), String> {
     if remote.is_some() && !local {
         return Err(

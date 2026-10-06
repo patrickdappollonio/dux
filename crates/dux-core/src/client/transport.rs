@@ -13,8 +13,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The longest any reply may take. A waiting operation read holds its reply
-/// for at most 25 seconds, so this leaves room for that and a slow network.
+/// The longest any reply may take: room for a waiting operation read's
+/// [`super::wait::READ_WAIT`] and a slow network.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long reaching a remote may take before it counts as not answering.
@@ -110,14 +110,15 @@ impl std::fmt::Display for TransportError {
 pub trait Transport {
     fn send(&self, request: &Request) -> Result<Response, TransportError>;
 
-    /// Send `request` and hand its reply's body to `on_body` as it arrives,
-    /// each piece with the reply's status, until the reply ends or `on_body`
-    /// answers [`ControlFlow::Break`]. It is called once with an empty piece as
-    /// soon as the status is known, so a reply with no body still tells its
-    /// caller what it was. For a reply that has no end of its own
-    /// (a followed log), so once connected there is no deadline of any kind:
-    /// a quiet stream is not a dead one, and the caller ends it. A reply that
-    /// ends before its framing says it is whole is [`TransportError::Dropped`].
+    /// Send `request` and hand its reply's body to `on_body` as it arrives, with
+    /// the reply's status, until the reply ends or `on_body` breaks.
+    ///
+    /// `on_body` first gets an empty piece as soon as the status is known. Once
+    /// connected nothing has a deadline: a quiet stream is not a dead one.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Dropped`] when the reply ends before its framing says it is whole.
     fn stream(
         &self,
         request: &Request,
@@ -196,10 +197,8 @@ impl Write for Deadline {
     }
 }
 
-/// A timeout that could not be set because the other end has already shut
-/// the connection down is no failure: macOS refuses to set one then
-/// (`EINVAL`), and the read or write after it cannot wait anyway, so it goes
-/// ahead and answers with what is left or with the end.
+/// macOS refuses to set a timeout (`EINVAL`) once the peer has shut the connection down; that
+/// is no failure, since the read or write after it cannot wait anyway.
 fn unless_shut_down(set: std::io::Result<()>) -> std::io::Result<()> {
     match set {
         Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
@@ -431,9 +430,8 @@ fn read_chunks(reader: &mut impl BufRead) -> Result<Vec<u8>, TransportError> {
     Ok(body)
 }
 
-/// Read a chunked body, handing each piece of a chunk over as it is read
-/// (never more than [`STREAM_PIECE`] at once, and a chunk is read whole before
-/// the one after it). Ends at the last chunk, or when `on_piece` breaks.
+/// Read a chunked body, handing it over in pieces of at most [`STREAM_PIECE`], until the
+/// last chunk or until `on_piece` breaks.
 fn each_chunk_piece(
     reader: &mut impl BufRead,
     on_piece: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
@@ -509,9 +507,8 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    /// `base` is the remote's URL with no trailing slash; request paths are
-    /// appended to it. `insecure` says the remote was added with
-    /// `--insecure`.
+    /// `base` is the remote's URL, to which request paths are appended; `insecure` says the
+    /// remote was added with `--insecure`.
     pub fn new(base: &str, insecure: bool) -> Self {
         let url = url::Url::parse(base).ok();
         let mut builder = ureq::Agent::config_builder()
@@ -533,10 +530,8 @@ impl HttpTransport {
         }
     }
 
-    /// Run `request` against `base` (a URL with no trailing slash), naming
-    /// `host` in the `Host` header when it is given, and answer once the reply
-    /// has begun. `whole` bounds the exchange as a whole; with `None` nothing
-    /// but connecting is bounded.
+    /// Run `request` against `base` and answer once the reply has begun. `whole` bounds the
+    /// whole exchange; with `None` only connecting is bounded.
     fn open(
         &self,
         request: &Request,
@@ -620,9 +615,8 @@ impl HttpTransport {
         }
     }
 
-    /// Run `attempt` against where this remote is reached: as written, or at
-    /// each address its name must resolve to, trying the next only when one
-    /// is unreachable.
+    /// Run `attempt` against the remote as written, or at each address its name must resolve
+    /// to, moving to the next address only when one is unreachable.
     fn through_destinations<T>(
         &self,
         mut attempt: impl FnMut(&str, Option<&str>) -> Result<T, TransportError>,
@@ -651,10 +645,8 @@ impl HttpTransport {
     }
 }
 
-/// Whether a request to `url` may go through a proxy named in the
-/// environment. Plain HTTP is allowed without `--insecure` only because it
-/// stays on this machine or the tailnet, and a proxy would carry it
-/// elsewhere; this machine's loopback is never proxied.
+/// Whether a request to `url` may go through an environment proxy. Plain HTTP without
+/// `--insecure` never may: it is allowed only because it stays on this machine or the tailnet.
 pub(crate) fn uses_environment_proxy(url: &url::Url, insecure: bool) -> bool {
     let loopback = match url.host() {
         Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
@@ -665,11 +657,8 @@ pub(crate) fn uses_environment_proxy(url: &url::Url, insecure: bool) -> bool {
     !loopback && (url.scheme() == "https" || insecure)
 }
 
-/// Where a plain-HTTP request to `url` must connect, or `None` to reach it
-/// as written. `localhost` is this machine's loopback, never whatever a name
-/// lookup says; a Tailscale name must resolve, now, to Tailscale addresses
-/// only, since plain HTTP is allowed to it for that reason alone. A remote
-/// added with `--insecure`, or reached over https, is reached as written.
+/// Where a plain-HTTP request to `url` must connect, or `None` to reach it as written. A
+/// Tailscale name must resolve to Tailscale addresses only: that is why plain HTTP is allowed.
 pub(crate) fn destinations(
     url: &url::Url,
     insecure: bool,

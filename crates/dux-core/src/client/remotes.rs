@@ -1,7 +1,6 @@
 //! Saved remotes: `remotes.toml` in the config folder, owner-only, holding
 //! each remote's URL, whether plain HTTP to it was allowed, the default
-//! remote and the CLI sign-in tokens. Never `config.toml`, which gets pasted
-//! into bug reports.
+//! remote and the CLI sign-in tokens, none of which live in `config.toml`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -126,9 +125,8 @@ impl Remotes {
         Ok(())
     }
 
-    /// Load the file, `change` it and save it, holding an exclusive lock on
-    /// [`REMOTES_LOCK_FILE`] throughout, so two commands changing it at once
-    /// never lose either change. A `change` that fails saves nothing.
+    /// Load the file, `change` it and save it under an exclusive lock, so two commands changing
+    /// it at once never lose either change. A `change` that fails saves nothing.
     pub fn update<T>(
         root: &Path,
         change: impl FnOnce(&mut Remotes) -> Result<T, CliError>,
@@ -141,8 +139,10 @@ impl Remotes {
     }
 
     /// Keep `token` as the sign-in to `name`, issued by the remote at `url`.
-    /// When `name` was removed, or now names another URL, while the sign-in
-    /// ran, nothing is kept: the token belongs to a remote no longer saved.
+    ///
+    /// # Errors
+    ///
+    /// [`Exit::Failed`], keeping nothing, when `name` was removed or now names another URL.
     pub fn keep_token(root: &Path, name: &str, url: &str, token: &str) -> Result<(), CliError> {
         Self::update(root, |saved| match saved.remotes.get_mut(name) {
             Some(remote) if remote.url == url => {
@@ -288,9 +288,8 @@ fn checked_url(url: &str, insecure: bool) -> Result<String, CliError> {
     Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// Whether plain HTTP to `host` keeps the password off an open network:
-/// this machine's loopback, or Tailscale's addresses and names, whose traffic
-/// is encrypted in transit.
+/// Whether plain HTTP to `host` keeps the password off an open network: loopback, or Tailscale
+/// addresses and names, whose traffic is encrypted in transit.
 fn plain_http_allowed(host: &url::Host<&str>) -> bool {
     match host {
         url::Host::Domain(name) => {

@@ -263,10 +263,8 @@ fn read_with<T>(
     }
 }
 
-/// Run a change: through the running dux it is selected on, so it applies at
-/// once, or, on this machine with no dux running, on config.toml itself.
-/// `question` is asked first (see [`output::confirm`]); `stdin_taken` says
-/// standard input carries a value, so it cannot carry the answer too.
+/// Run a change through the selected running dux, or on config.toml when this machine runs
+/// none. `stdin_taken` says standard input carries a value, so it cannot also carry the answer.
 fn change_with(
     selection: &Selection,
     flags: &ChangeFlags,
@@ -641,9 +639,8 @@ pub fn server_connections(
     server_inspect::connections_ls(&client, shape(&list))
 }
 
-/// `dux server logs`: the last lines of the server log and, with `follow`,
-/// every line after, printed as they come. A dux on this machine that is not
-/// running has left the log in its file, which is read as it stands.
+/// `dux server logs`: the last lines of the server log and, with `follow`, every line after.
+/// With no dux running on this machine, its log file is read as it stands.
 pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<String, CliError> {
     use std::io::Write;
     use std::ops::ControlFlow;
