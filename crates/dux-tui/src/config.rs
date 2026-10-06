@@ -1466,11 +1466,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # and removing a project are refused while somebody else is connected to\n\
                  # what they would end, unless whoever asks says to go ahead anyway. A\n\
                  # browser tab keeps counting as connected to a terminal for this many\n\
-                 # seconds after the terminal's connection closes, when the tab was showing\n\
-                 # it and is itself still connected: a phone whose screen goes off for a\n\
-                 # minute still protects the agent its owner is working in. 0 stops\n\
-                 # counting the moment the terminal's connection closes. Default 300.\n\
-                 # A config reload applies this to the next connection that closes.",
+                 # seconds after the last moment it showed it, when the terminal's\n\
+                 # connection was lost rather than closed, even once the tab's own\n\
+                 # connection is lost too: a phone in a pocket still protects the agent its\n\
+                 # owner is working in. Closing the tab, navigating away, opening something\n\
+                 # else in it, signing out or going ahead anyway ends it at once. 0 stops\n\
+                 # counting the moment the connection is lost. Default 300.\n\
+                 # A config reload applies this to the next connection that is lost.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.presence_grace_seconds as usize),
         },

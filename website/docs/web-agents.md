@@ -307,11 +307,15 @@ way, and neither is the terminal app deleting the agent it shows, but a second t
 the same computer counts like any other device.
 
 > [!IMPORTANT]
-> **A phone with its screen off still counts.** When a browser tab was showing a terminal and
-> that terminal's connection closes (the screen locked, the tab went to the background), the
-> tab keeps counting as connected to it for `presence_grace_seconds` under `[server]` (300
-> seconds by default), as long as the tab itself is still connected. A device that has gone
-> silent for 75 seconds stops counting.
+> **A phone in your pocket still counts.** When a browser tab was showing a terminal and that
+> terminal's connection is lost rather than closed (the screen locked, the phone went into a
+> pocket, the network dropped), the tab keeps counting as connected to it for
+> `presence_grace_seconds` under `[server]` (300 seconds by default), counted from the last
+> moment it was on screen, even after dux has given up on the phone's connection altogether.
+> It stops counting at once when the tab closes the terminal on purpose (you close the tab,
+> navigate away, or open another agent or terminal in it), when it signs out, or when somebody
+> goes ahead anyway. A device that was not showing the terminal stops counting once it has
+> been silent for 75 seconds.
 
 The terminal app counts as connected to exactly the terminals it is drawing: an agent that is
 selected but not on screen, because a diff fills the center pane, protects nothing.

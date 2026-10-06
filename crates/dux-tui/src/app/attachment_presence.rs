@@ -74,7 +74,10 @@ impl App {
     /// This surface stopped drawing anything: it is leaving the terminal (a
     /// quit, or the flip to the server).
     pub(super) fn release_drawn_attachments(&mut self) {
-        self.engine.attachments.deregister(TERMINAL_UI_CONNECTION);
+        self.engine.attachments.deregister(
+            TERMINAL_UI_CONNECTION,
+            dux_core::attachments::Ending::Deliberate,
+        );
         self.drawn_ptys.clear();
         self.published_ptys = None;
     }

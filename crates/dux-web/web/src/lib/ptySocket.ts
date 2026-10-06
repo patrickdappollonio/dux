@@ -19,7 +19,9 @@
 //   - Every open names this tab's events connection as `?events=<id>`, read at
 //     that moment, so the server counts the terminal as part of this browser
 //     tab: the tab is not in its own way when it deletes or stops what it shows,
-//     and a reconnected events socket is named by the next reopen.
+//     and a reconnected events socket is named by the next reopen. While the
+//     events socket is opening with no id yet, an open waits for it, for at
+//     most `CONNECTION_ID_WAIT_MS` (`connection.ts`).
 //
 // Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at
@@ -34,7 +36,7 @@
 import { assertNever } from "./assertNever"
 import { wsUrl } from "./apiBase"
 import { authPaused } from "./authGate"
-import { getConnectionId } from "./connection"
+import { awaitingConnectionId, getConnectionId, onConnectionIdSettled } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
@@ -149,14 +151,24 @@ export class PtySocket extends ReconnectingSocket {
     // stopped trying, which is the gate's other half.
     super(url, {
       parkWhileHidden: true,
-      canRetry: () => serverValidated() && !appSocketGivenUp(),
+      canRetry: () =>
+        serverValidated() && !appSocketGivenUp() && !awaitingConnectionId(),
       attemptBudget: () => 0,
     })
     // The gate pushes as well as blocking: a retry held by it re-arms at whatever
     // delay it had reached, and the gate opening is the moment to try.
-    this.unsubscribeGate = onServerValidated(() => {
+    const unsubscribeValidated = onServerValidated(() => {
       this.resumeNow()
     })
+    // The tab's events id arriving (or the wait for it running out) is the
+    // other moment a held open can go.
+    const unsubscribeId = onConnectionIdSettled(() => {
+      this.resumeNow()
+    })
+    this.unsubscribeGate = () => {
+      unsubscribeValidated()
+      unsubscribeId()
+    }
   }
 
   // Names this tab's events connection (see the protocol notes above). None

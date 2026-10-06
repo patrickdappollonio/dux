@@ -19,17 +19,24 @@
 //! deleting what it shows, or the browser tab that sent the request. Driving
 //! or watching is read from the PTY ownership record, never from a client.
 //!
-//! Two things keep a connection counted that is not streaming right now, and
-//! one thing stops counting one that is:
+//! One thing keeps a terminal counted after its socket is gone, and one thing
+//! stops counting a socket that is still there:
 //!
-//! - A browser tab whose terminal socket closed while its page was being
-//!   looked at (the last beat on it said so) still counts as attached to that
-//!   terminal for the presence grace, as long as its events connection is
-//!   live: a phone whose screen went off for a minute still protects the agent
-//!   its owner is working in.
-//! - A connection whose peer has sent nothing for [`QUIET_DEADLINE`] is not
-//!   counted, whatever its socket task is doing, so a socket stuck on a send
-//!   to a dead peer stops blocking anything once the deadline passes.
+//! - A terminal socket that was LOST (reaped, timed out, cut off by the
+//!   network) while its page was being looked at (its last beat said so) keeps
+//!   counting for the presence grace from that beat, whether or not the tab's
+//!   events connection is still up: a phone in a pocket for minutes still
+//!   protects the agent its owner is working in. Only a deliberate end
+//!   releases it at once ([`Ending::Deliberate`]: a clean close, a sign-out),
+//!   or the tab attaching anything again, or a change forced over it. A tab
+//!   whose events connection was lost names the old one when it reconnects,
+//!   and its new connection inherits what the old one still counted
+//!   ([`Attachments::inherit`]).
+//! - An attachment whose peer has sent nothing for [`QUIET_DEADLINE`], and
+//!   whose page was not being looked at, is not counted, whatever its socket
+//!   task is doing, so a socket stuck on a send to a dead peer stops blocking
+//!   once the deadline passes (its socket's quiet watchdog then ends it as
+//!   lost).
 //!
 //! In memory only: a restart loses every connection, so it loses every
 //! attachment too, and a stored one would block deletes after a crash.
@@ -182,6 +189,17 @@ pub struct Blocker {
     pub target: Target,
 }
 
+/// How a connection or an attachment ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// The client meant it: a clean close (the tab closed or went elsewhere),
+    /// a sign-out, or the thing it streamed being gone. Nothing lingers.
+    Deliberate,
+    /// The connection was lost (reaped, timed out, cut off). A terminal its
+    /// page was looking at keeps counting for the grace.
+    Lost,
+}
+
 /// A new attachment refused because a change is ending what it would attach
 /// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,18 +212,23 @@ struct Connection {
 
 struct Attachment {
     connection: String,
+    /// The connection as it presented itself when this attached, kept here so
+    /// the attachment still says who it is after its connection record goes.
+    facts: Option<ConnectionFacts>,
     target: Target,
     heard: Option<Heard>,
     /// This attachment's id in the PTY ownership record, when it has one.
     pty_conn: Option<u64>,
-    /// Whether the last beat on it said its page was being looked at.
-    viewed: bool,
+    /// When the last beat on it said its page was being looked at; `None`
+    /// when the last beat said it was not, or there was none.
+    viewed_at: Option<Instant>,
 }
 
-/// An attachment that ended while it was being looked at, still counted until
-/// `until` while its connection is live.
+/// A terminal whose socket was lost while its page was being looked at,
+/// still counted until `until`.
 struct Presence {
     connection: String,
+    facts: ConnectionFacts,
     target: Target,
     until: Instant,
 }
@@ -266,14 +289,20 @@ impl Attachments {
         });
     }
 
-    /// Forget a connection with everything attached through it.
-    pub fn deregister(&self, id: &str) {
+    /// Forget a connection.
+    ///
+    /// Lost, only the record goes: a terminal socket linked to it ends on its
+    /// own, and what the tab counted as attached to keeps counting. A
+    /// deliberate end takes everything attached through it at once.
+    pub fn deregister(&self, id: &str, ending: Ending) {
         self.with(|state| {
             state.connections.remove(id);
-            state
-                .attachments
-                .retain(|_, attachment| attachment.connection != id);
-            state.presences.retain(|presence| presence.connection != id);
+            if ending == Ending::Deliberate {
+                state
+                    .attachments
+                    .retain(|_, attachment| attachment.connection != id);
+                state.presences.retain(|presence| presence.connection != id);
+            }
         });
     }
 
@@ -291,8 +320,7 @@ impl Attachments {
     }
 
     /// Attach `connection` to `target`, refused while a change that covers it
-    /// holds a reservation. The token is what [`Self::detach`] and
-    /// [`Self::revoke`] take.
+    /// holds a reservation. The token is what [`Self::detach`] takes.
     pub fn attach(
         &self,
         connection: &str,
@@ -305,16 +333,26 @@ impl Attachments {
             if state.reserved(&target) {
                 return Err(Reserved);
             }
+            // The tab is attached somewhere again: whatever it was still
+            // counted as attached to after losing a socket is over.
+            state
+                .presences
+                .retain(|presence| presence.connection != connection);
             state.next += 1;
             let token = state.next;
+            let facts = state
+                .connections
+                .get(connection)
+                .map(|known| known.facts.clone());
             state.attachments.insert(
                 token,
                 Attachment {
                     connection: connection.to_string(),
+                    facts,
                     target,
                     heard,
                     pty_conn,
-                    viewed: false,
+                    viewed_at: None,
                 },
             );
             Ok(token)
@@ -323,36 +361,52 @@ impl Attachments {
 
     /// The last beat on attachment `token` said whether its page is being
     /// looked at.
-    pub fn note_viewed(&self, token: u64, viewed: bool) {
+    pub fn note_viewed(&self, token: u64, viewed: bool, now: Instant) {
         self.with(|state| {
             if let Some(attachment) = state.attachments.get_mut(&token) {
-                attachment.viewed = viewed;
+                attachment.viewed_at = viewed.then_some(now);
             }
         });
     }
 
-    /// The attachment ended. When its page was being looked at, it keeps
-    /// counting for `grace` while its connection is live.
-    pub fn detach(&self, token: u64, now: Instant, grace: Duration) {
+    /// The attachment ended. Lost while its page was being looked at, it keeps
+    /// counting until `grace` after its last viewed beat; ended deliberately,
+    /// nothing is left.
+    pub fn detach(&self, token: u64, ending: Ending, now: Instant, grace: Duration) {
         self.with(|state| {
             let Some(attachment) = state.attachments.remove(&token) else {
                 return;
             };
-            if attachment.viewed && !grace.is_zero() {
+            if ending == Ending::Lost
+                && let (Some(viewed_at), Some(facts)) = (attachment.viewed_at, attachment.facts)
+                && viewed_at + grace > now
+            {
                 state.presences.push(Presence {
                     connection: attachment.connection,
+                    facts,
                     target: attachment.target,
-                    until: now + grace,
+                    until: viewed_at + grace,
                 });
             }
             state.presences.retain(|presence| presence.until > now);
         });
     }
 
-    /// The attachment's peer went quiet: forget it at once, with no grace.
-    pub fn revoke(&self, token: u64) {
+    /// A tab's new events connection `new` takes over what its lost one `old`
+    /// still counts as attached to, so the tab is not in its own way and its
+    /// next attach ends it.
+    ///
+    /// Only from a connection that is gone: a live one keeps what it has.
+    pub fn inherit(&self, old: &str, new: &str) {
         self.with(|state| {
-            state.attachments.remove(&token);
+            if state.connections.contains_key(old) {
+                return;
+            }
+            for presence in &mut state.presences {
+                if presence.connection == old {
+                    presence.connection = new.to_string();
+                }
+            }
         });
     }
 
@@ -371,14 +425,19 @@ impl Attachments {
                 }
                 state.next += 1;
                 let token = state.next;
+                let facts = state
+                    .connections
+                    .get(TERMINAL_UI_CONNECTION)
+                    .map(|known| known.facts.clone());
                 state.attachments.insert(
                     token,
                     Attachment {
                         connection: TERMINAL_UI_CONNECTION.to_string(),
+                        facts,
                         target,
                         heard: None,
                         pty_conn,
-                        viewed: false,
+                        viewed_at: None,
                     },
                 );
             }
@@ -392,7 +451,8 @@ impl Attachments {
 
     /// In one step: refuse a change to `scope` with the connections in its
     /// way, unless there are none or the policy forces it, and otherwise
-    /// refuse every new attachment to `scope` for `life`. The id is what
+    /// refuse every new attachment to `scope` for `life`. A forced change also
+    /// ends every lost terminal still counted in `scope`. The id is what
     /// [`Self::release`] takes.
     pub fn reserve(
         &self,
@@ -406,6 +466,9 @@ impl Attachments {
             if !blockers.is_empty() && !policy.force {
                 return Err(blockers);
             }
+            state
+                .presences
+                .retain(|presence| !scope.covers(&presence.target));
             state.prune_reservations();
             state.next += 1;
             let id = state.next;
@@ -442,63 +505,62 @@ impl State {
     }
 
     fn blockers(&self, scope: &Scope, exempt: Option<&str>, now: Instant) -> Vec<Blocker> {
-        let counted = |id: &str| -> Option<&Connection> {
-            if Some(id) == exempt {
-                return None;
-            }
-            self.connections
-                .get(id)
-                .filter(|connection| connection_live(connection, now))
-        };
+        let exempted = |id: &str| Some(id) == exempt;
         let mut attached: Vec<(&u64, &Attachment)> = self.attachments.iter().collect();
         attached.sort_by_key(|(token, _)| **token);
         let mut blockers = Vec::new();
         for (_, attachment) in attached {
+            let Some(facts) = &attachment.facts else {
+                continue;
+            };
             if !scope.covers(&attachment.target)
-                || attachment
-                    .heard
-                    .as_ref()
-                    .is_some_and(|heard| heard.quiet(now))
+                || exempted(&attachment.connection)
+                // Quiet and not being looked at: a dead peer. One that was
+                // being looked at keeps counting; its socket's watchdog ends
+                // it as lost, with the grace.
+                || (attachment.viewed_at.is_none()
+                    && attachment
+                        .heard
+                        .as_ref()
+                        .is_some_and(|heard| heard.quiet(now)))
             {
                 continue;
             }
-            let Some(connection) = counted(&attachment.connection) else {
-                continue;
-            };
             blockers.push(blocker(
-                connection,
+                facts,
                 &attachment.target,
-                self.drives(connection, attachment),
+                self.drives(facts, attachment),
             ));
         }
         for presence in &self.presences {
-            if presence.until <= now || !scope.covers(&presence.target) {
+            if presence.until <= now
+                || !scope.covers(&presence.target)
+                || exempted(&presence.connection)
+            {
                 continue;
             }
-            if let Some(connection) = counted(&presence.connection) {
-                blockers.push(blocker(connection, &presence.target, false));
-            }
+            blockers.push(blocker(&presence.facts, &presence.target, false));
         }
         blockers
     }
 
-    fn drives(&self, connection: &Connection, attachment: &Attachment) -> bool {
+    fn drives(&self, facts: &ConnectionFacts, attachment: &Attachment) -> bool {
         match (attachment.pty_conn, &self.owners) {
             (Some(id), Some(owners)) => owners.current_owner(&attachment.target.id).0 == Some(id),
             (Some(_), None) => false,
             // The terminal UI without a seat in an ownership record is the only
             // thing that can type into what it draws.
-            (None, _) => connection.facts.surface == Surface::TerminalUi,
+            (None, _) => facts.surface == Surface::TerminalUi,
         }
     }
 }
 
-fn blocker(connection: &Connection, target: &Target, driving: bool) -> Blocker {
+fn blocker(facts: &ConnectionFacts, target: &Target, driving: bool) -> Blocker {
     Blocker {
-        surface: connection.facts.surface,
-        device: connection.facts.device.clone(),
-        address: connection.facts.address.map(|address| address.to_string()),
-        verified: connection.facts.verified,
+        surface: facts.surface,
+        device: facts.device.clone(),
+        address: facts.address.map(|address| address.to_string()),
+        verified: facts.verified,
         driving,
         target: target.clone(),
     }
@@ -634,7 +696,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.len(), 1, "{refused:?}");
 
-        attachments.deregister("e2");
+        attachments.deregister("e2", Ending::Deliberate);
         assert!(
             attachments
                 .reserve(agent_scope("s1"), &own, Life::Released, now)
@@ -667,63 +729,146 @@ mod tests {
         );
     }
 
-    /// A terminal socket that closed while its page was looked at keeps its
-    /// tab counted for the grace, while the tab's events connection is live;
-    /// one that closed unlooked-at does not linger at all.
+    const GRACE: Duration = Duration::from_secs(300);
+
+    fn lose(attachments: &Attachments, token: u64, at: Instant) {
+        attachments.detach(token, Ending::Lost, at, GRACE);
+    }
+
+    /// A terminal whose socket was lost (reaped, timed out, cut off) while its
+    /// page was being looked at keeps counting for the grace, even once the
+    /// tab's own events connection is lost too. Only a deliberate end releases
+    /// it at once: a clean close, a sign-out, the tab attaching anything again
+    /// (also under the id its next events connection inherits), or a change
+    /// forced over it.
     #[test]
-    fn a_closed_socket_that_was_being_looked_at_counts_for_the_grace() {
+    fn a_terminal_that_was_being_looked_at_counts_for_the_grace_until_ended_deliberately() {
+        type Ends = fn(&Attachments, u64, Instant);
+        let cases: [(&str, Ends, bool); 8] = [
+            ("its socket lost", |a, t, at| lose(a, t, at), true),
+            (
+                "its socket and its events connection lost",
+                |a, t, at| {
+                    lose(a, t, at);
+                    a.deregister("phone", Ending::Lost);
+                },
+                true,
+            ),
+            (
+                "its last beat not looked at",
+                |a, t, at| {
+                    a.note_viewed(t, false, at);
+                    lose(a, t, at);
+                },
+                false,
+            ),
+            (
+                "its socket closed cleanly",
+                |a, t, at| {
+                    a.detach(t, Ending::Deliberate, at, GRACE);
+                },
+                false,
+            ),
+            (
+                "signed out after its socket was lost",
+                |a, t, at| {
+                    lose(a, t, at);
+                    a.deregister("phone", Ending::Deliberate);
+                },
+                false,
+            ),
+            (
+                "the tab attached elsewhere",
+                |a, t, at| {
+                    lose(a, t, at);
+                    a.attach("phone", tab("s9-slot", "s9"), None, None).unwrap();
+                },
+                false,
+            ),
+            (
+                "the tab attached elsewhere from its next events connection",
+                |a, t, at| {
+                    lose(a, t, at);
+                    a.deregister("phone", Ending::Lost);
+                    a.register("phone-again", browser("100.64.0.9", "Safari"), None);
+                    a.inherit("phone", "phone-again");
+                    a.attach("phone-again", tab("s9-slot", "s9"), None, None)
+                        .unwrap();
+                },
+                false,
+            ),
+            (
+                "a change forced over it",
+                |a, t, at| {
+                    lose(a, t, at);
+                    let forced = Policy {
+                        requester: None,
+                        force: true,
+                    };
+                    let id = a
+                        .reserve(agent_scope("s1"), &forced, Life::Released, at)
+                        .unwrap();
+                    a.release(id);
+                },
+                false,
+            ),
+        ];
+        let beat = Instant::now();
+        for (case, end, blocks) in cases {
+            let attachments = Attachments::default();
+            attachments.register(
+                "phone",
+                browser("100.64.0.9", "Safari"),
+                Some(Heard::at(beat)),
+            );
+            let token = attachments
+                .attach("phone", tab("s1-slot", "s1"), None, None)
+                .unwrap();
+            attachments.note_viewed(token, true, beat);
+            end(&attachments, token, beat + Duration::from_secs(10));
+            let blockers =
+                attachments.blockers(&agent_scope("s1"), None, beat + Duration::from_secs(60));
+            assert_eq!(!blockers.is_empty(), blocks, "{case}: {blockers:?}");
+        }
+    }
+
+    /// The grace runs from the socket's last viewed beat, not from when the
+    /// socket was lost, and a tab's next events connection that inherits it is
+    /// not in its own way.
+    #[test]
+    fn the_grace_runs_from_the_last_viewed_beat() {
         let attachments = Attachments::default();
-        let now = Instant::now();
-        let grace = Duration::from_secs(300);
-        attachments.register(
-            "phone",
-            browser("100.64.0.9", "Safari"),
-            Some(Heard::at(now)),
-        );
-        let viewed = attachments
+        let beat = Instant::now();
+        attachments.register("phone", browser("100.64.0.9", "Safari"), None);
+        let token = attachments
             .attach("phone", tab("s1-slot", "s1"), None, None)
             .unwrap();
-        attachments.note_viewed(viewed, true);
-        attachments.detach(viewed, now, grace);
-        let unviewed = attachments
-            .attach("phone", tab("s2-slot", "s2"), None, None)
-            .unwrap();
-        attachments.detach(unviewed, now, grace);
-
+        attachments.note_viewed(token, true, beat);
+        lose(&attachments, token, beat + Duration::from_secs(100));
+        let at = |offset: u64| beat + Duration::from_secs(offset);
         assert_eq!(
             attachments
-                .blockers(&agent_scope("s1"), None, now + Duration::from_secs(60))
+                .blockers(&agent_scope("s1"), None, at(299))
                 .len(),
-            1,
-            "inside the grace"
+            1
         );
         assert!(
             attachments
-                .blockers(&agent_scope("s2"), None, now + Duration::from_secs(60))
+                .blockers(&agent_scope("s1"), None, at(301))
                 .is_empty()
         );
+
+        attachments.deregister("phone", Ending::Lost);
+        attachments.inherit("phone", "phone-again");
         assert!(
             attachments
-                .blockers(
-                    &agent_scope("s1"),
-                    None,
-                    now + grace + Duration::from_secs(1)
-                )
-                .is_empty(),
-            "past the grace"
-        );
-        attachments.deregister("phone");
-        assert!(
-            attachments
-                .blockers(&agent_scope("s1"), None, now + Duration::from_secs(60))
-                .is_empty(),
-            "the events connection is gone"
+                .blockers(&agent_scope("s1"), Some("phone-again"), at(60))
+                .is_empty()
         );
     }
 
     /// An attachment whose peer went quiet stops blocking at the deadline on
-    /// its own, whatever its socket is stuck doing; one revoked is gone and
-    /// leaves no grace behind.
+    /// its own, whatever its socket is stuck doing.
     #[test]
     fn a_quiet_attachment_stops_blocking_at_the_deadline() {
         let attachments = Attachments::default();
@@ -742,18 +887,6 @@ mod tests {
         assert!(
             attachments
                 .blockers(&agent_scope("s1"), None, now + Duration::from_secs(76))
-                .is_empty()
-        );
-
-        let token = attachments
-            .attach("e1", tab("s2-slot", "s2"), None, None)
-            .unwrap();
-        attachments.note_viewed(token, true);
-        attachments.revoke(token);
-        attachments.detach(token, now, Duration::from_secs(300));
-        assert!(
-            attachments
-                .blockers(&agent_scope("s2"), None, now)
                 .is_empty()
         );
     }

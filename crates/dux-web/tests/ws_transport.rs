@@ -591,18 +591,7 @@ async fn connect_events(addr: SocketAddr) -> (ClientWs, String) {
 /// [`connect_events`] presenting `user_agent`, as a browser's events socket
 /// presents the same one its terminal sockets do.
 async fn connect_events_as(addr: SocketAddr, user_agent: &str) -> (ClientWs, String) {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut request = format!("ws://{addr}/ws/events")
-        .into_client_request()
-        .unwrap();
-    request
-        .headers_mut()
-        .insert("user-agent", user_agent.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(5))
-        .await
-        .expect("the connected frame");
-    (ws, hello["id"].as_str().unwrap().to_string())
+    connect_events_at(addr, "/ws/events", user_agent).await
 }
 
 /// Whether a `status` event whose message contains `needle` arrives within the
@@ -1146,14 +1135,21 @@ async fn a_browser_tab_is_not_in_its_own_way_but_a_second_tab_on_the_same_machin
     assert_eq!(delete_agent_once_free(addr, "s1", Some(&tab_a)).await, 204);
 }
 
-/// A phone whose terminal socket closed while its owner was looking at it
-/// (the last beat said so) still protects that agent while its events
-/// connection is up; one whose page was not being looked at does not.
+/// A phone whose terminal socket was lost while its owner was looking at it
+/// (the last beat said so) still protects that agent for the grace, even once
+/// its events socket is reaped too; one whose page was not being looked at
+/// does not, and one whose socket was closed cleanly releases it at once.
 #[tokio::test]
 async fn a_phone_that_parked_its_terminal_while_looking_at_it_still_blocks_a_delete() {
-    let (addr, _tmp) = boot_with_extra_sessions(&["s2"]).await;
-    let (_events, phone) = connect_events_as(addr, "dux-test-phone").await;
-    for (agent, viewed) in [("s1", true), ("s2", false)] {
+    let (addr, _tmp) = boot_with_extra_sessions(&["s2", "s3"]).await;
+    // (agent, the last beat looked at it, the socket closed cleanly)
+    let mut phones = Vec::new();
+    for (agent, viewed, clean) in [
+        ("s1", true, false),
+        ("s2", false, false),
+        ("s3", true, true),
+    ] {
+        let (events, phone) = connect_events_as(addr, "dux-test-phone").await;
         let mut pty = connect_pty_as(
             addr,
             &format!("/ws/sessions/{agent}/pty?events={phone}"),
@@ -1168,18 +1164,58 @@ async fn a_phone_that_parked_its_terminal_while_looking_at_it_still_blocks_a_del
         next_event_frame(&mut pty, "beat", Duration::from_secs(8))
             .await
             .expect("the beat is answered");
-        drop(pty);
+        if clean {
+            pty.close(None).await.unwrap();
+        } else {
+            drop(pty);
+        }
+        phones.push((events, phone));
     }
+    let first_phone = phones[0].1.clone();
+    // Every phone's events socket is lost too, never closed: the connection
+    // just stops, as a reap sees it.
+    drop(phones);
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
         delete_agent_once_free(addr, "s2", None).await,
         204,
-        "the agent the phone was not looking at is free once its socket closed"
+        "the agent the phone was not looking at is free once its socket was lost"
+    );
+    assert_eq!(
+        delete_agent_once_free(addr, "s3", None).await,
+        204,
+        "a cleanly closed socket releases its agent at once"
     );
     let (status, refused) = delete_agent_as(addr, "s1", None).await;
     assert_eq!(status, 409, "{refused}");
     assert_eq!(refused["blockers"][0]["device"], "dux-test-phone");
     assert_eq!(refused["blockers"][0]["driving"], false);
+
+    // The phone comes back: its new events socket names the one it lost, so
+    // the agent it was looking at is its own again, not in its own way.
+    let (_back, phone) = connect_events_at(
+        addr,
+        &format!("/ws/events?after={first_phone}"),
+        "dux-test-phone",
+    )
+    .await;
+    assert_eq!(delete_agent_once_free(addr, "s1", Some(&phone)).await, 204);
+}
+
+/// An events socket opened at `path` (query included) presenting
+/// `user_agent`, with its connection id.
+async fn connect_events_at(addr: SocketAddr, path: &str, user_agent: &str) -> (ClientWs, String) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("user-agent", user_agent.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(5))
+        .await
+        .expect("the connected frame");
+    (ws, hello["id"].as_str().unwrap().to_string())
 }
 
 /// THE WHOLE JOURNEY for a standalone agent, over the real HTTP surface: create

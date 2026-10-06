@@ -8423,7 +8423,9 @@ mod tests {
             "{}",
             app.status.message()
         );
-        app.engine.attachments.deregister("browser-tab");
+        app.engine
+            .attachments
+            .deregister("browser-tab", dux_core::attachments::Ending::Deliberate);
 
         app.force_reconnect_agent().expect("force reconnect");
 
@@ -8949,7 +8951,9 @@ mod tests {
             app.status.text()
         );
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
-        app.engine.attachments.deregister("browser-tab");
+        app.engine
+            .attachments
+            .deregister("browser-tab", dux_core::attachments::Ending::Deliberate);
 
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);

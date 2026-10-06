@@ -1,3 +1,4 @@
+import { getPreviousConnectionId, noteConnectionIdPending } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import type { EventsClientMessage, EventsServerMessage } from "./types"
 
@@ -21,6 +22,18 @@ export class EventsSocket extends ReconnectingSocket {
   // only. Mutate via subscribe/unsubscribe.
   get topics(): string[] {
     return [...this.subscriptions].sort()
+  }
+
+  // Every open is a new connection with no id yet, so terminal sockets wait
+  // for its `connected` frame (briefly; see `connection.ts`). After a drop it
+  // names the id it had (`?after=`), so the server hands what the lost
+  // connection still counted as attached to over to this one.
+  protected override openUrl(): string {
+    noteConnectionIdPending()
+    const previous = getPreviousConnectionId()
+    if (previous === null) return this.url
+    const separator = this.url.includes("?") ? "&" : "?"
+    return `${this.url}${separator}after=${encodeURIComponent(previous)}`
   }
 
   // Re-send the WHOLE interest set on every (re)open: server-side interest is

@@ -306,7 +306,7 @@ pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
 
 /// Default for `[server] presence_grace_seconds`: how long a browser tab keeps
 /// protecting a terminal it was looking at after that terminal's connection
-/// closed (a phone whose screen went off), while the tab itself is connected.
+/// was lost (a phone in a pocket).
 pub const DEFAULT_PRESENCE_GRACE_SECONDS: u64 = 300;
 
 /// Default cap on concurrent `/files/tree` directory listings (see
@@ -1107,10 +1107,12 @@ pub struct ServerConfig {
     /// `operation_unknown_after_seconds`.
     pub operation_retention_seconds: u64,
     /// How long, in seconds, a browser tab still counts as attached to a
-    /// terminal after that terminal's connection closed while the tab was
-    /// showing it (the last beat said it was being looked at), for as long as
-    /// the tab's own connection is up. Default 300. Read when the terminal's
-    /// connection closes, so a config reload applies to the next one.
+    /// terminal whose connection was lost (not closed) while the tab was
+    /// showing it, counted from the last beat that said it was being looked
+    /// at, whether or not the tab's own connection is still up. A deliberate
+    /// end (a clean close, a sign-out, the tab attaching elsewhere, a forced
+    /// change) ends it at once. Default 300. Read when the connection is lost,
+    /// so a config reload applies to the next one.
     pub presence_grace_seconds: u64,
     /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
     /// section refuses the whole config rather than resetting to "no
@@ -1186,7 +1188,7 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 ///   terminal connection opens, so the next connection already has the new value.
 /// - `operation_unknown_after_seconds` and `operation_retention_seconds`: read as
 ///   each change starts, so the next one already has the new values.
-/// - `presence_grace_seconds`: read as each terminal connection closes.
+/// - `presence_grace_seconds`: read as each terminal connection is lost.
 ///
 /// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
 /// are built once in `build_app` and never resized on reload, and the tab caps are

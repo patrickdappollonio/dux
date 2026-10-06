@@ -34899,7 +34899,9 @@ cyan = "#00ffff"
             app.status.text()
         );
         assert!(app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)));
-        app.engine.attachments.deregister("browser-tab");
+        app.engine
+            .attachments
+            .deregister("browser-tab", dux_core::attachments::Ending::Deliberate);
 
         app.prompt = prompt();
         // Space activates the focused (Close) button.
