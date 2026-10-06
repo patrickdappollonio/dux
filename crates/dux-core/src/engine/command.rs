@@ -1296,17 +1296,17 @@ impl Engine {
                 }
                 (
                     Command::UpdateMacros { macros },
-                    Some(crate::status_text!["Saved macro ", q(name), "."]),
+                    Some(macro_done("Saved", name)),
                 )
             }
             ConfigSetChange::RemoveMacro { name } => {
                 let mut macros = self.config.macros.clone();
                 if macros.entries.shift_remove(&name).is_none() {
-                    anyhow::bail!("unknown macro \"{name}\"");
+                    anyhow::bail!("{}", crate::config_resources::unknown_macro(&name));
                 }
                 (
                     Command::UpdateMacros { macros },
-                    Some(crate::status_text!["Removed macro ", q(name), "."]),
+                    Some(macro_done("Removed", name)),
                 )
             }
             ConfigSetChange::SetEnvVar { name, value } => {
@@ -1849,6 +1849,17 @@ fn saved_global_env_message(count: usize) -> String {
          the same key.",
         count_of(count, "global environment variable")
     )
+}
+
+/// What a one-macro change says it did (`verb` is `Saved` or `Removed`). A
+/// name outside the `[macros]` rule may be a token pasted where a name goes,
+/// so it is not repeated.
+fn macro_done(verb: &str, name: String) -> crate::status_text::StatusText {
+    if crate::config_resources::shown_name("", "macros", &name).1 {
+        crate::status_text![format!("{verb} a macro whose name is not shown.")]
+    } else {
+        crate::status_text![format!("{verb} macro "), q(name), "."]
+    }
 }
 
 /// The status line confirming a macro save, counting the macros written.

@@ -328,14 +328,14 @@ pub fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliEr
         } => change_with(
             selection,
             &change,
-            &format!("Save macro {name}"),
+            &resources::set_macro_question(&name),
             false,
             |writer| resources::set_macro(writer, &name, text, &surface),
         ),
         MacrosSub::Rm { name, change } => change_with(
             selection,
             &change,
-            &format!("Remove macro {name}"),
+            &resources::remove_macro_question(&name),
             false,
             |writer| resources::remove_macro(writer, &name),
         ),

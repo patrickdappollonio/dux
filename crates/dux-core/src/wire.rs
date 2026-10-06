@@ -5043,7 +5043,13 @@ impl Engine {
             let (name, checked) =
                 crate::config::checked_macro(&entry.name, entry.text, &entry.surface)?;
             if macros.entries.contains_key(&name) {
-                anyhow::bail!("Name \"{name}\" is already in use. Choose another.");
+                // A name outside the `[macros]` rule is not repeated.
+                match crate::config_resources::shown_name("", "macros", &name) {
+                    (name, false) => {
+                        anyhow::bail!("Name \"{name}\" is already in use. Choose another.")
+                    }
+                    (_, true) => anyhow::bail!("That name is already in use. Choose another."),
+                }
             }
             macros.entries.insert(name, checked);
         }

@@ -152,12 +152,13 @@ fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
 
 /// What the command line prints about `name` when it is typed as a provider,
 /// a macro or an environment variable with no dux running: `providers show`,
-/// `macros show`, the questions `env set` and `env rm` ask, `env set`'s name
-/// check, and both changes on the file.
+/// `macros show`, the questions `env set`, `env rm`, `macros add` and `macros
+/// rm` ask, `env set`'s name check, and each change on the file.
 fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
     use dux_core::client::config_resources::{
         Source, Writer, check_env_name, macros_show, providers_show, remove_env,
-        remove_env_question, set_env, set_env_question,
+        remove_env_question, remove_macro, remove_macro_question, set_env, set_env_question,
+        set_macro, set_macro_question,
     };
     let text = |result: Result<String, dux_core::client::CliError>| match result {
         Ok(text) => text,
@@ -166,6 +167,11 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
     let mut said = vec![
         ("env set question".to_string(), set_env_question(name)),
         ("env rm question".to_string(), remove_env_question(name)),
+        ("macros add question".to_string(), set_macro_question(name)),
+        (
+            "macros rm question".to_string(),
+            remove_macro_question(name),
+        ),
         (
             "env set name check".to_string(),
             text(check_env_name(name).map(|()| String::new())),
@@ -190,6 +196,24 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
     said.push((
         "env rm".to_string(),
         text(remove_env(Writer::File(paths), name)),
+    ));
+    // A save that succeeds, and the two it refuses for what it was given.
+    for (text_given, surface) in [("t", "agent"), ("", "agent"), ("t", "nowhere")] {
+        std::fs::write(&paths.config_path, body).expect("seed");
+        said.push((
+            format!("macros add ({text_given:?}, {surface})"),
+            text(set_macro(
+                Writer::File(paths),
+                name,
+                text_given.to_string(),
+                surface,
+            )),
+        ));
+    }
+    std::fs::write(&paths.config_path, body).expect("seed");
+    said.push((
+        "macros rm".to_string(),
+        text(remove_macro(Writer::File(paths), name)),
     ));
     said
 }

@@ -335,6 +335,16 @@ fn edit_failed(error: anyhow::Error) -> CliError {
     failed(format!("{error:#}"))
 }
 
+/// What `dux macros add` asks before it changes anything.
+pub fn set_macro_question(name: &str) -> String {
+    format!("Save macro {}", resources::macro_label(name))
+}
+
+/// What `dux macros rm` asks before it changes anything.
+pub fn remove_macro_question(name: &str) -> String {
+    format!("Remove macro {}", resources::macro_label(name))
+}
+
 /// `dux macros add`: add the macro, or replace the one with that name.
 pub fn set_macro(
     writer: Writer<'_>,
@@ -354,7 +364,8 @@ pub fn set_macro(
             let saved =
                 resources::set_macro_in_file(paths, name, text, surface).map_err(edit_failed)?;
             Ok(format!(
-                "Saved macro {saved} in {}. {APPLIES_AT_START}\n",
+                "Saved macro {} in {}. {APPLIES_AT_START}\n",
+                resources::macro_label(&saved),
                 paths.config_path.display()
             ))
         }
@@ -374,7 +385,8 @@ pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> 
         Writer::File(paths) => {
             resources::remove_macro_in_file(paths, name).map_err(edit_failed)?;
             Ok(format!(
-                "Removed macro {name} from {}. {APPLIES_AT_START}\n",
+                "Removed macro {} from {}. {APPLIES_AT_START}\n",
+                resources::macro_label(name),
                 paths.config_path.display()
             ))
         }

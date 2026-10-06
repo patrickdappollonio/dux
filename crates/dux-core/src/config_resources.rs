@@ -73,6 +73,30 @@ pub fn env_label(raw: &str, name: &str) -> String {
     shown_name(raw, "env", name).0
 }
 
+/// A macro's name as a sentence names it: the name itself when it follows the
+/// `[macros]` rule, else the placeholder for an entry whose name is not shown.
+pub fn macro_label(name: &str) -> String {
+    shown_name("", "macros", name).0
+}
+
+/// A macro as the subject of a sentence: `Macro "name"` when its name may be
+/// shown, else `The macro`, so a token typed where a name goes is never
+/// repeated.
+pub fn macro_subject(name: &str) -> String {
+    match shown_name("", "macros", name) {
+        (name, false) => format!("Macro \"{name}\""),
+        (_, true) => "The macro".to_string(),
+    }
+}
+
+/// The refusal for removing a macro the list does not hold.
+pub fn unknown_macro(name: &str) -> String {
+    match shown_name("", "macros", name) {
+        (name, false) => format!("unknown macro \"{name}\""),
+        (label, true) => format!("unknown macro: {label}"),
+    }
+}
+
 /// The refusal for removing a variable the global environment does not hold.
 pub fn unknown_env_var(name: &str) -> String {
     match shown_name("", "env", name) {
@@ -327,7 +351,7 @@ pub fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> 
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
         let table = crate::config_write::ensure_table(doc, "macros");
         if table.remove(name).is_none() {
-            anyhow::bail!("unknown macro \"{name}\"");
+            anyhow::bail!("{}", unknown_macro(name));
         }
         Ok(())
     })

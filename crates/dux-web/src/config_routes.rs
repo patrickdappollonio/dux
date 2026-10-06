@@ -1195,8 +1195,9 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(record["kind"], "macro.set");
         assert_eq!(record["state"], "succeeded");
-        assert!(
-            record["message"].as_str().unwrap().contains("Review it"),
+        // A name outside the `[macros]` rule is not repeated in the outcome.
+        assert_eq!(
+            record["message"], "Saved a macro whose name is not shown.",
             "{record}"
         );
 

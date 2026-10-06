@@ -114,11 +114,15 @@ pub fn checked_macro(
         anyhow::bail!("Macro name cannot be empty.");
     }
     if text.is_empty() {
-        anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
+        anyhow::bail!(
+            "{} has no text. Enter the text to send.",
+            crate::config_resources::macro_subject(&name)
+        );
     }
     let surface = MacroSurface::from_config_str(surface).ok_or_else(|| {
         anyhow::anyhow!(
-            "Macro \"{name}\" has an unknown surface \"{surface}\". Use \"agent\", \"terminal\", or \"both\"."
+            "{} has an unknown surface \"{surface}\". Use \"agent\", \"terminal\", or \"both\".",
+            crate::config_resources::macro_subject(&name)
         )
     })?;
     Ok((name, MacroEntry { text, surface }))
