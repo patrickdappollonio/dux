@@ -628,16 +628,12 @@ pub fn perform(
     planned: Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
-    let record = start(client, planned)?;
+    let record = client.change(planned.method, &planned.path, planned.body)?;
     let Some(timeout) = wait else {
         return Ok(format!("{}\n", record.id));
     };
     let record = client.wait(record, timeout)?;
     report(&record)
-}
-
-fn start(client: &Client, planned: Planned) -> Result<OperationRecord, CliError> {
-    client.change(planned.method, &planned.path, planned.body)
 }
 
 fn report(record: &OperationRecord) -> Result<String, CliError> {

@@ -298,18 +298,8 @@ pub enum Writer<'a> {
     },
 }
 
-/// What segment escapes in a path: everything but the URL's unreserved marks.
-const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'~');
-
 fn entry_path(collection: &str, name: &str) -> String {
-    format!(
-        "/api/v1/{collection}/{}",
-        percent_encoding::utf8_percent_encode(name, SEGMENT)
-    )
+    format!("/api/v1/{collection}/{}", super::wait::segment(name))
 }
 
 /// Send one change to a running dux and say how it ended.
