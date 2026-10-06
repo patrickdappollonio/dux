@@ -83,9 +83,8 @@ pub fn credential_generation(password_hash: &str) -> String {
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Who holds a session, which decides how long it may sit unused: a browser's
-/// is `[server.auth] session_idle_seconds`, the command line's is
-/// `[server.auth] cli_token_idle_days`.
+/// Who holds a session, which decides the idle setting it obeys:
+/// `session_idle_seconds` for a browser, `cli_token_idle_days` for the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
     Browser,

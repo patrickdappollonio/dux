@@ -46,9 +46,8 @@ pub struct Admission {
 }
 
 impl Engine {
-    /// Admit `command` against the open operation records, taking its keys
-    /// onto the record of the change being dispatched when it has one. A
-    /// command that changes nothing a client follows is always admitted.
+    /// Admit `command` against the open records, its keys held by the record
+    /// being dispatched; a command outside admission is always admitted.
     pub(crate) fn admit_wire(&self, command: &WireCommand) -> Result<(), InTheWay> {
         match self.wire_admission(command) {
             Some(admission) => self.admit(self.operation_in_dispatch.as_deref(), &admission),
@@ -63,9 +62,7 @@ impl Engine {
             .admit(self.operation_in_dispatch.as_deref(), &admission.wants, &[])
     }
 
-    /// [`Self::check_admission`] for the engine commands a surface sends
-    /// itself: an agent delete, a project removal or deletion, a terminal
-    /// close, and a macro or environment save.
+    /// [`Self::check_admission`] for the engine commands a surface sends itself.
     pub(crate) fn check_command(&self, command: &super::Command) -> Result<(), InTheWay> {
         use super::Command;
         use super::command::ConfigSetChange;

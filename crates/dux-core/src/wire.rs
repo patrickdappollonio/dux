@@ -119,10 +119,8 @@ pub enum WireCommand {
     },
     PersistGlobalEnv {
         env: BTreeMap<String, String>,
-        /// The [`global_env_version`] of the table this save was based on.
-        /// When present and the table has changed since, the save is refused
-        /// with [`StaleSet::GlobalEnv`] and nothing is written; absent, the
-        /// save replaces whatever is there.
+        /// The [`global_env_version`] this save was based on: a changed table
+        /// refuses it with [`StaleSet::GlobalEnv`]; absent, the save replaces it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
     },
@@ -489,10 +487,8 @@ pub enum WireCommand {
         session_id: String,
         tab_id: String,
     },
-    /// Stop one tab's provider process and keep the tab, dormant, in the strip
-    /// (any tab, the session-slot tab included). The agent detaches only when
-    /// this was its last running tab. A tab that is not running is an
-    /// idempotent no-op that says so; `tab_id` must belong to `session_id`.
+    /// Stop one tab's provider process and keep the tab dormant; the agent
+    /// detaches only with its last running tab. A tab not running is a no-op.
     StopAgentTab {
         session_id: String,
         tab_id: String,
@@ -603,10 +599,8 @@ pub enum WireCommand {
     /// strings are all rejected.
     UpdateMacros {
         entries: Vec<WireMacroEntry>,
-        /// The [`macros_version`] of the list this save was based on. When
-        /// present and the list has changed since, the save is refused with
-        /// [`StaleSet::Macros`] and nothing is written; absent, the save
-        /// replaces whatever is there.
+        /// The [`macros_version`] this save was based on: a changed list refuses
+        /// it with [`StaleSet::Macros`]; absent, the save replaces it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
     },
@@ -621,9 +615,8 @@ pub enum WireCommand {
     RemoveMacro {
         name: String,
     },
-    /// Set one global environment variable, keeping the rest of `[env]`. The
-    /// name must be a valid variable name; the value never appears in any
-    /// status.
+    /// Set one global environment variable, keeping the rest of `[env]`; the
+    /// value never appears in any status.
     SetGlobalEnvVar {
         name: String,
         value: String,
@@ -840,9 +833,7 @@ impl WireCommand {
 }
 
 /// The version of a macro list a client read, carried back on its whole-list
-/// save so a list that changed since is refused rather than overwritten. A
-/// digest of the list's content and order: two reads of the same list agree,
-/// and any edit, a reorder included, moves it.
+/// save: a digest of content and order, so any edit, a reorder included, moves it.
 pub fn macros_version(macros: &crate::config::MacrosConfig) -> String {
     let entries: Vec<(&String, &str, &crate::config::MacroSurface)> = macros
         .entries
@@ -1129,24 +1120,19 @@ pub struct WireCommandOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_op_id: Option<String>,
     /// The operation record that follows this command, set only when it was
-    /// dispatched through [`Engine::apply_wire_operation`]. `None` for every
-    /// other dispatch.
+    /// dispatched through [`Engine::apply_wire_operation`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
-    /// The final of the keyed busy in `status`, when the command already
-    /// reached it inside the call. Raised right after `status`, so the busy
-    /// does not outlive the work it stands for. `None` for every other
-    /// command.
+    /// The final of the keyed busy in `status`, when the command already reached
+    /// it inside the call; raised right after `status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled: Option<WireStatus>,
-    /// The operation record as it stood when the command answered, set
-    /// beside `operation_id`. A snapshot rather than a later read, so the
-    /// reply holds it even when the record is kept for no time at all.
+    /// The operation record as it stood when the command answered, so the reply
+    /// holds it even when the record is kept for no time at all.
     #[serde(skip)]
     pub operation: Option<Box<crate::operations::OperationView>>,
-    /// The version the macro list or the global environment is at after a
-    /// command that changes it, for the client to send back on its next
-    /// whole-set save. `None` for every other command.
+    /// The version the macro list or the global environment is at after a command
+    /// that changes it, for the client's next whole-set save.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -1213,11 +1199,8 @@ pub(crate) fn wire_status_from_reaction(reaction: &EventReaction) -> Option<Wire
     }
 }
 
-/// The final of the keyed busy `answered`, when the same reaction already
-/// carries it. A command can open an operation and finish it in one call
-/// (deleting a project that has no worktree to wait for), and a command
-/// answers with one status, so without this the final was dropped and the
-/// spinner stayed up with nothing left to take it down.
+/// The final of the keyed busy `answered`, when the same reaction already carries
+/// it: a command that opens and finishes an operation in one call answers both.
 pub(crate) fn settled_final_from_reaction(
     reaction: &EventReaction,
     answered: Option<&WireStatus>,
@@ -1240,13 +1223,8 @@ struct LaunchReport {
     launched: bool,
 }
 
-/// The [`LaunchReport`] of a launch reaction, or `None` for a reaction that is
-/// no launch report and for a create's launch, whose record follows the
-/// create's own key. A failure reported by agent, not by tab, reports under
-/// the agent's [`crate::operations::launch_failure_key`], where
-/// `Engine::process_agent_launch_failed` moved the records of the tab that
-/// failed: asking which tab is the first one now could name a tab a promotion
-/// put there in the meantime.
+/// The [`LaunchReport`] of a launch reaction, `None` for a create's launch; a failure
+/// reported by agent reports under its [`crate::operations::launch_failure_key`].
 fn launch_report(reaction: &EventReaction) -> Option<LaunchReport> {
     let tab = |tab_id: &str, launched| LaunchReport {
         key: crate::operations::launch_binding_key(tab_id),
@@ -2827,9 +2805,7 @@ impl Engine {
     }
 
     /// Stop one tab's process and keep the tab, through the teardown every
-    /// surface's kill shares ([`Engine::kill_tab_runtime`]). Answers whether
-    /// the agent detached, which it does only when this was its last running
-    /// tab.
+    /// surface's kill shares. Answers whether the agent detached.
     fn stop_agent_tab_wire(
         &mut self,
         session_id: &str,
@@ -3822,9 +3798,8 @@ impl Engine {
                     )],
                 };
                 self.current_origin = crate::statusline::StatusScope::All;
-                // A record following the lookup now follows the create it
-                // handed off to, whose final carries the outcome; a create that
-                // never started ends the record on the status that says why.
+                // A record following the lookup follows the create it handed off
+                // to, or ends on the status saying why no create started.
                 if let Some(lookup) = status_op_id {
                     match self.last_created_op_id.take() {
                         Some(create) => self.operations.hand_off(lookup, &create),
@@ -4314,9 +4289,8 @@ impl Engine {
         }
     }
 
-    /// End the records following a from-PR create's lookup on the status that
-    /// says why no create started. That status carries no key, so nothing else
-    /// could finish them: the lookup's own key is only ever cleared.
+    /// End the records following a from-PR create's lookup on the keyless status
+    /// that says why no create started; the lookup's own key is only ever cleared.
     fn finish_pr_lookup_operation(&self, lookup: &str, status: Option<&WireStatus>) {
         let (tone, message, segments) = match status {
             Some(status) => (
@@ -4330,10 +4304,8 @@ impl Engine {
             .finish_by_key(lookup, tone, message, segments, std::time::Instant::now());
     }
 
-    /// Tell the operation record following this agent's delete, if a client
-    /// asked for one, what became of its worktree and branches: under the
-    /// delete op's key when the removal ran on a worker, or the record being
-    /// dispatched when the delete finished inline.
+    /// Tell the record following this agent's delete, if any, what became of its
+    /// worktree and branches.
     fn note_delete_parts(&self, session_id: &str, parts: Vec<crate::operations::OperationPart>) {
         let key = self
             .pending_delete_ops_web
@@ -4363,29 +4335,9 @@ impl Engine {
         }
     }
 
-    /// Drive the web reconnect / force-restart launch follow-up to completion.
-    /// When a launch reports back, its `AgentLaunchReadyView` /
-    /// `AgentLaunchFailedView` reaction resolves the web launch op
-    /// (`Engine::pending_web_launch_ops`) stashed by `reconnect_session`,
-    /// replacing its busy with the same-key final. This is the web counterpart to
-    /// the TUI's `resolve_reconnect_op_or`.
-    ///
-    /// When no op is stashed (a resume-fallback retry or a startup auto-reopen,
-    /// neither of which goes through `reconnect_session`), the same final is
-    /// emitted UNKEYED, byte-identical, since no web busy precedes those.
-    /// Create-kind launches are resolved engine-side, never here.
-    ///
-    /// Slot-ness is read from the outcome's SESSION SNAPSHOT, deliberately, and
-    /// this is the one place that must not be changed to ask the live session:
-    /// the question is which arm requested this launch, not which tab is the slot
-    /// now, and a `Kind::Tab` launch collapses into the `Reconnect` view. A live
-    /// read would send a tab promoted mid-launch down the session-keyed branch
-    /// and strand its `tab-launch-<id>` busy toast forever.
-    ///
-    /// It is also where a tab created or started by a route finishes its
-    /// operation record, on the final this follow-up produces: that final's key
-    /// is shared by every launch of the tab, or it has none, so it cannot name
-    /// the request on its own.
+    /// Resolve a launch report into the web launch op's final (unkeyed when none
+    /// is stashed), and finish the records of a tab a route created or started.
+    /// Slot-ness comes from the outcome's session snapshot, not the live session.
     pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         let followup = self.web_launch_followup_statuses(reaction);
         if let Some(report) = launch_report(reaction) {
@@ -5225,9 +5177,8 @@ impl Engine {
                     read_at: version,
                 })
             }
-            // One entry: what it asks for is checked here, on the request
-            // alone; what it does to the set is decided when it runs, against
-            // the config as it is then (a reload may have deferred it).
+            // The request is checked here; its effect on the set is decided when
+            // it runs, against the config then (a reload may have deferred it).
             WireCommand::SetMacro {
                 name,
                 text,
@@ -11354,6 +11305,13 @@ mod tests {
         );
         let op_id = op.id().to_string();
         engine.pending_web_launch_ops.insert("s1".into(), op);
+        // A promotion while the launch was in flight moved the live slot to
+        // another tab. The question is which arm requested this launch, which
+        // only the outcome's snapshot answers: asking the live session would
+        // send it down the tab-keyed branch and strand the op's busy forever.
+        let mut promoted = session.clone();
+        promoted.slot_tab_id = "promoted-tab".to_string();
+        engine.sessions.push(promoted);
 
         let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
             tab_id: session.slot_tab_id().to_string(),

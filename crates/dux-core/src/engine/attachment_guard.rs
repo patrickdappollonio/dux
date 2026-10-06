@@ -43,20 +43,16 @@ impl std::fmt::Display for Attached {
 
 impl std::error::Error for Attached {}
 
-/// A reservation that lasts until the end of the call holding it, for a
-/// change with no operation record to outlive it. One tied to a record ends
-/// with the record instead, and dropping this does nothing to it.
+/// A reservation that ends when dropped, for a change with no operation record;
+/// one tied to a record ends with the record, and dropping this leaves it.
 #[must_use = "the reservation ends when this is dropped"]
 pub struct Reservation {
     held: Option<(Attachments, u64)>,
 }
 
 impl Reservation {
-    /// The change's work runs on past the call that made it, under the status
-    /// key `key`: keep the reservation until that key's final lands (or the
-    /// spinner's own ceiling passes), rather than until this is dropped. A
-    /// reservation tied to an operation record already lasts as long as the
-    /// record, and this leaves it so.
+    /// The change's work runs on under the status key `key`: keep the reservation
+    /// until that key's final lands, or the spinner's ceiling passes.
     pub fn until_final(mut self, key: &str) {
         if let Some((attachments, id)) = self.held.take() {
             attachments.hand_to_key(
@@ -105,8 +101,7 @@ impl Engine {
     }
 
     /// What starting `session_id` would end: every other agent running in its
-    /// folder, which a launch stops so the two never share it
-    /// (`Engine::detach_conflicting_worktree_session`).
+    /// folder, which a launch stops so the two never share it.
     pub fn launch_conflict_scope(&self, session_id: &str) -> Scope {
         let mut scope = Scope::default();
         let Some(directory) = self
@@ -164,11 +159,12 @@ impl Engine {
             .collect()
     }
 
-    /// Refuse a change to `scope` with whoever is attached to it, other than
-    /// the asking connection, unless the asker forced it; otherwise refuse
-    /// every new attachment to it until the change ends: the operation record
-    /// being dispatched finishes, or, with none, the returned reservation is
-    /// dropped.
+    /// Reserve `scope` against new attachments until the change ends: the record
+    /// being dispatched finishes, or, with none, the reservation is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`Attached`] naming whoever else is attached, unless the asker forced it.
     pub fn reserve_destruction(&self, scope: Scope) -> Result<Reservation, Attached> {
         let policy = self.dispatch_policy.clone().unwrap_or_else(|| Policy {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
@@ -218,8 +214,7 @@ impl Engine {
     }
 
     /// The reservation for a guarded [`WireCommand`] the web dispatches to an
-    /// engine method rather than as a [`Command`] (those are guarded in
-    /// `Engine::apply`), or `None` for any other.
+    /// engine method rather than as a [`Command`], or `None` for any other.
     pub(crate) fn guard_wire(
         &self,
         command: &WireCommand,
@@ -256,10 +251,12 @@ impl Engine {
         )
     }
 
-    /// The terminal UI is quitting, which ends everything, and the person
-    /// agreed to cutting off `accepted`. Refused, with everybody attached now,
-    /// when somebody else has attached since; otherwise nobody can attach to
-    /// anything until the process has gone.
+    /// The terminal UI is quitting over `accepted`: nobody can attach to anything
+    /// until the process has gone.
+    ///
+    /// # Errors
+    ///
+    /// [`Attached`] with everybody attached now, when somebody else has attached since.
     pub fn reserve_quit(&self, accepted: &[Blocker]) -> Result<(), Attached> {
         self.attachments
             .reserve_accepting(
@@ -273,9 +270,8 @@ impl Engine {
             .map_err(|blockers| Attached { blockers })
     }
 
-    /// `blockers` with every name a dialog shows resolved: the device's short
-    /// label, the tab's strip label or the terminal's label (its id when this
-    /// engine no longer has it), and the agent's name.
+    /// `blockers` with every name a dialog shows resolved; a terminal this engine
+    /// no longer has is named by its id.
     pub fn attached_entries(
         &self,
         blockers: &[Blocker],

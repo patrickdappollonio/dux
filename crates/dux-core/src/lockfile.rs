@@ -27,16 +27,10 @@ use rustix::io::Errno;
 use crate::control_socket::{ControlSocket, Unavailable};
 use crate::io_retry::retry_on_interrupt_errno;
 
-/// Exclusive single-instance lock on the dux config directory.
+/// Exclusive single-instance lock on the dux config directory, held while this
+/// value lives; the kernel releases it on any exit, so a stale file never blocks.
 ///
-/// The file handle is kept open for the lifetime of this value. The kernel
-/// releases the advisory lock when the file descriptor is closed, including
-/// on process exit via `SIGKILL` or crash, so stale lockfiles never block a
-/// future launch. Only a live peer actively holding the lock will.
-///
-/// The lock also owns the control socket once [`Self::open_control_socket`]
-/// bound it, which is what makes "only the lock holder binds the socket" a
-/// fact of the types rather than of the call sites.
+/// It owns the control socket once [`Self::open_control_socket`] binds it.
 #[derive(Debug)]
 pub struct SingleInstanceLock {
     file: File,
@@ -69,10 +63,8 @@ impl Drop for SingleInstanceLock {
 }
 
 impl SingleInstanceLock {
-    /// Bind the control socket at `path` and say so in the lock file, as
-    /// `control-socket=<path>`; when it cannot be bound, say why instead, as
-    /// `control-socket-unavailable=<reason>`. A dead socket at the path is
-    /// replaced; anything else there is left alone.
+    /// Bind the control socket at `path` and record in the lock file where it is,
+    /// or why it could not be bound. Only a dead socket at the path is replaced.
     pub fn open_control_socket(&mut self, path: &Path) -> Result<(), Unavailable> {
         let result = match ControlSocket::bind(path) {
             Ok(socket) => {
@@ -284,9 +276,8 @@ fn read_holder_pid_once(file: &mut File) -> Option<u32> {
     LockFileContents::parse(&buf).pid
 }
 
-/// The line a dux adds to its lock file, after its PID, once it handles the
-/// reload signal (see [`crate::reload_signal`]): the process says its SIGUSR1
-/// handler is in place, so `kill -USR1` reloads it instead of ending it.
+/// The line a dux adds to its lock file, after its PID, once its SIGUSR1 handler
+/// is in place, so `kill -USR1` reloads it instead of ending it.
 pub const RELOAD_SIGNAL_MARKER: &str = "reload-signal=usr1";
 
 /// What this process writes into the lock file it holds: its PID on the
@@ -309,10 +300,8 @@ pub const CONTROL_SOCKET_PREFIX: &str = "control-socket=";
 /// followed by the reason.
 pub const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unavailable=";
 
-/// A lock file's contents as written by any dux: the holder's PID on the
-/// first line (the whole file, for a dux from before the marker), whether a
-/// later line says it handles the reload signal, and where its control socket
-/// is or why it has none.
+/// A lock file's contents as written by any dux, whose PID line may be the whole
+/// file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFileContents {
     pub pid: Option<u32>,

@@ -502,9 +502,8 @@ enum CopyName {
     Temporary,
 }
 
-/// Only the names rotation itself makes, with their numbers validated, so a file
-/// the user keeps beside the log (`server.log.notes.tmp`, `server.log.old`) is
-/// never taken for a copy.
+/// Only the names rotation itself makes, numbers validated, so a file the user
+/// keeps beside the log (`server.log.old`) is never taken for a copy.
 fn copy_name(rest: &str) -> Option<CopyName> {
     let all_digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
     let mut parts = rest.split('.');
@@ -546,8 +545,7 @@ fn scan_copies(path: &Path) -> (Vec<u32>, Vec<PathBuf>) {
 }
 
 /// Every rotated copy of the log at `path` that exists, plain or gzipped, and
-/// every temporary file a killed compression left, so a caller removing the log
-/// can remove what belongs to it.
+/// every temporary file a killed compression left.
 pub fn rotated_copies_of(path: &Path) -> Vec<PathBuf> {
     let (positions, temps) = scan_copies(path);
     let mut found = temps;
@@ -682,9 +680,8 @@ fn report_rotation_failure(reported: &'static std::sync::Once, message: &str) {
 /// Separate from [`init`] because `init` installs a process-global logger and a
 /// panic hook, neither of which a test can do twice.
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
-    // Private from the first instant: a dangling symlink at the log path makes
-    // this open create its target, which tightening afterwards would leave
-    // alone (it never follows a link) and readable by everyone.
+    // Private from the first instant: through a dangling symlink this creates the
+    // target, which the later tightening never follows a link to reach.
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -706,9 +703,8 @@ pub fn resolve_server_log_path(config: &ServerConfig, paths: &DuxPaths) -> PathB
     resolve_under_root(&config.log_path, paths, "server.log")
 }
 
-/// The file the server log is written to, as a serve that opens it names it:
-/// [`resolve_server_log_path`] with a link at that path resolved. For a reader
-/// with no running serve to ask; a running one reports the path it opened.
+/// The file the server log is written to, as a serve that opens it names it,
+/// for a reader with no running serve to ask.
 pub fn server_log_file(config: &ServerConfig, paths: &DuxPaths) -> PathBuf {
     resolve_link(resolve_server_log_path(config, paths))
 }
@@ -725,10 +721,8 @@ fn resolve_under_root(configured: &str, paths: &DuxPaths, default_name: &str) ->
     }
 }
 
-/// The server's own log file: the lines `dux server` prints, written by every way
-/// of serving, rotated and pruned by `[server]`'s `log_*` settings through the
-/// same machinery as `dux.log`. A second [`RotatingLog`] with settings of its
-/// own, so neither log's limits move the other's.
+/// The server's own log file, written by every way of serving and rotated by
+/// `[server]`'s `log_*` settings, apart from `dux.log`'s.
 pub struct ServerLog(RotatingLog);
 
 impl ServerLog {
@@ -747,8 +741,7 @@ impl ServerLog {
 }
 
 /// Open the server log named by `config`, creating its folder and the file
-/// owner-only. The settings are read once, here: a serve that is already
-/// running keeps what it started with.
+/// owner-only; its settings are read once, here.
 pub fn open_server_log(config: &ServerConfig, paths: &DuxPaths) -> std::io::Result<ServerLog> {
     let path = resolve_server_log_path(config, paths);
     if let Some(parent) = path.parent() {

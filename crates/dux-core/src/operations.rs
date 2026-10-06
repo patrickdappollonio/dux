@@ -11,15 +11,14 @@
 //! # Ids
 //!
 //! A record's id is the keyed-status key the engine already mints for the
-//! change, the same `op_id` the create routes have always answered with. A
+//! change, the same `op_id` the create routes answer with. A
 //! change that runs to its end inside the call, or whose status rides a key
 //! that is not unique to it (a stop's per-agent key, a tab launch's per-tab
 //! key), gets a fresh id from the same minter, so the two never collide.
 //!
 //! # Completion points
 //!
-//! A record finishes in exactly one of these places, each named here so a new
-//! route has a list to join:
+//! A record finishes in exactly one of these places:
 //!
 //! - Inside the call, on the engine thread, when the change finished before
 //!   the route answered (`Engine::apply_wire_operation` and the tab and
@@ -165,8 +164,6 @@ pub enum HoldMode {
     /// Nothing else may change the thing while this is held.
     Exclusive,
     /// Other shared holds may sit beside this one; an exclusive one may not.
-    /// An agent create holds its project this way, so two creates in one
-    /// project never refuse each other while a project removal waits for both.
     Shared,
 }
 
@@ -225,9 +222,8 @@ impl std::fmt::Display for InTheWay {
 
 impl std::error::Error for InTheWay {}
 
-/// Whether an engine error's text is an [`InTheWay`] refusal. The engine
-/// actor hands errors to the routes as text, so this is how a route answers
-/// `409` for it rather than the `400` an invalid request gets.
+/// Whether an engine error's text is an [`InTheWay`] refusal: engine errors
+/// reach the routes as text, and this one answers `409` rather than `400`.
 pub fn is_in_the_way(message: &str) -> bool {
     message.starts_with(IN_THE_WAY_LEAD)
 }
@@ -336,9 +332,7 @@ impl OperationNotes {
         self.parts.extend(other.parts);
     }
 
-    /// The outcome these notes and a final of `tone` add up to. Something
-    /// missed (a refused or failed part, or a final that is not an info) with
-    /// something done is partial; missed with nothing done is a failure.
+    /// The outcome these notes and a final of `tone` add up to.
     fn settle(&self, tone: StatusTone) -> OperationState {
         let missed = self.parts.iter().any(|p| p.outcome.missed())
             || matches!(tone, StatusTone::Warning | StatusTone::Error);
@@ -357,8 +351,7 @@ impl OperationNotes {
 }
 
 /// How long a record may run before it reads as unknown, and how long a
-/// finished one is kept. Read from `[server]` when the record opens, so a
-/// config reload applies to the operations started after it.
+/// finished one is kept; fixed when the record opens, so a reload affects only later ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationPolicy {
     pub unknown_after: Duration,
@@ -391,26 +384,20 @@ pub struct OperationView {
     pub parts: Vec<OperationPart>,
 }
 
-/// The key a route binds a tab create or start to, finished when that tab's
-/// launch reports back. Not a status key: a tab launch's status rides a key
-/// shared by every launch of that tab, which cannot name one request.
+/// The key a tab create or start waits on, finished by that tab's launch report.
+/// Not a status key: every launch of a tab shares one, so it cannot name a request.
 pub fn launch_binding_key(tab_id: &str) -> String {
     format!("launch:{tab_id}")
 }
 
-/// The key a failed launch of an agent's first tab moves its records to. That
-/// failure is reported by agent, not by tab, and a promotion may have made
-/// another tab the first by the time it lands, so the engine moves the waiting
-/// records off the tab that failed while it still knows which one that was.
+/// The key a failed launch of an agent's first tab moves its waiting records to:
+/// that failure is reported by agent, and a promotion may move the first slot first.
 pub fn launch_failure_key(session_id: &str) -> String {
     format!("launch-failed:{session_id}")
 }
 
-/// A fresh record id, from the same minter as every keyed status, so an id
-/// minted here can never name another change's status.
 /// What a record waiting for a config reload waits on. Not a status key: the
-/// reload's own statuses (the browsers' refresh notice among them) must not
-/// end it, only its owner saying how it ended does.
+/// reload's own statuses do not end it; only its owner saying how it ended does.
 const RELOAD_KEY_PREFIX: &str = "reload-epoch:";
 
 /// A reload's outcome with the listener changes that went wrong folded in:
@@ -439,6 +426,8 @@ fn reload_key(epoch: u64) -> String {
     format!("{RELOAD_KEY_PREFIX}{epoch}")
 }
 
+/// A fresh record id, from the same minter as every keyed status, so an id
+/// minted here can never name another change's status.
 pub fn mint_operation_id() -> String {
     crate::engine::status_op::next_status_id()
 }
@@ -464,19 +453,35 @@ struct Record {
     /// The admission keys this record holds. Read only while `end` is `None`,
     /// so finishing the record is what releases them.
     holds: Vec<Hold>,
-    /// The agent an agent delete is removing, as it looked when the delete
-    /// started: the agent leaves the workspace at once, and this is how a
-    /// client's list still shows it, as being removed, while the record runs.
+    /// The agent a delete is removing, as it looked when the delete started, so
+    /// a client's list can show it as being removed after it leaves the workspace.
     removing: Option<Box<crate::viewmodel::SessionView>>,
+}
+
+impl Record {
+    fn end_as(
+        &mut self,
+        state: OperationState,
+        message: &str,
+        segments: Option<&[ProseSegment]>,
+        now: Instant,
+    ) {
+        self.end = Some(End {
+            state,
+            message: message.to_string(),
+            segments: segments.map(<[ProseSegment]>::to_vec),
+            at: now,
+        });
+        self.awaiting = None;
+    }
 }
 
 #[derive(Default)]
 struct Registry {
     records: HashMap<String, Record>,
     next_token: u64,
-    /// Which reload a record asked for follows. The reload whose barrier is
-    /// open, or the next one to open, is `reload_epoch`; one asked for while a
-    /// reload is already reading waits for the follow-up, `reload_epoch + 1`.
+    /// The reload whose barrier is open, or the next to open; a record asked for
+    /// while one is already reading follows the epoch after it.
     reload_epoch: u64,
     /// The epochs whose barrier has closed and whose owner has not yet said
     /// how it ended, oldest first.
@@ -522,9 +527,8 @@ impl std::fmt::Debug for RecordWatch {
 }
 
 impl RecordWatch {
-    /// Whether the record is still open: running, or past its unknown
-    /// threshold with the work not yet ended. A record discarded or pruned
-    /// is not.
+    /// Whether the record is still open: running, or unknown with the work not
+    /// yet ended. A discarded or pruned record is not.
     pub fn is_open(&self) -> bool {
         self.operations.with(|registry| {
             registry
@@ -535,9 +539,8 @@ impl RecordWatch {
     }
 }
 
-/// The registry. Cheaply cloned; every clone is the same registry. A poisoned
-/// lock is recovered rather than propagated: a panic elsewhere must not take a
-/// client's answer down with it.
+/// The registry. Every clone is the same registry. A poisoned lock is
+/// recovered, so a panic elsewhere never takes a client's answer down with it.
 #[derive(Clone, Default)]
 pub struct Operations(Arc<Mutex<Registry>>);
 
@@ -588,15 +591,13 @@ impl Operations {
         });
     }
 
-    /// Admit a change that wants `wants`: refused, naming the operation in the
-    /// way, when another open record holds any of them in a conflicting mode;
-    /// otherwise `takes` joins the holds of `record` (the change's own record,
-    /// when it has one), all under one lock, so two changes cannot both be
-    /// admitted to the same thing. A change with no record of its own passes
-    /// `None` and holds nothing past its call.
+    /// Admits a change that wants `wants` and, under the same lock, adds `takes`
+    /// to `record`'s holds; with no record (`None`) nothing is held past the call.
     ///
-    /// When several records are in the way, the one that started first is
-    /// named.
+    /// # Errors
+    ///
+    /// [`InTheWay`] naming the earliest-started open record that holds any of
+    /// `wants` in a conflicting mode.
     pub fn admit(
         &self,
         record: Option<&str>,
@@ -629,9 +630,8 @@ impl Operations {
         })
     }
 
-    /// Add `hold` to the records waiting on `key`, or to the record whose id it
-    /// is: a change that made a thing holds it from then on, as
-    /// [`Self::note`] records that it made it.
+    /// Add `hold` to the records waiting on `key` or whose id it is: a change
+    /// that made a thing holds it from then on.
     pub fn hold(&self, key: &str, hold: Hold) {
         self.with(|registry| {
             for (id, record) in registry.records.iter_mut() {
@@ -727,9 +727,8 @@ impl Operations {
         });
     }
 
-    /// Make the running record `id` wait for the config reload that will read
-    /// the file next: the one whose barrier is open now, or, with `queued`
-    /// (a reload is already reading), the follow-up it asked for.
+    /// Make the running record `id` wait for the next reload to read the file:
+    /// the open barrier's, or with `queued` (one is already reading) its follow-up.
     pub fn await_reload(&self, id: &str, queued: bool) {
         self.with(|registry| {
             let key = reload_key(registry.reload_epoch + u64::from(queued));
@@ -752,9 +751,8 @@ impl Operations {
         })
     }
 
-    /// The reload whose barrier was open has closed: its outcome is the owner's
-    /// to say, through [`Self::finish_reload`], and the next reload is the one
-    /// after it.
+    /// The reload whose barrier was open has closed; its owner reports how it
+    /// ended through [`Self::finish_reload`].
     pub fn reload_closed(&self) {
         self.with(|registry| {
             let closed = registry.reload_epoch;
@@ -763,10 +761,8 @@ impl Operations {
         });
     }
 
-    /// The owner of the oldest closed reload says how it ended: finish every
-    /// record that waited for it, or, while a listener change the reload set
-    /// off is still running, once that change has ended too. Nothing happens
-    /// when no reload has closed.
+    /// The owner of the oldest closed reload says how it ended. Its records finish
+    /// now, or once the listener changes it set off have ended.
     pub fn finish_reload(&self, state: OperationState, message: &str, now: Instant) {
         let (closed, waiting) = self.with(|registry| {
             let closed = registry.reloads_closed.pop_front();
@@ -788,9 +784,8 @@ impl Operations {
         }
     }
 
-    /// The reload being applied started a change to a listener (the background
-    /// web server, the Tailscale leg) that ends later. Pair it with
-    /// [`Self::listener_change_done`].
+    /// The reload being applied started a listener change that ends later; pair
+    /// it with [`Self::listener_change_done`].
     pub fn listener_change_started(&self) {
         self.with(|registry| registry.listener_pending += 1);
     }
@@ -800,9 +795,8 @@ impl Operations {
         self.with(|registry| registry.listener_problems.push(problem));
     }
 
-    /// A listener change started by [`Self::listener_change_started`] ended,
-    /// with `problem` saying how when it did not work. When the last one ends,
-    /// the reloads that waited for them finish.
+    /// A listener change ended, with `problem` saying how when it did not work.
+    /// When the last one ends, the reloads that waited for them finish.
     pub fn listener_change_done(&self, problem: Option<String>, now: Instant) {
         let released = self.with(|registry| {
             registry.listener_pending = registry.listener_pending.saturating_sub(1);
@@ -824,9 +818,8 @@ impl Operations {
         }
     }
 
-    /// The reload that was about to read the file could not start, so its
-    /// waiting records fail with `message`, and that reload is over: a later
-    /// one is a different reload, and never completes them.
+    /// The reload about to read the file could not start: its waiting records
+    /// fail with `message`, and a later reload never completes them.
     pub fn fail_reload(&self, message: &str, now: Instant) {
         let epoch = self.with(|registry| {
             let epoch = registry.reload_epoch;
@@ -899,13 +892,7 @@ impl Operations {
         self.with(|registry| {
             for record in registry.awaiting(key) {
                 let state = record.notes.settle(tone);
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
@@ -922,13 +909,7 @@ impl Operations {
     ) {
         self.with(|registry| {
             for record in registry.awaiting(key) {
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
@@ -947,13 +928,7 @@ impl Operations {
                 && record.end.is_none()
             {
                 let state = record.notes.settle(tone);
-                record.end = Some(End {
-                    state,
-                    message: message.to_string(),
-                    segments: segments.map(<[ProseSegment]>::to_vec),
-                    at: now,
-                });
-                record.awaiting = None;
+                record.end_as(state, message, segments, now);
             }
         });
     }
@@ -970,9 +945,8 @@ impl Operations {
         self.peek(id, now)
     }
 
-    /// [`Self::view`] without forgetting anything first: the snapshot a route
-    /// answers with, taken where the change ended, so it holds whatever the
-    /// retention is.
+    /// [`Self::view`] without pruning first, so a snapshot taken where the change
+    /// ended holds whatever the retention is.
     pub fn peek(&self, id: &str, now: Instant) -> Option<OperationView> {
         self.with(|registry| {
             let record = registry.records.get(id)?;
@@ -1036,10 +1010,8 @@ impl IdSnapshot {
     }
 }
 
-/// How [`crate::engine::Engine::settle_operation`] may treat a record: take
-/// the key its change minted as the record's id (`may_rekey`, only before
-/// anybody was told the id), and put the record's id on a final that had no
-/// key (`stamp_key`, only when the client asked to follow it).
+/// Whether settling may adopt a minted key as the record's id (only before
+/// anybody was told the id), and stamp the id on a keyless final.
 #[derive(Clone, Copy)]
 struct Settle {
     may_rekey: bool,
@@ -1143,20 +1115,12 @@ pub fn agent_delete_failure_parts(
 }
 
 impl crate::engine::Engine {
-    /// Dispatch `command` as a change a client will ask about, and open its
-    /// operation record. The record's id comes back as the outcome's
-    /// `operation_id`.
+    /// Dispatch `command` as a change a client will follow, opening its record
+    /// before any of its statuses is raised; the outcome's `operation_id` names it.
     ///
-    /// The record is opened here, on the engine thread, before the command's
-    /// statuses are raised, so no final can land before the record waits for
-    /// it. A command that finished inside this call is the first completion
-    /// point: its record ends now, on the final the command answered with,
-    /// which carries the record's id as its key when it had none. A command
-    /// still running keeps its record open under the key of its create op or
-    /// its busy; a key minted for this one operation becomes the record's id,
-    /// and a key other changes share is waited on under a fresh id.
+    /// # Errors
     ///
-    /// A command that is refused outright (an `Err`) leaves no record.
+    /// The command's own refusal, which leaves no record.
     pub fn apply_wire_operation(
         &mut self,
         command: crate::wire::WireCommand,
@@ -1165,11 +1129,8 @@ impl crate::engine::Engine {
         self.apply_wire_followed(command, kind, true)
     }
 
-    /// [`Self::apply_wire_operation`] for a change nobody asked to follow: it
-    /// opens a record all the same, so what it changes is held for as long as
-    /// it runs, but the statuses it raises are left exactly as they would be
-    /// without one (no record id is put on a final that had no key), so the
-    /// answer and the events a client sees do not change.
+    /// [`Self::apply_wire_operation`] for a change nobody asked to follow: the
+    /// record still holds what it changes, and its statuses are left untouched.
     pub fn apply_wire_recorded(
         &mut self,
         command: crate::wire::WireCommand,
@@ -1208,9 +1169,8 @@ impl crate::engine::Engine {
             .iter()
             .any(|op| op.as_deref() == Some(provisional.as_str()));
         let id = if deferred || self.operations.awaits_reload(&provisional) {
-            // Held behind a config reload, or itself a reload: nothing has
-            // happened yet, so the record waits for the drain that runs it, or
-            // for its reload's owner to say how it ended.
+            // Deferred behind a reload, or a reload itself: nothing has happened
+            // yet, so the record waits for the drain or the reload's owner.
             provisional
         } else {
             self.operations
@@ -1233,10 +1193,8 @@ impl crate::engine::Engine {
         Ok(outcome)
     }
 
-    /// Run a command a config reload deferred, finishing the record of the
-    /// client that asked for it, if one did, the way
-    /// [`Self::apply_wire_operation`] would have. The drain of the deferred
-    /// queue is this record's completion point.
+    /// Run a command a config reload deferred, settling the record of the client
+    /// that asked for it the way [`Self::apply_wire_operation`] would have.
     pub(crate) fn apply_deferred_operation(
         &mut self,
         command: crate::engine::Command,
@@ -1284,12 +1242,8 @@ impl crate::engine::Engine {
         result
     }
 
-    /// Where a record goes once its change has answered: still running under
-    /// `running` (a key minted for it alone becomes its id when `may_rekey`,
-    /// any other key is waited on), ended at once by a final the change
-    /// already reached (`settled`), or ended on the status it answered with,
-    /// which carries the record's id as its key when it had none and
-    /// `stamp_key` asks for it. Answers the record's id.
+    /// Leave the record waiting on the key its change still runs under, or end it
+    /// on the final it already reached; answers the record's id.
     fn settle_operation(
         &self,
         provisional: &str,
@@ -1345,9 +1299,8 @@ impl crate::engine::Engine {
         }
     }
 
-    /// Open a running record under `id`, with the policy `[server]` sets now.
-    /// A change dispatched outside [`Self::apply_wire_operation`] (a tab or a
-    /// terminal) opens its record here before it starts.
+    /// Open a running record under `id`, with the policy `[server]` sets now, for
+    /// a change dispatched outside [`Self::apply_wire_operation`].
     pub fn open_operation(&self, id: &str, kind: OperationKind) {
         self.operations.open(
             id,
@@ -1357,24 +1310,16 @@ impl crate::engine::Engine {
         );
     }
 
-    /// Add facts to the record waiting on `key`, or, with no key, to the
-    /// record of the change being dispatched right now. A no-op when neither
-    /// names a record, which is every change nobody asked about.
+    /// Add facts to the record waiting on `key`, or, with no key, to the record
+    /// being dispatched right now; a no-op when neither names a record.
     pub fn note_operation(&self, key: Option<&str>, notes: OperationNotes) {
         if let Some(key) = key.or(self.operation_in_dispatch.as_deref()) {
             self.operations.note(key, notes);
         }
     }
 
-    /// A launch reported back: finish every record waiting on `key` (a
-    /// tab's [`launch_binding_key`], or for a failure reported by agent, its
-    /// [`launch_failure_key`]). A completion point of its own, because the
-    /// launch's status rides a key shared by every launch of that tab.
-    ///
-    /// A launch that came up succeeds. One that did not is a failure, unless
-    /// the record created `tab_id` and that tab is still there (a promotion
-    /// kept it, or its cleanup failed): then the create half-happened, and the
-    /// record says so. A tab that is gone is no longer counted as created.
+    /// A launch reported back: finish the records waiting on `key`. A failed
+    /// launch is partial, not failed, for a record whose created tab still exists.
     pub fn finish_launch_operations(
         &self,
         key: &str,
@@ -1403,12 +1348,8 @@ impl crate::engine::Engine {
             .finish_by_key(key, StatusTone::Error, message, segments, now);
     }
 
-    /// A config reload ended, and `outcome` is how its owner says it did: finish
-    /// the records of every client that asked for it. Each serving mode has
-    /// exactly one owner (the terminal UI's reload handlers, or the web
-    /// actor's reload follow-up) and each calls this once per reload, on
-    /// whichever of the three results the reload had: applied, adopted with a
-    /// step failed, or refused.
+    /// A config reload ended as `outcome` says: finish the records of every client
+    /// that asked for it. Called once per reload by that serving mode's reload owner.
     pub fn finish_config_reload_operations(
         &self,
         outcome: &crate::config_reload_status::ConfigReloadOutcome,
@@ -1418,9 +1359,8 @@ impl crate::engine::Engine {
             .finish_reload(state, &message, Instant::now());
     }
 
-    /// Forget the finished records past their retention. Called from the one
-    /// per-tick engine call every serving surface makes, so a registry nobody
-    /// reads still lets go of what it no longer has to keep.
+    /// Forget the finished records past their retention, so a registry nobody
+    /// reads still lets go of them.
     pub fn prune_operations(&self) {
         self.operations.prune(Instant::now());
     }

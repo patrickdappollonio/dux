@@ -78,15 +78,8 @@ pub enum InFlightKey {
         path: String,
         action: ProjectFolderAction,
     },
-    /// The admission keys: one per thing a client can change, held by an
-    /// operation record from the moment its change is admitted until the
-    /// record finishes (see [`crate::operations`], which keeps them on the
-    /// record so they can never outlive it). A change that wants a key another
-    /// open record holds in a conflicting mode is refused, naming that
-    /// operation. The engine works out what a change wants from its own state
-    /// (`Engine::wire_admission`): a change to an agent also wants each of its
-    /// tabs and terminals, and a change inside an agent or a project wants
-    /// that agent or project shared.
+    /// The admission keys, one per thing a client can change, held by an
+    /// operation record from admission until it finishes ([`crate::operations`]).
     Agent(String),
     Tab(TabId),
     Terminal(String),

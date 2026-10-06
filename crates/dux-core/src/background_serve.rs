@@ -205,24 +205,14 @@ pub struct ServiceOutcome {
     /// what died and how; the terminal UI puts it on the status line, replacing
     /// the "serving on ..." message that is by then a lie.
     pub retirement: Option<String>,
-    /// The statuses a change made through this serve by a client with no
-    /// connection of its own (the command line) raised for every surface, in
-    /// the order raised: no browser stands in for the terminal UI's status
-    /// line, so it is handed them here.
+    /// The statuses a connectionless client's change (the command line) raised
+    /// for every surface, in order, for the terminal UI's status line to show.
     pub statuses: Vec<crate::wire::WireStatus>,
 }
 
-/// A web server the terminal UI services once per loop iteration.
-///
-/// Every method takes `&mut Engine` rather than holding one: the TUI owns the
-/// engine and lends it for the duration of the call.
-///
-/// Two questions, kept apart: [`Self::has_core`] (is anything served at all,
-/// the control socket included) decides whether the engine is lent, because a
-/// command-line client's request waits on that; [`Self::is_serving`] (is the
-/// web served) decides everything a person sees or a browser drives: the
-/// serving crumb, the connection count, the terminal UI's seat in the PTY
-/// ownership registry, the poll cap and the flip refusal.
+/// A web server the terminal UI services once per loop iteration, lending it the
+/// engine for each call. [`Self::has_core`] decides whether the engine is lent;
+/// [`Self::is_serving`] decides everything a person sees or a browser drives.
 pub trait BackgroundServeCompanion {
     /// Do the companion's share of one drained reaction, before the terminal UI
     /// applies it.
@@ -269,14 +259,12 @@ pub trait BackgroundServeCompanion {
     /// While one is, the engine is lent every iteration.
     fn has_core(&self) -> bool;
 
-    /// Serve the control socket the engine's lock holds, alone, when nothing
-    /// is served yet: the plain terminal UI's core. A no-op when a core is
-    /// already up or dux runs without the socket.
+    /// Serve the control socket alone, the plain terminal UI's core; a no-op when
+    /// a core is already up or dux runs without the socket.
     fn start_control_socket(&mut self, engine: &mut Engine);
 
-    /// Stop every core, the control socket's included, letting the requests
-    /// the socket already accepted finish first. For leaving the terminal UI:
-    /// a quit, or the flip, whose own core serves the socket next.
+    /// Stop every core, the control socket's included, once the requests it
+    /// already accepted finish: for a quit, or the flip, whose core serves next.
     fn release(&mut self, engine: &mut Engine);
 
     /// The URLs currently being served, for status copy. Empty when not serving.
@@ -291,24 +279,10 @@ pub trait BackgroundServeCompanion {
     /// question that takes a lock or a turn.
     fn connections(&self) -> usize;
 
-    /// Start serving on `listeners`, which the caller already bound.
-    ///
-    /// Bound by the CALLER so a bind failure is reported without anything having
-    /// been torn down: the terminal UI stays exactly where it was. Returns the
-    /// URLs on success, or a message fit for the status line.
-    ///
-    /// `claim_before_serving` asks for every pty running in `engine` that nobody
-    /// drives to be claimed for the terminal UI BEFORE any listener accepts a
-    /// connection (see [`TuiOwnership::claim_every_running_pty`]), and the claims
-    /// announced once the serve is up. The terminal UI passes it for a start
-    /// somebody at its keyboard asked for, and never for the startup autostart.
-    /// Seeding the registry first is the whole point: a browser tab already
-    /// reconnecting cannot win a plain-attach claim in between, and its handshake
-    /// reads the owner from the seeded registry.
-    ///
-    /// `startup` is what the bind pre-flight learned (warnings, best-effort bind
-    /// failures, whether a Tailscale address was found), so the serve's log
-    /// opens with the banner `dux server` prints.
+    /// Start serving on `listeners`, which the caller already bound so a bind
+    /// failure tears nothing down. Returns the URLs, or a status-line message.
+    /// `claim_before_serving` claims every undriven running pty for the terminal
+    /// UI before any listener accepts a connection; `startup` opens the log's banner.
     fn start(
         &mut self,
         engine: &mut Engine,
@@ -318,9 +292,8 @@ pub trait BackgroundServeCompanion {
         startup: crate::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String>;
 
-    /// The log file the running serve opened, or `None` when it is not serving
-    /// or could not open one. The viewer follows this file and not the config's
-    /// `log_path`, which a reload may have changed since the serve started.
+    /// The log file the running serve opened, which a reload of `log_path` does
+    /// not move; `None` when not serving or none could be opened.
     fn server_log_path(&self) -> Option<std::path::PathBuf>;
 
     /// Change `[server] tailscale` on the running listener.
@@ -332,9 +305,8 @@ pub trait BackgroundServeCompanion {
     /// serving; the CONFIG write is the caller's, and happens either way.
     fn set_tailscale_mode(&mut self, engine: &Engine, mode: crate::config::TailscaleMode);
 
-    /// Stop serving the web and release everything the serve owned, going
-    /// back to serving the control socket alone. A no-op when not serving, so
-    /// a caller never has to check first.
+    /// Stop serving the web and release what the serve owned, back to serving the
+    /// control socket alone. A no-op when not serving.
     fn stop(&mut self, engine: &mut Engine);
 
     /// The terminal UI's seat in this serve's PTY-ownership registry, or `None`

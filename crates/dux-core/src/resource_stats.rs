@@ -96,9 +96,8 @@ impl ResourceCollector {
             // Establish the "before" side of the delta, then let enough time pass
             // for sysinfo to compute a meaningful one.
             self.refresh();
-            // On macOS sysinfo records a process's CPU times from its second
-            // refresh only (the first one just creates its entry), so without
-            // this the baseline sample reads 0% for every process there.
+            // On macOS sysinfo records CPU times only from a process's second
+            // refresh, so without this the baseline sample reads 0% there.
             #[cfg(target_os = "macos")]
             self.refresh();
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);

@@ -266,10 +266,8 @@ pub enum Command {
     /// model; a multi-writer setup would need read-modify-merge.
     UpdateMacros { macros: crate::config::MacrosConfig },
 
-    /// A change to the macro list or the global environment a client asked
-    /// for, kept as what was asked rather than as the set it would produce,
-    /// so a change a config reload deferred runs against the config as it is
-    /// when it finally runs. See [`ConfigSetChange`].
+    /// A change to the macro list or the global environment, kept as asked so a
+    /// change a reload deferred runs against the config as it is when it runs.
     ChangeConfigSet(ConfigSetChange),
 
     /// Point the changed-files watch at a session's worktree, or clear it with
@@ -433,9 +431,8 @@ fn discard_message(
 /// What a client asked of the macro list or the global environment.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConfigSetChange {
-    /// Replace the whole list; `read_at` is the
-    /// [`crate::wire::macros_version`] it was based on, refused with
-    /// [`crate::wire::StaleSet::Macros`] when the list has moved since.
+    /// Replace the whole list, refused with [`crate::wire::StaleSet::Macros`] when
+    /// it has moved since the [`crate::wire::macros_version`] in `read_at`.
     ReplaceMacros {
         macros: crate::config::MacrosConfig,
         read_at: Option<String>,
@@ -471,10 +468,8 @@ impl Engine {
         // Refused while a change another surface follows holds what this one
         // would change. Checked only: a command has no record to hold with.
         self.check_command(&command)?;
-        // Refused while somebody else is attached to what it would end; held
-        // against new attachments until the change ends (see
-        // `attachment_guard`): its operation record finishing, or, with none,
-        // the final of the status key its work runs on past this call.
+        // Refused while somebody else is attached to what it would end, and held
+        // against new attachments until the change ends.
         let reservation = self.guard_command(&command)?;
         let status_key = match &command {
             Command::PersistProject {
@@ -1149,9 +1144,8 @@ impl Engine {
                 // let the caller retry.
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
-                    // The reload that was to start never will: the clients
-                    // waiting on it (a queued follow-up's) are told so, and a
-                    // later reload is a different one.
+                    // The reload that was to start never will, so the clients
+                    // waiting on it are told so.
                     self.operations.fail_reload(
                         "Config writer is busy; please retry.",
                         std::time::Instant::now(),
@@ -1319,10 +1313,8 @@ impl Engine {
         }
     }
 
-    /// Resolve a [`ConfigSetChange`] against the config as it is now and save
-    /// the result through the whole-set command, so the write, its rollback
-    /// rules and its failure sentences are shared. A one-entry change answers
-    /// with a sentence about that entry instead of the count of the set.
+    /// Resolve a [`ConfigSetChange`] against the config as it is now and save the
+    /// result through the whole-set command, answering about the one entry.
     fn apply_config_set_change(
         &mut self,
         change: ConfigSetChange,

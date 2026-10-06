@@ -193,10 +193,8 @@ pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
     end_exactly_with(rows, grace, &|| Ok(read_process_table())).unwrap_or_default()
 }
 
-/// [`end_exactly`] with the process table handed in, answering an error when
-/// the table cannot be read instead of taking an unreadable table for a world
-/// where nothing runs. A factory reset reads it with
-/// [`read_process_table_strict`].
+/// [`end_exactly`] with the process table handed in, as
+/// [`read_process_table_strict`] reads it.
 pub fn end_exactly_with(
     rows: &[ProcRow],
     grace: Duration,
@@ -710,10 +708,8 @@ pub fn read_process_table() -> Vec<ProcRow> {
     }
 }
 
-/// [`read_process_table`] that says so when it cannot read the table, for a
-/// caller that must not mistake an unread table for no processes at all (a
-/// factory reset). A process that vanishes while the table is read is normal;
-/// anything else that cannot be read is an error.
+/// [`read_process_table`] that fails when the table cannot be read, rather than
+/// answering no processes; a process vanishing mid-read is not a failure.
 pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
     crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
     #[cfg(target_os = "linux")]
@@ -768,12 +764,8 @@ pub struct Occupant {
     pub cwd: std::path::PathBuf,
 }
 
-/// Every process of the current user in `table` (this one excluded) whose
-/// working directory is in or under one of `folders`. Another user's process
-/// is skipped, and so is a process of this user the system will not let dux
-/// inspect (a service that dropped its privileges, a systemd user manager
-/// among them): its directory cannot be read, and refusing on every such
-/// process would make the answer always no. Blocking.
+/// Every inspectable process of the current user in `table` (this one excluded)
+/// working in or under one of `folders`. Blocking.
 pub fn occupants_of(
     table: &[ProcRow],
     folders: &[std::path::PathBuf],
@@ -819,11 +811,8 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        // The short BSD info, because the kernel answers it for every
-        // process; the full `PROC_PIDTBSDINFO` is refused for another user's
-        // process, which is exactly the process this question has to tell
-        // apart. `libc` declares neither the flavor nor its struct, so both
-        // are spelled here from `<sys/proc_info.h>`.
+        // The short BSD info, which the kernel answers for another user's process
+        // too; `libc` declares neither it nor its struct, so both follow `<sys/proc_info.h>`.
         const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
         #[repr(C)]
         #[allow(dead_code)] // the kernel fills every field; only the uid is read

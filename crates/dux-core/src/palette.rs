@@ -183,7 +183,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         name: "view-server-log",
         description: "Open the server's log full-screen while dux serves in the background",
         // TUI-only: `dux server` prints this log to its terminal and the flip shows
-        // it on its status screen. The web has no view of it by decision.
+        // it on its status screen; the web has no view of it.
     },
     PaletteCommand {
         action: Action::SetTailscaleMode,

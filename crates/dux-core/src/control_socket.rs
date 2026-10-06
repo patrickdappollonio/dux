@@ -35,9 +35,8 @@ pub enum Unavailable {
     NotASocket { path: PathBuf },
     /// A socket at the path answers: another process is serving on it.
     InUse { path: PathBuf },
-    /// The folder the socket would go in is not this user's alone, so a file
-    /// dux binds, changes the mode of or removes there could be swapped under
-    /// it by somebody else.
+    /// The socket's folder is not this user's alone, so somebody else could swap
+    /// the file under dux between its steps.
     SharedFolder { folder: PathBuf },
     /// Connecting to a socket left at the path failed for a reason other than
     /// a refusal, so nothing proves it dead and dux leaves it alone.
@@ -123,9 +122,8 @@ impl ControlSocket {
         if path.as_os_str().as_encoded_bytes().contains(&b'\n') {
             return Err(Unavailable::LineBreak);
         }
-        // Everything below names the path, which follows symlinks: only a
-        // folder nobody else can write to keeps it from being swapped between
-        // the steps.
+        // Every step below names the path, which follows symlinks: only a private
+        // folder keeps it from being swapped between them.
         if !in_private_folder(path) {
             return Err(Unavailable::SharedFolder {
                 folder: folder_of(path),
@@ -158,9 +156,8 @@ impl ControlSocket {
         &self.path
     }
 
-    /// A handle on the one bound listener, for a core to serve. Every core
-    /// serves a clone, so the socket stays bound while none is serving and
-    /// connections wait in its backlog.
+    /// A clone of the bound listener for a core to serve; the socket stays bound
+    /// while no core serves, and connections wait in its backlog.
     pub fn listener(&self) -> io::Result<UnixListener> {
         self.listener.try_clone()
     }
@@ -245,10 +242,8 @@ pub fn unavailable_warning(reason: &Unavailable) -> String {
     )
 }
 
-/// Bind the control socket at `path` for the holder of `lock`, the one step
-/// every way dux starts takes once it holds the lock and has read the config.
-/// Answers the warning to show when dux has to run without the socket, already
-/// written to `dux.log`; the lock file carries the reason either way.
+/// Bind the control socket at `path` for the holder of `lock`. Answers the warning
+/// to show when dux runs without it, already written to `dux.log`.
 pub fn open(lock: &mut crate::lockfile::SingleInstanceLock, path: &Path) -> Option<String> {
     match lock.open_control_socket(path) {
         Ok(()) => {
@@ -266,10 +261,8 @@ pub fn open(lock: &mut crate::lockfile::SingleInstanceLock, path: &Path) -> Opti
     }
 }
 
-/// What a config reload says when it moved `[server] control_socket`: the
-/// socket is bound once per process, so the new path waits for the next start
-/// of dux itself, whichever way it serves. `None` when the setting did not
-/// change.
+/// What a config reload says when it moved `[server] control_socket`, bound once
+/// per process; `None` when the setting did not change.
 pub fn moved_warning(
     prev: &crate::config::ServerConfig,
     next: &crate::config::ServerConfig,

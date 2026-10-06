@@ -78,11 +78,8 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(tightened))
 }
 
-/// Set a socket dux has just bound to [`PRIVATE_FILE_MODE`] exactly. A socket
-/// is bound with the umask's mode, and connecting needs write permission, so
-/// this is what keeps other users out of a socket bound outside the config
-/// folder. Unlike the tightening above, a failure here is returned: a control
-/// socket another user might open is not one dux serves.
+/// Set a socket dux just bound, with the umask's mode, to [`PRIVATE_FILE_MODE`]
+/// exactly; unlike the tightening above, a failure is returned.
 pub fn make_socket_private(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }

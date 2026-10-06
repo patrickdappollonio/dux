@@ -878,10 +878,8 @@ impl SessionStore {
             .unwrap_or_default())
     }
 
-    /// The saved process registry, refusing what [`Self::load_process_registry`]
-    /// forgives: a body that does not parse is an error here, not an empty
-    /// registry. For a caller that must not mistake "unreadable" for "nothing
-    /// was recorded".
+    /// The saved process registry, where a body that does not parse is an error
+    /// rather than the empty registry [`Self::load_process_registry`] answers.
     pub fn load_process_registry_strict(
         &self,
     ) -> Result<Vec<crate::process_sessions::StoredSession>> {
