@@ -28,6 +28,10 @@ pub enum Reply {
     Raw(String),
     /// Close without answering.
     Close,
+    /// These pieces, one every `gap`, then close.
+    Slow(Vec<String>, std::time::Duration),
+    /// Say nothing for this long, then close.
+    Hang(std::time::Duration),
 }
 
 impl Reply {
@@ -122,10 +126,22 @@ fn serve<S: Read + Write>(stream: S, record: &Mutex<Vec<Seen>>, handler: &Handle
         body: String::from_utf8_lossy(&body).into_owned(),
     };
     record.lock().unwrap().push(seen.clone());
-    if let Reply::Raw(bytes) = handler(&seen) {
-        let mut stream = reader.into_inner();
-        let _ = stream.write_all(bytes.as_bytes());
-        let _ = stream.flush();
+    let mut stream = reader.into_inner();
+    match handler(&seen) {
+        Reply::Raw(bytes) => {
+            let _ = stream.write_all(bytes.as_bytes());
+            let _ = stream.flush();
+        }
+        Reply::Close => {}
+        Reply::Slow(pieces, gap) => {
+            for piece in pieces {
+                if stream.write_all(piece.as_bytes()).is_err() || stream.flush().is_err() {
+                    return;
+                }
+                std::thread::sleep(gap);
+            }
+        }
+        Reply::Hang(how_long) => std::thread::sleep(how_long),
     }
 }
 

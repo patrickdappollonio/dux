@@ -50,10 +50,15 @@ impl Selection {
 
 /// Print a command's result, or its error, and end the process with its code.
 pub fn finish(result: Result<String, CliError>) -> ! {
+    finish_with_code(result.map(|text| (text, 0)))
+}
+
+/// [`finish`] for a result that carries its own exit code.
+pub fn finish_with_code(result: Result<(String, i32), CliError>) -> ! {
     match result {
-        Ok(text) => {
+        Ok((text, code)) => {
             print!("{text}");
-            std::process::exit(0);
+            std::process::exit(code);
         }
         Err(error) => {
             eprintln!("{}", error.message);
@@ -74,36 +79,50 @@ fn line(text: String) -> String {
     format!("{text}\n")
 }
 
-pub fn operations(command: OperationsSub, selection: &Selection) -> Result<String, CliError> {
+/// `dux operations show`: the record on stdout, and the exit code its state
+/// calls for (0 succeeded, 1 failed or partly done, 6 still running).
+pub fn operations(
+    command: OperationsSub,
+    selection: &Selection,
+) -> Result<(String, i32), CliError> {
     let paths = discover()?;
     let client = connect::connect(&selection.target(&paths)?, &paths.lock_path)?;
     match command {
-        OperationsSub::Show { id } => Ok(line(wait::describe(&client.operation(&id)?))),
+        OperationsSub::Show { id } => {
+            let record = client.operation(&id)?;
+            let code = wait::exit_of(&record).map_or(0, Exit::code);
+            Ok((line(wait::describe(&record)), code))
+        }
     }
 }
 
 pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliError> {
     let paths = discover()?;
-    let mut saved = Remotes::load(&paths.root)?;
+    let root = &paths.root;
     match command {
         RemoteSub::Add {
             name,
             url,
             insecure,
         } => {
-            saved.add(&name, &url, insecure)?;
-            saved.save(&paths.root)?;
-            let url = &saved.get(&name)?.url;
+            let url = Remotes::update(root, |saved| {
+                saved.add(&name, &url, insecure)?;
+                Ok(saved.get(&name)?.url.clone())
+            })?;
             Ok(line(format!(
                 "Saved remote {name} ({url}). Use it with --remote {name}, or make it the default \
                  with \"dux remote default {name}\"."
             )))
         }
-        RemoteSub::Ls(list) => Ok(output::render(&saved.listing(), shape(&list))),
+        RemoteSub::Ls(list) => Ok(output::render(
+            &Remotes::load(root)?.listing(),
+            shape(&list),
+        )),
         RemoteSub::Rm { name } => {
-            let was_default = saved.default.as_deref() == Some(name.as_str());
-            let removed = saved.remove(&name)?;
-            saved.save(&paths.root)?;
+            let (was_default, removed) = Remotes::update(root, |saved| {
+                let was_default = saved.default.as_deref() == Some(name.as_str());
+                Ok((was_default, saved.remove(&name)?))
+            })?;
             let mut text = format!("Forgot remote {name}.");
             if was_default {
                 text.push_str(
@@ -120,9 +139,11 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             Ok(line(text))
         }
         RemoteSub::Default { name, unset: _ } => {
-            let before = saved.default.clone();
-            saved.set_default(name.as_deref())?;
-            saved.save(&paths.root)?;
+            let before = Remotes::update(root, |saved| {
+                let before = saved.default.clone();
+                saved.set_default(name.as_deref())?;
+                Ok(before)
+            })?;
             Ok(line(match (name, before) {
                 (Some(name), _) => format!(
                     "{name} is now the default remote: commands talk to it unless --local, \
@@ -136,6 +157,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             }))
         }
         RemoteSub::Login { name, stdin } => {
+            let saved = Remotes::load(root)?;
             let name = named_or_selected(name, selection, &saved, "login")?;
             let remote = saved.get(&name)?.clone();
             if !sign_in::password_set(&name, &remote)? {
@@ -150,22 +172,13 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             let password = dux_tui::read_sign_in_password(stdin, &format!("Password for {name}"))
                 .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
             let token = sign_in::login(&name, &remote, password.expose())?;
-            // Read again: the prompt may have waited while another command
-            // changed the file.
-            let mut saved = Remotes::load(&paths.root)?;
-            match saved.remotes.get_mut(&name) {
-                Some(entry) => entry.token = Some(token),
-                None => {
-                    return Err(CliError::new(
-                        Exit::Failed,
-                        format!("{name} was removed while signing in, so the sign-in was not kept"),
-                    ));
-                }
-            }
-            saved.save(&paths.root)?;
+            // The prompt may have waited while another command changed the
+            // remote; the token is kept only for the URL that issued it.
+            Remotes::keep_token(root, &name, &remote.url, &token)?;
             Ok(line(format!("Signed in to {name}.")))
         }
         RemoteSub::Logout { name } => {
+            let saved = Remotes::load(root)?;
             let name = named_or_selected(name, selection, &saved, "logout")?;
             let remote = saved.get(&name)?.clone();
             let Some(token) = remote.token.clone() else {
@@ -174,10 +187,14 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 )));
             };
             let told = sign_in::logout(&name, &remote, &token);
-            if let Some(entry) = saved.remotes.get_mut(&name) {
-                entry.token = None;
-            }
-            saved.save(&paths.root)?;
+            Remotes::update(root, |saved| {
+                if let Some(entry) = saved.remotes.get_mut(&name)
+                    && entry.token.as_deref() == Some(token.as_str())
+                {
+                    entry.token = None;
+                }
+                Ok(())
+            })?;
             match told {
                 Ok(()) => Ok(line(format!("Signed out of {name}."))),
                 Err(error) => Err(CliError::new(

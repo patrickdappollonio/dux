@@ -34,8 +34,39 @@ pub struct Remote {
     pub token: Option<String>,
 }
 
+/// The file every change to [`REMOTES_FILE`] holds an exclusive lock on.
+/// The remotes file itself is replaced by each save, so it cannot be locked.
+pub const REMOTES_LOCK_FILE: &str = "remotes.toml.lock";
+
 pub fn remotes_path(root: &Path) -> PathBuf {
     root.join(REMOTES_FILE)
+}
+
+/// Take the exclusive lock on [`REMOTES_LOCK_FILE`], waiting for whoever
+/// holds it. Released when the returned file closes.
+fn lock(root: &Path) -> Result<std::fs::File, CliError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = root.join(REMOTES_LOCK_FILE);
+    let fail = |error: &dyn std::fmt::Display| {
+        CliError::new(
+            Exit::Failed,
+            format!("could not lock {}: {error}", path.display()),
+        )
+    };
+    crate::file_modes::create_private_dir_all(root).map_err(|e| fail(&e))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(crate::file_modes::PRIVATE_FILE_MODE)
+        .open(&path)
+        .map_err(|e| fail(&e))?;
+    crate::io_retry::retry_on_interrupt_errno(|| {
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+    })
+    .map_err(|e| fail(&e))?;
+    Ok(file)
 }
 
 impl Remotes {
@@ -54,17 +85,31 @@ impl Remotes {
                 ));
             }
         };
+        // The parser's own message quotes the file, and the file holds
+        // sign-in tokens, so only the place it broke is said.
         toml::from_str(&text).map_err(|error| {
+            let place = match error.span() {
+                Some(span) => {
+                    let before = text.get(..span.start).unwrap_or(&text);
+                    let line = before.matches('\n').count() + 1;
+                    let column = before.rsplit('\n').next().unwrap_or_default().chars().count() + 1;
+                    format!(" at line {line}, column {column}")
+                }
+                None => String::new(),
+            };
             CliError::new(
                 Exit::Failed,
-                format!("{} is not valid: {error}", path.display()),
+                format!(
+                    "{} is not valid{place}; fix it by hand, or remove it and add your remotes again",
+                    path.display()
+                ),
             )
         })
     }
 
     /// Write the file whole, owner-only from the moment it exists, replacing
-    /// the old one in one rename.
-    pub fn save(&self, root: &Path) -> Result<(), CliError> {
+    /// the old one in one rename. Every change goes through [`Self::update`].
+    fn save(&self, root: &Path) -> Result<(), CliError> {
         let path = remotes_path(root);
         let fail = |error: &dyn std::fmt::Display| {
             CliError::new(
@@ -79,6 +124,39 @@ impl Remotes {
         std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| fail(&e))?;
         file.persist(&path).map_err(|e| fail(&e.error))?;
         Ok(())
+    }
+
+    /// Load the file, `change` it and save it, holding an exclusive lock on
+    /// [`REMOTES_LOCK_FILE`] throughout, so two commands changing it at once
+    /// never lose either change. A `change` that fails saves nothing.
+    pub fn update<T>(
+        root: &Path,
+        change: impl FnOnce(&mut Remotes) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        let _lock = lock(root)?;
+        let mut saved = Self::load(root)?;
+        let result = change(&mut saved)?;
+        saved.save(root)?;
+        Ok(result)
+    }
+
+    /// Keep `token` as the sign-in to `name`, issued by the remote at `url`.
+    /// When `name` was removed, or now names another URL, while the sign-in
+    /// ran, nothing is kept: the token belongs to a remote no longer saved.
+    pub fn keep_token(root: &Path, name: &str, url: &str, token: &str) -> Result<(), CliError> {
+        Self::update(root, |saved| match saved.remotes.get_mut(name) {
+            Some(remote) if remote.url == url => {
+                remote.token = Some(token.to_string());
+                Ok(())
+            }
+            _ => Err(CliError::new(
+                Exit::Failed,
+                format!(
+                    "{name} was removed or now points elsewhere than {url}, which it pointed at \
+                     when signing in began, so the sign-in was not kept; sign in again"
+                ),
+            )),
+        })
     }
 
     /// The remote saved as `name`.
@@ -284,7 +362,8 @@ mod tests {
     }
 
     #[test]
-    fn the_file_round_trips_owner_only_and_forgets_a_removed_default() {
+    fn the_remotes_file_round_trips_owner_only_keeps_a_token_only_for_its_url_and_never_echoes_its_text()
+     {
         use std::os::unix::fs::PermissionsExt;
         let dir = private_dir();
         let root = dir.path().join("home");
@@ -324,5 +403,76 @@ mod tests {
         changed.remove("work").unwrap();
         assert_eq!(changed.default, None);
         assert!(changed.remove("work").is_err());
+
+        // A sign-in is kept only while the remote still has the URL it was
+        // issued by.
+        Remotes::update(&root, |saved| {
+            saved.remove("work")?;
+            saved.add("work", "https://other.example.com", false)
+        })
+        .unwrap();
+        let refused =
+            Remotes::keep_token(&root, "work", "https://work.example.com", "new").unwrap_err();
+        assert_eq!(refused.exit, Exit::Failed);
+        assert!(refused.message.contains("work"), "{}", refused.message);
+        assert_eq!(
+            Remotes::load(&root).unwrap().get("work").unwrap().token,
+            None
+        );
+        Remotes::keep_token(&root, "work", "https://other.example.com", "new").unwrap();
+        assert_eq!(
+            Remotes::load(&root)
+                .unwrap()
+                .get("work")
+                .unwrap()
+                .token
+                .as_deref(),
+            Some("new")
+        );
+
+        // A broken file is reported by where it breaks, never by its text.
+        for (text, line) in [
+            (
+                "[remotes.work]\nurl = \"https://x\"\ninsecure = \"SECRET-TOKEN\"\n",
+                "line 3",
+            ),
+            ("[remotes.work]\ntoken = \"SECRET-TOKEN\n", "line 2"),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let broken = Remotes::load(&root).unwrap_err();
+            assert!(!broken.message.contains("SECRET"), "{}", broken.message);
+            assert!(broken.message.contains(line), "{}", broken.message);
+        }
+    }
+
+    #[test]
+    fn concurrent_changes_to_the_remotes_file_are_never_lost() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = private_dir();
+        let root = dir.path().to_path_buf();
+        let (loaded, has_loaded) = mpsc::channel();
+        let (go, may_go) = mpsc::channel::<()>();
+        let first_root = root.clone();
+        let first = std::thread::spawn(move || {
+            Remotes::update(&first_root, |saved| {
+                loaded.send(()).unwrap();
+                let _ = may_go.recv_timeout(Duration::from_millis(500));
+                saved.add("a", "https://a.example.com", false)
+            })
+        });
+        has_loaded.recv().unwrap();
+        let second_root = root.clone();
+        let second = std::thread::spawn(move || {
+            Remotes::update(&second_root, |saved| {
+                saved.add("b", "https://b.example.com", false)
+            })
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = go.send(());
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        let names: Vec<String> = Remotes::load(&root).unwrap().remotes.into_keys().collect();
+        assert_eq!(names, ["a", "b"]);
     }
 }

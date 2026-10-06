@@ -413,3 +413,82 @@ fn a_config_reset_refuses_while_another_dux_holds_the_lock_and_touches_nothing()
         );
     }
 }
+
+/// Answer each request on a socket in `dir` from `reply`, as a running dux
+/// would, and hold `dux.lock` naming that socket.
+fn serve_as_dux(
+    dir: &std::path::Path,
+    reply: fn(&str) -> (u16, &'static str),
+) -> dux_core::lockfile::SingleInstanceLock {
+    use std::io::{BufRead, BufReader, Write};
+    let socket = dir.join("dux.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+            let (status, body) = match path {
+                "/api/v1/build" => (200, r#"{"version":"v1","process":"p","api":1}"#),
+                other => reply(other),
+            };
+            let _ = write!(
+                reader.get_mut(),
+                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    let lock = dux_core::lockfile::SingleInstanceLock::acquire(&dir.join("dux.lock")).unwrap();
+    std::fs::write(
+        dir.join("dux.lock"),
+        format!(
+            "{}\ncontrol-socket={}\n",
+            std::process::id(),
+            socket.display()
+        ),
+    )
+    .unwrap();
+    lock
+}
+
+#[test]
+fn an_operation_is_shown_and_exits_with_the_code_of_its_outcome() {
+    let dir = home("operations-show");
+    let _dux = serve_as_dux(&dir, |path| match path {
+        "/api/v1/operations/op-ok" => (
+            200,
+            r#"{"id":"op-ok","kind":"tab.close","state":"succeeded","message":"Closed the tab.","created":[],"removed":[],"parts":[]}"#,
+        ),
+        "/api/v1/operations/op-part" => (
+            200,
+            r#"{"id":"op-part","kind":"agent.delete","state":"partial","message":"Deleted web; kept its branch.","created":[],"removed":[],"parts":[]}"#,
+        ),
+        "/api/v1/operations/op-run" => (
+            200,
+            r#"{"id":"op-run","kind":"agent.delete","state":"running","message":"","created":[],"removed":[],"parts":[]}"#,
+        ),
+        _ => (404, r#"{"error":"unknown_operation"}"#),
+    });
+    for (id, code, state) in [
+        ("op-ok", 0, "succeeded"),
+        ("op-part", 1, "partial"),
+        ("op-run", 6, "running"),
+    ] {
+        let run = dux_in(&dir, &["operations", "show", id], &[]);
+        assert_eq!(run.code(), code, "{id}: {}", run.stderr());
+        assert!(run.stdout().contains(id), "{id}: {}", run.stdout());
+        assert!(run.stdout().contains(state), "{id}: {}", run.stdout());
+    }
+    let run = dux_in(&dir, &["operations", "show", "op-gone"], &[]);
+    assert_eq!(run.code(), 1);
+    assert!(run.stderr().contains("op-gone"), "{}", run.stderr());
+}

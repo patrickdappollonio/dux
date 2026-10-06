@@ -65,9 +65,9 @@ fn main() -> Result<()> {
         Some(commands::Command::Remote(remote)) => {
             client_commands::finish(client_commands::remote(remote.command, &selection))
         }
-        Some(commands::Command::Operations(operations)) => {
-            client_commands::finish(client_commands::operations(operations.command, &selection))
-        }
+        Some(commands::Command::Operations(operations)) => client_commands::finish_with_code(
+            client_commands::operations(operations.command, &selection),
+        ),
         Some(_) => not_built(),
     }
 }

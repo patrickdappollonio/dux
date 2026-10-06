@@ -92,6 +92,7 @@ impl Client {
             path: format!("{path}{separator}operation=1"),
             body: body.map(|json| json.to_string().into_bytes()),
             bearer: None,
+            timeout: None,
         })?;
         if reply.status != 202 {
             return Err(self.refusal(&reply));
@@ -117,14 +118,17 @@ impl Client {
     }
 
     /// Read `record` again by its id until it has an outcome or `timeout`
-    /// passes. A read that drops is retried by the same id. Running out of
-    /// time is [`Exit::Unknown`], naming the id to look it up by later.
+    /// passes. A read that drops is retried by the same id, and no read is
+    /// allowed past the time left. Running out of time is [`Exit::Unknown`],
+    /// naming the id to look it up by later; an outcome that did arrive is
+    /// always reported, however late.
     pub fn wait(
         &self,
         record: OperationRecord,
         timeout: Duration,
     ) -> Result<OperationRecord, CliError> {
-        let deadline = Instant::now() + timeout;
+        let started = Instant::now();
+        let deadline = started + timeout;
         let mut record = record;
         loop {
             if record.state.is_final() {
@@ -132,11 +136,25 @@ impl Client {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(unknown_outcome(&record.id, timeout));
+                return Err(unknown_after(&record.id, started.elapsed()));
             }
-            let wait = left.min(READ_WAIT).as_secs().max(1);
-            match self.try_send(Request::get(operation_path(&record.id, wait))) {
-                Ok(reply) if reply.status == 200 => record = self.parse(&reply)?,
+            // The dux answers a wait at its end, so it is asked to end a
+            // second before the time left, to leave the answer room to arrive.
+            let wait = left
+                .saturating_sub(Duration::from_secs(1))
+                .min(READ_WAIT)
+                .as_secs();
+            let read = Request {
+                timeout: Some(left),
+                ..Request::get(operation_path(&record.id, wait))
+            };
+            match self.try_send(read) {
+                Ok(reply) if reply.status == 200 => {
+                    record = self.parse(&reply)?;
+                    if wait == 0 && !record.state.is_final() {
+                        std::thread::sleep(RETRY_PAUSE.min(left));
+                    }
+                }
                 Ok(reply) if reply.status == 404 => {
                     return Err(CliError::new(
                         Exit::Unknown,
@@ -149,7 +167,12 @@ impl Client {
                     ));
                 }
                 Ok(reply) => return Err(self.refusal(&reply)),
-                Err(_) => std::thread::sleep(RETRY_PAUSE.min(left)),
+                Err(error @ super::transport::TransportError::Refused(_)) => {
+                    return Err(self.no_reply(&error));
+                }
+                Err(_) => std::thread::sleep(
+                    RETRY_PAUSE.min(deadline.saturating_duration_since(Instant::now())),
+                ),
             }
         }
     }
@@ -171,13 +194,26 @@ fn operation_path(id: &str, wait_seconds: u64) -> String {
     }
 }
 
-fn unknown_outcome(id: &str, timeout: Duration) -> CliError {
+/// A wait that ran out after `waited`.
+fn unknown_after(id: &str, waited: Duration) -> CliError {
+    let seconds = waited.as_secs();
+    let unit = if seconds == 1 { "second" } else { "seconds" };
     CliError::new(
         Exit::Unknown,
         format!(
-            "operation {id} was still running after {} seconds, so its outcome is unknown; it \
-             has not been stopped. Look it up with \"dux operations show {id}\"",
-            timeout.as_secs()
+            "operation {id} was still running after {seconds} {unit}, so its outcome is unknown; \
+             it has not been stopped. Look it up with \"dux operations show {id}\""
+        ),
+    )
+}
+
+/// A record read without waiting that has no outcome yet.
+fn still_running(id: &str) -> CliError {
+    CliError::new(
+        Exit::Unknown,
+        format!(
+            "operation {id} is still running, so its outcome is not known yet. Look it up again \
+             with \"dux operations show {id}\""
         ),
     )
 }
@@ -201,9 +237,16 @@ pub fn outcome(record: &OperationRecord) -> Result<String, CliError> {
         RecordState::Failed | RecordState::Partial => {
             Err(CliError::new(Exit::Failed, describe(record)))
         }
-        RecordState::Running | RecordState::Unknown => {
-            Err(unknown_outcome(&record.id, Duration::ZERO))
-        }
+        RecordState::Running | RecordState::Unknown => Err(still_running(&record.id)),
+    }
+}
+
+/// The exit code a record calls for; `None` when it succeeded.
+pub fn exit_of(record: &OperationRecord) -> Option<Exit> {
+    match record.state {
+        RecordState::Succeeded => None,
+        RecordState::Failed | RecordState::Partial => Some(Exit::Failed),
+        RecordState::Running | RecordState::Unknown => Some(Exit::Unknown),
     }
 }
 
@@ -339,12 +382,27 @@ mod tests {
     #[test]
     fn a_wait_that_runs_out_is_unknown_and_names_the_id() {
         let dir = private_dir();
-        let (_fake, _lock, client) = local(dir.path(), |_, _| Reply::json(200, RUNNING));
+        // The first read is never answered: the wait still ends on time.
+        let (_fake, _lock, client) = local(dir.path(), |n, _| match n {
+            0 => Reply::Hang(Duration::from_secs(10)),
+            _ => Reply::json(200, RUNNING),
+        });
         let started = client
             .change(Method::Post, "/api/v1/sessions/a1/kill", None)
             .unwrap();
-        let error = client.wait(started, Duration::from_secs(1)).unwrap_err();
+        let began = Instant::now();
+        let error = client.wait(started, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "every read is bounded by the time left: {:?}",
+            began.elapsed()
+        );
         assert_eq!(error.exit, Exit::Unknown);
+        assert!(
+            error.message.contains("after 2 seconds"),
+            "{}",
+            error.message
+        );
         assert!(
             error.message.contains("dux operations show op-7"),
             "{}",
@@ -401,6 +459,16 @@ mod tests {
         assert!(shown.contains("op-7"), "{shown}");
         assert!(shown.contains("partial"), "{shown}");
         assert!(shown.contains("worktree: /w/web removed"), "{shown}");
+        assert_eq!(
+            exit_of(&client.operation("op-7").unwrap()),
+            Some(Exit::Failed)
+        );
+        let running: OperationRecord = serde_json::from_str(RUNNING).unwrap();
+        assert_eq!(exit_of(&running), Some(Exit::Unknown));
+        let still = outcome(&running).unwrap_err();
+        assert_eq!(still.exit, Exit::Unknown);
+        assert!(!still.message.contains("0 seconds"), "{}", still.message);
+        assert!(still.message.contains("still running"), "{}", still.message);
         let missing = client.operation("op-9").unwrap_err();
         assert_eq!(missing.exit, Exit::Failed);
         assert!(missing.message.contains("op-9"));

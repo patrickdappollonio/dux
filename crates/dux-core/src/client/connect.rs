@@ -94,7 +94,7 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
         },
         Target::Remote { name, remote } => {
             let client = Client {
-                transport: Box::new(HttpTransport::new(&remote.url)),
+                transport: Box::new(HttpTransport::new(&remote.url, remote.insecure)),
                 token: remote.token.clone(),
                 target: format!("{name} ({})", remote.url),
                 remote: Some(name.clone()),
@@ -169,10 +169,13 @@ impl Client {
 
     /// The error for a request that got no reply.
     pub fn no_reply(&self, error: &TransportError) -> CliError {
-        CliError::new(
-            Exit::NotRunning,
-            format!("{} does not answer: {error}", self.target),
-        )
+        match error {
+            TransportError::Refused(why) => CliError::new(Exit::Failed, why.clone()),
+            _ => CliError::new(
+                Exit::NotRunning,
+                format!("{} does not answer: {error}", self.target),
+            ),
+        }
     }
 
     /// GET `path` and read its JSON; any status but 200 is the dux's refusal.

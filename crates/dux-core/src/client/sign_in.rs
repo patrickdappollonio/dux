@@ -4,20 +4,21 @@
 
 use super::connect::reply_sentence;
 use super::remotes::Remote;
-use super::transport::{HttpTransport, Method, Request, Response, Transport};
+use super::transport::{HttpTransport, Method, Request, Response, Transport, TransportError};
 use super::{CliError, Exit};
 
 /// The label a remote records for this sign-in.
 const LABEL: &str = "dux CLI";
 
 fn send(name: &str, remote: &Remote, request: Request) -> Result<Response, CliError> {
-    HttpTransport::new(&remote.url)
+    HttpTransport::new(&remote.url, remote.insecure)
         .send(&request)
-        .map_err(|error| {
-            CliError::new(
+        .map_err(|error| match error {
+            TransportError::Refused(why) => CliError::new(Exit::Failed, why),
+            _ => CliError::new(
                 Exit::NotRunning,
                 format!("{name} ({}) does not answer: {error}", remote.url),
-            )
+            ),
         })
 }
 
@@ -52,6 +53,7 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<String, CliE
             path: "/api/v1/auth/cli-login".to_string(),
             body: Some(body.to_string().into_bytes()),
             bearer: None,
+            timeout: None,
         },
     )?;
     if reply.status != 200 {
@@ -83,6 +85,7 @@ pub fn logout(name: &str, remote: &Remote, token: &str) -> Result<(), CliError> 
             path: "/api/v1/auth/cli-logout".to_string(),
             body: None,
             bearer: Some(token.to_string()),
+            timeout: None,
         },
     )?;
     if (200..300).contains(&reply.status) {
