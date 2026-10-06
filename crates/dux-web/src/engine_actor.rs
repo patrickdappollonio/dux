@@ -2967,6 +2967,7 @@ impl EngineService {
             .source_text
             .as_str()
             .and_then(|raw| dux_core::config::start_refusal(raw, surface))
+            .or_else(|| dux_core::config::log_path_refusal(&reloaded, &engine.paths))
         {
             return Err(format!(
                 "config.toml was changed outside dux, and this change was not made because \

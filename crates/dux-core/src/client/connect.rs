@@ -133,6 +133,13 @@ fn find_local(lock_path: &Path) -> Result<UnixTransport, CliError> {
     })
 }
 
+/// How long a client waits for a dux that holds the lock to say where its control
+/// socket is: the moments between taking the lock and opening the socket.
+const STARTING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the lock is read again during [`STARTING_WAIT`].
+const STARTING_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// [`find_local`], with `None` for a free lock.
 fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliError> {
     let read = || {
@@ -140,7 +147,24 @@ fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliErro
             .map(|text| LockFileContents::parse(&text))
             .unwrap_or_default()
     };
-    if let Some(socket) = read().control_socket {
+    let says_nothing = |lock: &LockFileContents| {
+        lock.control_socket.is_none() && lock.control_socket_unavailable.is_none()
+    };
+    let mut lock = read();
+    // A held lock that says nothing about a socket yet is a dux still starting.
+    if says_nothing(&lock)
+        && matches!(
+            crate::reload_signal::lock_holder(lock_path),
+            LockHolder::Held(_)
+        )
+    {
+        let until = std::time::Instant::now() + STARTING_WAIT;
+        while says_nothing(&lock) && std::time::Instant::now() < until {
+            std::thread::sleep(STARTING_POLL);
+            lock = read();
+        }
+    }
+    if let Some(socket) = lock.control_socket.clone() {
         let transport = UnixTransport::new(socket);
         if transport.answers() {
             return Ok(Some(transport));
@@ -149,14 +173,22 @@ fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliErro
     let not_running = |message: String| CliError::new(Exit::NotRunning, message);
     match crate::reload_signal::lock_holder(lock_path) {
         LockHolder::Free => Ok(None),
-        LockHolder::Held(pid) => match read().control_socket_unavailable {
-            Some(reason) => Err(not_running(format!(
-                "dux (PID {pid}) is running without a control socket: {reason}"
-            ))),
-            None => Err(not_running(format!(
-                "dux (PID {pid}) is running but does not answer on its control socket; restart it"
-            ))),
-        },
+        LockHolder::Held(pid) => {
+            let lock = read();
+            match (lock.control_socket_unavailable, lock.control_socket) {
+                (Some(reason), _) => Err(not_running(format!(
+                    "dux (PID {pid}) is running without a control socket: {reason}"
+                ))),
+                (None, None) => Err(not_running(format!(
+                    "dux (PID {pid}) is still starting and has not opened its control socket \
+                     yet; try again in a moment"
+                ))),
+                (None, Some(_)) => Err(not_running(format!(
+                    "dux (PID {pid}) is running but does not answer on its control socket; \
+                     restart it"
+                ))),
+            }
+        }
         LockHolder::Unknown(reason) => Err(not_running(format!(
             "could not tell whether dux is running: {reason}"
         ))),
@@ -207,6 +239,7 @@ impl Client {
     pub fn no_reply(&self, error: &TransportError) -> CliError {
         match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why.clone()),
+            TransportError::NotOwner(why) => CliError::new(Exit::NotRunning, why.clone()),
             _ => CliError::new(
                 Exit::NotRunning,
                 format!("{} does not answer: {error}", self.target),
@@ -433,14 +466,46 @@ mod tests {
         let mut lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
         let pid = std::process::id();
 
+        // Held, with no word about a socket yet: dux is still starting. The
+        // client waits a little for the line, then says so.
+        let asked = std::time::Instant::now();
         let error = connect(&Target::Local, &lock_path).unwrap_err();
         assert_eq!(error.exit, Exit::NotRunning);
         assert_eq!(
             error.message,
             format!(
-                "dux (PID {pid}) is running but does not answer on its control socket; restart it"
+                "dux (PID {pid}) is still starting and has not opened its control socket yet; \
+                 try again in a moment"
             )
         );
+        let waited = asked.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(1900)
+                && waited < std::time::Duration::from_secs(4),
+            "{waited:?}"
+        );
+
+        // The line arriving within that wait is used.
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            _ => Reply::json(404, "{}"),
+        });
+        let writer = {
+            let lock_path = lock_path.clone();
+            let socket = socket.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::fs::write(
+                    &lock_path,
+                    format!("{pid}\ncontrol-socket={}\n", socket.display()),
+                )
+                .unwrap();
+            })
+        };
+        assert!(connect(&Target::Local, &lock_path).is_ok());
+        writer.join().unwrap();
+        std::fs::write(&lock_path, format!("{pid}\n")).unwrap();
 
         let too_long = dir.path().join("x".repeat(120)).join("dux.sock");
         let _ = lock.open_control_socket(&too_long);
@@ -542,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dux_speaking_another_api_is_refused_naming_both_versions() {
+    fn a_dux_speaking_another_api_or_run_by_another_user_is_refused() {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, |_| {
@@ -568,6 +633,20 @@ mod tests {
             "{}",
             error.message
         );
+
+        // A socket whose other end is not this user is sent nothing at all.
+        let before = _fake.seen().len();
+        let other = crate::control_socket::current_uid() + 1;
+        super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(Some(other)));
+        let error = connect(&Target::Local, &dir.path().join("dux.lock")).unwrap_err();
+        super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(None));
+        assert_eq!(error.exit, Exit::NotRunning);
+        assert!(
+            error.message.contains("belongs to another user"),
+            "{}",
+            error.message
+        );
+        assert_eq!(_fake.seen().len(), before, "nothing was sent");
     }
 
     #[test]

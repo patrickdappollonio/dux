@@ -149,7 +149,7 @@ for the answer. It then says which of these happened:
   applies the next time it starts." and exits with status 0.
 - dux is running but could not be asked: the change is saved, and `set` prints "The change is
   saved, but the running dux was not asked to reload it:" followed by why (for example that
-  dux is running without a control socket, or does not answer on it), then says dux keeps its
+  dux is running without a control socket, is still starting, or does not answer on it), then says dux keeps its
   current settings until you reload it from the app or restart it. It exits with status 0.
 - dux did not answer in time: `set` waits up to `[cli] wait_timeout_seconds` (10 minutes by
   default) for the reload's answer. If none comes it prints "The change is saved, but the
@@ -359,6 +359,11 @@ If `path` points at a symlink, dux follows it once at startup: the live log and
 its rotated copies all live beside the file the link points at, and the link
 itself is left alone.
 
+`path` may not point at a file dux keeps for itself: `config.toml`, the sessions
+database (with its `-wal` and `-shm` files), `dux.lock`, `remotes.toml` or the
+control socket, however the path reaches it. dux refuses to start, and a reload is
+refused, naming the setting.
+
 > [!TIP]
 > `tail -F ~/.config/dux/dux.log` (note the capital F) follows the log across a
 > rotation. Plain `tail -f` keeps watching the rotated copy and goes quiet.
@@ -381,8 +386,10 @@ before the command ends. `wait_timeout_seconds` is how long it waits; past that,
 the command stops waiting and says the outcome is unknown, naming the change's id
 so `dux operations show <id>` can look it up later. The change itself keeps
 running either way. `--wait-timeout <seconds>` sets a different wait for one
-command, and `--no-wait` returns at once with the id. Only the command line on
-this machine reads this setting, the next time it runs.
+command, and `--no-wait` returns at once with the id. Either way a wait lasts at
+most a day (86400 seconds); a longer value waits a day. Only the command line on
+this machine reads this setting, the next time it runs, and when `config.toml`
+cannot be read it waits the usual 10 minutes.
 
 ## How long a clone may go quiet (`[git]`)
 

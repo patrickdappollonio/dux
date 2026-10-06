@@ -4961,6 +4961,92 @@ pub fn start_check(config: &Config) -> Result<()> {
     }
 }
 
+/// The problems with `config`'s log files at `paths`: `[logging] path` or `[server]
+/// log_path` naming a file dux keeps for itself, which the log would be written into.
+/// Both surfaces refuse to start, and to reload, with any of them.
+pub fn log_path_problems(config: &Config, paths: &DuxPaths) -> Vec<StartProblem> {
+    use crate::config_auth::Problem;
+    // A file as the system finds it: through every link when it exists, else
+    // through its folder's, so `..`, a linked folder and a link at the path itself
+    // all land where a write would.
+    let identity = |path: &Path| -> PathBuf {
+        if let Ok(found) = std::fs::canonicalize(path) {
+            return found;
+        }
+        match (path.parent(), path.file_name()) {
+            (Some(folder), Some(name)) => std::fs::canonicalize(folder)
+                .map_or_else(|_| path.to_path_buf(), |folder| folder.join(name)),
+            _ => path.to_path_buf(),
+        }
+    };
+    let database = paths.sessions_db_path.as_os_str();
+    let with_suffix = |suffix: &str| {
+        let mut name = database.to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let own = [
+        paths.config_path.clone(),
+        paths.sessions_db_path.clone(),
+        with_suffix("-wal"),
+        with_suffix("-shm"),
+        paths.lock_path.clone(),
+        crate::client::remotes::remotes_path(&paths.root),
+        resolve_control_socket(&paths.root, &config.server.control_socket),
+    ];
+    let dux_log = [
+        paths.root.join("dux.log"),
+        crate::logger::resolve_log_path(&config.logging, paths),
+    ];
+    let logs = [
+        (
+            ["logging", "path"],
+            "[logging] path",
+            crate::logger::resolve_log_path(&config.logging, paths),
+            &own[..],
+        ),
+        (
+            ["server", "log_path"],
+            "[server] log_path",
+            crate::logger::resolve_server_log_path(&config.server, paths),
+            &[&own[..], &dux_log[..]].concat()[..],
+        ),
+    ];
+    let mut problems = Vec::new();
+    for (key, shown, log, forbidden) in logs {
+        let log = identity(&log);
+        let Some(taken) = forbidden.iter().find(|file| identity(file) == log) else {
+            continue;
+        };
+        // Named by dux's own file, never by the value written, which the
+        // start problems never repeat.
+        let name = taken.file_name().map_or_else(
+            || taken.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        problems.push(StartProblem::new(
+            Problem::about(
+                key_path(&key),
+                format!(
+                    "{shown} points at {name}, a file dux keeps for itself, so the log would \
+                     be written into it. Give the log a file of its own."
+                ),
+            ),
+            true,
+            true,
+        ));
+    }
+    problems
+}
+
+/// [`log_path_problems`]' first, as the sentence to refuse with.
+pub fn log_path_refusal(config: &Config, paths: &DuxPaths) -> Option<String> {
+    log_path_problems(config, paths)
+        .into_iter()
+        .next()
+        .map(|problem| problem.message)
+}
+
 /// The config dux runs with from a whole file's text: read as a start reads
 /// it, with the corrections a load makes.
 pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
@@ -6871,6 +6957,102 @@ mod tests {
             lock_path: root.join("dux.lock"),
             socket_path: root.join("dux.sock"),
             root: root.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn a_log_may_not_be_written_into_a_file_dux_keeps_for_itself() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("dux");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        // Another way into the same folder.
+        std::os::unix::fs::symlink(&root, dir.path().join("alias")).unwrap();
+        let alias = dir.path().join("alias");
+        let paths = test_paths(&root);
+        let at = |relative: &str| alias.join(relative).display().to_string();
+        let cases = vec![
+            (
+                "logging",
+                "config.toml".to_string(),
+                Some(("[logging] path", "config.toml")),
+            ),
+            (
+                "logging",
+                "sessions.sqlite3".to_string(),
+                Some(("[logging] path", "sessions.sqlite3")),
+            ),
+            (
+                "logging",
+                "sessions.sqlite3-wal".to_string(),
+                Some(("[logging] path", "sessions.sqlite3-wal")),
+            ),
+            (
+                "logging",
+                "sub/../sessions.sqlite3-shm".to_string(),
+                Some(("[logging] path", "sessions.sqlite3-shm")),
+            ),
+            (
+                "logging",
+                at("dux.lock"),
+                Some(("[logging] path", "dux.lock")),
+            ),
+            (
+                "logging",
+                "remotes.toml".to_string(),
+                Some(("[logging] path", "remotes.toml")),
+            ),
+            (
+                "logging",
+                "dux.sock".to_string(),
+                Some(("[logging] path", "dux.sock")),
+            ),
+            (
+                "server",
+                "dux.log".to_string(),
+                Some(("[server] log_path", "dux.log")),
+            ),
+            (
+                "server",
+                at("config.toml"),
+                Some(("[server] log_path", "config.toml")),
+            ),
+            (
+                "server",
+                "ctl.sock".to_string(),
+                Some(("[server] log_path", "ctl.sock")),
+            ),
+            ("logging", "dux.log".to_string(), None),
+            ("logging", String::new(), None),
+            ("server", "server.log".to_string(), None),
+            ("server", String::new(), None),
+            ("server", "sub/other.log".to_string(), None),
+        ];
+        for (section, value, expected) in cases {
+            let mut config = Config::default();
+            config.server.control_socket = if value == "ctl.sock" {
+                "ctl.sock".to_string()
+            } else {
+                "dux.sock".to_string()
+            };
+            match section {
+                "logging" => config.logging.path = value.clone(),
+                _ => config.server.log_path = value.clone(),
+            }
+            let problems = log_path_problems(&config, &paths);
+            match expected {
+                None => assert!(problems.is_empty(), "{section} {value}: {problems:?}"),
+                Some((key, file)) => {
+                    assert_eq!(problems.len(), 1, "{section} {value}: {problems:?}");
+                    let problem = &problems[0];
+                    assert!(problem.stops_terminal_ui && problem.stops_dux_server);
+                    assert!(problem.message.contains(key), "{}", problem.message);
+                    assert!(problem.message.contains(file), "{}", problem.message);
+                    assert_eq!(
+                        log_path_refusal(&config, &paths).as_deref(),
+                        Some(problem.message.as_str())
+                    );
+                }
+            }
         }
     }
 

@@ -163,8 +163,7 @@ impl Client {
         record: OperationRecord,
         timeout: Duration,
     ) -> Result<OperationRecord, CliError> {
-        let started = Instant::now();
-        self.wait_loop(record, started, started + timeout, false)
+        self.wait_loop(record, Instant::now(), deadline_after(timeout), false)
     }
 
     /// Wait for somebody else's operation `id`, until `deadline`, as [`Self::wait`] does, except
@@ -233,7 +232,10 @@ impl Client {
                     ));
                 }
                 Ok(reply) => return Err(self.refusal(&reply)),
-                Err(error @ super::transport::TransportError::Refused(_)) => {
+                Err(
+                    error @ (super::transport::TransportError::Refused(_)
+                    | super::transport::TransportError::NotOwner(_)),
+                ) => {
                     return Err(self.no_reply(&error));
                 }
                 Err(_) => std::thread::sleep(
@@ -289,15 +291,26 @@ fn still_running(id: &str) -> CliError {
     )
 }
 
+/// The longest any wait lasts: a day.
+pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How long a change waits: `--wait-timeout` when given, else `[cli]
-/// wait_timeout_seconds` from this machine's config file.
-pub fn wait_timeout(flag: Option<u64>, config_path: &Path) -> Result<Duration, CliError> {
-    if let Some(seconds) = flag {
-        return Ok(Duration::from_secs(seconds));
-    }
-    let config = crate::config::load_config_file(config_path)
-        .map_err(|error| CliError::new(Exit::Failed, error.to_string()))?;
-    Ok(Duration::from_secs(config.cli.wait_timeout_seconds))
+/// wait_timeout_seconds` from this machine's config file, or its default when
+/// the file cannot be read; never more than [`MAX_WAIT_TIMEOUT`].
+pub fn wait_timeout(flag: Option<u64>, config_path: &Path) -> Duration {
+    let seconds = flag.unwrap_or_else(|| {
+        crate::config::load_config_file(config_path)
+            .map_or(crate::config::DEFAULT_CLI_WAIT_TIMEOUT_SECONDS, |config| {
+                config.cli.wait_timeout_seconds
+            })
+    });
+    Duration::from_secs(seconds).min(MAX_WAIT_TIMEOUT)
+}
+
+/// The moment a wait of `timeout` from now ends, a wait past
+/// [`MAX_WAIT_TIMEOUT`] ending there.
+pub fn deadline_after(timeout: Duration) -> Instant {
+    Instant::now() + timeout.min(MAX_WAIT_TIMEOUT)
 }
 
 /// A finished record as the command ends on it: its sentence on success, or
@@ -415,7 +428,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(started.state, RecordState::Running);
-        let finished = client.wait(started, Duration::from_secs(30)).unwrap();
+        // However long the wait is allowed, it reads until the outcome.
+        let finished = client.wait(started, Duration::MAX).unwrap();
         assert_eq!(finished.state, RecordState::Partial);
         let reads: Vec<String> = fake
             .seen()
@@ -576,18 +590,20 @@ mod tests {
     fn the_wait_timeout_comes_from_the_flag_else_the_config_file() {
         let dir = private_dir();
         let config = dir.path().join("config.toml");
-        assert_eq!(
-            wait_timeout(Some(5), &config).unwrap(),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            wait_timeout(None, &config).unwrap(),
-            Duration::from_secs(600)
-        );
+        assert_eq!(wait_timeout(Some(5), &config), Duration::from_secs(5));
+        assert_eq!(wait_timeout(None, &config), Duration::from_secs(600));
         std::fs::write(&config, "[cli]\nwait_timeout_seconds = 42\n").unwrap();
+        assert_eq!(wait_timeout(None, &config), Duration::from_secs(42));
+        // At most a day, from the flag or the file.
         assert_eq!(
-            wait_timeout(None, &config).unwrap(),
-            Duration::from_secs(42)
+            wait_timeout(Some(u64::MAX), &config),
+            Duration::from_secs(86_400)
         );
+        std::fs::write(&config, "[cli]\nwait_timeout_seconds = 99999999999\n").unwrap();
+        assert_eq!(wait_timeout(None, &config), Duration::from_secs(86_400));
+        // A file that cannot be read waits the usual 10 minutes rather than
+        // failing the change.
+        std::fs::write(&config, "[cli\n").unwrap();
+        assert_eq!(wait_timeout(None, &config), Duration::from_secs(600));
     }
 }

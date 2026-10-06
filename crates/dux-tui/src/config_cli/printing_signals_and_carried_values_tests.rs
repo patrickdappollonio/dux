@@ -108,7 +108,7 @@ fn a_password_set_beside_a_dux_that_cannot_be_asked_does_not_claim_browsers_were
     )
     .expect("set");
     assert!(
-        out.contains("does not answer on its control socket"),
+        out.contains("is still starting and has not opened its control socket yet"),
         "not asked:\n{out}"
     );
     assert!(

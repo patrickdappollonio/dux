@@ -278,7 +278,7 @@ fn remotes_are_saved_listed_made_default_and_forgotten() {
 }
 
 #[test]
-fn config_refuses_a_selected_remote_and_touches_nothing() {
+fn config_refuses_a_selected_remote_or_an_unreadable_remotes_file_and_touches_nothing() {
     let refusal = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n";
     let saved_default =
         "default = \"work\"\n\n[remotes.work]\nurl = \"https://work.example.com\"\n";
@@ -320,6 +320,23 @@ fn config_refuses_a_selected_remote_and_touches_nothing() {
     );
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(dir.join("config.toml").exists());
+
+    // A remotes.toml that cannot be read stops a config command that would
+    // read it, naming the file and both ways on.
+    let dir = home("config-remotes-broken");
+    std::fs::write(dir.join("remotes.toml"), "default = [\n").unwrap();
+    let run = dux_in(&dir, &["config", "set", "ui.theme", "x"], &[]);
+    assert_eq!(run.code(), 1, "{}", run.stderr());
+    for needle in ["remotes.toml", "dux --local config", "dux config reset"] {
+        assert!(run.stderr().contains(needle), "{needle}: {}", run.stderr());
+    }
+    assert!(!dir.join("config.toml").exists());
+    // `--local` and a reset never read it.
+    let run = dux_in(&dir, &["--local", "config", "path"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    let run = dux_in(&dir, &["config", "reset"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(!dir.join("remotes.toml").exists(), "the reset removed it");
 }
 
 #[test]

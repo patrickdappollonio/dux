@@ -9612,6 +9612,47 @@ mod tests {
             "{}",
             record.message
         );
+
+        // Held back again because the drain started a reload ahead of it, the
+        // change has still not happened, and its record stays open until the
+        // drain after that runs it.
+        engine
+            .apply(Command::PersistProject {
+                action: Box::new(crate::worker::ProjectPersistenceAction::Add {
+                    project: crate::engine::test_support::sample_project("p10", "/tmp/p10"),
+                    status_message: "added".to_string().into(),
+                }),
+                status_op_id: None,
+            })
+            .expect("register the project");
+        engine.config_writer.flush();
+        engine.apply(Command::ReloadConfig).expect("a reload");
+        engine
+            .apply(Command::ReloadConfig)
+            .expect("a follow-up reload, queued");
+        let id = engine
+            .apply_wire_operation(
+                crate::wire::WireCommand::RemoveProject {
+                    project_id: "p10".to_string(),
+                },
+                crate::operations::OperationKind::ProjectRemove,
+            )
+            .expect("the removal is accepted and deferred")
+            .operation_id
+            .expect("an operation id");
+        let event = engine.worker_rx.recv().expect("the first reload completes");
+        let _ = engine.process_worker_event(event);
+        assert!(engine.reloading, "the follow-up reload is running");
+        assert_eq!(
+            engine.operations.view(&id, now()).unwrap().state,
+            crate::operations::OperationState::Running,
+            "a change held back again has not happened yet"
+        );
+        let event = engine.worker_rx.recv().expect("the follow-up completes");
+        let _ = engine.process_worker_event(event);
+        let record = engine.operations.view(&id, now()).unwrap();
+        assert_eq!(record.state, crate::operations::OperationState::Succeeded);
+        assert_eq!(record.removed, vec!["p10".to_string()]);
     }
 
     /// A test `ConfigSurface` whose `reload` reports a validation FAILURE (posts an

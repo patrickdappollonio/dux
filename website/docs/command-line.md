@@ -34,7 +34,9 @@ dux isn't running; start it with "dux" or "dux server"
 ```
 
 A dux that is running but cannot be reached says that instead, with its PID, and why
-when dux knows. The usual fix is to restart it.
+when dux knows. The usual fix is to restart it. A dux that has only just started gets up
+to two seconds to open its socket; if it still has not, the command says dux is still
+starting, and trying again in a moment is the fix.
 
 The resources that live in `config.toml` (macros, providers, keys, themes and the global
 environment) do not need dux running; [see below](#resources-kept-in-configtoml).
@@ -49,7 +51,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | `dux projects worktrees ls <project>` | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
 | `dux agents ls`, `show <agent>` | Agents, with their project or folder, provider, state, running tabs and how many browsers are connected. `--project` keeps one project's; `--worktrees` prints just each agent's id and the folder it works in. |
 | `dux agents add` | Creates an agent. `--project` on a new branch, plus `--existing-branch`, `--from-pr <number or URL>` or `--from-worktree <path>`; `--fork <agent>`; or `--standalone <folder>` with an optional `--provider`. `--name` names it and `--copy-uncommitted` brings the project's uncommitted changes along. |
-| `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. |
+| `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. `--delete-branch` needs `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
 | `dux agents stop <agent>`, `start <agent>` | Stops everything an agent runs, or starts it again. |
 | `dux agents tabs ls <agent>` | The agent's provider tabs and whether each is running. |
 | `dux agents tabs add <agent>` | Adds a tab, running the project's provider unless `--provider` names another. |
@@ -108,11 +110,13 @@ command returns. If part of a change failed, the command says which part and exi
 
 A second `dux agents add` that runs while another agent is still being created waits for
 that creation to finish (within the same wait time), then creates its own and says it
-waited. With `--no-wait` it is refused instead, as the browser and the terminal UI refuse it.
+waited. If the wait time runs out before the other creation finishes, it never starts its
+own: it is refused and exits 3. With `--no-wait` it is refused at once, as the browser and
+the terminal UI refuse it.
 
 - `--no-wait` prints the change's id and returns at once.
 - `--wait-timeout <seconds>` waits a different time than usual. The usual time is
-  `[cli] wait_timeout_seconds` (10 minutes); see
+  `[cli] wait_timeout_seconds` (10 minutes). No wait lasts more than a day; see
   [Configuration](/docs/configuration#how-long-a-command-waits-cli).
 - A wait that runs out says the outcome is unknown, prints the id, and exits 6. The change
   has not been stopped: it carries on, and `dux operations show <id>` tells you how it
@@ -167,7 +171,8 @@ The environment's values are usually secrets, so they are treated like it:
 A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
 hidden, the same rule `dux config get` follows: `ls` lists it under a placeholder name, and
 `dux macros show '<name>'` finds it by its real name but prints only that placeholder and
-its surface. The macro editor in the browser shows it in full.
+its surface. `ls -q` leaves it out, since a placeholder is no id another command takes,
+and says on stderr how many it left out. The macro editor in the browser shows it in full.
 
 ## Another machine's dux
 
@@ -205,6 +210,10 @@ machine instead.
 > `DUX_REMOTE` or a default, it refuses rather than let you think you changed the other
 > machine. Run `dux --local config …` to go ahead.
 
+`dux config` reads the saved remotes only to learn whether one is selected. If that file
+cannot be read, `dux config` stops and names it: `dux --local config …` goes ahead without
+it, and `dux config reset` never reads it (a reset removes it).
+
 The listings of macros, providers, keys, themes and the environment come from the remote's
 own config when a remote is selected, and so do the changes to macros and the
 environment.
@@ -225,7 +234,9 @@ box asks for its password; run "dux remote login box"
 and bans included. A sign-in stays good until it goes unused for
 `[server.auth] cli_token_idle_days` on that dux (30 by default), until you run
 `dux remote logout`, or until the password changes, which signs every command line out at
-once.
+once. Signing in again where you already were ends the earlier sign-in on that dux; if
+it cannot be ended, `dux remote login` says so, keeps the new one, and the earlier one
+ends on its own once it goes unused.
 
 Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder, readable
 only by you, never in `config.toml`. Neither file is safe to paste into a bug report:

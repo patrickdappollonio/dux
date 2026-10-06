@@ -144,6 +144,15 @@ pub fn check_server_start_target(remote: Option<&str>, local: bool) -> Result<()
     Ok(())
 }
 
+/// Starting dux with no command starts the terminal UI on this machine, so
+/// naming a target is a mistake.
+pub fn check_terminal_ui_start_target(remote: Option<&str>, local: bool) -> Result<(), String> {
+    if remote.is_some() || local {
+        return Err("dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux".to_string());
+    }
+    Ok(())
+}
+
 /// What `dux [--remote x | --local] config <args>` carries: the global flags
 /// that came before the word, and everything after it, byte for byte.
 #[derive(Debug)]
@@ -263,7 +272,7 @@ pub struct ChangeFlags {
     /// Print the operation id and return without waiting for the change.
     #[arg(long)]
     pub no_wait: bool,
-    /// Wait at most this many seconds for the change to finish.
+    /// Wait at most this many seconds for the change to finish (at most a day).
     #[arg(long, value_name = "SECONDS", conflicts_with = "no_wait")]
     pub wait_timeout: Option<u64>,
 }
@@ -433,8 +442,9 @@ pub enum AgentsSub {
         /// Also remove the agent's worktree.
         #[arg(long)]
         delete_worktree: bool,
-        /// Delete its branch with the worktree.
-        #[arg(long, conflicts_with = "keep_branch")]
+        /// Delete its branch with the worktree. Needs --delete-worktree: git
+        /// will not delete a branch a worktree still has checked out.
+        #[arg(long, conflicts_with = "keep_branch", requires = "delete_worktree")]
         delete_branch: bool,
         /// Keep its branch.
         #[arg(long)]
@@ -909,6 +919,7 @@ mod tests {
             &["agents", "add", "--fork", "a", "--name", "b"][..],
             &["agents", "ls", "--worktrees", "--project", "app"][..],
             &["agents", "rm", "a", "--delete-worktree", "--keep-branch"][..],
+            &["agents", "rm", "a", "--keep-branch"][..],
             &[
                 "agents",
                 "tabs",
@@ -938,6 +949,7 @@ mod tests {
                 "--existing-branch",
             ][..],
             &["agents", "rm", "a", "--delete-branch", "--keep-branch"][..],
+            &["agents", "rm", "a", "--delete-branch"][..],
             &["terminals", "add", "--agent", "a", "--project", "p"][..],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
@@ -985,6 +997,20 @@ mod tests {
         );
         assert_eq!(check_server_start_target(None, true), Err(msg.to_string()));
         assert_eq!(check_server_start_target(None, false), Ok(()));
+    }
+
+    #[test]
+    fn starting_the_terminal_ui_refuses_a_selected_target() {
+        let msg = "dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux";
+        assert_eq!(
+            check_terminal_ui_start_target(Some("box"), false),
+            Err(msg.to_string())
+        );
+        assert_eq!(
+            check_terminal_ui_start_target(None, true),
+            Err(msg.to_string())
+        );
+        assert_eq!(check_terminal_ui_start_target(None, false), Ok(()));
     }
 
     #[test]

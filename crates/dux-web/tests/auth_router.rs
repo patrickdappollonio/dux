@@ -1609,6 +1609,17 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
         StatusCode::OK,
         "the control socket never asks for the password"
     );
+    // A followed log over the control socket is not ended for want of a
+    // session it was never asked for: the stream stays open.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(800),
+            everywhere.get(CONTROL_SOCKET, "/api/v1/server/log?follow=true"),
+        )
+        .await
+        .is_err(),
+        "the control socket's log stream stays open when every client must sign in"
+    );
 
     let open = Dux::start_tuned("", move |p| p.with_live_exposure(unchecked));
     let open_status = open.status(THIS_MACHINE, None).await;

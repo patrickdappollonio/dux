@@ -42,6 +42,35 @@ impl Selection {
         Ok(Remotes::load(&paths.root)?.default)
     }
 
+    /// [`Self::remote_name`] for the `dux config` command `args`. A reset never reads
+    /// remotes.toml, so a broken one cannot stop the reset that removes it; any other
+    /// command that cannot read it says so, with the ways on.
+    pub fn config_remote_name(
+        &self,
+        paths: &DuxPaths,
+        args: &[String],
+    ) -> Result<Option<String>, CliError> {
+        if args.first().is_some_and(|word| word == "reset") {
+            return Ok(connect::selected_remote(
+                self.remote.as_deref(),
+                self.local,
+                Self::variable().as_deref(),
+                None,
+            ));
+        }
+        self.remote_name(paths).map_err(|error| {
+            CliError::new(
+                error.exit,
+                format!(
+                    "{}. dux config reads that file to learn whether a remote is selected: run \
+                     \"dux --local config …\" to go ahead without it, or fix the file (\"dux \
+                     config reset\" removes it, along with config.toml and the logs)",
+                    error.message
+                ),
+            )
+        })
+    }
+
     fn target(&self, paths: &DuxPaths) -> Result<Target, CliError> {
         let remotes = Remotes::load(&paths.root)?;
         connect::choose_target(
@@ -176,10 +205,13 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             }
             let password = dux_tui::read_sign_in_password(stdin, &format!("Password for {name}"))
                 .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
-            let token = sign_in::login(&name, &remote, password.expose())?;
+            let signed_in = sign_in::login(&name, &remote, password.expose())?;
+            if let Some(kept) = &signed_in.old_sign_in_kept {
+                eprintln!("{kept}");
+            }
             // The prompt may have waited while another command changed the
             // remote; the token is kept only for the URL that issued it.
-            Remotes::keep_token(root, &name, &remote.url, &token)?;
+            Remotes::keep_token(root, &name, &remote.url, &signed_in.token)?;
             Ok(line(format!("Signed in to {name}.")))
         }
         RemoteSub::Logout { name } => {
@@ -286,7 +318,7 @@ fn change_with(
     let wait = if flags.no_wait {
         None
     } else {
-        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path))
     };
     change(Writer::Dux {
         client: &client,
@@ -445,7 +477,7 @@ fn change_on_dux(
     let wait = if flags.no_wait {
         None
     } else {
-        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path))
     };
     workspace::perform(&client, planned, wait)
 }

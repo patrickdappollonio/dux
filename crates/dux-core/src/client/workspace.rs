@@ -637,7 +637,7 @@ pub fn perform(
     planned: Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
-    let deadline = wait.map(|timeout| Instant::now() + timeout);
+    let deadline = wait.map(wait::deadline_after);
     let record = match client.try_change(planned.method, &planned.path, planned.body.clone(), None)
     {
         Ok(record) => record,
@@ -691,7 +691,12 @@ fn retry_after_other_create(
         }
     };
     eprintln!("Another agent was being created (operation {other}), so this one waited for it.");
-    client.wait_for_other(other, deadline)?;
+    // Time running out on somebody else's creation leaves this one never started:
+    // refused, not of unknown outcome.
+    match client.wait_for_other(other, deadline) {
+        Err(error) if error.exit == Exit::Unknown => return Err(refused.error),
+        other => other?,
+    }
     if Instant::now() >= deadline {
         return Err(refused.error);
     }
@@ -1309,14 +1314,15 @@ mod create_wait_tests {
 
     #[test]
     fn no_create_is_started_once_the_time_has_run_out() {
-        // The other creation outlasts the 1 s wait: the command ends unknown and sends
-        // no second create.
+        // The other creation outlasts the 1 s wait: this one never started, so the
+        // command ends refused, with the refusal, and sends no second create.
         let dir = private_dir();
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![(200, OTHER_RUNNING)];
         let (fake, _lock, client) = dux_running(dir.path(), script);
         let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
-        assert_eq!(error.exit, Exit::Unknown);
+        assert_eq!(error.exit, Exit::Refused);
+        assert_eq!(error.message, SENTENCE);
         assert_eq!(posts(&fake), 1);
 
         // The same with no operation named: it gives up with the refusal.

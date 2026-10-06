@@ -94,6 +94,8 @@ pub enum TransportError {
     Dropped(String),
     /// Not sent, for the reason given.
     Refused(String),
+    /// Not sent: the control socket's other end is another user's process.
+    NotOwner(String),
 }
 
 impl std::fmt::Display for TransportError {
@@ -101,7 +103,8 @@ impl std::fmt::Display for TransportError {
         match self {
             TransportError::Unreachable(why)
             | TransportError::Dropped(why)
-            | TransportError::Refused(why) => f.write_str(why),
+            | TransportError::Refused(why)
+            | TransportError::NotOwner(why) => f.write_str(why),
         }
     }
 }
@@ -126,6 +129,13 @@ pub trait Transport {
     ) -> Result<(), TransportError>;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The user a test makes the control socket's other end out not to be.
+    pub(crate) static OWNER_OVERRIDE: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// HTTP/1.1 over the control socket of the dux on this machine.
 #[derive(Clone, Debug)]
 pub struct UnixTransport {
@@ -145,6 +155,84 @@ impl UnixTransport {
     /// at most [`PROBE_TIMEOUT`].
     pub fn answers(&self) -> bool {
         connect_unix(&self.path, PROBE_TIMEOUT).is_ok()
+    }
+}
+
+/// The user the control socket's other end must be: this one.
+fn expected_owner() -> u32 {
+    #[cfg(test)]
+    if let Some(uid) = OWNER_OVERRIDE.with(std::cell::Cell::get) {
+        return uid;
+    }
+    crate::control_socket::current_uid()
+}
+
+/// The user id of the process at the other end of `stream`.
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
+    // the descriptor is open for as long as `stream` is borrowed.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+    if read == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// The user id of the process at the other end of `stream`.
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: `uid` and `gid` are valid for writes, and the descriptor is
+    // open for as long as `stream` is borrowed.
+    let read = unsafe {
+        libc::getpeereid(
+            stream.as_raw_fd(),
+            std::ptr::addr_of_mut!(uid),
+            std::ptr::addr_of_mut!(gid),
+        )
+    };
+    if read == 0 {
+        Ok(uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Refuse a control socket whose other end is not this user, before anything is
+/// sent: whoever answers there would read the request and could answer anything.
+fn check_owner(stream: &UnixStream, path: &Path) -> Result<(), TransportError> {
+    let own = expected_owner();
+    match peer_uid(stream) {
+        Ok(peer) if peer == own => Ok(()),
+        Ok(peer) => Err(TransportError::NotOwner(format!(
+            "the control socket at {} belongs to another user (user id {peer}; yours is {own}), \
+             so nothing was sent to it",
+            path.display()
+        ))),
+        Err(error) => Err(TransportError::NotOwner(format!(
+            "could not tell which user serves the control socket at {}, so nothing was sent to \
+             it: {error}",
+            path.display()
+        ))),
     }
 }
 
@@ -218,6 +306,7 @@ impl Transport for UnixTransport {
         let stream = connect_unix(&self.path, allowed).map_err(|error| {
             TransportError::Unreachable(format!("{}: {error}", self.path.display()))
         })?;
+        check_owner(&stream, &self.path)?;
         let dropped = |error: std::io::Error| TransportError::Dropped(error.to_string());
         let mut stream = Deadline { stream, until };
         stream.write_all(&request_bytes(request)).map_err(dropped)?;
@@ -233,6 +322,7 @@ impl Transport for UnixTransport {
         let stream = connect_unix(&self.path, CONNECT_TIMEOUT).map_err(|error| {
             TransportError::Unreachable(format!("{}: {error}", self.path.display()))
         })?;
+        check_owner(&stream, &self.path)?;
         let dropped = |error: std::io::Error| TransportError::Dropped(error.to_string());
         let mut stream = Deadline {
             stream,

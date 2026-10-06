@@ -266,6 +266,20 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     assert_eq!(run.stdout(), "hi\nbye\n");
     assert!(!stopped.join("sessions.sqlite3").exists());
 
+    // A macro whose name is not shown has no id to print, so -q leaves it out
+    // and says how many it left out.
+    let mut text = std::fs::read_to_string(stopped.join("config.toml")).unwrap();
+    text = text.replace(
+        "bye = {",
+        "\"not shown here\" = { text = \"x\", surface = \"agent\" }\nbye = {",
+    );
+    std::fs::write(stopped.join("config.toml"), text).unwrap();
+    let run = dux(&stopped, &["macros", "ls", "-q"], "");
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(run.stdout(), "hi\nbye\n");
+    assert!(run.stderr().contains('1'), "{}", run.stderr());
+    assert!(!run.stderr().contains("not shown here"), "{}", run.stderr());
+
     let _ = std::fs::remove_dir_all(&stopped);
     let _ = std::fs::remove_dir_all(&root);
 }

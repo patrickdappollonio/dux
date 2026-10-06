@@ -24,7 +24,7 @@ fn main() -> Result<()> {
                     format!("{error:#}"),
                 )
             })
-            .and_then(|paths| selection.remote_name(&paths));
+            .and_then(|paths| selection.config_remote_name(&paths, &config.args));
         let remote = match remote {
             Ok(remote) => remote,
             Err(error) => client_commands::finish(Err(error)),
@@ -48,7 +48,14 @@ fn main() -> Result<()> {
         local: cli.local,
     };
     match cli.command {
-        None => run_tui_with_flip(),
+        None => {
+            if let Err(message) =
+                commands::check_terminal_ui_start_target(cli.remote.as_deref(), cli.local)
+            {
+                usage_error(&message);
+            }
+            run_tui_with_flip()
+        }
         Some(commands::Command::Server(server)) => {
             if let Err(message) = commands::listener_flags_with_subcommand(&server) {
                 usage_error(&message);
@@ -300,6 +307,13 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    // Before either log opens: a log path naming one of dux's own files would
+    // write into it.
+    if let Some(refusal) = dux_core::config::log_path_refusal(&config, &paths) {
+        eprintln!("error: dux server cannot start: {refusal}");
+        std::process::exit(1);
+    }
 
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.

@@ -2883,6 +2883,19 @@ impl Engine {
                 if self.mark_session_status(&session.id, SessionStatus::Detached) {
                     self.update_pr_sync_sessions();
                 }
+                // Nothing reaches the screen, but a client following this
+                // tab is told its launch did not come up.
+                self.finish_launch_operations(
+                    &crate::operations::launch_binding_key(tab_id.as_str()),
+                    Some(tab_id.as_str()),
+                    false,
+                    &format!(
+                        "Agent {} could not resume its conversation, and starting it fresh \
+                         failed too: {message}",
+                        session.display_label()
+                    ),
+                    None,
+                );
                 (AgentLaunchFailedOutcome::ResumeFallback, None)
             }
             AgentLaunchKind::StartupAutoReopen => {
@@ -8360,6 +8373,20 @@ mod tests {
         let _ = engine.session_store.upsert_session(&session);
         engine.sessions.push(session);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
+        // A client following the tab's start waits on its launch report.
+        engine.operations.open(
+            "op-start",
+            crate::operations::OperationKind::TabStart,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            std::time::Instant::now(),
+        );
+        engine.operations.await_key(
+            "op-start",
+            &crate::operations::launch_binding_key("s1-slot"),
+        );
 
         let data = make_failed_data(
             "s1",
@@ -8373,6 +8400,14 @@ mod tests {
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot"))));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
+        // The fresh start after a failed resume did not come up either: the
+        // client is told so, with the reason, rather than left waiting.
+        let record = engine
+            .operations
+            .view("op-start", std::time::Instant::now())
+            .unwrap();
+        assert_eq!(record.state, crate::operations::OperationState::Failed);
+        assert!(record.message.contains("boom"), "{}", record.message);
     }
 
     /// A launch that never came up records the tab's last run as failed, which
