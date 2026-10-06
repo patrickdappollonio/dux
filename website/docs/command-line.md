@@ -233,7 +233,9 @@ box asks for its password; run "dux remote login box"
 and bans included. A sign-in stays good until it goes unused for
 `[server.auth] cli_token_idle_days` on that dux (30 by default), until you run
 `dux remote logout`, or until the password changes, which signs every command line out at
-once.
+once. Signing in again where you already were ends the earlier sign-in on that dux; if
+it cannot be ended, `dux remote login` says so, keeps the new one, and the earlier one
+ends on its own once it goes unused.
 
 Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder, readable
 only by you, never in `config.toml`. Neither file is safe to paste into a bug report:

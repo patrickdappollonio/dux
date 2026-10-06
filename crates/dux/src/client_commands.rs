@@ -205,10 +205,13 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             }
             let password = dux_tui::read_sign_in_password(stdin, &format!("Password for {name}"))
                 .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
-            let token = sign_in::login(&name, &remote, password.expose())?;
+            let signed_in = sign_in::login(&name, &remote, password.expose())?;
+            if let Some(kept) = &signed_in.old_sign_in_kept {
+                eprintln!("{kept}");
+            }
             // The prompt may have waited while another command changed the
             // remote; the token is kept only for the URL that issued it.
-            Remotes::keep_token(root, &name, &remote.url, &token)?;
+            Remotes::keep_token(root, &name, &remote.url, &signed_in.token)?;
             Ok(line(format!("Signed in to {name}.")))
         }
         RemoteSub::Logout { name } => {
