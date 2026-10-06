@@ -47,6 +47,7 @@ pub enum WorktreeOpKind {
     Upload,
     GitChange,
     AddProject,
+    CloneRepository,
 }
 
 impl WorktreeOpKind {
@@ -64,6 +65,7 @@ impl WorktreeOpKind {
             Self::Upload => "a file upload",
             Self::GitChange => "a change to its files from the changes pane",
             Self::AddProject => "a project being added there",
+            Self::CloneRepository => "a repository being cloned there",
         }
     }
 }

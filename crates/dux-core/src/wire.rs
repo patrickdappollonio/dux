@@ -358,6 +358,19 @@ pub enum WireCommand {
         path: String,
         name: String,
     },
+    /// Clone `url` into `path` as a new project, then start an agent named
+    /// `agent_name` there, or a random name when it is blank (`random_name` is
+    /// the New agent dialog's checkbox). The same request as `Command::CloneProject`: the checks that
+    /// need no git refuse it at once, and the rest runs on a worker under the
+    /// returned busy (see [`crate::clone_project`]).
+    CloneProject {
+        url: String,
+        path: String,
+        #[serde(default)]
+        agent_name: Option<String>,
+        #[serde(default)]
+        random_name: bool,
+    },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
         project_id: String,
@@ -1275,6 +1288,38 @@ struct WebProjectAdd<'a> {
     status_op_id: &'a Option<String>,
 }
 
+/// [`WebProjectAdd`] without an op to resolve, for
+/// [`Engine::add_project_without_op`].
+pub(crate) struct ProjectAdd<'a> {
+    pub path: &'a str,
+    pub display_name: String,
+    pub current_branch: &'a str,
+    pub leading_branch: &'a str,
+    pub status_message: StatusText,
+    /// Prefix for the "git succeeded but registration failed" error message.
+    pub add_failed_prefix: &'a str,
+}
+
+/// What [`Engine::add_project_without_op`] did.
+pub(crate) struct ProjectAddResult {
+    /// The statuses the add said, as a caller with no op of its own shows them.
+    pub statuses: Vec<WireStatus>,
+    /// The project at the path and the engine's sentence about it, when the add
+    /// landed or found that project already registered.
+    pub added: Option<(String, StatusText)>,
+}
+
+impl ProjectAddResult {
+    /// Why the add failed: its first error, or `fallback`.
+    pub fn failure(&self, fallback: &StatusText) -> StatusText {
+        self.statuses
+            .iter()
+            .find(|s| s.tone == "error")
+            .map(|s| StatusText::from_parts(s.message.clone(), s.segments.clone()))
+            .unwrap_or_else(|| fallback.clone())
+    }
+}
+
 /// The authoritative "added" status message from a `PersistProject::Add`
 /// reaction (the engine's real outcome: an honest dedup message when a race
 /// hit that path, or the normal success text), or `None` for any other reaction.
@@ -1290,7 +1335,7 @@ pub(crate) fn added_status_message(reaction: &EventReaction) -> Option<StatusTex
 
 /// Resolve a project's display name: the trimmed user-supplied name, or the
 /// path's basename when empty. Shared by the add-project followups.
-fn display_project_name(name: &str, path: &str) -> String {
+pub(crate) fn display_project_name(name: &str, path: &str) -> String {
     if name.trim().is_empty() {
         PathBuf::from(path)
             .file_name()
@@ -1343,6 +1388,15 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
             ),
         ],
         _ => vec![],
+    }
+}
+
+/// The keys a reaction dismisses, `Multi` flattened.
+fn cleared_keys(reaction: &EventReaction) -> Vec<String> {
+    match reaction {
+        EventReaction::ClearStatus(key) => vec![key.clone()],
+        EventReaction::Multi(items) => items.iter().flat_map(cleared_keys).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1792,6 +1846,27 @@ impl Engine {
                 let status = self.add_project_init_repo(&path, name)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
+                )))
+            }
+            // The engine command's own entry, told a browser asked so the web
+            // layer drives the follow-up.
+            WireCommand::CloneProject {
+                url,
+                path,
+                agent_name,
+                random_name,
+            } => {
+                let request = crate::clone_project::CloneRequest {
+                    url,
+                    path,
+                    agent_name,
+                    random_name,
+                };
+                let busy = self
+                    .begin_clone_project(&request, true)
+                    .map_err(|refused| anyhow::anyhow!("{refused}"))?;
+                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
+                    WireStatus::from_update(&busy),
                 )))
             }
             WireCommand::AddProject { .. } => {
@@ -3418,6 +3493,11 @@ impl Engine {
         // Serialize per repo path: reject a second concurrent request rather than
         // let two workers both bootstrap. Cleared on completion in
         // `process_worker_event` (and on a worker panic, below).
+        if self.clone_running_into(std::path::Path::new(&path_str)) {
+            anyhow::bail!(
+                "dux is cloning a repository into \"{path_str}\". Please wait for it to finish."
+            );
+        }
         if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
             anyhow::bail!(
                 "An initial commit is already being created for \"{path_str}\". Please wait for it to finish."
@@ -3500,6 +3580,11 @@ impl Engine {
         // Serialize per path: reject a second concurrent bootstrap (init or
         // commit-only) rather than let two workers race. Cleared on completion
         // in `process_worker_event` (and on a worker panic, below).
+        if self.clone_running_into(std::path::Path::new(&path_str)) {
+            anyhow::bail!(
+                "dux is cloning a repository into \"{path_str}\". Please wait for it to finish."
+            );
+        }
         if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
             anyhow::bail!(
                 "A repository is already being initialized in \"{path_str}\". Please wait for it to finish."
@@ -3830,6 +3915,21 @@ impl Engine {
         }
     }
 
+    /// Drive a clone that is ready to become a project: add it and dispatch
+    /// its agent create ([`Engine::finish_clone`]), returning the statuses to
+    /// broadcast and the clone's key to dismiss once the create took over.
+    /// Other reactions return nothing.
+    pub fn drive_clone_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
+        let EventReaction::AddProjectAfterClone(done) = reaction else {
+            return WebFollowupStatuses::default();
+        };
+        let finished = self.finish_clone(done);
+        WebFollowupStatuses {
+            statuses: wire_statuses_from_reaction(&finished),
+            clear_keys: cleared_keys(&finished),
+        }
+    }
+
     /// Drive an add-project follow-up to completion, returning user-facing
     /// statuses. When worker 2's `git switch` completes successfully,
     /// `process_worker_event` produces `AddProjectAfterBranchCheckout` and this
@@ -3926,11 +4026,11 @@ impl Engine {
     }
 
     /// Shared tail of the "do git work, then register the project" web
-    /// followups: build the `Project`, apply the INLINE add (config write with
-    /// SQLite rollback), and resolve the keyed add-project op. Used by both the
-    /// checkout-default and initial-commit flows so the delicate status-op
-    /// correlation lives in one place. Args are a named-field struct so the two
-    /// adjacent branch strings can't be silently transposed.
+    /// followups: add the project ([`Self::add_project_without_op`]) and
+    /// resolve the keyed add-project op. Used by both the checkout-default and
+    /// initial-commit flows so the delicate status-op correlation lives in one
+    /// place. Args are a named-field struct so the two adjacent branch strings
+    /// can't be silently transposed.
     fn finish_web_project_add(&mut self, args: WebProjectAdd) -> Vec<WireStatus> {
         let WebProjectAdd {
             path,
@@ -3940,6 +4040,73 @@ impl Engine {
             status_message,
             add_failed_prefix,
             status_op_id,
+        } = args;
+        // The inline persist can mint a status from `current_origin`, so the
+        // add runs under the op's captured scope.
+        let origin = status_op_id
+            .as_ref()
+            .and_then(|id| self.pending_web_add_project_ops.get(id))
+            .map(|op| op.scope().clone())
+            .unwrap_or(crate::statusline::StatusScope::All);
+        let added = self.add_project_without_op(
+            ProjectAdd {
+                path,
+                display_name,
+                current_branch,
+                leading_branch,
+                status_message: status_message.clone(),
+                add_failed_prefix,
+            },
+            origin,
+            status_op_id.as_deref(),
+        );
+
+        // Resolve the add-project op against the same outcome the
+        // `statuses` carry, keying the final to the op's id so it replaces
+        // the busy. The op's resolver re-emits the SAME message: a clean
+        // add → `Added` (info), any failure → `AddFailed` (the relayed
+        // error text). When no op is registered (id None, or already
+        // consumed by a switch-failure path), fall back to `statuses`.
+        if let Some(id) = status_op_id
+            && let Some(op) = self.pending_web_add_project_ops.remove(id)
+        {
+            let outcome = match &added.added {
+                Some((_, success_message)) => crate::engine::WebAddProjectOutcome::Added {
+                    status_message: success_message.clone(),
+                },
+                // Surface the same failure text the unkeyed `statuses` would
+                // have shown (the engine's rolled-back error or the apply
+                // error), now keyed so it replaces the busy.
+                None => crate::engine::WebAddProjectOutcome::AddFailed {
+                    message: added.failure(&status_message),
+                },
+            };
+            // The add-project op always resolves to a Message (never a
+            // Clear), so `into_reaction()` is a keyed `Status` that
+            // `wire_statuses_from_reaction` renders directly.
+            return wire_statuses_from_reaction(&op.resolve(&outcome).into_reaction());
+        }
+        added.statuses
+    }
+
+    /// Register a repository that git work has just prepared as a project,
+    /// with no operation of its own to resolve: build the `Project` and apply
+    /// the INLINE add (config write with SQLite rollback) under `origin`. A
+    /// project it created is noted on the operation record waiting on
+    /// `note_key`.
+    pub(crate) fn add_project_without_op(
+        &mut self,
+        args: ProjectAdd,
+        origin: crate::statusline::StatusScope,
+        note_key: Option<&str>,
+    ) -> ProjectAddResult {
+        let ProjectAdd {
+            path,
+            display_name,
+            current_branch,
+            leading_branch,
+            status_message,
+            add_failed_prefix,
         } = args;
         let project = Project {
             id: uuid::Uuid::new_v4().to_string(),
@@ -3961,56 +4128,44 @@ impl Engine {
         // config-write or DB failure returns an error-toned `Status` that is
         // still a Rust `Ok`, so inspect the reaction and report a rolled-back
         // add as the failure it was rather than an optimistic success.
-        //
-        // When `status_op_id` is Some, which it always is for the web, the
-        // add-project op is ALSO resolved so its busy is replaced by the keyed
-        // final instead of separately cleared. The inline persist can mint a
-        // status from `current_origin`, so re-set that to the op's captured
-        // scope before dispatch and restore `All` afterward.
-        let origin = status_op_id
-            .as_ref()
-            .and_then(|id| self.pending_web_add_project_ops.get(id))
-            .map(|op| op.scope().clone())
-            .unwrap_or(crate::statusline::StatusScope::All);
         self.current_origin = origin;
         // What was there before, so an add that found its project already
         // registered (a race into the dedup) is not reported as creating it.
         let existing: Vec<String> = self.projects.iter().map(|p| p.id.clone()).collect();
         // The engine's Added outcome carries the AUTHORITATIVE message, which is
         // the dedup chokepoint's honest "already in the workspace" text when a
-        // race hit that path, not this caller's optimistic narrative. Surface
-        // that (falling back to the caller's message only if the engine didn't
-        // provide one), for both the unkeyed status and the keyed op below.
-        let mut success_message: StatusText = status_message.clone();
+        // race hit that path, not this caller's optimistic narrative.
+        let mut added = None;
         let statuses = match self.apply(Command::PersistProject {
             action: Box::new(ProjectPersistenceAction::Add {
                 project,
-                status_message: status_message.clone(),
+                status_message,
             }),
             status_op_id: None,
         }) {
             Ok(EventReaction::ProjectPersistenceOutcome(outcome))
                 if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
             {
-                if let ProjectPersistenceView::Added {
+                let ProjectPersistenceView::Added {
                     status_message: engine_message,
                     project_id,
                 } = &outcome.view
+                else {
+                    unreachable!("matched as Added above")
+                };
+                if let Some(key) = note_key
+                    && !existing.contains(project_id)
                 {
-                    success_message = engine_message.clone();
-                    if let Some(key) = status_op_id
-                        && !existing.contains(project_id)
-                    {
-                        self.operations.note(
-                            key,
-                            crate::operations::OperationNotes {
-                                created: vec![project_id.clone()],
-                                ..Default::default()
-                            },
-                        );
-                    }
+                    self.operations.note(
+                        key,
+                        crate::operations::OperationNotes {
+                            created: vec![project_id.clone()],
+                            ..Default::default()
+                        },
+                    );
                 }
-                vec![WireStatus::new("info", success_message.clone())]
+                added = Some((project_id.clone(), engine_message.clone()));
+                vec![WireStatus::new("info", engine_message.clone())]
             }
             // A rolled-back add surfaces as an error-toned Status; relay it
             // verbatim so the user learns the add failed and was undone.
@@ -4021,38 +4176,7 @@ impl Engine {
             )],
         };
         self.current_origin = crate::statusline::StatusScope::All;
-
-        // Resolve the add-project op against the same outcome the
-        // `statuses` carry, keying the final to the op's id so it replaces
-        // the busy. The op's resolver re-emits the SAME message: a clean
-        // add → `Added` (info), any failure → `AddFailed` (the relayed
-        // error text). When no op is registered (id None, or already
-        // consumed by a switch-failure path), fall back to `statuses`.
-        if let Some(id) = status_op_id
-            && let Some(op) = self.pending_web_add_project_ops.remove(id)
-        {
-            let is_success = statuses.iter().any(|s| s.tone == "info");
-            let outcome = if is_success {
-                crate::engine::WebAddProjectOutcome::Added {
-                    status_message: success_message.clone(),
-                }
-            } else {
-                // Surface the same failure text the unkeyed `statuses`
-                // would have shown (the engine's rolled-back error or the
-                // apply error), now keyed so it replaces the busy.
-                let message = statuses
-                    .iter()
-                    .find(|s| s.tone == "error")
-                    .map(|s| StatusText::from_parts(s.message.clone(), s.segments.clone()))
-                    .unwrap_or_else(|| status_message.clone());
-                crate::engine::WebAddProjectOutcome::AddFailed { message }
-            };
-            // The add-project op always resolves to a Message (never a
-            // Clear), so `into_reaction()` is a keyed `Status` that
-            // `wire_statuses_from_reaction` renders directly.
-            return wire_statuses_from_reaction(&op.resolve(&outcome).into_reaction());
-        }
-        statuses
+        ProjectAddResult { statuses, added }
     }
 
     /// Drive a checkout-related reaction to completion, returning user-facing
@@ -5125,6 +5249,7 @@ impl Engine {
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::AddProjectCreateInitialCommit { .. }
             | WireCommand::AddProjectInitRepo { .. }
+            | WireCommand::CloneProject { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::AttachPullRequest { .. }
@@ -9692,6 +9817,55 @@ mod tests {
         statuses
     }
 
+    fn clone_command(url: &Path, path: &Path, agent_name: &str) -> WireCommand {
+        WireCommand::CloneProject {
+            url: url.to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
+            agent_name: Some(agent_name.to_string()),
+            random_name: false,
+        }
+    }
+
+    /// Drive a clone the way the web actor does: the worker's event, the
+    /// follow-up that adds the project and dispatches the agent, and, when one
+    /// was dispatched, the create to its end.
+    fn drive_clone_chain(engine: &mut Engine) -> WebFollowupStatuses {
+        // Whatever an earlier agent still reports is processed on the way, as a
+        // surface would.
+        let event = loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the clone worker's event");
+            if matches!(event, WorkerEvent::RepositoryCloned { .. }) {
+                break event;
+            }
+            engine.process_worker_event(event);
+        };
+        let reaction = engine.process_worker_event(event);
+        let mut chain = engine.drive_clone_followup(&reaction);
+        chain
+            .statuses
+            .extend(wire_statuses_from_reaction(&reaction));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !engine.pending_create_ops.is_empty() {
+            let event = engine
+                .worker_rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("the create settles in time");
+            let reaction = engine.process_worker_event(event);
+            chain
+                .statuses
+                .extend(wire_statuses_from_reaction(&reaction));
+        }
+        chain
+    }
+
+    /// The statuses that end something, not the spinners.
+    fn finals(chain: &WebFollowupStatuses) -> Vec<&WireStatus> {
+        chain.statuses.iter().filter(|s| s.tone != "busy").collect()
+    }
+
     #[test]
     fn wire_add_project_checkout_default_deserializes() {
         let json = r#"{"command":"add_project_checkout_default","args":{"path":"/repo","name":"My Project"}}"#;
@@ -9780,6 +9954,44 @@ mod tests {
             !crate::git::repo_has_commits(repo.path()),
             "the rejected request must not have committed"
         );
+
+        // A clone holds its destination however it is spelled: a second clone
+        // through a symlinked parent with a trailing slash is refused, and so
+        // is an init there. A clone into the folder the commit holds is too.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = std::fs::canonicalize(tmp.path()).unwrap();
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&parent, &link).unwrap();
+        let dest = parent.join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        assert!(engine.mark_in_flight(InFlightKey::Clone(dest.clone())));
+        let refusal = engine
+            .apply_wire(clone_command(
+                Path::new("/srv/remote.git"),
+                Path::new(&format!("{}/dest/", link.display())),
+                "agent",
+            ))
+            .map(|_| ())
+            .expect_err("a second clone into the destination");
+        assert!(refusal.to_string().contains("already cloning"), "{refusal}");
+        let init = engine.apply_wire(WireCommand::AddProjectInitRepo {
+            path: dest.to_string_lossy().into_owned(),
+            name: String::new(),
+        });
+        let init = init
+            .map(|_| ())
+            .expect_err("an init where a clone runs went ahead");
+        assert!(init.to_string().contains("cloning"), "{init}");
+        assert!(!dest.join(".git").exists());
+        let into_commit = engine.apply_wire(clone_command(
+            Path::new("/srv/remote.git"),
+            repo.path(),
+            "agent",
+        ));
+        assert!(
+            into_commit.is_err(),
+            "a clone where an initial commit runs went ahead"
+        );
     }
 
     #[test]
@@ -9863,6 +10075,72 @@ mod tests {
             engine.mark_in_flight(crate::engine::InFlightKey::InitialCommit(canonical)),
             "the in-flight gate must be cleared after the worker completes"
         );
+
+        // A clone of a local repository with a commit adds the project on the
+        // remote's default branch and starts the named agent there, with one
+        // final, the create's, and nothing left open.
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = crate::git::test_support::bare_remote_with_commit(tmp.path());
+        let dest = std::fs::canonicalize(tmp.path()).unwrap().join("cloned");
+        let busy = engine
+            .apply_wire(clone_command(&remote, &dest, "first-agent"))
+            .expect("dispatch the clone")
+            .status
+            .expect("a keyed busy");
+        assert_eq!(busy.tone, "busy");
+        let chain = drive_clone_chain(&mut engine);
+        let project = engine
+            .projects
+            .iter()
+            .find(|p| Path::new(&p.path) == dest)
+            .expect("the clone is a project")
+            .clone();
+        assert_eq!(project.current_branch, "main");
+        assert_eq!(project.leading_branch.as_deref(), Some("main"));
+        assert_eq!(project.name, "cloned");
+        let agents: Vec<_> = engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .collect();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].branch_name(), Some("first-agent"));
+        let finals = finals(&chain);
+        assert_eq!(finals.len(), 1, "{finals:?}");
+        assert_eq!(finals[0].tone, "info", "{finals:?}");
+        assert_eq!(chain.clear_keys, vec![busy.key.unwrap()]);
+        assert!(engine.clones.pending.is_empty());
+        assert!(engine.pending_create_ops.is_empty());
+        assert!(
+            engine.mark_in_flight(InFlightKey::Clone(dest)),
+            "the clone's gate must be cleared"
+        );
+
+        // A blank agent name is a random one, as in the New agent dialog,
+        // whether or not a random name was asked for.
+        let blank = std::fs::canonicalize(tmp.path()).unwrap().join("blank");
+        engine
+            .apply_wire(WireCommand::CloneProject {
+                url: remote.to_string_lossy().into_owned(),
+                path: blank.to_string_lossy().into_owned(),
+                agent_name: Some("  ".to_string()),
+                random_name: false,
+            })
+            .expect("a blank name is not refused");
+        drive_clone_chain(&mut engine);
+        let project = engine
+            .projects
+            .iter()
+            .find(|p| Path::new(&p.path) == blank)
+            .expect("the clone is a project");
+        let names: Vec<&str> = engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .filter_map(|s| s.branch_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(crate::git::is_valid_agent_name(names[0]), "{names:?}");
     }
 
     #[test]
@@ -10209,6 +10487,271 @@ mod tests {
                 .expect("load projects")
                 .is_empty()
         );
+
+        // A clone whose add fails keeps the clone, creates no agent, and says so.
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = crate::git::test_support::bare_remote_with_commit(tmp.path());
+        let dest = std::fs::canonicalize(tmp.path()).unwrap().join("cloned");
+        engine
+            .apply_wire(clone_command(&remote, &dest, "agent"))
+            .expect("dispatch the clone");
+        let chain = drive_clone_chain(&mut engine);
+        let finals = finals(&chain);
+        assert_eq!(finals.len(), 1, "{finals:?}");
+        assert_eq!(finals[0].tone, "warning");
+        for needle in [
+            "couldn't add it as a project",
+            "was rolled back",
+            "still there",
+        ] {
+            assert!(finals[0].message.contains(needle), "{}", finals[0].message);
+        }
+        assert!(dest.join(".git").exists(), "the clone was not kept");
+        assert!(engine.projects.is_empty());
+        assert!(engine.sessions.is_empty());
+    }
+
+    #[test]
+    fn each_clone_check_refuses_with_its_own_sentence_before_git_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let remote = crate::git::test_support::bare_remote_with_commit(&root);
+        let dest = root.join("dest");
+        let full = root.join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("left-behind"), "x").unwrap();
+        let linked = root.join("linked");
+        std::fs::create_dir(root.join("empty")).unwrap();
+        std::os::unix::fs::symlink(root.join("empty"), &linked).unwrap();
+        let project = root.join("project");
+        let request = |url: &str, path: &Path, name: Option<&str>| WireCommand::CloneProject {
+            url: url.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            agent_name: name.map(str::to_string),
+            random_name: false,
+        };
+        let url = remote.to_string_lossy().into_owned();
+        // (what, request, destination it must leave without a clone, words the
+        // refusal carries)
+        let cases: Vec<(&str, WireCommand, &Path, &[&str])> = vec![
+            (
+                "an empty address",
+                request("  ", &dest, Some("a")),
+                &dest,
+                &["address"],
+            ),
+            (
+                "an agent name git will not take",
+                request(&url, &dest, Some("not a name")),
+                &dest,
+                &["Invalid agent name", "not a name"],
+            ),
+            (
+                "a name only git's own rules refuse",
+                request(&url, &dest, Some("HEAD")),
+                &dest,
+                &["won't take", "HEAD"],
+            ),
+            (
+                "a relative destination",
+                request(&url, Path::new("relative/dest"), Some("a")),
+                &dest,
+                &["isn't an absolute path"],
+            ),
+            (
+                "a destination whose parent is missing",
+                request(&url, &root.join("missing/dest"), Some("a")),
+                &dest,
+                &["doesn't exist"],
+            ),
+            (
+                "a destination that is not an empty folder",
+                request(&url, &full, Some("a")),
+                &full,
+                &["isn't an empty folder", "interrupted"],
+            ),
+            (
+                "a destination that is a symbolic link",
+                request(&url, &linked, Some("a")),
+                &linked,
+                &["symbolic link"],
+            ),
+            (
+                "a destination that is already a project",
+                request(&url, &project, Some("a")),
+                &project,
+                &["already a project"],
+            ),
+        ];
+        for (what, command, untouched, needles) in cases {
+            let (mut engine, _engine_dir) = test_engine();
+            engine
+                .projects
+                .push(crate::engine::test_support::sample_project(
+                    "p1",
+                    &project.to_string_lossy(),
+                ));
+            // Refused at once, or by the worker before it runs git.
+            let sentence = match engine.apply_wire(command) {
+                Err(refused) => refused.to_string(),
+                Ok(_) => {
+                    let chain = drive_clone_chain(&mut engine);
+                    let finals = finals(&chain);
+                    assert_eq!(finals.len(), 1, "{what}: {finals:?}");
+                    assert_eq!(finals[0].tone, "error", "{what}");
+                    finals[0].message.clone()
+                }
+            };
+            for needle in needles {
+                assert!(sentence.contains(needle), "{what}: {sentence}");
+            }
+            assert!(!untouched.join(".git").exists(), "{what}: git ran");
+            assert_eq!(engine.projects.len(), 1, "{what}");
+            assert!(engine.clones.pending.is_empty(), "{what}");
+        }
+    }
+
+    #[test]
+    fn a_clone_that_stops_short_of_a_project_adds_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let empty = crate::git::test_support::empty_bare_remote(&root);
+        let broken_root = root.join("broken");
+        std::fs::create_dir(&broken_root).unwrap();
+        let broken = crate::git::test_support::bare_remote_with_missing_head(&broken_root);
+        // (what, remote, whether the clone stays, tone, words the final carries)
+        let cases: Vec<(&str, PathBuf, bool, &str, &[&str])> = vec![
+            (
+                "an address that does not exist",
+                root.join("nothing-here.git"),
+                false,
+                "error",
+                &["Couldn't clone", "Nothing was added"],
+            ),
+            (
+                "an empty remote",
+                empty,
+                true,
+                "warning",
+                &["no commits yet", "still there", "Add project"],
+            ),
+            (
+                "a remote whose default branch is broken",
+                broken,
+                true,
+                "warning",
+                &[
+                    "default branch could not be checked out",
+                    "still there",
+                    "Add project",
+                ],
+            ),
+        ];
+        for (index, (what, remote, kept, tone, needles)) in cases.into_iter().enumerate() {
+            let (mut engine, _engine_dir) = test_engine();
+            let dest = root.join(format!("dest-{index}"));
+            engine
+                .apply_wire(clone_command(&remote, &dest, "agent"))
+                .expect("dispatch the clone");
+            let chain = drive_clone_chain(&mut engine);
+            let finals = finals(&chain);
+            assert_eq!(finals.len(), 1, "{what}: {finals:?}");
+            assert_eq!(finals[0].tone, tone, "{what}: {}", finals[0].message);
+            for needle in needles {
+                assert!(
+                    finals[0].message.contains(needle),
+                    "{what}: {}",
+                    finals[0].message
+                );
+            }
+            assert_eq!(dest.join(".git").exists(), kept, "{what}");
+            if !kept {
+                assert!(!dest.exists(), "{what}: a folder was left behind");
+            }
+            assert!(engine.projects.is_empty(), "{what}");
+            assert!(engine.sessions.is_empty(), "{what}");
+        }
+    }
+
+    #[test]
+    fn an_agent_name_taken_in_the_clone_adds_the_project_and_no_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let remote = crate::git::test_support::bare_remote_with_commit(&root);
+        for name in ["feature", "main"] {
+            let (mut engine, _engine_dir) = test_engine();
+            let dest = root.join(format!("dest-{name}"));
+            engine
+                .apply_wire(clone_command(&remote, &dest, name))
+                .expect("dispatch the clone");
+            let chain = drive_clone_chain(&mut engine);
+            let finals = finals(&chain);
+            assert_eq!(finals.len(), 1, "{name}: {finals:?}");
+            assert_eq!(finals[0].tone, "warning", "{name}");
+            for needle in [name, "already exists", "New agent"] {
+                assert!(
+                    finals[0].message.contains(needle),
+                    "{name}: {}",
+                    finals[0].message
+                );
+            }
+            assert_eq!(engine.projects.len(), 1, "{name}");
+            assert!(engine.sessions.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_user_and_token_in_the_address_reach_no_status_or_log_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = std::fs::canonicalize(tmp.path()).unwrap().join("dest");
+        // A transport git has no helper for, so it fails without the network.
+        let url = "nohelper://me:ghp_secret@example.invalid/repo.git";
+        let (mut engine, _engine_dir) = test_engine();
+        let (outcome, mut logged) = crate::logger::capture_for_test(|| {
+            engine.apply_wire(clone_command(Path::new(url), &dest, "agent"))
+        });
+        let busy = outcome.expect("dispatch the clone").status.unwrap();
+        assert!(
+            busy.message.contains("nohelper://example.invalid/repo.git"),
+            "{}",
+            busy.message
+        );
+        let chain = drive_clone_chain(&mut engine);
+        // The worker logs on its own thread, so run its job here as well.
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        let ((), worker_lines) = crate::logger::capture_for_test(|| {
+            crate::clone_project::run_clone_job(
+                crate::clone_project::CloneJob {
+                    status_op_id: "op-direct".to_string(),
+                    url: url.to_string(),
+                    destination: dest.clone(),
+                    agent_name: "agent".to_string(),
+                    stall: std::time::Duration::from_secs(60),
+                    processes: Default::default(),
+                },
+                &worker_tx,
+            )
+        });
+        logged.extend(worker_lines);
+        let reaction = engine.process_worker_event(worker_rx.recv().unwrap());
+        let mut said: Vec<String> = std::iter::once(&busy)
+            .chain(&chain.statuses)
+            .map(|status| format!("{status:?}"))
+            .collect();
+        said.extend(
+            wire_statuses_from_reaction(&reaction)
+                .iter()
+                .map(|status| format!("{status:?}")),
+        );
+        assert!(
+            logged.iter().any(|line| line.contains("example.invalid")),
+            "the worker logs the clone: {logged:?}"
+        );
+        assert_eq!(finals(&chain).len(), 1, "{:?}", chain.statuses);
+        for text in said.iter().chain(&logged) {
+            assert!(!text.contains("ghp_secret"), "a token got out: {text}");
+            assert!(!text.contains("//me"), "a user got out: {text}");
+        }
     }
 
     #[test]

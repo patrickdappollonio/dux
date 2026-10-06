@@ -1,0 +1,80 @@
+{
+  "note": "The folder a clone of each address lands in, by git's own rule. Read by `the_shared_clone_folder_name_fixture_holds` in crates/dux-core/src/clone_project.rs, which checks that `clone_dir_name(address)` is `name` (null for an address with no usable name).",
+  "cases": [
+    {
+      "what": "https with .git",
+      "address": "https://github.com/owner/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "https without .git",
+      "address": "https://github.com/owner/repo",
+      "name": "repo"
+    },
+    {
+      "what": "a trailing slash",
+      "address": "https://github.com/owner/repo/",
+      "name": "repo"
+    },
+    {
+      "what": "ssh",
+      "address": "ssh://git@github.com/owner/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "scp-style",
+      "address": "git@github.com:owner/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "scp-style with no folder",
+      "address": "git@example.com:repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "a GitLab subgroup",
+      "address": "https://gitlab.com/group/subgroup/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "an Azure DevOps address",
+      "address": "https://dev.azure.com/org/project/_git/repo",
+      "name": "repo"
+    },
+    {
+      "what": "a user and token in the address",
+      "address": "https://user:token@github.com/owner/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "a local path",
+      "address": "/srv/git/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "a local working copy's .git folder",
+      "address": "/srv/work/repo/.git",
+      "name": "repo"
+    },
+    {
+      "what": "a file address",
+      "address": "file:///srv/git/repo.git",
+      "name": "repo"
+    },
+    {
+      "what": "surrounding spaces",
+      "address": "  https://github.com/owner/repo.git  ",
+      "name": "repo"
+    },
+    {
+      "what": "nothing at all",
+      "address": "   ",
+      "name": null
+    },
+    {
+      "what": "only a suffix",
+      "address": "/.git",
+      "name": null
+    }
+  ]
+}

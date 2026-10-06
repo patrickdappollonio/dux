@@ -6,6 +6,7 @@
 
 mod admission;
 mod attachment_guard;
+mod clone;
 pub mod command;
 mod companion;
 pub mod config_saver;
@@ -768,6 +769,11 @@ pub struct Engine {
     /// lookup FAILURE is resolved in `process_worker_event`'s `PullRequestResolved`
     /// Err handler.
     pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
+    /// Repository clones, for either surface: each one's op waiting on its
+    /// worker, and the git processes quitting dux stops. A clone that stops
+    /// short of a project resolves its op in `process_worker_event`; one ready
+    /// to add hands off to its agent create in [`Engine::finish_clone`].
+    pub clones: crate::clone_project::Clones,
     /// Manual PR-attach ops (the "Resolving PR to attach…" busy). SHARED by
     /// both surfaces, because the whole resolve→attach flow completes
     /// engine-side: the busy is minted in
@@ -2068,9 +2074,26 @@ fn project_to_project_config(p: &Project) -> ProjectConfig {
 
 impl Engine {
     /// Mark an operation as in-flight. Returns `true` if it was newly
-    /// inserted, `false` if it was already present.
+    /// inserted, `false` if it was already present, or if another operation
+    /// that writes a repository into a folder holds the same folder (see
+    /// [`InFlightKey::folder_written`]).
     pub fn mark_in_flight(&mut self, key: InFlightKey) -> bool {
+        if let Some(folder) = key.folder_written()
+            && self
+                .in_flight
+                .iter()
+                .any(|held| held.folder_written() == Some(folder))
+        {
+            return false;
+        }
         self.in_flight.insert(key)
+    }
+
+    /// Stop every repository clone running, and any that starts from now on:
+    /// dux is quitting. Each one runs in a session of its own, so nothing else
+    /// would.
+    pub fn stop_clones(&self) {
+        self.clones.processes.stop_all();
     }
 
     /// Clear an in-flight key after a worker's completion event arrives.

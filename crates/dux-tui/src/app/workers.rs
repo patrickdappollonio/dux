@@ -695,6 +695,19 @@ impl App {
                 );
             }
 
+            EventReaction::AddProjectAfterClone(done) => {
+                // The engine adds the project and dispatches the agent; this
+                // surface shows what it says, and, as for a create dispatched
+                // here, the agent it starts is this surface's.
+                let create = dux_core::engine::InFlightKey::CreateAgent;
+                let was_in_flight = self.engine.is_in_flight(&create);
+                let finished = self.engine.finish_clone(&done);
+                if !was_in_flight && self.engine.is_in_flight(&create) {
+                    self.create_agent_started_here = true;
+                }
+                self.apply_routed_reaction(finished, routing);
+            }
+
             EventReaction::ContinueCreateAgentAfterInspection {
                 project,
                 inspection,

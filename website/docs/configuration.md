@@ -384,6 +384,19 @@ running either way. `--wait-timeout <seconds>` sets a different wait for one
 command, and `--no-wait` returns at once with the id. Only the command line on
 this machine reads this setting, the next time it runs.
 
+## How long a clone may go quiet (`[git]`)
+
+```toml
+[git]
+clone_stall_seconds = 300  # 5 minutes
+```
+
+When dux clones a repository for a new project, there is no limit on how long
+the whole clone takes: a big repository is slow, not stuck. What dux watches
+instead is git's progress. A clone that prints nothing for `clone_stall_seconds`
+is stopped, and the message says so. Raise it for a remote that takes a long time
+to start sending. Values below 1 count as 1. It takes effect for the next clone.
+
 ## Environment variables and portable paths
 
 Project paths understand `$HOME`, `${HOME}`, and `~`, and environment values expand

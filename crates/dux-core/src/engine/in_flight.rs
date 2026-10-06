@@ -61,6 +61,13 @@ pub enum InFlightKey {
     /// this key, which also makes init-and-commit and commit-only on one path
     /// mutually exclusive.
     InitialCommit(String),
+    /// A repository is being cloned into this destination (its parent
+    /// canonicalized, plus its name), for a new project. While set, nothing
+    /// else that writes a repository into a folder may start on the same path:
+    /// [`super::Engine::mark_in_flight`] refuses an `InitialCommit` there, and
+    /// a clone is refused while either names it. Cleared by the
+    /// `RepositoryCloned` handler, which the worker sends however it ended.
+    Clone(std::path::PathBuf),
     /// An operation that switches the branch of the project folder at `path`
     /// is running: "Check out default branch", "Change base branch" or a
     /// project "Pull project". All three run `git switch` in the same folder,
@@ -88,6 +95,18 @@ pub enum InFlightKey {
     MacroList,
     /// The global `[env]` table, as one thing.
     GlobalEnv,
+}
+
+impl InFlightKey {
+    /// The folder this operation writes a repository into, for the keys that
+    /// do: at most one of them may hold a folder at a time.
+    pub fn folder_written(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Clone(path) => Some(path),
+            Self::InitialCommit(path) => Some(std::path::Path::new(path)),
+            _ => None,
+        }
+    }
 }
 
 /// The operations that switch a project folder's branch and therefore share

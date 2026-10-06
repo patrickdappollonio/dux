@@ -30,8 +30,9 @@
 //!   there: an agent create (new, fork, from a worktree, standalone and, after
 //!   the pull-request lookup hands off, from a pull request), an agent delete
 //!   that removes its worktree, a stop that waits for the agent to exit, a
-//!   start that launches, a project removal that deletes worktrees, and the
-//!   project adds that run git first.
+//!   start that launches, a project removal that deletes worktrees, the
+//!   project adds that run git first, and a clone (which, once it has added
+//!   its project, hands off to its agent create).
 //! - When a tab's launch reports back (`Engine::drive_web_launch_followup`),
 //!   for a tab created or started by a route, because the launch's own status
 //!   says nothing about which request it answers.
@@ -44,6 +45,7 @@
 //! |---|---|
 //! | `POST /projects`, a plain add | inside the call |
 //! | `POST /projects`, an add that runs git first | its add op's final, at the emitter |
+//! | `POST /projects` with `clone_url` | the clone op's final when it stops short of an agent, else the create it hands off to, at the emitter |
 //! | `DELETE /projects/{id}` | inside the call when no worktree is removed, else the deletion op's final, at the emitter |
 //! | `POST /sessions` (every kind) | the create op's final, at the emitter; a from-PR create follows its lookup, which hands off to the create or ends at the lookup follow-up |
 //! | `DELETE /sessions/{id}` | inside the call when no worktree is removed, else the delete op's final, at the emitter |

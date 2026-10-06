@@ -2011,6 +2011,14 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.cli.wait_timeout_seconds,
     );
 
+    // --- [git] ---
+    patch_table_u64(
+        doc,
+        "git",
+        "clone_stall_seconds",
+        config.git.clone_stall_seconds,
+    );
+
     // --- [server] ---
     // The deprecated `bind` field is migrated away on load and is never
     // re-emitted here, so a patch/recover/plain write produces the new
