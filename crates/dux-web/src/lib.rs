@@ -36,6 +36,7 @@ pub mod file_routes;
 pub mod first_load_routes;
 pub mod git_routes;
 pub mod host_guard;
+pub mod operation_routes;
 pub(crate) mod ownership_publish;
 pub mod project_actions;
 pub mod project_reads;
@@ -157,10 +158,13 @@ fn warn_if_ui_not_built() {
 /// Returns `(console, access_log)`. An unrecognized color value is warned about
 /// on the console it built, as its first line. The flip does NOT call this: the
 /// setting governs `dux server`'s stdout only, and the flip's viewer is themed.
-fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
+fn build_console(config: &dux_core::config::Config, paths: &DuxPaths) -> (Console, bool) {
     let setting = &config.server.color;
     let color = crate::console::detect(setting);
-    let console = Console::stdout(color, dux_core::serve_log::StdStreams::current());
+    let mut console = Console::stdout(color, dux_core::serve_log::StdStreams::current());
+    if let Some(log) = open_server_log(config, paths) {
+        console = console.with_server_log(log);
+    }
     // dux.log already has it: the load logs every value it reads as another.
     if !crate::console::is_known_color_setting(setting) {
         console.warn(&crate::console::unknown_color_warning(setting));
@@ -169,6 +173,27 @@ fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
     // nobody can scan.
     console.set_qr_codes(config.server.qr_codes && std::io::stdout().is_terminal());
     (console, config.server.access_log)
+}
+
+/// Open `server.log` for a serve. A log that cannot be opened is a warning in
+/// `dux.log` and a serve without the file, never a reason not to serve: the
+/// terminal (or the flip's viewer) still shows every line.
+pub(crate) fn open_server_log(
+    config: &dux_core::config::Config,
+    paths: &DuxPaths,
+) -> Option<Arc<dux_core::logger::ServerLog>> {
+    match dux_core::logger::open_server_log(&config.server, paths) {
+        Ok(log) => Some(Arc::new(log)),
+        Err(error) => {
+            dux_core::logger::warn(&format!(
+                "[server] could not open the server log at {}: {error}. The server runs \
+                 without writing server.log; change [server] log_path to somewhere dux can \
+                 write.",
+                dux_core::logger::resolve_server_log_path(&config.server, paths).display()
+            ));
+            None
+        }
+    }
 }
 
 /// The warning shown when a BEST-EFFORT (Tailscale) listener cannot bind because
@@ -525,7 +550,7 @@ fn run_plain_http(
     let control_listener = control_socket::listener_of(&engine);
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
-    let (console, access_log) = build_console(&engine.config);
+    let (console, access_log) = build_console(&engine.config, &paths);
     // What the caller learned before anything was loaded prints first, ahead of
     // the bind, so it is on screen even if a bind then fails.
     for warning in &startup_warnings {
@@ -2758,7 +2783,12 @@ pub fn serve_with_engine(
     // The flip owns the terminal with its themed status screen, so this console
     // writes NOTHING to stdout; it records every line into the shared ring the
     // status screen's log viewer draws, the same lines `dux server` prints.
-    let console = Console::capture(activity);
+    let mut console = Console::capture(activity);
+    // The same lines go to `server.log`, so the flip leaves the log the other two
+    // ways of serving leave.
+    if let Some(log) = open_server_log(&engine.config, &engine.paths) {
+        console = console.with_server_log(log);
+    }
     // The QR codes reach the log viewer as lines, exactly as `dux server`
     // prints them.
     console.set_qr_codes(engine.config.server.qr_codes);
@@ -4359,6 +4389,49 @@ mod tests {
             *printed_at_exit.lock().unwrap(),
             format!("12:00:00 error {}\n", super::FORCE_EXIT_MESSAGE)
         );
+    }
+
+    fn paths_in(root: &std::path::Path) -> DuxPaths {
+        DuxPaths {
+            root: root.to_path_buf(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+        }
+    }
+
+    /// `dux server`'s console keeps `server.log` beside printing, at the path
+    /// `[server] log_path` names.
+    #[test]
+    fn dux_servers_console_also_writes_the_server_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = dux_core::config::Config::default();
+        config.server.log_path = "logs/web.log".to_string();
+        let (console, access_log) = super::build_console(&config, &paths_in(dir.path()));
+        assert!(access_log);
+        console.error("listener lost");
+        console.flush();
+        let written = std::fs::read_to_string(dir.path().join("logs/web.log")).unwrap();
+        let line = written.lines().next().expect("one line");
+        let (stamp, rest) = line.split_once(' ').expect("a dated line");
+        chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+        assert_eq!(&rest[9..], "error listener lost", "{written}");
+    }
+
+    /// A log dux cannot open costs the file, not the serve.
+    #[test]
+    fn a_server_log_that_cannot_be_opened_does_not_stop_the_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "a file where the log's folder should be").unwrap();
+        let mut config = dux_core::config::Config::default();
+        config.server.log_path = blocker.join("server.log").to_string_lossy().into_owned();
+        assert!(super::open_server_log(&config, &paths_in(dir.path())).is_none());
+        let (console, _) = super::build_console(&config, &paths_in(dir.path()));
+        console.info("still printing");
+        console.flush();
     }
 
     // ── Startup banner builders ────────────────────────────────────────────
@@ -6677,6 +6750,7 @@ mod auth_warning_mode_tests {
             vec![listener],
             Vec::new(),
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .unwrap();
         *server.tailscale_mode_control().bound_leg().lock().unwrap() =

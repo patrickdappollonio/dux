@@ -170,6 +170,7 @@ fn serve(
         vec![listener],
         vec![format!("http://{addr}")],
         claim_before_serving,
+        dux_core::serve_log::StartupNotes::default(),
     )
     .expect("the serve starts");
     (server, addr)

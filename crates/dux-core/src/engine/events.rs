@@ -408,6 +408,7 @@ pub enum EventReaction {
     BackgroundServerPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        startup: crate::serve_log::StartupNotes,
     },
     /// The background web server finished applying a live `[server] tailscale`
     /// change. The terminal UI resolves its pending status op with it.
@@ -2883,6 +2884,15 @@ impl Engine {
                         "dropping launch-failed event for closed extra tab {tab_id} of session {}",
                         session.id,
                     ));
+                    // Nothing reaches the screen, but a client following this
+                    // tab is told its launch did not come up.
+                    self.finish_launch_operations(
+                        &crate::operations::launch_binding_key(tab_id.as_str()),
+                        Some(tab_id.as_str()),
+                        false,
+                        "",
+                        None,
+                    );
                     return (AgentLaunchFailedOutcome::Silent, None);
                 }
                 logger::error(&format!(
@@ -2939,6 +2949,22 @@ impl Engine {
                     error: launch_error,
                 },
                 Vec::new(),
+            );
+        }
+        // A failure reported by agent rather than by tab: move the records
+        // following the tab that failed to the agent's failure key now, while
+        // this is still known to be the tab, so a promotion meanwhile cannot
+        // hand them another tab's report.
+        if let (
+            AgentLaunchFailedOutcome::Reconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::ForceReconnect { session_id, .. }
+            | AgentLaunchFailedOutcome::StartupAutoReopen { session_id, .. },
+            _,
+        ) = &outcome
+        {
+            self.operations.hand_off(
+                &crate::operations::launch_binding_key(tab_id.as_str()),
+                &crate::operations::launch_failure_key(session_id),
             );
         }
         outcome
@@ -3001,6 +3027,7 @@ impl Engine {
         // old config, so every surface's apply compares with the true state.
         let github_before = self.github_integration_enabled;
         let deferred = std::mem::take(&mut self.deferred_commands);
+        let mut deferred_operations = std::mem::take(&mut self.deferred_operations).into_iter();
         let has_deferred = !deferred.is_empty();
         // Pre-swap `self.config` to the reloaded config (rather than leaving the
         // surface to do the swap) whenever we must base a follow-up write on the
@@ -3084,7 +3111,8 @@ impl Engine {
         // still reports each save's success/failure.
         let mut deferred_reactions = Vec::new();
         for command in deferred {
-            match self.apply(command) {
+            let operation = deferred_operations.next().flatten();
+            match self.apply_deferred_operation(command, operation) {
                 Ok(EventReaction::Nothing) => {}
                 Ok(reaction) => deferred_reactions.push(reaction),
                 Err(err) => deferred_reactions.push(EventReaction::Status(StatusUpdate::error(
@@ -4537,9 +4565,17 @@ impl Engine {
                     startup,
                 }
             }
-            WorkerEvent::BackgroundServerPreflightReady { result, warning } => {
+            WorkerEvent::BackgroundServerPreflightReady {
+                result,
+                warning,
+                startup,
+            } => {
                 // Same story: the listeners belong to whoever asked to serve.
-                EventReaction::BackgroundServerPreflightReady { result, warning }
+                EventReaction::BackgroundServerPreflightReady {
+                    result,
+                    warning,
+                    startup,
+                }
             }
             WorkerEvent::TailscaleModeApplied { mode, outcome } => {
                 EventReaction::TailscaleModeApplied { mode, outcome }
@@ -8507,11 +8543,35 @@ mod tests {
             .sessions
             .push(sample_session("s1", "project-1", "feat/x"));
 
+        // A client following the tab's create waits on its launch report.
+        engine.operations.open(
+            "op-tab",
+            crate::operations::OperationKind::TabCreate,
+            crate::operations::OperationPolicy {
+                unknown_after: std::time::Duration::from_secs(60),
+                retention: std::time::Duration::from_secs(60),
+            },
+            std::time::Instant::now(),
+        );
+        engine
+            .operations
+            .await_key("op-tab", &crate::operations::launch_binding_key("tab-1"));
+
         let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
         let (outcome, create_final) = engine.process_agent_launch_failed(data);
 
         assert!(matches!(outcome, AgentLaunchFailedOutcome::Silent));
         assert!(create_final.is_none());
+        // Silent to the screen, but the client is told the launch did not
+        // come up rather than left waiting forever.
+        assert_eq!(
+            engine
+                .operations
+                .view("op-tab", std::time::Instant::now())
+                .unwrap()
+                .state,
+            crate::operations::OperationState::Failed
+        );
     }
 
     #[test]

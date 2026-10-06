@@ -215,6 +215,14 @@ impl LogLine {
         line
     }
 
+    /// A line shown exactly as written, with no styling: how a viewer shows a
+    /// line it read back from `server.log`, which keeps only the plain spelling.
+    pub fn plain_text(text: &str) -> Self {
+        Self {
+            segments: vec![LogSegment::plain(text)],
+        }
+    }
+
     /// The line's tone: the one its marker carries, or `None` for a line with no
     /// marker (the banner header, an access line).
     pub fn tone(&self) -> Option<LogTone> {

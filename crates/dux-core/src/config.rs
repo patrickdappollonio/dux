@@ -294,6 +294,16 @@ pub const DEFAULT_HEARTBEAT_DEADLINE_SECONDS: u32 = 30;
 /// far shorter than forever.
 pub const DEFAULT_PTY_SEND_TIMEOUT_SECONDS: u32 = 60;
 
+/// Default for `[server] operation_unknown_after_seconds`: how long a change a
+/// client asked about may run before its record reads as unknown. Equal to the
+/// status line's [`crate::statusline::BUSY_LIVE_CEILING`], the point past which
+/// a spinner is no longer believed either.
+pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
+
+/// Default for `[server] operation_retention_seconds`: how long a finished
+/// change's record can still be read by its id.
+pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
+
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
 /// the async reactor; this bounds how many can run at once so a burst of tree
@@ -840,8 +850,9 @@ pub struct ServerConfig {
     /// Whether the server logs a per-request access line (method, path, status,
     /// latency) to its console: `dux server`'s stdout, and the log viewer of the
     /// `start-web-server` flip. The `/healthz` probe is always skipped.
-    /// Default true. The access log is console-only (never written to `dux.log`),
-    /// so piping `dux server`'s stdout captures it, and the `start-web-server`
+    /// Default true. The access log is never written to `dux.log`; it goes to the
+    /// console and to `server.log` (the background server, which prints nothing
+    /// over the terminal UI, writes only the file), and the `start-web-server`
     /// flip shows the same lines in its log viewer.
     pub access_log: bool,
     /// How many lines the `start-web-server` flip's log viewer keeps for
@@ -854,6 +865,25 @@ pub struct ServerConfig {
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
     /// starts.
     pub log_viewer_lines: usize,
+    /// Where the server's own log is written: the same lines `dux server` prints,
+    /// kept by all three ways of serving, so the log of a server that ran with no
+    /// terminal in front of it can still be read. A relative path is resolved from
+    /// the config folder; an empty one is read as the default. Default
+    /// `server.log`. `dux.log` keeps the debugging trail and is unaffected. Read
+    /// when a serve starts.
+    pub log_path: String,
+    /// Size in bytes the server log may reach before dux rotates it, with the same
+    /// whole-line and `0 = never rotate` rules as `[logging] max_bytes`. Default
+    /// 10 MiB. Read when a serve starts.
+    pub log_max_bytes: u64,
+    /// How many rotated copies of the server log to keep, numbered `server.log.1`
+    /// upwards; the oldest is deleted. `0` rotates and discards. Read through
+    /// [`effective_log_keep`], so values above [`MAX_LOG_KEEP`] are clamped.
+    /// Default 5. Read when a serve starts.
+    pub log_keep: u32,
+    /// Whether a rotated server log is gzipped to `server.log.N.gz` in the
+    /// background. Default true. Read when a serve starts.
+    pub log_compress: bool,
     /// Whether `dux server` and the start-web-server flip show QR codes for
     /// this machine's tailnet addresses (its Tailscale IP and its MagicDNS
     /// name, the `tailscale serve` HTTPS URL when one ends at dux), so a phone
@@ -1061,6 +1091,16 @@ pub struct ServerConfig {
     /// it then retries forever. Read live, so a config reload applies to the
     /// next connection with no restart.
     pub pty_send_timeout_seconds: u32,
+    /// How long, in seconds, a change a client is waiting on may run before
+    /// its operation record reads `unknown`. Default 1800. The record stays
+    /// open and still finishes with the real outcome; this never ends a change
+    /// or calls it failed. Read when the change starts, so a config reload
+    /// applies to the changes started after it.
+    pub operation_unknown_after_seconds: u64,
+    /// How long, in seconds, a finished change's operation record can still
+    /// be read by its id. Default 1800. Read when the change starts, like
+    /// `operation_unknown_after_seconds`.
+    pub operation_retention_seconds: u64,
     /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
     /// section refuses the whole config rather than resetting to "no
     /// password" (see [`crate::config_auth`] and [`load_config`]). Never
@@ -1089,6 +1129,16 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
     server_bind_settings_changed(prev, next)
         || server_console_settings_changed(prev, next)
         || server_log_viewer_settings_changed(prev, next)
+        || server_log_file_settings_changed(prev, next)
+}
+
+/// True when a config reload changed a setting of `server.log`, which is opened
+/// when a serve starts, in every way of serving.
+pub fn server_log_file_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    prev.log_path != next.log_path
+        || prev.log_max_bytes != next.log_max_bytes
+        || prev.log_keep != next.log_keep
+        || prev.log_compress != next.log_compress
 }
 
 /// True when a config reload changed a `[server]` setting read once, as the
@@ -1123,6 +1173,8 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 ///   change retimes every open tab live.
 /// - `pty_send_timeout_seconds`: read on the server, but read live at the moment a
 ///   terminal connection opens, so the next connection already has the new value.
+/// - `operation_unknown_after_seconds` and `operation_retention_seconds`: read as
+///   each change starts, so the next one already has the new values.
 ///
 /// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
 /// are built once in `build_app` and never resized on reload, and the tab caps are
@@ -2094,6 +2146,10 @@ impl Default for ServerConfig {
             color: "auto".to_string(),
             access_log: true,
             log_viewer_lines: DEFAULT_LOG_VIEWER_LINES,
+            log_path: "server.log".to_string(),
+            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            log_keep: DEFAULT_LOG_KEEP,
+            log_compress: true,
             qr_codes: true,
             serve_while_tui: false,
             control_socket: DEFAULT_CONTROL_SOCKET.to_string(),
@@ -2118,6 +2174,8 @@ impl Default for ServerConfig {
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
+            operation_unknown_after_seconds: DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS,
+            operation_retention_seconds: DEFAULT_OPERATION_RETENTION_SECONDS,
             auth: ServerAuthConfig::default(),
         }
     }

@@ -313,8 +313,8 @@ dux config get ui.theme  # Print one setting
 dux config set ui.theme catppuccin_mocha   # Change one setting; a running dux reloads
 dux config diff          # Show what you've changed from defaults
 dux config diff --raw    # Unified diff against the default config (prints [env])
-dux config reset         # Remove config and logs (keeps agents)
-dux config reset --all   # Full factory reset
+dux config reset         # Remove config, the logs (server log included) and saved remotes (keeps agents)
+dux config reset --all   # Full factory reset; keeps the welcome-seen note, deletes nothing if a program dux started still runs
 dux config regenerate    # Preview a fresh default config
 dux config restore-docs  # Preview re-adding the comments, keeping your values
 ```

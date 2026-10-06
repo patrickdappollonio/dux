@@ -27,18 +27,24 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 
+use dux_core::operations::OperationKind;
 use dux_core::wire::WireCommand;
 
+use crate::engine_actor::OperationTicket;
 use crate::git_routes::resolve_worktree;
-use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
+use crate::rest_common::{
+    OperationQuery, id_within_bound, operation_accepted, scope_from_headers, ticket_accepted,
+    unknown_session,
+};
 use crate::server::AppState;
+use std::sync::Arc;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -93,6 +99,7 @@ struct SetFocusedTabBody {
 async fn create_tab(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     body: Option<Json<CreateTabBody>>,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -102,7 +109,16 @@ async fn create_tab(
         return resp.into_response();
     }
     let provider = body.and_then(|b| b.0.provider);
-    match state.engine.create_agent_tab(id.clone(), provider).await {
+    let ticket = operation
+        .asked()
+        .then(|| OperationTicket::new(OperationKind::TabCreate));
+    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    match state
+        .engine
+        .create_agent_tab(id.clone(), provider, ticket)
+        .await
+    {
+        Ok(_) if let Some(record) = &followed => ticket_accepted(record),
         Ok((tab_id, provider)) => {
             let location = format!("/api/v1/sessions/{id}/tabs/{tab_id}");
             (
@@ -157,28 +173,38 @@ async fn resolve_tab_of_session(
 async fn delete_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
         return *resp;
     }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::CloseAgentTab {
-                session_id: id.clone(),
-                tab_id: tab,
-            },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
+    let command = WireCommand::CloseAgentTab {
+        session_id: id.clone(),
+        tab_id: tab,
+    };
+    let scope = scope_from_headers(&headers, &state.connections);
+    let result = if operation.asked() {
+        state
+            .engine
+            .apply_wire_operation(command, scope, OperationKind::TabClose)
+            .await
+            .map(|(outcome, op)| (outcome, Some(op)))
+    } else {
+        state
+            .engine
+            .apply_wire_scoped(command, scope)
+            .await
+            .map(|outcome| (outcome, None))
+    };
+    match result {
+        Ok((_, Some(op))) => operation_accepted(&op),
         // `Engine::close_tab` detaches the agent the same way `KillSessionPty`
         // does when this was the session's LAST live tab, and returns that
         // in-flight-aware outcome on the wire result. Consume it directly rather
         // than re-deriving from `has_live_process`, which cannot see a launch
         // still in flight for a sibling tab.
-        Ok(outcome) => {
+        Ok((outcome, None)) => {
             let detached = outcome.detached.unwrap_or(true);
             (
                 StatusCode::OK,
@@ -202,11 +228,17 @@ async fn delete_tab(
 async fn start_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
+    Query(operation): Query<OperationQuery>,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
         return *resp;
     }
-    match state.engine.start_agent_tab(tab).await {
+    let ticket = operation
+        .asked()
+        .then(|| OperationTicket::new(OperationKind::TabStart));
+    let followed = ticket.as_ref().map(|ticket| Arc::clone(&ticket.record));
+    match state.engine.start_agent_tab(tab, ticket).await {
+        Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }

@@ -51,6 +51,7 @@ pub mod lockfile;
 pub mod logger;
 pub mod macros;
 pub mod model;
+pub mod operations;
 pub mod palette;
 pub mod poller_status;
 pub mod pr_reference;

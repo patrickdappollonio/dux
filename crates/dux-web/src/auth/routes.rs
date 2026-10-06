@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use dux_core::auth::{MinimumFailure, Password};
+use dux_core::web_sessions::{NewToken, SessionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::Zeroizing;
@@ -26,6 +27,8 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/api/v1/auth/status", get(status))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/cli-login", post(cli_login))
+        .route("/api/v1/auth/cli-logout", post(cli_logout))
         .route("/api/v1/auth/password", post(change_password))
         .route(
             "/api/v1/auth/dismiss-no-auth-warning",
@@ -165,6 +168,9 @@ fn body_limit(max_bytes: u32, fields: usize) -> usize {
 #[derive(Deserialize)]
 struct LoginBody {
     password: String,
+    /// Who is signing in, for the log; only the command line sends one.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// `POST /api/v1/auth/login` with `{password}`.
@@ -173,6 +179,78 @@ async fn login(
     Extension(auth): Extension<RequestAuth>,
     request: Request,
 ) -> Response {
+    let token = match sign_in(&state, &auth, request, SessionKind::Browser).await {
+        SignIn::Token(token, _) => token,
+        SignIn::Refused(refusal) => return refusal,
+    };
+    let a = &auth.0;
+    let secure = cookie::secure(
+        a.snapshot.config.cookie_secure,
+        a.classification.https_serve_route,
+    );
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie::set(a.cookie_port, &token.cookie_value, secure),
+    );
+    response
+}
+
+/// `POST /api/v1/auth/cli-login` with `{password, label}`: the same password
+/// check, slow-down and ban as the browser's login, answering a token for the
+/// `Authorization` header instead of a cookie. It ends only after
+/// `cli_token_idle_days` without use, so there is no fixed expiry to report.
+async fn cli_login(
+    State(state): State<AppState>,
+    Extension(auth): Extension<RequestAuth>,
+    request: Request,
+) -> Response {
+    match sign_in(&state, &auth, request, SessionKind::Cli).await {
+        SignIn::Token(token, label) => {
+            let label: String = label.unwrap_or_default().chars().take(80).collect();
+            dux_core::logger::info(&format!(
+                "[server] the command line signed in{}",
+                if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" as {label:?}")
+                }
+            ));
+            Json(json!({ "token": token.cookie_value, "expires_at": null })).into_response()
+        }
+        SignIn::Refused(refusal) => refusal,
+    }
+}
+
+/// `POST /api/v1/auth/cli-logout`: end the token this request carried. Answers
+/// 204 even when it carried none, because the caller asked for exactly that
+/// outcome.
+async fn cli_logout(
+    State(state): State<AppState>,
+    Extension(auth): Extension<RequestAuth>,
+) -> Response {
+    for digest in &auth.0.bearer {
+        state.auth.end_session(*digest).await;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// How a sign-in ended: a session's token (and who asked for it), or the
+/// refusal to answer with.
+enum SignIn {
+    Token(NewToken, Option<String>),
+    Refused(Response),
+}
+
+/// The password check every sign-in shares: reads the body, checks the
+/// password under the slow-down and ban, and starts a session of `kind`. A
+/// refusal is the finished response.
+async fn sign_in(
+    state: &AppState,
+    auth: &RequestAuth,
+    request: Request,
+    kind: SessionKind,
+) -> SignIn {
     let snapshot = state.auth.snapshot();
     let config = &snapshot.config;
     let Some(raw) = bounded_body(
@@ -181,60 +259,58 @@ async fn login(
     )
     .await
     else {
-        return too_long(config.max_password_bytes);
+        return SignIn::Refused(too_long(config.max_password_bytes));
     };
     let Ok(body) = serde_json::from_slice::<LoginBody>(&raw) else {
-        return bad_request("The sign-in request must be JSON with a password field.");
+        return SignIn::Refused(bad_request(
+            "The sign-in request must be JSON with a password field.",
+        ));
     };
     drop(raw);
     let password = Password::new(body.password);
     if password.byte_len() > config.max_password_bytes as usize {
-        return too_long(config.max_password_bytes);
+        return SignIn::Refused(too_long(config.max_password_bytes));
     }
     if !snapshot.has_password() {
-        return refusal(
-            StatusCode::CONFLICT,
-            json!({
-                "error": "no_password",
-                "message": "No password is set on this dux, so there is nothing to sign in to.",
-            }),
-        );
+        return SignIn::Refused(no_password());
     }
     let a = &auth.0;
     match state.auth.verify(&a.classification, password).await {
         Verify::Right { generation, weak } => {
             state.auth.note_strength(&generation, weak);
-            let token = match state.auth.issue_session(&a.facts, &generation).await {
-                Ok(super::Issued::Session(token)) => token,
-                Ok(super::Issued::Blocked) => return super::middleware::blocked(),
-                Ok(super::Issued::Stale) => return password_changed_meanwhile(),
-                Err(error) => return server_error(format!("Could not start a session: {error:#}")),
-            };
-            let secure = cookie::secure(config.cookie_secure, a.classification.https_serve_route);
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                cookie::set(a.cookie_port, &token.cookie_value, secure),
-            );
-            response
+            match state.auth.issue_session(&a.facts, &generation, kind).await {
+                Ok(super::Issued::Session(token)) => SignIn::Token(token, body.label),
+                Ok(super::Issued::Blocked) => SignIn::Refused(super::middleware::blocked()),
+                Ok(super::Issued::Stale) => SignIn::Refused(password_changed_meanwhile()),
+                Err(error) => SignIn::Refused(server_error(format!(
+                    "Could not start a session: {error:#}"
+                ))),
+            }
         }
-        Verify::Wrong => refusal(
+        Verify::Wrong => SignIn::Refused(refusal(
             StatusCode::UNAUTHORIZED,
             json!({ "error": "wrong_password", "message": "That password is not right." }),
-        ),
-        Verify::Blocked => super::middleware::blocked(),
-        Verify::Wait(limited) => rate_limited(limited),
-        Verify::Busy => busy(),
-        Verify::NoPassword => refusal(
-            StatusCode::CONFLICT,
-            json!({
-                "error": "no_password",
-                "message": "No password is set on this dux, so there is nothing to sign in to.",
-            }),
-        ),
-        Verify::Stale => password_changed_meanwhile(),
-        Verify::Failed(error) => server_error(format!("Could not check the password: {error}")),
+        )),
+        Verify::Blocked => SignIn::Refused(super::middleware::blocked()),
+        Verify::Wait(limited) => SignIn::Refused(rate_limited(limited)),
+        Verify::Busy => SignIn::Refused(busy()),
+        Verify::NoPassword => SignIn::Refused(no_password()),
+        Verify::Stale => SignIn::Refused(password_changed_meanwhile()),
+        Verify::Failed(error) => SignIn::Refused(server_error(format!(
+            "Could not check the password: {error}"
+        ))),
     }
+}
+
+/// The answer to a sign-in on a dux with no password.
+fn no_password() -> Response {
+    refusal(
+        StatusCode::CONFLICT,
+        json!({
+            "error": "no_password",
+            "message": "No password is set on this dux, so there is nothing to sign in to.",
+        }),
+    )
 }
 
 /// The answer to a sign-in whose password changed while it was checked.

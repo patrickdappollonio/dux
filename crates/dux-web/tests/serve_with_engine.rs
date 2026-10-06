@@ -562,6 +562,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
 async fn the_flip_logs_what_dux_server_prints() {
     let (mut engine, _tmp) = build_engine();
     engine.config.server.access_log = true;
+    let server_log_path = engine.paths.root.join("server.log");
     let (terminal_id, _label) = engine
         .create_companion_terminal("s1", 24, 80)
         .expect("create terminal");
@@ -661,6 +662,50 @@ async fn the_flip_logs_what_dux_server_prints() {
     assert!(
         stamped("\u{279c} Requesting 0 agents and 1 terminal to gracefully shut down"),
         "the shutdown progress:\n{joined}"
+    );
+
+    // `server.log` holds the same lines in the plain spelling `dux server`
+    // prints with color off.
+    let file = std::fs::read_to_string(&server_log_path).expect("server.log");
+    // Each line leads with the full date and time, in `dux.log`'s format.
+    let file_lines: Vec<&str> = file
+        .lines()
+        .map(|line| {
+            let (stamp, rest) = line.split_once(' ').expect("a dated line");
+            chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+            rest
+        })
+        .collect();
+    let file_stamped = |rest: &str| {
+        file_lines
+            .iter()
+            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
+    };
+    assert!(
+        file_stamped("warn Tailscale not detected (test)"),
+        "the pre-flight warning opens the file:\n{file}"
+    );
+    assert!(
+        file_lines
+            .iter()
+            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
+        "the banner header:\n{file}"
+    );
+    assert!(
+        file_lines.contains(&format!("  -> Local (loopback): http://{addr}").as_str()),
+        "the banner names the URL:\n{file}"
+    );
+    assert!(
+        file_stamped("GET /api/v1/build 200 "),
+        "the access log reaches the file:\n{file}"
+    );
+    assert!(
+        file_stamped("info client connected from 127.0.0.1"),
+        "the client connecting:\n{file}"
+    );
+    assert!(
+        file_stamped("info Requesting 0 agents and 1 terminal to gracefully shut down"),
+        "the shutdown progress:\n{file}"
     );
 }
 

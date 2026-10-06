@@ -2024,6 +2024,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "log_viewer_lines",
         config.server.log_viewer_lines,
     );
+    patch_table_str(doc, "server", "log_path", &config.server.log_path);
+    patch_table_u64(doc, "server", "log_max_bytes", config.server.log_max_bytes);
+    patch_table_u32(doc, "server", "log_keep", config.server.log_keep);
+    patch_table_bool(doc, "server", "log_compress", config.server.log_compress);
     patch_table_bool(doc, "server", "qr_codes", config.server.qr_codes);
     patch_table_bool(
         doc,
@@ -2142,6 +2146,18 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "server",
         "pty_send_timeout_seconds",
         config.server.pty_send_timeout_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "operation_unknown_after_seconds",
+        config.server.operation_unknown_after_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "operation_retention_seconds",
+        config.server.operation_retention_seconds as usize,
     );
     patch_table_usize(
         doc,
@@ -4693,6 +4709,10 @@ unknown_key = \"untouched\"
         config.server.max_websocket_terminal_connections = 44;
         config.server.title = "dux #1".to_string();
         config.server.favicon = "violet".to_string();
+        config.server.log_path = "logs/server-events.log".to_string();
+        config.server.log_max_bytes = 2048;
+        config.server.log_keep = 2;
+        config.server.log_compress = false;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
@@ -4713,6 +4733,10 @@ unknown_key = \"untouched\"
         assert_eq!(parsed.server.max_websocket_terminal_connections, 44);
         assert_eq!(parsed.server.title, "dux #1");
         assert_eq!(parsed.server.favicon, "violet");
+        assert_eq!(parsed.server.log_path, "logs/server-events.log");
+        assert_eq!(parsed.server.log_max_bytes, 2048);
+        assert_eq!(parsed.server.log_keep, 2);
+        assert!(!parsed.server.log_compress);
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),

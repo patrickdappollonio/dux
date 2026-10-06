@@ -736,6 +736,9 @@ pub enum WorkerEvent {
     BackgroundServerPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        /// What the pre-flight learned, carried to the serve's log so it opens
+        /// with the same lines `dux server` prints.
+        startup: crate::serve_log::StartupNotes,
     },
     /// A live `[server] tailscale` change the BACKGROUND web server carried out.
     ///

@@ -190,13 +190,25 @@ pub fn session_processes_where(
 /// to [`KILL_SETTLE`] more. Answers the ones still running after that.
 /// Blocking: a worker thread's call.
 pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
+    end_exactly_with(rows, grace, &|| Ok(read_process_table())).unwrap_or_default()
+}
+
+/// [`end_exactly`] with the process table handed in, answering an error when
+/// the table cannot be read instead of taking an unreadable table for a world
+/// where nothing runs. A factory reset reads it with
+/// [`read_process_table_strict`].
+pub fn end_exactly_with(
+    rows: &[ProcRow],
+    grace: Duration,
+    read_table: &dyn Fn() -> Result<Vec<ProcRow>, String>,
+) -> Result<Vec<ProcRow>, String> {
     let wanted: HashSet<ProcessIdentity> = rows.iter().map(ProcRow::identity).collect();
-    let alive = || -> Vec<ProcRow> {
-        read_process_table()
+    let alive = || -> Result<Vec<ProcRow>, String> {
+        Ok(read_table()?
             .into_iter()
             // A zombie has exited: nothing of it is running any more.
             .filter(|row| !row.exited && wanted.contains(&row.identity()))
-            .collect()
+            .collect())
     };
     let signal = |pid: u32, signal: rustix::process::Signal| {
         if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
@@ -204,19 +216,19 @@ pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
         }
     };
     let start = Instant::now();
-    for row in alive() {
+    for row in alive()? {
         signal(row.pid, rustix::process::Signal::TERM);
         signal(row.pid, rustix::process::Signal::HUP);
     }
     let mut killed = false;
     loop {
-        let left = alive();
+        let left = alive()?;
         if left.is_empty() {
-            return left;
+            return Ok(left);
         }
         let elapsed = start.elapsed();
         if elapsed >= grace + KILL_SETTLE {
-            return left;
+            return Ok(left);
         }
         if elapsed >= grace && !killed {
             for row in &left {
@@ -695,6 +707,142 @@ pub fn read_process_table() -> Vec<ProcRow> {
                 ),
             })
             .collect()
+    }
+}
+
+/// [`read_process_table`] that says so when it cannot read the table, for a
+/// caller that must not mistake an unread table for no processes at all (a
+/// factory reset). A process that vanishes while the table is read is normal;
+/// anything else that cannot be read is an error.
+pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
+    crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
+    #[cfg(target_os = "linux")]
+    {
+        let gone = rustix::io::Errno::SRCH.raw_os_error();
+        let entries = std::fs::read_dir("/proc")
+            .map_err(|error| format!("/proc could not be listed: {error}"))?;
+        let mut rows = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("/proc could not be listed: {error}"))?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => rows.push(
+                    parse_linux_stat(pid, &stat)
+                        .ok_or_else(|| format!("/proc/{pid}/stat could not be understood"))?,
+                ),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(gone) => {}
+                Err(error) => return Err(format!("/proc/{pid}/stat could not be read: {error}")),
+            }
+        }
+        non_empty_table(rows)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        non_empty_table(read_process_table())
+    }
+}
+
+/// dux is always in the table, so an empty one was not read.
+fn non_empty_table(rows: Vec<ProcRow>) -> Result<Vec<ProcRow>, String> {
+    if rows.is_empty() {
+        Err("the process list came back empty".to_string())
+    } else {
+        Ok(rows)
+    }
+}
+
+/// A process of this user working in one of the folders handed to
+/// [`occupants_of`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Occupant {
+    pub pid: u32,
+    pub command: String,
+    pub cwd: std::path::PathBuf,
+}
+
+/// Every process of the current user in `table` (this one excluded) whose
+/// working directory is in or under one of `folders`. Another user's process
+/// is skipped, and so is a process of this user the system will not let dux
+/// inspect (a service that dropped its privileges, a systemd user manager
+/// among them): its directory cannot be read, and refusing on every such
+/// process would make the answer always no. Blocking.
+pub fn occupants_of(
+    table: &[ProcRow],
+    folders: &[std::path::PathBuf],
+) -> Result<Vec<Occupant>, String> {
+    let me = rustix::process::geteuid().as_raw();
+    let mut mine: Vec<&ProcRow> = Vec::new();
+    for row in table
+        .iter()
+        .filter(|row| !row.exited && row.pid != std::process::id())
+    {
+        if process_uid(row.pid)? == Some(me) {
+            mine.push(row);
+        }
+    }
+    let pids: Vec<u32> = mine.iter().map(|row| row.pid).collect();
+    let report = crate::file_drop::process_cwds(&pids);
+    Ok(mine
+        .into_iter()
+        .filter_map(|row| {
+            let cwd = report.found.get(&row.pid)?;
+            folders
+                .iter()
+                .any(|folder| crate::worktree_ops::folder_contains(folder, cwd))
+                .then(|| Occupant {
+                    pid: row.pid,
+                    command: row.name.clone(),
+                    cwd: cwd.clone(),
+                })
+        })
+        .collect())
+}
+
+/// Who owns a process: `None` when it is gone.
+fn process_uid(pid: u32) -> Result<Option<u32>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(format!("/proc/{pid}")) {
+            Ok(meta) => Ok(Some(meta.uid())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("who owns process {pid} could not be read: {error}")),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: zeroed is a valid value for this plain-data struct.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let Ok(raw) = libc::c_int::try_from(pid) else {
+            return Ok(None);
+        };
+        // SAFETY: the buffer is exactly the struct the flavor fills, and its
+        // size is passed with it.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                raw,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast::<libc::c_void>(),
+                size as libc::c_int,
+            )
+        };
+        if usize::try_from(written).ok() == Some(size) {
+            Ok(Some(info.pbi_uid))
+        } else if crate::file_drop::process_can_answer(pid) {
+            Err(format!("who owns process {pid} could not be read"))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -3080,6 +3228,80 @@ mod tests {
             "flush reported the record saved ({saved}) while nothing reached the database: \
              {stored:?}"
         );
+    }
+
+    fn proc_row(pid: u32) -> ProcRow {
+        ProcRow {
+            pid,
+            ppid: None,
+            sid: Some(pid),
+            start_time: 1,
+            name: "x".to_string(),
+            exited: false,
+        }
+    }
+
+    #[test]
+    fn a_process_table_that_cannot_be_read_is_not_taken_for_nothing_running() {
+        let rows = [proc_row(4242)];
+        assert!(end_exactly_with(&rows, Duration::ZERO, &|| Err("no /proc".to_string())).is_err());
+        assert!(non_empty_table(Vec::new()).is_err());
+        assert_eq!(non_empty_table(vec![proc_row(1)]).unwrap().len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unrecorded_process_working_in_a_folder_is_found_there_and_not_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inside = tmp.path().join("in");
+        let elsewhere = tmp.path().join("out");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .current_dir(inside.join(""))
+            .spawn()
+            .unwrap();
+        let table = read_process_table_strict().unwrap();
+        let found = occupants_of(&table, std::slice::from_ref(&inside)).unwrap();
+        let missed = occupants_of(&table, &[elsewhere]).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|who| who.pid == child.id() && who.command == "sleep"),
+            "{found:?}"
+        );
+        assert!(missed.iter().all(|who| who.pid != child.id()));
+    }
+
+    #[test]
+    fn the_strict_registry_loader_errors_on_a_body_that_does_not_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let store = crate::storage::SessionStore::open(&db).unwrap();
+        assert!(store.load_process_registry_strict().unwrap().is_empty());
+        store
+            .replace_process_registry(&[StoredSession {
+                owner: Some("a1".to_string()),
+                session: session(4242),
+                folder: tmp.path().to_path_buf(),
+                standalone: false,
+                survivors: Vec::new(),
+                label: None,
+            }])
+            .unwrap();
+        assert_eq!(store.load_process_registry_strict().unwrap().len(), 1);
+
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute(
+            "update process_registry set body = 'not json' where id = 1",
+            [],
+        )
+        .unwrap();
+        assert!(store.load_process_registry_strict().is_err());
+        assert!(store.load_process_registry().unwrap().is_empty());
     }
 
     /// review9: the persisted registry entry carries the session's label, so a

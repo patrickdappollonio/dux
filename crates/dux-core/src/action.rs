@@ -178,6 +178,9 @@ pub enum Action {
     StartBackgroundServer,
     /// Palette-only: stop the background web server, leaving every agent running.
     StopBackgroundServer,
+    /// Palette-only: open the server log viewer full-screen over the terminal UI
+    /// while it serves in the background.
+    ViewServerLog,
     /// Palette-only: open the `[server] tailscale` picker. The web counterpart is
     /// the Preferences dialog's Tailscale row.
     SetTailscaleMode,
@@ -338,6 +341,7 @@ impl Action {
             Action::StartWebServer => "start_web_server",
             Action::StartBackgroundServer => "start_background_server",
             Action::StopBackgroundServer => "stop_background_server",
+            Action::ViewServerLog => "view_server_log",
             Action::SetTailscaleMode => "set_tailscale_mode",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::ToggleTabReachesAgent => "toggle_tab_reaches_agent",
@@ -578,6 +582,9 @@ impl Action {
             Action::StopBackgroundServer => {
                 "Stop serving the web UI in the background; agents keep running."
             }
+            Action::ViewServerLog => {
+                "Show the server's log full-screen: the last lines of server.log, then live."
+            }
             Action::SetTailscaleMode => {
                 "Choose whether dux binds your Tailscale address: auto, yes, or no."
             }
@@ -742,6 +749,7 @@ impl Action {
             | Action::StartWebServer
             | Action::StartBackgroundServer
             | Action::StopBackgroundServer
+            | Action::ViewServerLog
             | Action::SetTailscaleMode
             | Action::ToggleAlwaysShowTabs
             | Action::ToggleTabReachesAgent

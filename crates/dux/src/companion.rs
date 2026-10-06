@@ -203,6 +203,7 @@ impl BackgroundServeCompanion for WebCompanion {
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
         claim_before_serving: bool,
+        startup: dux_core::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String> {
         if self.is_serving() {
             return Err("The web UI is already serving in the background.".to_string());
@@ -213,7 +214,7 @@ impl BackgroundServeCompanion for WebCompanion {
         // adoption problem rather than a busy port; either way nothing has been
         // taken away from the terminal UI, and dropping `listeners` with the error
         // releases the addresses again.
-        match BackgroundServer::start(engine, listeners, urls, claim_before_serving) {
+        match BackgroundServer::start(engine, listeners, urls, claim_before_serving, startup) {
             Ok(server) => {
                 let urls = server.urls();
                 self.server = Some(server);
@@ -224,6 +225,10 @@ impl BackgroundServeCompanion for WebCompanion {
                 Err(format!("Could not start the web server: {err:#}"))
             }
         }
+    }
+
+    fn server_log_path(&self) -> Option<std::path::PathBuf> {
+        self.server.as_ref().and_then(|s| s.server_log_path())
     }
 
     fn ownership(&self) -> Option<TuiOwnership> {

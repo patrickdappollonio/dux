@@ -4782,6 +4782,9 @@ mod tests {
             pending_web_launch_ops: std::collections::HashMap::new(),
             live_status_keys: Default::default(),
             last_created_op_id: None,
+            operations: Default::default(),
+            operation_in_dispatch: None,
+            deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };
@@ -4829,6 +4832,7 @@ mod tests {
             )),
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
+            server_log_viewer: None,
             status: crate::statusline::KeyedStatusController::with_clear_after(
                 std::time::Duration::ZERO,
             )
@@ -5130,6 +5134,9 @@ mod tests {
             pending_web_launch_ops: std::collections::HashMap::new(),
             live_status_keys: Default::default(),
             last_created_op_id: None,
+            operations: Default::default(),
+            operation_in_dispatch: None,
+            deferred_operations: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
             removal_coordination: Default::default(),
         };

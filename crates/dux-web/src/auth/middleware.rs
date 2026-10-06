@@ -46,15 +46,16 @@ const PUBLIC_FILES: &[&str] = &[
 ];
 
 /// Whether a request is to a declared public route: the files above and
-/// `/assets/*` by GET or HEAD, the auth status by GET or HEAD, and the login by
-/// POST. Any other method on those paths is an ordinary protected request.
+/// `/assets/*` by GET or HEAD, the auth status by GET or HEAD, and the two
+/// logins (the browser's and the command line's) by POST. Any other method on those paths is an ordinary protected request.
 pub(crate) fn is_public(method: &Method, path: &str) -> bool {
     let read = method == Method::GET || method == Method::HEAD;
     if read && (PUBLIC_FILES.contains(&path) || is_asset(path)) {
         return true;
     }
     (read && path == "/api/v1/auth/status")
-        || (method == Method::POST && path == "/api/v1/auth/login")
+        || (method == Method::POST
+            && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/cli-login"))
 }
 
 /// A path under `/assets/` with nothing in it that could step outside.
@@ -235,8 +236,11 @@ mod tests {
         assert!(!is_public(&Method::POST, "/api/v1/auth/status"));
         assert!(is_public(&Method::POST, "/api/v1/auth/login"));
         assert!(!is_public(&Method::GET, "/api/v1/auth/login"));
+        assert!(is_public(&Method::POST, "/api/v1/auth/cli-login"));
+        assert!(!is_public(&Method::GET, "/api/v1/auth/cli-login"));
         for protected in [
             "/api/v1/auth/logout",
+            "/api/v1/auth/cli-logout",
             "/api/v1/auth/password",
             "/api/v1/auth/dismiss-no-auth-warning",
             "/api/v1/projects",

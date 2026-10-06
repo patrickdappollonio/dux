@@ -51,6 +51,9 @@ pub struct BackgroundServer {
     /// connection registry. An atomic because the terminal UI reads it once per
     /// rendered frame from the thread that also services this serve.
     connections: Arc<AtomicUsize>,
+    /// The file this serve's console writes, which a reload of `[server]
+    /// log_path` does not move for as long as this serve runs.
+    log_path: Option<std::path::PathBuf>,
 }
 
 /// How long a hand-over waits for the control socket's accepted requests to be
@@ -78,11 +81,36 @@ impl BackgroundServer {
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
         claim_before_serving: bool,
+        startup: dux_core::serve_log::StartupNotes,
     ) -> Result<Self> {
         crate::warn_if_ui_not_built();
-        // Writes nowhere: the terminal UI owns this terminal, and nothing on this
-        // path reads a captured activity ring.
-        let console = Console::noop();
+        // Prints nothing over the terminal UI's frame, but keeps `server.log`:
+        // the lines `dux server` prints, written to the file, access lines
+        // included when `[server] access_log` is on.
+        let server_log = crate::open_server_log(&engine.config, &engine.paths);
+        let log_path = server_log.as_ref().map(|log| log.path().to_path_buf());
+        let console = match server_log {
+            Some(log) => Console::server_log_only(log),
+            None => Console::noop(),
+        };
+        // What `dux server` opens its log with: the warnings raised before
+        // binding, then the banner with the version and what actually bound.
+        for warning in &startup.warnings {
+            console.warn(warning);
+        }
+        let legs: Vec<(std::net::SocketAddr, bool)> = listeners
+            .iter()
+            .filter_map(|listener| listener.local_addr().ok())
+            .map(|addr| (addr, addr.ip().is_loopback()))
+            .collect();
+        console.banner(&crate::serve_banner(
+            dux_core::display_version(),
+            &legs,
+            &startup.bind_warnings,
+            engine.config.server.tailscale_mode(),
+            startup.tailscale_detected,
+            &engine.config.server.auth,
+        ));
 
         // The terminal UI's `App::run` already spawned the global background
         // workers and is still running; spawning them here would double them.
@@ -121,9 +149,9 @@ impl BackgroundServer {
             crate::control_socket::listener_of(engine),
             &engine.config,
             console,
-            // The access log would print to a console that writes nowhere, and it
-            // is never wanted over a terminal UI's frame regardless.
-            false,
+            // Gated by the console too: with no `server.log` to write, the console
+            // records nothing and a request line costs nothing.
+            engine.config.server.access_log,
             SignalPolicy::Inherited,
             crate::BackgroundHooks {
                 ownership_publisher: Some(Arc::clone(&publisher)),
@@ -139,6 +167,7 @@ impl BackgroundServer {
             ownership: Some(ownership),
             publisher,
             connections,
+            log_path,
         };
         server.publish_ownership_events(&seeded_claims);
         Ok(server)
@@ -165,6 +194,7 @@ impl BackgroundServer {
             ownership: None,
             publisher: Arc::new(std::sync::OnceLock::new()),
             connections: Arc::new(AtomicUsize::new(0)),
+            log_path: None,
         }))
     }
 
@@ -185,6 +215,11 @@ impl BackgroundServer {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         self.stop()
+    }
+
+    /// The log file this serve opened, `None` when it could not open one.
+    pub fn server_log_path(&self) -> Option<std::path::PathBuf> {
+        self.log_path.clone()
     }
 
     /// How many browser tabs are connected to this serve right now. Connections,
@@ -360,6 +395,11 @@ mod tests {
     /// the two the workspace has are an async one and one this crate does not
     /// depend on, and a bare GET with no body is not worth either.
     fn healthz(addr: std::net::SocketAddr) -> Result<String, String> {
+        get(addr, "/healthz")
+    }
+
+    /// The status line of a bare GET of `path`.
+    fn get(addr: std::net::SocketAddr, path: &str) -> Result<String, String> {
         use std::io::{Read, Write};
 
         let timeout = std::time::Duration::from_secs(3);
@@ -370,7 +410,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
         write!(
             stream,
-            "GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
         )
         .map_err(|e| format!("write failed: {e}"))?;
         let mut response = String::new();
@@ -448,6 +488,7 @@ mod tests {
             vec![listener],
             vec!["http://stale.example:1".to_string()],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("the serve starts");
 
@@ -472,7 +513,7 @@ mod tests {
     /// serves it is answered by whichever core comes next, on the same socket.
     #[test]
     fn a_toggle_cycle_stops_serving_and_starts_a_fresh_app() {
-        let (mut engine, _tmp) = engine_in_tempdir();
+        let (mut engine, tmp) = engine_in_tempdir();
         // Not a test about Tailscale: on any other mode every request waits on
         // the first Funnel check, which would consult this machine's real CLI.
         engine.config.server.tailscale = "no".to_string();
@@ -503,6 +544,7 @@ mod tests {
         assert!(answer.contains("\"projects\""), "{answer}");
         assert!(plain.hand_over(&mut engine).is_none());
         let waiting = request_over_socket(&socket, "/api/v1/workspace");
+        engine.config.server.access_log = true;
 
         let (listener, first_addr) = loopback_listener();
         let mut server = BackgroundServer::start(
@@ -510,6 +552,10 @@ mod tests {
             vec![listener],
             vec![format!("http://{first_addr}")],
             false,
+            dux_core::serve_log::StartupNotes {
+                warnings: vec!["Tailscale not detected (test).".to_string()],
+                ..Default::default()
+            },
         )
         .expect("the first serve starts");
         let answer = serviced_until_answered(&mut server, &mut engine, waiting);
@@ -522,6 +568,12 @@ mod tests {
         assert!(
             status.contains("200"),
             "a started background server must answer on its own address, got {status:?}"
+        );
+        get(first_addr, "/api/v1/build").expect("the first serve answers a page request");
+        assert_eq!(
+            server.server_log_path(),
+            Some(tmp.path().join("server.log")),
+            "the serve says which file it opened"
         );
         assert!(
             server.hand_over(&mut engine).is_none(),
@@ -541,12 +593,14 @@ mod tests {
         assert!(plain.hand_over(&mut engine).is_none());
 
         // Toggling back on builds a fresh app rather than reviving the old one.
+        engine.config.server.access_log = false;
         let (listener, second_addr) = loopback_listener();
         let server = BackgroundServer::start(
             &mut engine,
             vec![listener],
             vec![format!("http://{second_addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("the second serve starts");
         let status = healthz(second_addr).expect("the second serve answers");
@@ -554,7 +608,45 @@ mod tests {
             status.contains("200"),
             "toggling back on must serve again, got {status:?}"
         );
+        get(second_addr, "/api/v1/build").expect("the second serve answers a page request");
         assert!(server.stop().is_none());
+
+        // Serving in the background prints nothing over the terminal UI, but the
+        // file keeps the request lines of the serve that had `access_log` on, and
+        // none of the one that had it off, and never the health probe's.
+        let log = std::fs::read_to_string(tmp.path().join("server.log")).expect("server.log");
+        let page_requests: Vec<&str> = log
+            .lines()
+            .filter(|line| {
+                let (stamp, rest) = line.split_once(' ').expect("a dated line");
+                chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+                rest.len() > 9 && rest[9..].starts_with("GET /api/v1/build 200 ")
+            })
+            .collect();
+        assert_eq!(page_requests.len(), 1, "{log}");
+        assert!(!log.contains("/healthz"), "{log}");
+        // Starting writes what `dux server` opens its log with: the warnings
+        // raised before binding, then the banner with the version and addresses.
+        let lines: Vec<&str> = log
+            .lines()
+            .map(|line| line.split_once(' ').expect("a dated line").1)
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.len() > 9 && l[9..] == *"warn Tailscale not detected (test)."),
+            "{log}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
+            "{log}"
+        );
+        assert!(
+            lines.contains(&format!("  -> Local (loopback): http://{first_addr}").as_str()),
+            "{log}"
+        );
     }
 
     /// The teardown flag must be set before anything waits on the runtime.
@@ -572,6 +664,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         let flag = std::sync::Arc::clone(&server.shutdown_flag);
@@ -598,6 +691,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         assert!(
@@ -624,6 +718,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         assert!(
@@ -646,6 +741,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("first serve");
         let first = crate::pty_owners::PtySizeOwners::default().next_conn_id();
@@ -657,6 +753,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             false,
+            dux_core::serve_log::StartupNotes::default(),
         )
         .expect("second serve");
         let second = crate::pty_owners::PtySizeOwners::default().next_conn_id();

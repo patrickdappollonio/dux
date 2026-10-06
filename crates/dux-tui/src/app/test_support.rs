@@ -227,6 +227,9 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_web_launch_ops: std::collections::HashMap::new(),
         live_status_keys: Default::default(),
         last_created_op_id: None,
+        operations: Default::default(),
+        operation_in_dispatch: None,
+        deferred_operations: Vec::new(),
         created_session_by_op: std::collections::HashMap::new(),
         removal_coordination: Default::default(),
     };
@@ -273,6 +276,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         )),
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
+        server_log_viewer: None,
         // The production default from `ui.status_clear_seconds`, deliberately
         // NOT zero: zero switches the status line out of its queue and into
         // most-recent-wins, so a test app built that way exercises a path almost

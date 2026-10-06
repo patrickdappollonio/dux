@@ -631,76 +631,16 @@ impl ServerStatusScreen {
                     frame.render_widget(header_para, chunks[0]);
 
                     // ── Log panel (rounded, themed) ─────────────────────────────
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(theme.overlay_border))
-                        .style(Style::default().bg(theme.app_bg))
-                        .padding(Padding::horizontal(1))
-                        .title(Line::from(Span::styled(
-                            " Log ",
-                            Style::default()
-                                .fg(theme.title_focused)
-                                .add_modifier(Modifier::BOLD),
-                        )))
-                        .title(
-                            Line::from(Span::styled(
-                                format!(" {connections} connected "),
-                                Style::default().fg(theme.provider_label_fg),
-                            ))
-                            .right_aligned(),
-                        );
-                    let content = block.inner(chunks[1]);
-                    view.set_width(usize::from(content.width).max(1), theme);
-                    let panel_rows = usize::from(content.height);
-                    let sticky = view.pinned_sticks(panel_rows);
-                    let pinned_rows = if sticky { view.pinned_rows.len() } else { 0 };
-                    let viewport = panel_rows.saturating_sub(pinned_rows);
-                    let total = view.scroll_total(sticky);
-                    let end_label = bindings
-                        .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
-                        .into_iter()
-                        .next();
-                    let (start, note) =
-                        place_log(scroll, viewport, total, end_label.as_deref(), |end| {
-                            view.lines_below(sticky, end)
-                        });
-                    let block = match note {
-                        Some(note) => block.title_bottom(
-                            Line::from(Span::styled(
-                                format!(" {note} "),
-                                Style::default().fg(theme.title_focused),
-                            ))
-                            .right_aligned(),
-                        ),
-                        None => block,
-                    };
-                    frame.render_widget(block, chunks[1]);
-                    let pinned_area = Rect {
-                        height: pinned_rows as u16,
-                        ..content
-                    };
-                    frame.render_widget(Paragraph::new(view.pinned_rows.clone()), pinned_area);
-                    let scroll_area = Rect {
-                        y: content.y + pinned_rows as u16,
-                        height: viewport as u16,
-                        ..content
-                    };
-                    let end = (start + viewport).min(total);
-                    frame.render_widget(
-                        Paragraph::new(view.scroll_window(sticky, start, end)),
-                        scroll_area,
-                    );
-                    render_scroll_indicator(
+                    measured = draw_log_panel(
                         frame,
                         chunks[1],
-                        scroll_area,
-                        start,
-                        viewport,
-                        total,
                         theme,
+                        bindings,
+                        view,
+                        scroll,
+                        "Log",
+                        format!(" {connections} connected "),
                     );
-                    measured = (viewport, sticky);
 
                     // ── Footer hints (centered) ─────────────────────────────────
                     let footer_para = Paragraph::new(footer)
@@ -821,6 +761,86 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
             Err(err.into())
         }
     }
+}
+
+/// Draw the rounded, themed log panel in `area`: the pinned startup rows on top
+/// while they fit, the scrolling rows below, the scroll indicator, and the note
+/// on the bottom border while scrolled back. Returns the scrolling area's height
+/// and whether the startup stuck on top, which the caller keeps to size a page
+/// between draws. Shared by the flip's status screen and the server log viewer,
+/// so the two draw one panel.
+#[allow(clippy::too_many_arguments)]
+fn draw_log_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    theme: &Theme,
+    bindings: &RuntimeBindings,
+    view: &mut LogView,
+    scroll: &mut LogScroll,
+    title: &str,
+    right_title: String,
+) -> (usize, bool) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.overlay_border))
+        .style(Style::default().bg(theme.app_bg))
+        .padding(Padding::horizontal(1))
+        .title(Line::from(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .title(
+            Line::from(Span::styled(
+                right_title,
+                Style::default().fg(theme.provider_label_fg),
+            ))
+            .right_aligned(),
+        );
+    let content = block.inner(area);
+    view.set_width(usize::from(content.width).max(1), theme);
+    let panel_rows = usize::from(content.height);
+    let sticky = view.pinned_sticks(panel_rows);
+    let pinned_rows = if sticky { view.pinned_rows.len() } else { 0 };
+    let viewport = panel_rows.saturating_sub(pinned_rows);
+    let total = view.scroll_total(sticky);
+    let end_label = bindings
+        .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
+        .into_iter()
+        .next();
+    let (start, note) = place_log(scroll, viewport, total, end_label.as_deref(), |end| {
+        view.lines_below(sticky, end)
+    });
+    let block = match note {
+        Some(note) => block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {note} "),
+                Style::default().fg(theme.title_focused),
+            ))
+            .right_aligned(),
+        ),
+        None => block,
+    };
+    frame.render_widget(block, area);
+    let pinned_area = Rect {
+        height: pinned_rows as u16,
+        ..content
+    };
+    frame.render_widget(Paragraph::new(view.pinned_rows.clone()), pinned_area);
+    let scroll_area = Rect {
+        y: content.y + pinned_rows as u16,
+        height: viewport as u16,
+        ..content
+    };
+    let end = (start + viewport).min(total);
+    frame.render_widget(
+        Paragraph::new(view.scroll_window(sticky, start, end)),
+        scroll_area,
+    );
+    render_scroll_indicator(frame, area, scroll_area, start, viewport, total, theme);
+    (viewport, sticky)
 }
 
 /// Rendered display width of a header line in columns.
@@ -1110,6 +1130,354 @@ fn wrapped_log_rows(lines: &[LogLine], theme: &Theme, width: usize) -> Vec<Line<
     wrap_styled_lines(&drawn, width)
 }
 
+// ---------------------------------------------------------------------------
+// The server log viewer
+// ---------------------------------------------------------------------------
+
+/// How often the reader thread looks at `server.log` for new lines. Wall-clock,
+/// and short enough that a line reads as live without the thread spinning.
+const FOLLOW_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How much of the file one backward read takes while looking for the last
+/// lines.
+const TAIL_CHUNK: u64 = 64 * 1024;
+
+/// Reads `server.log` from where it left off: first the last lines, then
+/// whatever was appended. It keeps the file it is reading open, so when a
+/// rotation moves that file away it finishes the old file's remaining bytes
+/// first and only then switches to the file the name now means, starting it
+/// from its first line. Two rotations inside one poll (over 10 MiB written in
+/// 200 ms at the default size) lose the file in between; that is accepted.
+struct FileFollower {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+    position: u64,
+    /// The bytes of a line the writer has not finished.
+    partial: Vec<u8>,
+}
+
+fn identity_of(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+impl FileFollower {
+    /// Open at the end of the file's last `last` lines. A file that does not
+    /// exist yet is followed from its first byte once it does.
+    fn start(path: std::path::PathBuf, last: usize) -> (Self, Vec<String>) {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut follower = Self {
+            path,
+            file: None,
+            position: 0,
+            partial: Vec::new(),
+        };
+        let Ok(mut file) = std::fs::File::open(&follower.path) else {
+            return (follower, Vec::new());
+        };
+        let Ok(meta) = file.metadata() else {
+            return (follower, Vec::new());
+        };
+        let length = meta.len();
+        let mut start = length;
+        let mut bytes: Vec<u8> = Vec::new();
+        while start > 0 && bytes.iter().filter(|b| **b == b'\n').count() <= last {
+            let step = TAIL_CHUNK.min(start);
+            start -= step;
+            let mut chunk = vec![0u8; step as usize];
+            if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut chunk).is_err() {
+                break;
+            }
+            chunk.extend_from_slice(&bytes);
+            bytes = chunk;
+        }
+        // The read began part-way into a line unless it reached the file's start.
+        if start > 0 {
+            if let Some(newline) = bytes.iter().position(|b| *b == b'\n') {
+                bytes.drain(..=newline);
+            } else {
+                bytes.clear();
+            }
+        }
+        // What follows the last newline is a line still being written.
+        let complete = bytes
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |newline| newline + 1);
+        follower.position = length.saturating_sub((bytes.len() - complete) as u64);
+        follower.file = Some(file);
+        let mut lines = split_lines(&bytes[..complete]);
+        let excess = lines.len().saturating_sub(last);
+        lines.drain(..excess);
+        (follower, lines)
+    }
+
+    /// Read what the held file has past `position`, restarting it if it shrank.
+    fn read_held(&mut self) {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        let Ok(meta) = file.metadata() else {
+            return;
+        };
+        if meta.len() < self.position {
+            self.position = 0;
+            self.partial.clear();
+        }
+        if meta.len() == self.position || file.seek(SeekFrom::Start(self.position)).is_err() {
+            return;
+        }
+        let mut fresh = Vec::new();
+        if file
+            .take(meta.len() - self.position)
+            .read_to_end(&mut fresh)
+            .is_err()
+        {
+            return;
+        }
+        self.position += fresh.len() as u64;
+        self.partial.extend_from_slice(&fresh);
+    }
+
+    /// The complete lines in `partial`, which keeps the unfinished tail.
+    fn take_lines(&mut self) -> Vec<String> {
+        let complete = self
+            .partial
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |newline| newline + 1);
+        let lines = split_lines(&self.partial[..complete]);
+        self.partial.drain(..complete);
+        lines
+    }
+
+    /// The complete lines written since the last look.
+    fn poll(&mut self) -> Vec<String> {
+        self.poll_after_snapshot(|| {})
+    }
+
+    /// [`Self::poll`] with a hook that runs between the first read of the held
+    /// file and the look at its name, so a test can write in that window.
+    fn poll_after_snapshot(&mut self, between: impl FnOnce()) -> Vec<String> {
+        // The file in hand first, to its end, so nothing written before a
+        // rotation is lost to it.
+        self.read_held();
+        let mut lines = self.take_lines();
+        between();
+        // Then the name: another file under it means a rotation.
+        let renamed = std::fs::File::open(&self.path).ok().filter(|opened| {
+            let current = opened.metadata().ok().map(|meta| identity_of(&meta));
+            let held = self
+                .file
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .map(|meta| identity_of(&meta));
+            current.is_some() && current != held
+        });
+        if let Some(next) = renamed {
+            // What the old file got between the first read and the look at the
+            // name is still its own.
+            self.read_held();
+            lines.extend(self.take_lines());
+            self.file = Some(next);
+            self.position = 0;
+            // A line the old file never finished has no ending to wait for.
+            self.partial.clear();
+            self.read_held();
+            lines.extend(self.take_lines());
+        }
+        lines
+    }
+}
+
+fn split_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What a key did to the viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerLogKey {
+    /// Close the viewer and go back to the terminal UI.
+    Close,
+    /// The viewer used the key, or ignored it; nothing behind it sees it.
+    Handled,
+}
+
+/// The server log, full-screen over the terminal UI: the last lines of
+/// `server.log`, then live. The drawing and the scrolling are the flip's own
+/// ([`LogView`], [`LogScroll`], [`draw_log_panel`]); what differs is the source,
+/// which is the file, read on a thread of its own so the interface never waits
+/// on the disk.
+pub(crate) struct ServerLogViewer {
+    ring: ActivityRing,
+    view: LogView,
+    scroll: LogScroll,
+    log_rows: usize,
+    sticky: bool,
+    path: std::path::PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ServerLogViewer {
+    /// Open the viewer on `path`, keeping `capacity` lines (`[server]
+    /// log_viewer_lines`). Returns at once: the first lines arrive from the reader
+    /// thread and the viewer fills in.
+    pub(crate) fn open(path: std::path::PathBuf, capacity: usize) -> Self {
+        let ring = ActivityRing::new(capacity);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_ring = ring.clone();
+        let reader_stop = std::sync::Arc::clone(&stop);
+        let reader_path = path.clone();
+        let last = ring.capacity();
+        let spawned = std::thread::Builder::new()
+            .name("dux-server-log-viewer".to_string())
+            .spawn(move || {
+                let (mut follower, first) = FileFollower::start(reader_path, last);
+                for line in first {
+                    reader_ring.push(LogLine::plain_text(&line));
+                }
+                while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(FOLLOW_INTERVAL);
+                    for line in follower.poll() {
+                        reader_ring.push(LogLine::plain_text(&line));
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            dux_core::logger::warn(&format!(
+                "could not start the server log viewer's reader: {error}"
+            ));
+        }
+        Self {
+            view: LogView::new(ring.capacity()),
+            ring,
+            scroll: LogScroll::default(),
+            log_rows: 0,
+            sticky: true,
+            path,
+            stop,
+        }
+    }
+
+    /// Bring the view up to date with what the reader has read. Whether anything
+    /// on screen changed.
+    pub(crate) fn sync(&mut self, theme: &Theme) -> bool {
+        let before = self.view.generation;
+        let arrived = self.view.sync(&self.ring, theme);
+        self.scroll.lines_arrived(arrived.lines, arrived.rows);
+        before != self.view.generation
+    }
+
+    /// A key while the viewer is open: `q` and `Esc` close it, the scroll
+    /// bindings scroll it, everything else is ignored.
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, bindings: &RuntimeBindings) -> ServerLogKey {
+        match screen_key(key, bindings) {
+            Some(ScreenKey::Exit(_)) => ServerLogKey::Close,
+            Some(ScreenKey::Scroll(action)) => {
+                self.scroll_by(action);
+                ServerLogKey::Handled
+            }
+            None => ServerLogKey::Handled,
+        }
+    }
+
+    /// Scroll by `action` (one of the six scroll actions).
+    pub(crate) fn scroll_by(&mut self, action: Action) {
+        let total = self.view.scroll_total(self.sticky);
+        let viewport = self.log_rows.max(1);
+        match action {
+            Action::ScrollLineUp => self.scroll.line_up(viewport, total),
+            Action::ScrollLineDown => self.scroll.line_down(),
+            Action::ScrollPageUp => self.scroll.page_up(viewport, total),
+            Action::ScrollPageDown => self.scroll.page_down(viewport),
+            Action::ScrollToTop => self.scroll.top(viewport, total),
+            Action::ScrollToBottom => self.scroll.bottom(),
+            _ => {}
+        }
+    }
+
+    /// Draw the viewer over the whole frame.
+    pub(crate) fn render(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        theme: &Theme,
+        bindings: &RuntimeBindings,
+    ) {
+        let area = frame.area();
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.app_bg)),
+            area,
+        );
+        let inner_width = area.width.saturating_sub(4).max(1);
+        let footer = viewer_footer_lines(theme, bindings, inner_width);
+        let footer_rows = footer.len() as u16 + 1;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .vertical_margin(1)
+            .horizontal_margin(2)
+            .constraints([Constraint::Min(3), Constraint::Length(footer_rows)])
+            .split(area);
+        let shown = self.path.display().to_string();
+        (self.log_rows, self.sticky) = draw_log_panel(
+            frame,
+            chunks[0],
+            theme,
+            bindings,
+            &mut self.view,
+            &mut self.scroll,
+            "Server log",
+            format!(" {shown} "),
+        );
+        frame.render_widget(
+            Paragraph::new(footer)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.app_bg)),
+            chunks[1],
+        );
+    }
+}
+
+impl Drop for ServerLogViewer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The viewer's footer: the scroll keys (read from the bindings) and the keys
+/// that close it.
+fn viewer_footer_lines(
+    theme: &Theme,
+    bindings: &RuntimeBindings,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let first = |action| {
+        bindings
+            .labels_reaching(action, server_screen_reaches)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    };
+    let row = |hints: &[Hint]| {
+        Line::from(fitted_hint_spans(theme, HintTone::Modal, hints, usize::from(width)).spans)
+    };
+    vec![
+        row(&[
+            Hint::keys(
+                [first(Action::ScrollPageUp), first(Action::ScrollPageDown)],
+                "scroll the log",
+            ),
+            Hint::key(first(Action::ScrollToTop), "oldest"),
+            Hint::key(first(Action::ScrollToBottom), "latest"),
+        ]),
+        row(&[Hint::fixed_keys(["q", "Esc"], "close the log").pinned()]),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1361,6 +1729,99 @@ mod tests {
     }
 
     // ── The incremental view ───────────────────────────────────────────────
+
+    /// The log viewer opens on the file's last lines and then picks up what is
+    /// appended, never showing a line the writer has not finished.
+    #[test]
+    fn a_followed_file_gives_its_last_lines_then_the_complete_lines_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.log");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        let (mut follower, first) = FileFollower::start(path.clone(), 3);
+        assert_eq!(first, ["three", "four", "five"]);
+        assert!(follower.poll().is_empty(), "nothing new yet");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"six\nsev").unwrap();
+        assert_eq!(
+            follower.poll(),
+            ["six"],
+            "half a line waits for its newline"
+        );
+        std::io::Write::write_all(&mut file, b"en\n").unwrap();
+        assert_eq!(follower.poll(), ["seven"]);
+    }
+
+    /// A rotation moves the file away and starts a new one under the same name;
+    /// the viewer carries on with the new file from its first line.
+    #[test]
+    fn a_followed_file_that_rotates_is_read_again_from_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.log");
+        std::fs::write(&path, "old one\nold two\n").unwrap();
+        let (mut follower, _) = FileFollower::start(path.clone(), 10);
+        // A line written just before the rotation is still shown.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"last before rotation\n").unwrap();
+        std::fs::rename(&path, dir.path().join("server.log.1")).unwrap();
+        std::fs::write(&path, "fresh\n").unwrap();
+        assert_eq!(follower.poll(), ["last before rotation", "fresh"]);
+
+        // A line the old file gets after the first read of it, while the name is
+        // being looked at, is shown too.
+        let (mut follower, _) = FileFollower::start(path.clone(), 10);
+        let rotated = dir.path().join("server.log.2");
+        let lines = follower.poll_after_snapshot(|| {
+            let mut old = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            std::io::Write::write_all(&mut old, b"late\n").unwrap();
+            std::fs::rename(&path, &rotated).unwrap();
+            std::fs::write(&path, "newest\n").unwrap();
+        });
+        assert_eq!(lines, ["late", "newest"]);
+    }
+
+    /// A log that does not exist yet is followed from its first byte once it
+    /// does.
+    #[test]
+    fn a_followed_file_that_appears_later_is_read_from_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.log");
+        let (mut follower, first) = FileFollower::start(path.clone(), 10);
+        assert!(first.is_empty());
+        std::fs::write(&path, "hello\n").unwrap();
+        assert_eq!(follower.poll(), ["hello"]);
+    }
+
+    /// The viewer closes on the flip's own close keys and scrolls on the same
+    /// bindings, and no other key does anything.
+    #[test]
+    fn the_viewer_closes_on_q_and_esc_and_ignores_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut viewer = ServerLogViewer::open(dir.path().join("server.log"), 10);
+        let b = bindings();
+        let plain = |code| key(code, KeyModifiers::NONE);
+        assert_eq!(
+            viewer.handle_key(plain(KeyCode::Char('x')), &b),
+            ServerLogKey::Handled
+        );
+        assert_eq!(
+            viewer.handle_key(plain(KeyCode::Esc), &b),
+            ServerLogKey::Close
+        );
+        assert_eq!(
+            viewer.handle_key(plain(KeyCode::Char('q')), &b),
+            ServerLogKey::Close
+        );
+    }
 
     fn event(msg: &str) -> LogLine {
         LogLine::event("12:00:00", LogTone::Info, msg)

@@ -46,6 +46,78 @@ impl App {
         }
     }
 
+    /// Palette action: open the server log full-screen. It follows the file the
+    /// background server writes, so it opens only while that server is up.
+    pub(crate) fn open_server_log_viewer(&mut self) {
+        if !self.background_server_is_serving() {
+            let path = dux_core::logger::resolve_server_log_path(
+                &self.engine.config.server,
+                &self.engine.paths,
+            );
+            self.set_warning(format!(
+                "The server log viewer follows the log of the web UI served in the background, \
+                 and nothing is serving right now. Use start-background-server to serve, or read \
+                 {} directly.",
+                path.display()
+            ));
+            return;
+        }
+        // The file the serve itself opened, which a reload of `log_path` since
+        // then has not moved.
+        let Some(path) = self
+            .companion
+            .as_ref()
+            .and_then(|companion| companion.server_log_path())
+        else {
+            self.set_warning(
+                "The background web server is not writing a server log (it could not open one; \
+                 dux.log says why), so there is nothing to follow."
+                    .to_string(),
+            );
+            return;
+        };
+        self.server_log_viewer = Some(crate::server_screen::ServerLogViewer::open(
+            path,
+            self.engine.config.server.log_viewer_lines,
+        ));
+        self.sync_server_log_viewer();
+        self.mark_frame_dirty();
+    }
+
+    /// Bring the open viewer up to date with what its reader has read, marking
+    /// the frame when a line arrived.
+    pub(crate) fn sync_server_log_viewer(&mut self) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        if viewer.sync(&self.theme) {
+            self.mark_frame_dirty();
+        }
+    }
+
+    /// A key while the server log viewer is open: it owns every key.
+    pub(crate) fn handle_server_log_key(&mut self, key: KeyEvent) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        if viewer.handle_key(key, &self.bindings) == crate::server_screen::ServerLogKey::Close {
+            self.server_log_viewer = None;
+        }
+    }
+
+    /// The wheel scrolls the open viewer; every other mouse event is ignored, so
+    /// nothing behind it can be clicked.
+    pub(crate) fn handle_server_log_mouse(&mut self, mouse: MouseEvent) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => viewer.scroll_by(Action::ScrollLineUp),
+            MouseEventKind::ScrollDown => viewer.scroll_by(Action::ScrollLineDown),
+            _ => {}
+        }
+    }
+
     /// The header chip that says a listener is up, or `None` when none is.
     ///
     /// Present whenever serving, connections or not: the chip's first job is to be
@@ -355,12 +427,18 @@ impl App {
             };
             let event = match preflight_server_listeners(port, tailscale_ip) {
                 Ok((listeners, urls, bind_warnings)) => {
+                    let startup = dux_core::serve_log::StartupNotes {
+                        warnings: detect_warning.iter().cloned().collect(),
+                        bind_warnings: bind_warnings.clone(),
+                        tailscale_detected: tailscale_ip.is_some(),
+                    };
                     WorkerEvent::BackgroundServerPreflightReady {
                         result: Ok((listeners, urls)),
                         warning: super::sessions::combine_flip_warnings(
                             detect_warning,
                             bind_warnings,
                         ),
+                        startup,
                     }
                 }
                 // A required (loopback) bind failed: surface the error. The
@@ -368,6 +446,7 @@ impl App {
                 Err(err) => WorkerEvent::BackgroundServerPreflightReady {
                     result: Err(format!("{err:#}")),
                     warning: detect_warning,
+                    startup: dux_core::serve_log::StartupNotes::default(),
                 },
             };
             let _ = tx.send(event);
@@ -381,6 +460,7 @@ impl App {
         &mut self,
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        startup: dux_core::serve_log::StartupNotes,
     ) {
         self.background_server_preflight_pending = false;
         // The user changed their mind while the bind was on its worker thread: a
@@ -411,6 +491,7 @@ impl App {
                         listeners,
                         urls.clone(),
                         claim_before_serving,
+                        startup,
                     ) {
                         Ok(urls) => {
                             // The serve claimed every running pty for this surface
@@ -896,6 +977,11 @@ pub(crate) mod tests {
         /// One entry per `[server]` section the seam was handed after an applied
         /// reload, standing in for the live limits a real serve would store.
         pub(crate) config_applied: Vec<dux_core::config::ServerConfig>,
+        /// The startup notes each start was handed.
+        pub(crate) started_with: Vec<dux_core::serve_log::StartupNotes>,
+        /// The log file the serve says it opened, standing in for the one the
+        /// real serve holds.
+        pub(crate) server_log_path: Option<std::path::PathBuf>,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
@@ -1033,13 +1119,30 @@ pub(crate) mod tests {
             self.recorded.lock().expect("not poisoned").connections
         }
 
+        fn server_log_path(&self) -> Option<std::path::PathBuf> {
+            if !self.serving {
+                return None;
+            }
+            self.recorded
+                .lock()
+                .expect("not poisoned")
+                .server_log_path
+                .clone()
+        }
+
         fn start(
             &mut self,
             engine: &mut Engine,
             _listeners: Vec<std::net::TcpListener>,
             _urls: Vec<String>,
             claim_before_serving: bool,
+            startup: dux_core::serve_log::StartupNotes,
         ) -> Result<Vec<String>, String> {
+            self.recorded
+                .lock()
+                .expect("not poisoned")
+                .started_with
+                .push(startup);
             // What the real serve does: seed the claims before it is serving,
             // then announce them once it is.
             let seeded = if claim_before_serving {
@@ -1680,10 +1783,19 @@ pub(crate) mod tests {
     /// real: the fake companion ignores the listeners it is handed and reports its
     /// own address back.
     pub(crate) fn finish_a_start(app: &mut App, warning: Option<String>) {
+        finish_a_start_with(app, warning, dux_core::serve_log::StartupNotes::default());
+    }
+
+    fn finish_a_start_with(
+        app: &mut App,
+        warning: Option<String>,
+        startup: dux_core::serve_log::StartupNotes,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
         app.apply_background_server_preflight(
             Ok((vec![listener], vec!["http://127.0.0.1:8080".to_string()])),
             warning,
+            startup,
         );
     }
 
@@ -1698,13 +1810,23 @@ pub(crate) mod tests {
     #[test]
     fn the_config_autostart_path_reports_as_a_start_the_config_made() {
         let mut app = test_app(default_bindings());
-        let (companion, _recorded) = FakeCompanion::serving();
+        let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
         app.stop_background_server_quietly();
         app.engine.config.server.serve_while_tui = true;
 
         app.start_background_server_from_config();
-        finish_a_start(&mut app, None);
+        let startup = dux_core::serve_log::StartupNotes {
+            warnings: vec!["Tailscale not detected (test).".to_string()],
+            bind_warnings: vec!["could not bind the Tailscale address".to_string()],
+            tailscale_detected: true,
+        };
+        finish_a_start_with(&mut app, None, startup.clone());
+        assert_eq!(
+            recorded.lock().expect("not poisoned").started_with,
+            vec![startup],
+            "the serve is told what the pre-flight learned, for its log"
+        );
 
         let (tone, message) = status_now(&app);
         assert_eq!(tone, StatusTone::Warning, "{message}");
@@ -2103,6 +2225,7 @@ pub(crate) mod tests {
         app.apply_background_server_preflight(
             Ok((vec![listener], vec!["http://127.0.0.1:0".to_string()])),
             None,
+            dux_core::serve_log::StartupNotes::default(),
         );
 
         assert!(
@@ -2143,6 +2266,7 @@ pub(crate) mod tests {
         app.apply_background_server_preflight(
             Ok((vec![listener], vec!["http://127.0.0.1:0".to_string()])),
             None,
+            dux_core::serve_log::StartupNotes::default(),
         );
 
         assert!(
@@ -2153,6 +2277,99 @@ pub(crate) mod tests {
             !app.engine.config.server.serve_while_tui,
             "and it must not write the setting back on"
         );
+    }
+
+    fn render_text(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buffer = terminal.backend().buffer().clone();
+        let width = usize::from(buffer.area.width);
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The server log, full-screen over the terminal UI: the last lines of
+    /// `server.log` as the background server wrote them, then what it writes
+    /// next, with Esc going back.
+    #[test]
+    fn view_server_log_shows_the_background_servers_lines_and_esc_returns() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.log_viewer_lines = 3;
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        // The serve opened this file, whatever the reloaded config now says.
+        let log = app.engine.paths.root.join("opened-at-start.log");
+        recorded.lock().expect("not poisoned").server_log_path = Some(log.clone());
+        app.engine.config.server.log_path = "server.log".to_string();
+        std::fs::write(
+            &log,
+            "10:00:00 info client connected from 10.0.0.1\n\
+             10:00:01 GET /api/v1/build 200 2ms\n\
+             10:00:02 info client connected from 10.0.0.2\n\
+             10:00:03 GET /api/v1/workspace 200 4ms\n",
+        )
+        .unwrap();
+
+        app.execute_command("view-server-log".to_string()).unwrap();
+        assert!(app.server_log_viewer.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            app.sync_server_log_viewer();
+            screen = render_text(&mut app);
+            if screen.contains("GET /api/v1/workspace 200 4ms") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            screen.contains("10:00:01 GET /api/v1/build 200 2ms"),
+            "the last three lines open the viewer:\n{screen}"
+        );
+        assert!(
+            !screen.contains("10.0.0.1"),
+            "only the last three lines, not the whole file:\n{screen}"
+        );
+
+        // A line the server writes later arrives without reopening.
+        let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut file, b"10:00:09 warn listener lost\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !screen.contains("listener lost") {
+            app.sync_server_log_viewer();
+            screen = render_text(&mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(screen.contains("10:00:09 warn listener lost"), "{screen}");
+
+        app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.server_log_viewer.is_none(), "Esc returns");
+    }
+
+    /// With nothing serving there is no background log to follow: say so, and
+    /// say where the file is.
+    #[test]
+    fn view_server_log_with_nothing_serving_says_so_and_opens_nothing() {
+        let mut app = test_app(default_bindings());
+        app.execute_command("view-server-log".to_string()).unwrap();
+        assert!(app.server_log_viewer.is_none());
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert!(message.contains("start-background-server"), "{message}");
+        assert!(message.contains("server.log"), "{message}");
+
+        // Serving, but with no log open: nothing to follow, and it says why.
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.execute_command("view-server-log".to_string()).unwrap();
+        assert!(app.server_log_viewer.is_none());
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert!(message.contains("not writing"), "{message}");
     }
 
     /// The chip is the standing "there is a listener" signal first and a counter

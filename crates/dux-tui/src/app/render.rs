@@ -1526,6 +1526,10 @@ impl App {
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         self.redraw.renders = self.redraw.renders.wrapping_add(1);
+        if let Some(viewer) = self.server_log_viewer.as_mut() {
+            viewer.render(frame, &self.theme, &self.bindings);
+            return;
+        }
         // Pre-fill the whole frame with the theme's app background, so cells no
         // widget paints over inherit it and a light theme looks light end to end.
         // A widget that sets `Color::Reset` still overrides this and passes

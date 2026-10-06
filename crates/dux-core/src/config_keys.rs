@@ -2863,6 +2863,14 @@ port = 3890
             "{error}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        let error = set_plain(&path, &lookup("server.log_keep").unwrap(), "5000")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("dux would use 1000 instead of 5000 for server.log_keep"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
     /// A set inside a section the load already reset over another of its
