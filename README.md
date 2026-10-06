@@ -254,6 +254,8 @@ See an agent going down the wrong path? Fork it. dux creates a new worktree with
 
 Point dux at any folder. A git repository joins the workspace as-is; a plain folder gets an offer to become one: dux runs `git init`, seeds a commented starter `.gitignore` for the dependency and build directories it finds (`node_modules`, `target`, and friends), creates an empty initial commit, and registers the project. Your existing files are left untouched (untracked). Folders inside an existing repository are refused with a pointer to the repository root, so projects never nest inside each other's history. In the web UI the picker can even create a new folder first, which makes starting a brand-new project from a phone entirely shell-free.
 
+Not on the machine yet? Clone it from dux: **Clone a repository…** beside Add project in the browser, or the `clone-project` palette command in the terminal UI. Paste the remote's address and dux clones its default branch, adds it as a project and starts the first agent on it, using your own git credentials and never stopping to ask for one.
+
 ### First Run and What's New
 
 The first time dux launches on a machine, it opens a one-time welcome screen instead of an empty sidebar: what a project is, what an agent is (its own git worktree, its own branch-style name), the fact that any AI CLI can be a provider, and the real path to your config file on this machine, which was written fully commented so you never have to leave it. Two buttons: add your first project, or close the screen. The website's address is printed beside them, and the frame names the key that closes it.

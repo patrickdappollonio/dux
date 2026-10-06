@@ -36,6 +36,19 @@ base branch, see its info, change its settings, read the startup-command logs of
 agents, and delete or remove it. Every project, including one with no agents yet, is in
 **Projects…** in the app menu; see [the workspace page](/docs/web-workspace#managing-projects).
 
+### Starting from a remote instead
+
+**Clone a repository…**, next to **Add project…** in the same menus, takes a git address
+rather than a folder. It asks for three things: the address, the destination folder (filled
+in from the address until you edit it) and the first agent's name, with the same random-name
+box as **New agent**. Press **Clone** and the dialog closes; progress rides a toast, and
+the new agent is selected when it shows up. If dux can tell straight away that something is
+wrong (no address, an agent name with characters a branch cannot hold, a destination that is not a full path or
+whose parent folder does not exist, a folder that is already a project), the dialog stays
+open with the reason so you can fix it without retyping. Everything else, including what
+each failure leaves on disk, is in
+[Creating agents](/docs/creating-agents#cloning-a-repository).
+
 ## Creating an agent
 
 Two doors, differing in what you start from.
@@ -72,8 +85,10 @@ every project you have:
   picker.
 
 > [!IMPORTANT]
-> **dux will not clone a repository it does not have.** Point it at a checkout that already
-> exists on the server, or clone one yourself first.
+> **This dialog never clones a repository dux does not have.** If no project is a checkout
+> of it, get one first with **Clone a repository…** (see
+> [Starting from a remote instead](#starting-from-a-remote-instead)), then paste the
+> reference again.
 
 A number on its own (`#123` or `123`) is the one form this door cannot take, since it does
 not say which repository it belongs to. dux refuses it and points you at "choose an existing
