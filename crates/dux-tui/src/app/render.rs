@@ -12877,11 +12877,24 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
 /// The exact inverse of `input::cursor_from_single_line_position`, so a click and
 /// the caret it produces agree about where the caret is.
 fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16 {
-    let mut cursor = cursor.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
+    let cursor = glyph_start(text, cursor);
     prefix_width.saturating_add(text[..cursor].cell_width())
+}
+
+/// The byte where the glyph (extended grapheme cluster) holding byte `cursor`
+/// of `text` starts, or `text.len()` for a caret at or past the end: where a
+/// single-line field's caret sits when `cursor` falls inside a glyph.
+fn glyph_start(text: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    if cursor >= text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= cursor)
+        .last()
+        .unwrap_or(0)
 }
 
 /// The one single-line text-field renderer.
@@ -12891,8 +12904,10 @@ fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16
 /// than one control pass whether focus actually sits on the field. Callers that
 /// own the only control pass `true`.
 ///
-/// The caret offset is a byte offset and is clamped to a character boundary
-/// before any slicing, so a name holding an accent or an emoji cannot panic.
+/// The caret offset is a byte offset and is clamped to the start of the glyph
+/// (extended grapheme cluster) it falls in before any slicing, so a name
+/// holding an accent or an emoji cannot panic, and the caret covers a whole
+/// emoji sequence rather than its first character.
 fn render_single_line_cursor_input(
     prefix: &str,
     text: &str,
@@ -12904,20 +12919,18 @@ fn render_single_line_cursor_input(
     if !focused {
         return Line::from(Span::raw(format!("{prefix}{text}")));
     }
-    let mut cursor = cursor.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let cursor = glyph_start(text, cursor);
     if cursor < text.len() {
         let (before, after) = text.split_at(cursor);
-        let cursor_char = after.chars().next().expect("cursor within text");
-        let cursor_len = cursor_char.len_utf8();
-        let rest = &after[cursor_len..];
+        let cursor_glyph = after.graphemes(true).next().expect("cursor within text");
+        let rest = &after[cursor_glyph.len()..];
         Line::from(vec![
             Span::raw(prefix.to_string()),
             Span::raw(before.to_string()),
             Span::styled(
-                cursor_char.to_string(),
+                cursor_glyph.to_string(),
                 Style::default().fg(cursor_fg).bg(cursor_bg),
             ),
             Span::raw(rest.to_string()),
@@ -23978,6 +23991,25 @@ mod tests {
                 ],
                 "{id}: caret-styled text is word-wrapped, the chip kept whole"
             );
+        }
+    }
+
+    #[test]
+    fn render_single_line_cursor_input_paints_the_caret_over_a_whole_emoji_sequence() {
+        let text = "👩\u{200d}💻a";
+        // At the sequence, and at a byte inside it, the caret covers all of it.
+        for cursor in [0, "👩".len()] {
+            let line =
+                render_single_line_cursor_input("", text, cursor, Color::White, Color::Black, true);
+            let caret: Vec<&str> = line
+                .spans
+                .iter()
+                .filter(|span| span.style.bg == Some(Color::Black))
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(caret, vec!["👩\u{200d}💻"], "caret at byte {cursor}");
+            let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+            assert_eq!(all, text);
         }
     }
 

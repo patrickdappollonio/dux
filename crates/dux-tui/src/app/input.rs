@@ -649,10 +649,13 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
 /// cells, so walking `char_indices().nth(col)` drifts one character further
 /// right for every wide glyph left of the click.
 ///
+/// It walks extended grapheme clusters, the unit the renderer draws in, so a
+/// click never lands the caret inside an emoji sequence such as `👩‍💻`.
+///
 /// A click on the second cell of a wide glyph resolves to the caret position
 /// before that glyph, deliberately: the renderer
 /// ([`super::render::render_single_line_cursor_input`]) paints the caret as an
-/// inverted cell over the whole character at the caret, so "before the glyph" is
+/// inverted cell over the whole glyph at the caret, so "before the glyph" is
 /// the only offset that highlights the glyph the user clicked on.
 ///
 /// A click past the end of the text yields `text.len()`.
@@ -662,23 +665,18 @@ fn cursor_from_single_line_position(
     prefix_width: usize,
     column: u16,
 ) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
     let relative_col = usize::from(column.saturating_sub(text_area.x));
     let mut target_col = relative_col.saturating_sub(prefix_width);
-    for (idx, ch) in text.char_indices() {
-        let width = char_display_width(ch);
-        if target_col < width.max(1) {
+    for (idx, glyph) in text.grapheme_indices(true) {
+        let width = cluster_width(glyph).max(1);
+        if target_col < width {
             return idx;
         }
-        target_col -= width.max(1);
+        target_col -= width;
     }
     text.len()
-}
-
-/// Display width of one character in terminal cells, measured by the same
-/// unicode-width table the renderer uses, so a click agrees with what is drawn.
-fn char_display_width(ch: char) -> usize {
-    let mut buf = [0u8; 4];
-    usize::from(ch.encode_utf8(&mut buf).cell_width())
 }
 
 fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
@@ -38364,6 +38362,15 @@ cyan = "#00ffff"
         assert_eq!(at(3), "🚀".len());
         assert_eq!(at(4), "🚀a".len());
         assert_eq!(at(99), text.len());
+
+        // A ZWJ sequence is one two-cell glyph: the cell after it is the
+        // next letter, never a position inside the sequence.
+        let text = "👩\u{200d}💻ab";
+        let at = |col: u16| cursor_from_single_line_position(text, area, 1, col);
+        assert_eq!(at(1), 0);
+        assert_eq!(at(2), 0);
+        assert_eq!(at(3), "👩\u{200d}💻".len());
+        assert_eq!(at(4), "👩\u{200d}💻a".len());
     }
 
     /// A field the user cannot click into is a gap. The project chooser's
