@@ -1,15 +1,11 @@
 //! This surface in the attachment registry ([`dux_core::attachments`]).
 //!
-//! The terminal UI is one connection, and it is attached to exactly the
-//! terminals it drew in its last frame, focused or not: an agent that is
-//! selected but whose pane is not on screen (a diff fills the center, or the
-//! server log covers everything) protects nothing. A change somebody else asks
-//! for (the command line, a browser) is refused while it would end a pane on
-//! screen here; a change asked for here is exempt from this surface's own
-//! panes and from nobody else's.
-//!
-//! Quitting the terminal UI ends every terminal it started, so the quit
-//! confirmation asks whenever another device is attached to one, and says who
+//! The terminal UI is one connection, attached to exactly the terminals it
+//! drew in its last frame: a selected agent whose pane is off screen protects
+//! nothing. A change asked for elsewhere is refused while it would end a pane
+//! on screen here; one asked for here is exempt from this surface's own panes
+//! only. Quitting ends every terminal this surface started, so the quit
+//! confirmation names anyone else attached to one
 //! ([`Engine::attached_elsewhere`](dux_core::engine::Engine::attached_elsewhere)).
 
 use super::*;
@@ -48,8 +44,7 @@ impl App {
     }
 
     /// Make this surface's attachments exactly what the frame just drawn
-    /// showed. Cheap when nothing changed, which is every frame but the ones
-    /// that open or close a pane.
+    /// showed; a frame that opened or closed no pane changes nothing.
     pub(super) fn publish_drawn_attachments(&mut self) {
         let pty_conn = self.pty_ownership_conn_id();
         let drawn = (std::mem::take(&mut self.drawn_ptys), pty_conn);
@@ -93,9 +88,8 @@ impl App {
         scope
     }
 
-    /// Run the confirm of `asked`: as its override when the dialog already
-    /// names who is attached (the person saw them and said to go ahead), as a
-    /// plain confirm the guard may refuse otherwise.
+    /// Run the confirm of `asked`: as the override when its dialog already
+    /// names who is attached, otherwise as a plain confirm the guard may refuse.
     pub(crate) fn guarded_by<R>(
         &mut self,
         asked: &PromptState,
@@ -108,9 +102,8 @@ impl App {
         }
     }
 
-    /// Run `act` as a change the person said to go ahead with over `shown`,
-    /// the blockers the dialog named: the guard still reserves what it ends,
-    /// and refuses again, naming everybody, when anybody else is in the way.
+    /// Run `act` over `shown`, the blockers the dialog named: the guard still
+    /// reserves what it ends, and refuses again when anybody else is in the way.
     fn over_shown_attached<R>(&mut self, shown: &[Blocker], act: impl FnOnce(&mut Self) -> R) -> R {
         let forced = dux_core::attachments::Policy {
             requester: Some(TERMINAL_UI_CONNECTION.to_string()),
@@ -123,20 +116,16 @@ impl App {
         result
     }
 
-    /// The guard refused the confirm of `asked`: open it again naming who is
-    /// in the way, with its confirm turned into the override and focus back on
-    /// Cancel, so the keystroke that confirmed cannot also go ahead over them.
+    /// Reopen `asked` naming who refused it, focused on Cancel so the keystroke
+    /// that confirmed cannot also go ahead over them.
     pub(crate) fn reopen_naming_attached(&mut self, mut asked: PromptState, refused: Attached) {
         asked.name_attached(refused.blockers);
         self.prompt = asked;
         self.forget_buttons_until_redrawn();
     }
 
-    /// Keep the list a dialog names live while it is open: anybody attaching
-    /// or leaving changes it, and a change puts focus back on Cancel, because
-    /// the override would now cut off someone the person has not seen yet.
-    /// Returns whether it changed, for the redraw gate. Only a dialog already
-    /// naming somebody is followed; one that names nobody asks when confirmed.
+    /// Keep an open dialog's attached list live, focus back on Cancel when it
+    /// changes; returns whether it did. A dialog naming nobody is not followed.
     pub(crate) fn refresh_attached_dialog(&mut self) -> bool {
         if self.prompt.attached().is_empty() {
             return false;
@@ -185,20 +174,14 @@ impl App {
         ))
     }
 
-    /// The dialog on screen is not the one the next clicks were aimed at: drop
-    /// the button rects the last frame published and any press in flight, so
-    /// the rest of this input batch (the second click of a double click above
-    /// all) lands on nothing, and the override takes a fresh press once it has
-    /// been drawn.
+    /// Drop the last frame's button rects and any press in flight, so the rest
+    /// of this input batch (a double click's second click) lands on nothing.
     pub(crate) fn forget_buttons_until_redrawn(&mut self) {
         self.overlay_layout.reset();
         self.pressed_button = None;
         self.mark_frame_dirty();
     }
 
-    /// What the confirm of `asked` came to: nothing to say when it went
-    /// ahead, the dialog opened again naming who when somebody else is
-    /// attached, any other failure on the status line.
     pub(crate) fn settle_guarded(&mut self, asked: PromptState, outcome: Result<()>) {
         if let Err(error) = outcome {
             match attached_refusal(error) {

@@ -763,12 +763,8 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 }
 
-/// Draw the rounded, themed log panel in `area`: the pinned startup rows on top
-/// while they fit, the scrolling rows below, the scroll indicator, and the note
-/// on the bottom border while scrolled back. Returns the scrolling area's height
-/// and whether the startup stuck on top, which the caller keeps to size a page
-/// between draws. Shared by the flip's status screen and the server log viewer,
-/// so the two draw one panel.
+/// Draw the log panel the flip's status screen and the server log viewer share. Returns
+/// the scrolling area's height and whether the startup stuck on top, to size a page by.
 #[allow(clippy::too_many_arguments)]
 fn draw_log_panel(
     frame: &mut ratatui::Frame,
@@ -1143,11 +1139,8 @@ pub(crate) enum ServerLogKey {
     Handled,
 }
 
-/// The server log, full-screen over the terminal UI: the last lines of
-/// `server.log`, then live. The drawing and the scrolling are the flip's own
-/// ([`LogView`], [`LogScroll`], [`draw_log_panel`]); what differs is the source,
-/// which is the file, read on a thread of its own so the interface never waits
-/// on the disk.
+/// The server log, full-screen: drawn and scrolled like the flip's panel, but fed from
+/// the file by a thread of its own so the interface never waits on the disk.
 pub(crate) struct ServerLogViewer {
     ring: ActivityRing,
     view: LogView,
@@ -1159,9 +1152,8 @@ pub(crate) struct ServerLogViewer {
 }
 
 impl ServerLogViewer {
-    /// Open the viewer on `path`, keeping `capacity` lines (`[server]
-    /// log_viewer_lines`). Returns at once: the first lines arrive from the reader
-    /// thread and the viewer fills in.
+    /// Open the viewer on `path`, keeping `capacity` lines. Returns at once; the
+    /// reader thread fills it in.
     pub(crate) fn open(path: std::path::PathBuf, capacity: usize) -> Self {
         let ring = ActivityRing::new(capacity);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1222,7 +1214,7 @@ impl ServerLogViewer {
         }
     }
 
-    /// Scroll by `action` (one of the six scroll actions).
+    /// Scroll by `action`; an action that is not a scroll does nothing.
     pub(crate) fn scroll_by(&mut self, action: Action) {
         let total = self.view.scroll_total(self.sticky);
         let viewport = self.log_rows.max(1);

@@ -910,12 +910,8 @@ pub(super) fn provider_picker_kind(prompt: &PromptState) -> Option<ProviderPicke
 }
 
 impl App {
-    /// The one quit path: ask for confirmation while anything is still running
-    /// or anybody else is attached to one of this process's terminals,
-    /// otherwise quit outright. Returns whether the run loop should exit.
-    ///
-    /// The first-load modal's `Ctrl-c` routes here too rather than re-deriving
-    /// the running counts (see `handle_prompt_key`).
+    /// The one quit path, the first-load modal's `Ctrl-c` included: confirm while anything
+    /// runs or anybody else is attached here, else quit. Returns whether the loop exits.
     pub(crate) fn begin_quit(&mut self) -> bool {
         let agent_count = self.engine.providers.len();
         let terminal_count = self.running_companion_terminal_count();
@@ -8329,10 +8325,8 @@ impl App {
         false
     }
 
-    /// Stop the tab the dialog named, through the same engine command the
-    /// browser's and the command line's stop send, so it is checked against
-    /// the changes another surface holds and the people attached to it in the
-    /// same place, and its sentence is the one they print.
+    /// Stop the tab the dialog named through the engine command the browser and
+    /// the command line send, so its guards and its sentence are theirs.
     pub(super) fn resolve_confirm_stop_tab(&mut self, confirm: bool) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmStopTab {
@@ -8469,9 +8463,8 @@ impl App {
             return false;
         }
 
-        // The confirmation is about ending processes, not about cutting
-        // anybody off: refused while somebody else is attached to one of them,
-        // with the list left open and who named.
+        // The dialog asks about ending processes, not people: the guard refuses
+        // while somebody else is attached, and the dialog reopens naming them.
         let asked = PromptState::ConfirmKillRunning(confirm_prompt.clone());
         let scope = self.kill_running_scope(&confirm_prompt.target_ids);
         let _reservation =
@@ -8509,9 +8502,7 @@ impl App {
         };
         let attached = attached.clone();
         if confirm {
-            // Asked again, naming everybody, when somebody attached behind the
-            // open dialog; otherwise nobody can attach to anything from here
-            // until dux has gone.
+            // Once reserved, nobody can attach to anything here until dux has gone.
             if let Err(now) = self.engine.reserve_quit(&attached) {
                 self.prompt.name_attached(now.blockers);
                 self.forget_buttons_until_redrawn();

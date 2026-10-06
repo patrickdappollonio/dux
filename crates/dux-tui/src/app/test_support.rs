@@ -395,12 +395,6 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     app
 }
 
-/// Put the selected terminal surface into SCROLL MODE the way a user does:
-/// wait until the child has actually produced scrollback history, scroll up by
-/// `lines`, and record the gesture through the same entry point the scroll keys
-/// and the wheel use. Polls instead of sleeping a fixed amount, so the test is
-/// waiting on the fact it depends on (real history) rather than on a guess.
-/// Panics if no history appears within ~2s.
 /// A browser tab at 10.0.0.7 watching `pty_id`, a terminal of `agent`, as
 /// the attachment registry records one.
 pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) -> u64 {
@@ -441,6 +435,12 @@ pub(crate) fn stop_watching(app: &App, token: u64) {
     );
 }
 
+/// Put the selected terminal surface into SCROLL MODE the way a user does:
+/// wait until the child has actually produced scrollback history, scroll up by
+/// `lines`, and record the gesture through the same entry point the scroll keys
+/// and the wheel use. Polls instead of sleeping a fixed amount, so the test is
+/// waiting on the fact it depends on (real history) rather than on a guess.
+/// Panics if no history appears within ~2s.
 pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
     for _ in 0..200 {
         if let Some(provider) = app.selected_terminal_surface_client() {

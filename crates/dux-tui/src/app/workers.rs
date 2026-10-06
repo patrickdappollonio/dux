@@ -939,10 +939,8 @@ impl App {
             .finish_config_reload_operations(&ConfigReloadOutcome::ApplyFailed(error));
     }
 
-    /// A new config is in force: the background server adopts its
-    /// `[server]` section, and a change only a restart applies says so.
-    /// Answers the warning sentence it raised, so a client that asked for the
-    /// reload hears it too.
+    /// Hand a new config's `[server]` section to the background server; returns the
+    /// restart-needed warning it raised, so a client that asked for the reload hears it.
     fn note_config_adopted(&mut self, before: &Config) -> Option<String> {
         if let Some(companion) = self.companion.as_mut() {
             companion.note_config_applied(&self.engine.config);
@@ -2023,11 +2021,8 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
     }
 }
 
-/// What a reloaded startup-bound `[server]` change means for this terminal UI.
-/// A background listener is restarted from inside dux, so the serving copy names
-/// that pair of commands; with nothing serving there is nothing to restart and
-/// the change simply waits for the next listener.
-/// `settings` are the keys that changed, named in the sentence.
+/// The warning for a reloaded `[server]` change that only a restart applies,
+/// naming the changed `settings`.
 pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
     let named = settings.join(", ");
     match serving_in_background {
