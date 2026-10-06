@@ -674,7 +674,9 @@ mod tests {
         std::thread::spawn(move || {
             let transport = UnixTransport::new(probe);
             let mut held = Vec::new();
-            for _ in 0..8 {
+            // Connections pile up until the queue is full: one on Linux, more
+            // on macOS, which sizes even a zero backlog's queue itself.
+            for _ in 0..1024 {
                 match std::os::unix::net::UnixStream::connect(transport.path()) {
                     Ok(stream) => held.push(stream),
                     // macOS refuses a connect to a full queue at once instead
