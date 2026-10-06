@@ -7,6 +7,7 @@
 //! remote. A target that does not answer stops the command; nothing falls back
 //! to another one.
 
+pub mod config_resources;
 pub mod connect;
 pub mod output;
 pub mod remotes;

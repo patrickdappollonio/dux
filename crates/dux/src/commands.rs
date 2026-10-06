@@ -459,11 +459,16 @@ pub enum MacrosSub {
     Ls(ListFlags),
     /// Show one macro by name.
     Show { name: String },
-    /// Add a macro.
+    /// Add a macro, or replace the one with that name.
     Add {
         name: String,
+        /// The text the macro types.
+        text: String,
+        /// Where the macro is offered: in agents, terminals, or both.
+        #[arg(long, default_value = "agent", value_parser = ["agent", "terminal", "both"])]
+        surface: String,
         #[command(flatten)]
-        rest: OpenArgs,
+        change: ChangeFlags,
     },
     /// Remove a macro.
     #[command(visible_alias = "remove")]
@@ -768,7 +773,7 @@ mod tests {
     #[test]
     fn macro_and_env_changes_parse() {
         for args in [
-            &["macros", "add", "m"][..],
+            &["macros", "add", "m", "hello", "--surface", "both"][..],
             &["macros", "remove", "m"][..],
             &["env", "set", "T", "--stdin"][..],
             &["env", "rm", "T"][..],

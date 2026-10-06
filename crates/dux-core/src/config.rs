@@ -101,6 +101,48 @@ pub struct MacroEntry {
     pub surface: MacroSurface,
 }
 
+/// One macro as a change asks for it, checked the way every surface checks
+/// it: the name trimmed and not empty, some text, and a surface dux knows.
+/// Returns the name as it is saved, with its entry.
+pub fn checked_macro(
+    name: &str,
+    text: String,
+    surface: &str,
+) -> anyhow::Result<(String, MacroEntry)> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("Macro name cannot be empty.");
+    }
+    if text.is_empty() {
+        anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
+    }
+    let surface = MacroSurface::from_config_str(surface).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Macro \"{name}\" has an unknown surface \"{surface}\". Use \"agent\", \"terminal\", or \"both\"."
+        )
+    })?;
+    Ok((name, MacroEntry { text, surface }))
+}
+
+/// Whether `name` may be set to `value` in the global environment, by the
+/// rule a project's env lines follow. The value may be a secret, so a
+/// refusal never quotes it.
+pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
+    if !is_valid_env_name(name) {
+        anyhow::bail!(
+            "\"{name}\" is not a valid environment variable name: use letters, \
+             digits and underscores, not starting with a digit."
+        );
+    }
+    if value.contains('\0') || expand_env_vars(value).is_none() {
+        anyhow::bail!(
+            "The value for \"{name}\" was not saved: it holds a NUL byte or a \
+             $NAME reference that is not a valid variable name."
+        );
+    }
+    Ok(())
+}
+
 /// Text macros: a map from name to entry.
 /// Each entry is triggered from the macro bar (Ctrl+\).
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

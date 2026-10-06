@@ -62,3 +62,27 @@ fn get_of_a_macro_the_file_defines_reports_it() {
         result.unwrap_err()
     );
 }
+
+/// `dux macros ls` with no dux running reads the file, and lists its macros
+/// in the order the file writes them.
+#[test]
+fn macros_ls_lists_the_files_macros_in_file_order() {
+    use dux_core::client::config_resources::{Source, macros_ls};
+    use dux_core::client::output::Shape;
+    crate::config::install_canonical_renderer();
+    let (_tmp, paths) = paths_with(
+        "[macros]\n# the newest\nzeta = { text = \"z\", surface = \"terminal\" }\nalpha = { text = \"first line\\nsecond\", surface = \"agent\" }\nmid = { text = \"m\", surface = \"both\" }\n",
+    );
+    let source = Source::File(&paths);
+    assert_eq!(
+        macros_ls(&source, Shape::Ids).unwrap(),
+        "zeta\nalpha\nmid\n"
+    );
+    assert_eq!(
+        macros_ls(&source, Shape::Table).unwrap(),
+        "NAME    SURFACE    TEXT\n\
+         zeta    terminal   z\n\
+         alpha   agent      first line…\n\
+         mid     both       m\n"
+    );
+}

@@ -1134,6 +1134,7 @@ dependencies = [
  "indexmap 2.14.0",
  "libc",
  "notify",
+ "opaline",
  "percent-encoding",
  "petname",
  "portable-pty",

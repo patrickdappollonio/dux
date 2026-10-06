@@ -464,7 +464,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                         .map(|id| crate::theme::ThemeListing {
                             id: id.clone(),
                             display_name: id.clone(),
-                            source: crate::theme::ThemeSource::User,
+                            source: dux_core::theme::ThemeSource::User,
                         })
                         .collect(),
                     selected: 0,

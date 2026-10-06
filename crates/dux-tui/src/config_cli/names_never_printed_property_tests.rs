@@ -119,7 +119,57 @@ fn printed(body: &str) -> Vec<(String, String)> {
         ));
     }
     said.extend(previews(body, false));
+    said.extend(listings(&paths, body, false));
     said
+}
+
+/// What `dux env ls`, `dux macros ls` and `dux providers ls` print about
+/// `body` with no dux running, `show` passed to `env ls`, in every shape.
+fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
+    use dux_core::client::config_resources::{Source, env_ls, macros_ls, providers_ls};
+    use dux_core::client::output::Shape;
+    let mut said = Vec::new();
+    for shape in [Shape::Table, Shape::Json, Shape::Ids] {
+        std::fs::write(&paths.config_path, body).expect("seed");
+        let source = Source::File(paths);
+        for (printer, result) in [
+            (
+                format!("env ls (show {show})"),
+                env_ls(&source, show, shape),
+            ),
+            ("macros ls".to_string(), macros_ls(&source, shape)),
+            ("providers ls".to_string(), providers_ls(&source, shape)),
+        ] {
+            let text = match result {
+                Ok(text) => text,
+                Err(error) => error.message,
+            };
+            said.push((format!("{printer} {shape:?}"), text));
+        }
+    }
+    said
+}
+
+/// `dux env ls` prints an environment value only with `--show`.
+#[test]
+fn env_ls_prints_a_value_only_with_show() {
+    crate::config::install_canonical_renderer();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = paths_in(tmp.path());
+    let body = "[env]\nAPI_TOKEN = \"zzSECRETvalue\"\n";
+    for (printer, text) in listings(&paths, body, false) {
+        assert!(!text.contains("zzSECRETvalue"), "{printer}: {text}");
+    }
+    let shown: Vec<String> = listings(&paths, body, true)
+        .into_iter()
+        .filter(|(printer, _)| printer.starts_with("env ls") && !printer.ends_with("Ids"))
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(shown.len(), 2);
+    assert!(
+        shown.iter().all(|text| text.contains("zzSECRETvalue")),
+        "{shown:?}"
+    );
 }
 
 /// dux's own documented file with `line` added where a user adds one: at
@@ -167,7 +217,10 @@ fn a_name_that_is_not_a_setting_name_never_reaches_a_printer() {
         for position in POSITIONS {
             let body = position.replace("{T}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
-            for (printer, text) in printed(&body) {
+            // `env ls --show` prints values, and still no name it hides.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let shown = listings(&paths_in(tmp.path()), &body, true);
+            for (printer, text) in printed(&body).into_iter().chain(shown) {
                 if text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
@@ -261,6 +314,7 @@ fn printed_with_show(body: &str) -> Vec<(String, String)> {
     let mut said = previews(body, true);
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = paths_in(tmp.path());
+    said.extend(listings(&paths, body, true));
     let mut asks: Vec<Vec<&str>> = TABLES.iter().map(|table| vec![*table, "--show"]).collect();
     asks.push(vec!["server.auth.password"]);
     asks.push(vec!["server.auth.password", "--show"]);

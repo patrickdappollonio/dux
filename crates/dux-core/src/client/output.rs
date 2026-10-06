@@ -101,6 +101,22 @@ fn table(listing: &Listing) -> String {
     out
 }
 
+/// One resource as `show` prints it: a `field: value` line per field that
+/// holds something, a string as its text and anything else as JSON.
+pub fn details(object: &serde_json::Value) -> String {
+    let Some(fields) = object.as_object() else {
+        return format!("{object}\n");
+    };
+    fields
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(field, value)| match value {
+            serde_json::Value::String(text) => format!("{field}: {text}\n"),
+            other => format!("{field}: {other}\n"),
+        })
+        .collect()
+}
+
 /// The one item of `items` that `query` names: the item whose id it is, or
 /// else the only item with that name. No match fails; a name several items
 /// share is refused, listing them so the caller can pick by id.
@@ -236,6 +252,20 @@ mod tests {
         assert_eq!(render(&empty, Shape::Table), "ID   NAME\n");
         assert_eq!(render(&empty, Shape::Json).trim(), "[]");
         assert_eq!(render(&empty, Shape::Ids), "");
+    }
+
+    #[test]
+    fn a_shown_resource_prints_a_line_per_field_that_holds_something() {
+        let shown = details(&serde_json::json!({
+            "name": "claude",
+            "args": ["--fast"],
+            "install_hint": null,
+            "forward_scroll": false,
+        }));
+        assert_eq!(
+            shown,
+            "args: [\"--fast\"]\nforward_scroll: false\nname: claude\n"
+        );
     }
 
     #[test]

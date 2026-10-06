@@ -5040,30 +5040,12 @@ impl Engine {
     fn update_macros_command(entries: Vec<WireMacroEntry>) -> anyhow::Result<Command> {
         let mut macros = crate::config::MacrosConfig::default();
         for entry in entries {
-            let name = entry.name.trim().to_string();
-            if name.is_empty() {
-                anyhow::bail!("Macro name cannot be empty.");
-            }
+            let (name, checked) =
+                crate::config::checked_macro(&entry.name, entry.text, &entry.surface)?;
             if macros.entries.contains_key(&name) {
                 anyhow::bail!("Name \"{name}\" is already in use. Choose another.");
             }
-            if entry.text.is_empty() {
-                anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
-            }
-            let surface = crate::config::MacroSurface::from_config_str(&entry.surface)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Macro \"{name}\" has an unknown surface \"{}\". Use \"agent\", \"terminal\", or \"both\".",
-                        entry.surface
-                    )
-                })?;
-            macros.entries.insert(
-                name,
-                crate::config::MacroEntry {
-                    text: entry.text,
-                    surface,
-                },
-            );
+            macros.entries.insert(name, checked);
         }
         Ok(Command::UpdateMacros { macros })
     }
@@ -5211,20 +5193,7 @@ impl Engine {
                 Command::ChangeConfigSet(ConfigSetChange::RemoveMacro { name })
             }
             WireCommand::SetGlobalEnvVar { name, value } => {
-                if !crate::config::is_valid_env_name(&name) {
-                    anyhow::bail!(
-                        "\"{name}\" is not a valid environment variable name: use letters, \
-                         digits and underscores, not starting with a digit."
-                    );
-                }
-                // The rule a project's env lines follow. The value is a secret,
-                // so the refusal never quotes it.
-                if value.contains('\0') || crate::config::expand_env_vars(&value).is_none() {
-                    anyhow::bail!(
-                        "The value for \"{name}\" was not saved: it holds a NUL byte or a \
-                         $NAME reference that is not a valid variable name."
-                    );
-                }
+                crate::config::check_global_env_var(&name, &value)?;
                 Command::ChangeConfigSet(ConfigSetChange::SetEnvVar { name, value })
             }
             WireCommand::RemoveGlobalEnvVar { name } => {

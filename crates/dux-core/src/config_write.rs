@@ -2426,13 +2426,7 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
     // key's own decor (a comment the user wrote above a macro line) with it.
     for (name, entry) in &macros.entries {
         let existing_key = table.remove_entry(name).map(|(key, _)| key);
-        let mut inline = InlineTable::new();
-        inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
-        inline.insert(
-            "surface",
-            Value::String(Formatted::new(entry.surface.as_config_str().to_string())),
-        );
-        let item = toml_edit::value(Value::InlineTable(inline));
+        let item = macro_item(entry);
         match existing_key {
             Some(key) => {
                 table.insert_formatted(&key, item);
@@ -2440,6 +2434,34 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
             None => {
                 table[name] = item;
             }
+        }
+    }
+}
+
+/// A macro as `[macros]` holds it: `{ text = "…", surface = "…" }`.
+fn macro_item(entry: &crate::config::MacroEntry) -> Item {
+    let mut inline = InlineTable::new();
+    inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
+    inline.insert(
+        "surface",
+        Value::String(Formatted::new(entry.surface.as_config_str().to_string())),
+    );
+    toml_edit::value(Value::InlineTable(inline))
+}
+
+/// Add the macro `name` to `[macros]` at its end, or replace it where it
+/// stands. A macro written as its own `[macros.<name>]` section keeps that
+/// form, and every comment around it stays.
+pub fn set_macro(doc: &mut DocumentMut, name: &str, entry: &crate::config::MacroEntry) {
+    let table = ensure_table(doc, "macros");
+    match table.get_mut(name) {
+        Some(Item::Table(section)) => {
+            section["text"] = toml_edit::value(entry.text.as_str());
+            section["surface"] = toml_edit::value(entry.surface.as_config_str());
+        }
+        Some(item) => *item = macro_item(entry),
+        None => {
+            table.insert(name, macro_item(entry));
         }
     }
 }

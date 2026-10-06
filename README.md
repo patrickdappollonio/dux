@@ -319,6 +319,20 @@ dux config regenerate    # Preview a fresh default config
 dux config restore-docs  # Preview re-adding the comments, keeping your values
 ```
 
+The resources kept in `config.toml` have commands of their own. They read the file
+whether or not dux is running; a change goes through a running dux so it applies at
+once, or into the file, comments kept, when dux is stopped. `--remote <name>` asks a
+remote dux instead.
+
+```bash
+dux macros ls            # Also: show <name>, add <name> <text> [--surface], rm <name>
+dux env ls               # Names only; --show prints the values too
+dux env set API_TOKEN    # Asks for the value; --stdin reads it from a pipe. Also: rm <name>
+dux providers ls         # Also: show <name>
+dux keys ls              # Every action, its keys, and whether you changed them
+dux themes ls            # The themes the picker offers, the current one marked
+```
+
 `dux config diff` is derived from the config structure rather than from a list
 somebody has to remember to update, so a new setting shows up in it the day it
 ships. It summarizes instead of printing two things: `[env]` reports only that it
