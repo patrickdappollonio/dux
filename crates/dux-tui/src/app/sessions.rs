@@ -4828,6 +4828,7 @@ mod tests {
             )),
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
+            server_log_viewer: None,
             status: crate::statusline::KeyedStatusController::with_clear_after(
                 std::time::Duration::ZERO,
             )

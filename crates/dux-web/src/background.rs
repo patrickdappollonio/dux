@@ -74,9 +74,13 @@ impl BackgroundServer {
         claim_before_serving: bool,
     ) -> Result<Self> {
         crate::warn_if_ui_not_built();
-        // Writes nowhere: the terminal UI owns this terminal, and nothing on this
-        // path reads a captured activity ring.
-        let console = Console::noop();
+        // Prints nothing over the terminal UI's frame, but keeps `server.log`:
+        // the lines `dux server` prints, written to the file, access lines
+        // included when `[server] access_log` is on.
+        let console = match crate::open_server_log(&engine.config, &engine.paths) {
+            Some(log) => Console::server_log_only(log),
+            None => Console::noop(),
+        };
 
         // The terminal UI's `App::run` already spawned the global background
         // workers and is still running; spawning them here would double them.
@@ -114,9 +118,9 @@ impl BackgroundServer {
             listeners,
             &engine.config,
             console,
-            // The access log would print to a console that writes nowhere, and it
-            // is never wanted over a terminal UI's frame regardless.
-            false,
+            // Gated by the console too: with no `server.log` to write, the console
+            // records nothing and a request line costs nothing.
+            engine.config.server.access_log,
             SignalPolicy::Inherited,
             crate::BackgroundHooks {
                 ownership_publisher: Some(Arc::clone(&publisher)),
@@ -308,6 +312,11 @@ mod tests {
     /// the two the workspace has are an async one and one this crate does not
     /// depend on, and a bare GET with no body is not worth either.
     fn healthz(addr: std::net::SocketAddr) -> Result<String, String> {
+        get(addr, "/healthz")
+    }
+
+    /// The status line of a bare GET of `path`.
+    fn get(addr: std::net::SocketAddr, path: &str) -> Result<String, String> {
         use std::io::{Read, Write};
 
         let timeout = std::time::Duration::from_secs(3);
@@ -318,7 +327,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
         write!(
             stream,
-            "GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
         )
         .map_err(|e| format!("write failed: {e}"))?;
         let mut response = String::new();
@@ -365,10 +374,11 @@ mod tests {
     /// or a second event-bus forwarder running beside the first.
     #[test]
     fn a_toggle_cycle_stops_serving_and_starts_a_fresh_app() {
-        let (mut engine, _tmp) = engine_in_tempdir();
+        let (mut engine, tmp) = engine_in_tempdir();
         // Not a test about Tailscale: on any other mode every request waits on
         // the first Funnel check, which would consult this machine's real CLI.
         engine.config.server.tailscale = "no".to_string();
+        engine.config.server.access_log = true;
 
         let (listener, first_addr) = loopback_listener();
         let server = BackgroundServer::start(
@@ -383,6 +393,7 @@ mod tests {
             status.contains("200"),
             "a started background server must answer on its own address, got {status:?}"
         );
+        get(first_addr, "/api/v1/build").expect("the first serve answers a page request");
         assert!(server.stop().is_none(), "a clean stop records no failure");
         assert!(
             healthz(first_addr).is_err(),
@@ -390,6 +401,7 @@ mod tests {
         );
 
         // Toggling back on builds a fresh app rather than reviving the old one.
+        engine.config.server.access_log = false;
         let (listener, second_addr) = loopback_listener();
         let server = BackgroundServer::start(
             &mut engine,
@@ -403,7 +415,19 @@ mod tests {
             status.contains("200"),
             "toggling back on must serve again, got {status:?}"
         );
+        get(second_addr, "/api/v1/build").expect("the second serve answers a page request");
         assert!(server.stop().is_none());
+
+        // Serving in the background prints nothing over the terminal UI, but the
+        // file keeps the request lines of the serve that had `access_log` on, and
+        // none of the one that had it off, and never the health probe's.
+        let log = std::fs::read_to_string(tmp.path().join("server.log")).expect("server.log");
+        let page_requests: Vec<&str> = log
+            .lines()
+            .filter(|line| line.len() > 9 && line[9..].starts_with("GET /api/v1/build 200 "))
+            .collect();
+        assert_eq!(page_requests.len(), 1, "{log}");
+        assert!(!log.contains("/healthz"), "{log}");
     }
 
     /// The teardown flag must be set before anything waits on the runtime.

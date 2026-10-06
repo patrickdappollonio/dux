@@ -174,7 +174,7 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<Vec<ResetLeftover>
         return Ok(Vec::new());
     }
 
-    let log_path = resolve_reset_log_path(paths);
+    let (log_path, server_log_path) = resolve_reset_log_paths(paths);
 
     let leftovers = if all {
         reset_agent_data(paths)?
@@ -184,6 +184,14 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<Vec<ResetLeftover>
 
     remove_file_with_message(&log_path)?;
     prune_empty_ancestors(&log_path, &paths.root)?;
+    // The server log goes with its rotated copies, and the saved remotes with
+    // the sign-in tokens they hold.
+    for copy in logger::rotated_copies_of(&server_log_path) {
+        remove_file_with_message(&copy)?;
+    }
+    remove_file_with_message(&server_log_path)?;
+    prune_empty_ancestors(&server_log_path, &paths.root)?;
+    remove_file_with_message(&paths.root.join("remotes.toml"))?;
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
 
@@ -762,6 +770,10 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     // link in the root is kept when one of these is at or through it.
     let mut recorded_folders: Vec<PathBuf> = Vec::new();
     let mut leftovers: Vec<ResetLeftover> = Vec::new();
+    // The one thing the reset keeps: that the welcome screen was already seen.
+    // Read here, written into the fresh database below, so a factory reset does
+    // not make the next start greet the user as a stranger.
+    let mut last_seen_version: Option<String> = None;
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
@@ -803,6 +815,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                     // reset removes is decided first, keeping everything the
                     // user owns, and the same set decides whose processes end:
                     // nothing working in a folder that is kept is touched.
+                    last_seen_version = store.last_seen_version().ok().flatten();
                     let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
                     let kept = end_recorded_processes(paths, &store, &removing);
                     let kept_folders: Vec<PathBuf> =
@@ -857,6 +870,20 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     );
     leftovers.extend(swept);
     remove_file_with_message(&paths.sessions_db_path)?;
+    if let Some(version) = last_seen_version {
+        match SessionStore::open(&paths.sessions_db_path)
+            .and_then(|store| store.set_last_seen_version(&version))
+        {
+            Ok(()) => println!(
+                "kept the record that you have seen the welcome screen, in a fresh {}",
+                paths.sessions_db_path.display()
+            ),
+            Err(error) => eprintln!(
+                "warning: could not keep the record that you have seen the welcome screen \
+                 ({error}); the next start shows it again"
+            ),
+        }
+    }
     Ok(leftovers)
 }
 
@@ -1247,17 +1274,21 @@ fn remove_leftover_folder(worktree: &Path) -> Option<SessionWorktreeReset> {
 // File / directory helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_reset_log_path(paths: &DuxPaths) -> PathBuf {
-    let logging = if paths.config_path.exists() {
+/// Where the config says `dux.log` and `server.log` are, or where they are by
+/// default when there is no config or it does not parse.
+fn resolve_reset_log_paths(paths: &DuxPaths) -> (PathBuf, PathBuf) {
+    let config = if paths.config_path.exists() {
         fs::read_to_string(&paths.config_path)
             .ok()
             .and_then(|raw| toml::from_str::<config::Config>(&raw).ok())
-            .map(|config| config.logging)
             .unwrap_or_default()
     } else {
-        config::LoggingConfig::default()
+        config::Config::default()
     };
-    logger::resolve_log_path(&logging, paths)
+    (
+        logger::resolve_log_path(&config.logging, paths),
+        logger::resolve_server_log_path(&config.server, paths),
+    )
 }
 
 fn remove_file_with_message(path: &Path) -> Result<()> {
@@ -2538,12 +2569,38 @@ mod tests {
         let harness = ResetHarness::new();
         harness.write_config_with_log_path("logs/custom.log");
         harness.write_log("logs/custom.log");
+        // The server log, its rotated copies (plain, gzipped, an abandoned
+        // temporary) and the saved remotes all go with the config.
+        for name in [
+            "logs/web-custom.log",
+            "logs/web-custom.log.1",
+            "logs/web-custom.log.2.gz",
+            "logs/web-custom.log.3.gz.4242.tmp",
+            "remotes.toml",
+        ] {
+            harness.write_log(name);
+        }
+        // A file that only looks like a copy is somebody else's.
+        harness.write_log("logs/web-custom.log.old");
         let worktree = harness.create_session("agent-1");
 
         run_reset(&harness.paths, false).expect("reset");
 
         assert!(!harness.paths.config_path.exists());
         assert!(!harness.paths.root.join("logs/custom.log").exists());
+        for name in [
+            "logs/web-custom.log",
+            "logs/web-custom.log.1",
+            "logs/web-custom.log.2.gz",
+            "logs/web-custom.log.3.gz.4242.tmp",
+            "remotes.toml",
+        ] {
+            assert!(!harness.paths.root.join(name).exists(), "{name} is removed");
+        }
+        assert!(
+            harness.paths.root.join("logs/web-custom.log.old").exists(),
+            "a file that is not a numbered copy stays"
+        );
         assert!(harness.paths.sessions_db_path.exists());
         assert!(worktree.exists());
 
@@ -2564,11 +2621,31 @@ mod tests {
         let harness = ResetHarness::new();
         harness.write_config_with_log_path("logs/custom.log");
         harness.write_log("logs/custom.log");
+        harness.write_log("logs/web-custom.log");
+        harness.write_log("remotes.toml");
         harness.create_session("agent-1");
+        SessionStore::open(&harness.paths.sessions_db_path)
+            .expect("store")
+            .set_last_seen_version("v0.6.0")
+            .expect("the welcome screen was seen");
 
         run_reset(&harness.paths, true).expect("reset");
 
-        assert!(!harness.paths.root.exists());
+        // Everything goes except the one record that the welcome screen was seen,
+        // which the fresh database holds, so the next start shows no welcome.
+        assert!(!harness.paths.config_path.exists());
+        assert!(!harness.paths.worktrees_root.exists());
+        assert!(!harness.paths.root.join("logs").exists());
+        assert!(!harness.paths.root.join("remotes.toml").exists());
+        let store = SessionStore::open(&harness.paths.sessions_db_path).expect("fresh store");
+        assert!(store.load_sessions().expect("sessions").is_empty());
+        let seen = store.last_seen_version().expect("record");
+        assert_eq!(seen.as_deref(), Some("v0.6.0"));
+        assert_eq!(
+            dux_core::first_load::plan(seen.as_deref(), "v0.6.0", false, false).screen,
+            dux_core::first_load::FirstLoad::Nothing,
+            "no welcome screen on the next start"
+        );
     }
 
     #[test]
@@ -2887,6 +2964,7 @@ mod tests {
         fn write_config_with_log_path(&self, log_path: &str) {
             let mut config = Config::default();
             config.logging.path = log_path.to_string();
+            config.server.log_path = "logs/web-custom.log".to_string();
             let bindings = RuntimeBindings::from_keys_config(&config.keys);
             let body = config::render_config_with(&config, &bindings);
             fs::write(&self.paths.config_path, body).expect("config");

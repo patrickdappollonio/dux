@@ -317,6 +317,11 @@ pub struct App {
     pub(crate) notes_fetch_explicit_request: Arc<AtomicBool>,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
+    /// The server log, full-screen over everything while it is `Some`: opened by
+    /// the `view-server-log` palette command while dux serves in the background,
+    /// closed by its own keys. Not a modal and not a fullscreen pane: it takes
+    /// every key and the whole frame until it closes.
+    pub(crate) server_log_viewer: Option<crate::server_screen::ServerLogViewer>,
     pub(crate) status: KeyedStatusController,
     /// The generation of the missing-project warning this App last wrote to the
     /// anonymous status slot, so it can retire its own message when the
@@ -4394,6 +4399,7 @@ impl App {
             notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
+            server_log_viewer: None,
             status,
             missing_project_warning_gen: None,
             prompt: PromptState::None,
@@ -4640,6 +4646,9 @@ impl App {
         }
         // Browser requests observe this tick's worker results and render in the same frame.
         self.service_companion();
+        // The server log's reader runs on a thread of its own, so nothing on this
+        // surface marks the frame when a line arrives: look.
+        self.sync_server_log_viewer();
         self.note_visible_pty_output();
         // Mark the visible tab before signals can raise or clear its attention state.
         self.note_focused_agent_viewed();
@@ -4844,6 +4853,7 @@ impl App {
 
     fn should_poll_raw_input(&self) -> bool {
         matches!(self.prompt, PromptState::None)
+            && self.server_log_viewer.is_none()
             && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
             && matches!(
                 self.input_target,
@@ -5124,6 +5134,7 @@ impl App {
                 self.terminal_focus.on_focus_lost();
                 false
             }
+            Event::Paste(_) if self.server_log_viewer.is_some() => false,
             Event::Paste(text) => {
                 self.handle_paste(&text);
                 false
@@ -5512,6 +5523,10 @@ impl App {
             }
             "stop-background-server" => {
                 self.stop_background_server();
+                Ok(())
+            }
+            "view-server-log" => {
+                self.open_server_log_viewer();
                 Ok(())
             }
             "set-tailscale-mode" => {

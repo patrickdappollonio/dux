@@ -21,6 +21,64 @@ impl App {
             .is_some_and(|companion| companion.is_serving())
     }
 
+    /// Palette action: open the server log full-screen. It follows the file the
+    /// background server writes, so it opens only while that server is up.
+    pub(crate) fn open_server_log_viewer(&mut self) {
+        let path = dux_core::logger::resolve_server_log_path(
+            &self.engine.config.server,
+            &self.engine.paths,
+        );
+        if !self.background_server_is_serving() {
+            self.set_warning(format!(
+                "The server log viewer follows the log of the web UI served in the background, \
+                 and nothing is serving right now. Use start-background-server to serve, or read \
+                 {} directly.",
+                path.display()
+            ));
+            return;
+        }
+        self.server_log_viewer = Some(crate::server_screen::ServerLogViewer::open(
+            path,
+            self.engine.config.server.log_viewer_lines,
+        ));
+        self.sync_server_log_viewer();
+        self.mark_frame_dirty();
+    }
+
+    /// Bring the open viewer up to date with what its reader has read, marking
+    /// the frame when a line arrived.
+    pub(crate) fn sync_server_log_viewer(&mut self) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        if viewer.sync(&self.theme) {
+            self.mark_frame_dirty();
+        }
+    }
+
+    /// A key while the server log viewer is open: it owns every key.
+    pub(crate) fn handle_server_log_key(&mut self, key: KeyEvent) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        if viewer.handle_key(key, &self.bindings) == crate::server_screen::ServerLogKey::Close {
+            self.server_log_viewer = None;
+        }
+    }
+
+    /// The wheel scrolls the open viewer; every other mouse event is ignored, so
+    /// nothing behind it can be clicked.
+    pub(crate) fn handle_server_log_mouse(&mut self, mouse: MouseEvent) {
+        let Some(viewer) = self.server_log_viewer.as_mut() else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => viewer.scroll_by(Action::ScrollLineUp),
+            MouseEventKind::ScrollDown => viewer.scroll_by(Action::ScrollLineDown),
+            _ => {}
+        }
+    }
+
     /// The header chip that says a listener is up, or `None` when none is.
     ///
     /// Present whenever serving, connections or not: the chip's first job is to be
@@ -2073,6 +2131,88 @@ pub(crate) mod tests {
             !app.engine.config.server.serve_while_tui,
             "and it must not write the setting back on"
         );
+    }
+
+    fn render_text(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buffer = terminal.backend().buffer().clone();
+        let width = usize::from(buffer.area.width);
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The server log, full-screen over the terminal UI: the last lines of
+    /// `server.log` as the background server wrote them, then what it writes
+    /// next, with Esc going back.
+    #[test]
+    fn view_server_log_shows_the_background_servers_lines_and_esc_returns() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.log_viewer_lines = 3;
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        let log = app.engine.paths.root.join("server.log");
+        std::fs::write(
+            &log,
+            "10:00:00 info client connected from 10.0.0.1\n\
+             10:00:01 GET /api/v1/build 200 2ms\n\
+             10:00:02 info client connected from 10.0.0.2\n\
+             10:00:03 GET /api/v1/workspace 200 4ms\n",
+        )
+        .unwrap();
+
+        app.execute_command("view-server-log".to_string()).unwrap();
+        assert!(app.server_log_viewer.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            app.sync_server_log_viewer();
+            screen = render_text(&mut app);
+            if screen.contains("GET /api/v1/workspace 200 4ms") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            screen.contains("10:00:01 GET /api/v1/build 200 2ms"),
+            "the last three lines open the viewer:\n{screen}"
+        );
+        assert!(
+            !screen.contains("10.0.0.1"),
+            "only the last three lines, not the whole file:\n{screen}"
+        );
+
+        // A line the server writes later arrives without reopening.
+        let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut file, b"10:00:09 warn listener lost\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !screen.contains("listener lost") {
+            app.sync_server_log_viewer();
+            screen = render_text(&mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(screen.contains("10:00:09 warn listener lost"), "{screen}");
+
+        app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.server_log_viewer.is_none(), "Esc returns");
+    }
+
+    /// With nothing serving there is no background log to follow: say so, and
+    /// say where the file is.
+    #[test]
+    fn view_server_log_with_nothing_serving_says_so_and_opens_nothing() {
+        let mut app = test_app(default_bindings());
+        app.execute_command("view-server-log".to_string()).unwrap();
+        assert!(app.server_log_viewer.is_none());
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert!(message.contains("start-background-server"), "{message}");
+        assert!(message.contains("server.log"), "{message}");
     }
 
     /// The chip is the standing "there is a listener" signal first and a counter

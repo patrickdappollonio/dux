@@ -272,6 +272,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         )),
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
+        server_log_viewer: None,
         // The production default from `ui.status_clear_seconds`, deliberately
         // NOT zero: zero switches the status line out of its queue and into
         // most-recent-wins, so a test app built that way exercises a path almost

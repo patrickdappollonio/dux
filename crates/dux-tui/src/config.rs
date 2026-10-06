@@ -1062,12 +1062,12 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "access_log",
             comment: Some(CommentSource::Static(
                 "# Log a per-request access line (method, path, status, latency) to the\n\
-                 # server's console: the terminal `dux server` prints to, and the log\n\
-                 # viewer of the in-app \"start web server\" flip, which shows the same\n\
-                 # lines. The /healthz probe is always skipped so a health checker does\n\
-                 # not flood the log. This output is console-ONLY and never written to\n\
-                 # dux.log, so piping `dux server`'s stdout captures the access log.\n\
-                 # Set false to silence it in both places.\n\
+                 # server's log: the terminal `dux server` prints to, the log viewer of\n\
+                 # the in-app \"start web server\" flip, and server.log, which every way\n\
+                 # of serving writes. The /healthz probe is always skipped so a health\n\
+                 # checker does not flood the log. It is never written to dux.log.\n\
+                 # server.log is readable only by you, and it records the addresses\n\
+                 # that connected: set false to keep them off disk and off the screen.\n\
                  # A config reload applies this to a running server right away.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.access_log),
@@ -1075,9 +1075,12 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "log_viewer_lines",
             comment: Some(CommentSource::Static(
-                "# How many lines the in-app \"start web server\" flip keeps in its log\n\
-                 # viewer for scrolling back. The viewer shows the same lines `dux server`\n\
-                 # prints to its terminal; older lines are dropped once it holds this many.\n\
+                "# How many lines the in-app log viewers keep for scrolling back: the\n\
+                 # \"start web server\" flip's, and the view-server-log palette command's,\n\
+                 # which opens with the last this-many lines of server.log and then\n\
+                 # follows it while the server runs in the background. The viewers show\n\
+                 # the same lines `dux server` prints to its terminal; older lines are\n\
+                 # dropped once one holds this many.\n\
                  # `dux server` itself has no such cap: its scrollback is your terminal's.\n\
                  # 0 is read as 1 and values above 20000 as 20000. A negative value is\n\
                  # not valid here: dux resets it to the default (2000) and says so in\n\
@@ -1085,6 +1088,51 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Applies the next time the flip starts.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.log_viewer_lines),
+        },
+        ConfigEntry::Field {
+            key: "log_path",
+            comment: Some(CommentSource::Static(
+                "# Where the server's own log is written: the same lines `dux server`\n\
+                 # prints (the startup banner, who connected, the access log, the\n\
+                 # shutdown), kept by `dux server`, by the in-app \"start web server\"\n\
+                 # flip and by the background server alike, so the log of a server that\n\
+                 # ran with no terminal in front of it can still be read. dux.log keeps\n\
+                 # the debugging trail and is not affected. Relative paths are resolved\n\
+                 # from the dux config directory. The file is readable only by you.\n\
+                 # Read when a server starts.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.log_path.clone()),
+        },
+        ConfigEntry::Field {
+            key: "log_max_bytes",
+            comment: Some(CommentSource::Static(
+                "# Size in bytes the server log may reach before dux rotates it. Default\n\
+                 # 10485760 (10 MiB). Rotation is by size only, and a line is always\n\
+                 # written whole, exactly as for [logging] max_bytes. Set to 0 to never\n\
+                 # rotate. Read when a server starts.",
+            )),
+            value_fn: |c| FieldValue::U64(c.server.log_max_bytes),
+        },
+        ConfigEntry::Field {
+            key: "log_keep",
+            comment: Some(CommentSource::Static(
+                "# How many rotated copies of the server log to keep beside the live\n\
+                 # one. Default 5. On each rotation server.log becomes server.log.1, the\n\
+                 # previous server.log.1 becomes server.log.2, and so on; anything past\n\
+                 # this count is deleted, which is how the log stays from growing without\n\
+                 # end. Set to 0 to rotate and throw the old log away. Values above 1000\n\
+                 # are clamped. Read when a server starts.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.log_keep),
+        },
+        ConfigEntry::Field {
+            key: "log_compress",
+            comment: Some(CommentSource::Static(
+                "# Gzip rotated copies of the server log in the background, so they are\n\
+                 # named server.log.1.gz, server.log.2.gz and so on. Default true. Set to\n\
+                 # false to keep them as plain text. Read when a server starts.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.log_compress),
         },
         ConfigEntry::Field {
             key: "qr_codes",
@@ -3162,6 +3210,10 @@ mod tests {
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("log_viewer_lines = 2000"));
+        assert!(rendered.contains("log_path = \"server.log\""));
+        assert!(rendered.contains("log_max_bytes = 10485760"));
+        assert!(rendered.contains("log_keep = 5"));
+        assert!(rendered.contains("log_compress = true"));
         assert!(rendered.contains("qr_codes = true"));
         assert!(rendered.contains("serve_while_tui = false"));
         assert!(rendered.contains("max_websocket_events_connections = 32"));
