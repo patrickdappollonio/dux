@@ -44,7 +44,7 @@ A handful of subcommands handle the file without you hunting for it:
   them, keeping every value exactly as it is.
 - `dux config reset` removes the config and the log, and keeps your agents and worktrees.
   `dux config reset --all` is the full factory reset: config, log, the session database and
-  every worktree dux made.
+  every worktree dux made. Both refuse while another dux is running.
 
 Hand-edits are preserved across saves: your comments and ordering survive.
 
@@ -142,15 +142,22 @@ change, a block after failed logins), never by dux saving its other settings.
 > touching the app: `kill -USR1 <pid>`. The PID is the first line of `dux.lock`, next to the config.
 
 > [!WARNING]
-> A factory reset deletes every worktree dux made, uncommitted work included. First it stops
-> what dux itself started and left running in those worktrees (a startup command's dev
-> server, or a job a terminal left working in one, say), giving each the same grace period
-> as a delete before forcing it. A folder
-> where something still runs (one of those that would not stop, or anything a standalone
-> agent started) is kept, and so may one something else is still writing into. The reset
-> carries on with everything else, then lists each folder it had to leave behind and why.
-> Stop whatever is still using it and delete the folder yourself. A folder a standalone
-> agent runs in is never touched.
+> A factory reset deletes every worktree dux made, uncommitted work included. It refuses to
+> run while another dux is running, and it is all or nothing. First it stops what dux itself
+> started and left running in those worktrees (a startup command's dev server, or a job a
+> terminal left working in one, say), giving each the same grace period as a delete before
+> forcing it. That includes everything a standalone agent started, wherever it works. Then it
+> looks once more: if anything dux started still runs, or any program of yours is working in a
+> folder the reset would delete (one dux never started included), or dux cannot tell whether
+> something does (it cannot read the database, the list of what it started, or the process
+> list), the reset deletes nothing: not the config, not the database, not a worktree. It says
+> why, lists each program and its folder, and exits with status 1. Stop what is listed and run
+> the reset again. If a folder cannot be removed once the deleting has begun, the reset stops
+> there, keeps the database and the config, lists what it removed and what failed, and exits
+> with status 1; fix that and run it again. A folder a standalone agent runs in is never
+> removed. Once the reset does delete, it keeps
+> the record that you have seen the welcome screen, so the screen does not open again on
+> the next start.
 
 ### What `dux config diff` shows, and what it holds back
 
