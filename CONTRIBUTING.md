@@ -178,7 +178,8 @@ a failing test before you fix it.
 
 `crates/dux-journeys` runs the real `dux` binary in Docker and drives it the way
 a person does: HTTP with a cookie jar, the events and terminal WebSockets, a real
-Chromium, and nginx, Caddy or a stand-in `tailscale` where a journey needs them.
+Chromium, the `dux` command line inside the container, and nginx, Caddy or a
+stand-in `tailscale` where a journey needs them.
 Each test's doc comment says what it covers as Situation, Task, Action and
 Result. They are Linux only and need Docker; a plain `cargo test` skips them.
 
