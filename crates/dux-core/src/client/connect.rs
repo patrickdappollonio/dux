@@ -234,6 +234,11 @@ impl Client {
         {
             return login_needed(name);
         }
+        if reply.status == 409
+            && let Some(blockers) = attached_blockers(reply)
+        {
+            return attached(&blockers);
+        }
         let exit = match reply.status {
             409 => Exit::Refused,
             503 => Exit::NotRunning,
@@ -283,6 +288,32 @@ impl Client {
             ),
         ))
     }
+}
+
+/// The people a `409 {"error":"attached"}` refusal names, or `None` for any
+/// other refusal.
+fn attached_blockers(reply: &Response) -> Option<Vec<crate::attachments::Blocker>> {
+    #[derive(serde::Deserialize)]
+    struct Refusal {
+        error: String,
+        blockers: Vec<crate::attachments::Blocker>,
+    }
+    let refusal: Refusal = serde_json::from_slice(&reply.body).ok()?;
+    (refusal.error == "attached").then_some(refusal.blockers)
+}
+
+/// A change refused because somebody else is attached to what it would end:
+/// one line per person, then the way past them.
+fn attached(blockers: &[crate::attachments::Blocker]) -> CliError {
+    let mut message = String::from("Someone else is using this right now:\n");
+    for blocker in blockers {
+        message.push_str(&format!("  {}\n", blocker.describe()));
+    }
+    message.push_str(
+        "Nothing was changed. Ask them to close it first, or add \
+         --dangerously-ignore-connected to go ahead and cut them off.",
+    );
+    CliError::new(Exit::Refused, message)
 }
 
 fn login_needed(name: &str) -> CliError {

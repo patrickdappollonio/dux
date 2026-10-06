@@ -46,7 +46,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::operations::RecordWatch;
 use crate::pty_owners::PtySizeOwners;
@@ -62,7 +62,7 @@ pub const QUIET_DEADLINE: Duration = Duration::from_secs(75);
 pub const TERMINAL_UI_CONNECTION: &str = "terminal-ui";
 
 /// Which kind of client a connection is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Browser,
@@ -70,7 +70,7 @@ pub enum Surface {
 }
 
 /// What an attachment streams.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
     /// An agent's tab (its first tab included).
@@ -81,7 +81,7 @@ pub enum TargetKind {
 
 /// One agent tab or terminal, with the agent it belongs to when it belongs to
 /// one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub kind: TargetKind,
     /// The PTY's id: the tab id or the terminal id.
@@ -193,8 +193,9 @@ pub enum Life {
     Key { key: String, until: Instant },
 }
 
-/// One connection in the way of a change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// One connection in the way of a change. Read back from a refusal by the
+/// command line, which prints it the way the engine words it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blocker {
     pub surface: Surface,
     pub device: Option<String>,
@@ -202,6 +203,36 @@ pub struct Blocker {
     pub verified: bool,
     pub driving: bool,
     pub target: Target,
+}
+
+impl Blocker {
+    /// One blocker in words: who, from where, doing what, to which tab or
+    /// terminal.
+    pub fn describe(&self) -> String {
+        let who = self
+            .device
+            .as_deref()
+            .and_then(crate::device_label::short_device_label)
+            .unwrap_or_else(|| match self.surface {
+                Surface::Browser => "a browser".to_string(),
+                Surface::TerminalUi => crate::background_serve::TUI_DEVICE_LABEL.to_string(),
+            });
+        let place = match &self.address {
+            Some(address) if self.verified => format!(" at {address}"),
+            Some(address) => format!(" at {address} (unverified)"),
+            None => String::new(),
+        };
+        let doing = if self.driving {
+            "typing in"
+        } else {
+            "watching"
+        };
+        let what = match self.target.kind {
+            TargetKind::Tab => "tab",
+            TargetKind::Terminal => "terminal",
+        };
+        format!("{who}{place}, {doing} {what} {}", self.target.id)
+    }
 }
 
 /// How a connection or an attachment ended.

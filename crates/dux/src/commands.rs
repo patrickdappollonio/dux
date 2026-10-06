@@ -261,15 +261,66 @@ pub struct GuardedChangeFlags {
     pub dangerously_ignore_connected: bool,
 }
 
-/// A command whose arguments a later part of the command line defines.
+/// `dux agents add`: one of a project, `--fork` or `--standalone` says
+/// where the agent comes from.
 #[derive(Args, Debug)]
-pub struct OpenArgs {
+#[command(group(
+    clap::ArgGroup::new("source")
+        .args(["project", "fork", "standalone"])
+        .required(true)
+))]
+pub struct AddAgentArgs {
+    /// The project to create the agent in, on a new branch unless
+    /// --from-pr or --from-worktree says otherwise.
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["fork", "standalone"])]
+    pub project: Option<String>,
+    /// The agent's name, which is also its branch's name in a project.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Create the agent on the branch of that name that already exists.
+    #[arg(long, conflicts_with_all = ["from_pr", "from_worktree", "fork", "standalone"])]
+    pub existing_branch: bool,
+    /// Create the agent from this pull request of the project (a number or
+    /// its address).
     #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        value_name = "ARGS"
+        long,
+        value_name = "PR",
+        requires = "project",
+        conflicts_with = "from_worktree"
     )]
-    pub args: Vec<String>,
+    pub from_pr: Option<String>,
+    /// Create the agent on this worktree the project already has.
+    #[arg(long, value_name = "PATH", requires = "project")]
+    pub from_worktree: Option<String>,
+    /// Create a standalone agent in this folder of your own, with no project.
+    #[arg(long, value_name = "FOLDER", conflicts_with = "fork")]
+    pub standalone: Option<String>,
+    /// The provider a standalone agent runs (the global default otherwise).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["project", "fork"])]
+    pub provider: Option<String>,
+    /// Fork this agent: a new worktree from its branch.
+    #[arg(long, value_name = "AGENT")]
+    pub fork: Option<String>,
+    /// Copy the uncommitted changes of the project's checkout into the new
+    /// worktree.
+    #[arg(long, conflicts_with_all = ["from_pr", "from_worktree", "fork", "standalone"])]
+    pub copy_uncommitted: bool,
+    #[command(flatten)]
+    pub change: ChangeFlags,
+}
+
+/// `dux terminals add`: an agent's or a project's, or a standalone one when
+/// neither is named.
+#[derive(Args, Debug)]
+pub struct AddTerminalArgs {
+    /// Open it in this agent's worktree.
+    #[arg(long, value_name = "AGENT", conflicts_with = "project")]
+    pub agent: Option<String>,
+    /// Open it at this project's root.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+    #[command(flatten)]
+    pub change: ChangeFlags,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,16 +340,29 @@ pub enum ProjectsSub {
     Ls(ListFlags),
     /// Show one project.
     Show { project: String },
-    /// Add a project from a path.
+    /// Add a project from a path and print its id last.
     Add {
         path: String,
+        /// The project's name (the folder's name by default).
+        #[arg(long)]
+        name: Option<String>,
+        /// Check the repository's default branch out first.
+        #[arg(long)]
+        checkout_default: bool,
+        /// Make a plain folder a git repository first, with a first commit.
+        #[arg(long)]
+        init: bool,
         #[command(flatten)]
         change: ChangeFlags,
     },
-    /// Remove a project.
+    /// Remove a project. Its agents' worktrees stay on disk unless
+    /// --delete-worktrees is given.
     #[command(visible_alias = "remove")]
     Rm {
         project: String,
+        /// Also delete its agents and their worktrees.
+        #[arg(long)]
+        delete_worktrees: bool,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
     },
@@ -334,17 +398,30 @@ pub enum AgentsSub {
         /// Only the agents of this project.
         #[arg(long, value_name = "PROJECT")]
         project: Option<String>,
+        /// Print only each agent's id and the folder it works in.
+        #[arg(long)]
+        worktrees: bool,
         #[command(flatten)]
         list: ListFlags,
     },
     /// Show one agent.
     Show { agent: String },
-    /// Create an agent.
-    Add(OpenArgs),
-    /// Delete an agent.
+    /// Create an agent and print its id last.
+    Add(AddAgentArgs),
+    /// Delete an agent. With neither --delete-branch nor --keep-branch, a
+    /// branch dux created goes with the worktree and one it found is kept.
     #[command(visible_alias = "remove")]
     Rm {
         agent: String,
+        /// Also remove the agent's worktree.
+        #[arg(long)]
+        delete_worktree: bool,
+        /// Delete its branch with the worktree.
+        #[arg(long, conflicts_with = "keep_branch")]
+        delete_branch: bool,
+        /// Keep its branch.
+        #[arg(long)]
+        keep_branch: bool,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
     },
@@ -420,8 +497,8 @@ pub enum TerminalsSub {
     /// List terminals.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
-    /// Open a terminal.
-    Add(OpenArgs),
+    /// Open a terminal and print its id last.
+    Add(AddTerminalArgs),
     /// Close a terminal.
     #[command(visible_alias = "remove")]
     Rm {
@@ -771,14 +848,75 @@ mod tests {
     }
 
     #[test]
-    fn macro_and_env_changes_parse() {
+    fn resource_changes_parse_and_conflicting_flags_are_refused() {
         for args in [
             &["macros", "add", "m", "hello", "--surface", "both"][..],
             &["macros", "remove", "m"][..],
             &["env", "set", "T", "--stdin"][..],
             &["env", "rm", "T"][..],
+            &["projects", "add", "/src/app", "--name", "app", "--init"][..],
+            &["projects", "rm", "app", "--delete-worktrees"][..],
+            &[
+                "agents",
+                "add",
+                "--project",
+                "app",
+                "--name",
+                "a",
+                "--existing-branch",
+            ][..],
+            &["agents", "add", "--project", "app", "--from-pr", "42"][..],
+            &[
+                "agents",
+                "add",
+                "--project",
+                "app",
+                "--from-worktree",
+                "/w/x",
+            ][..],
+            &[
+                "agents",
+                "add",
+                "--standalone",
+                "/src/x",
+                "--provider",
+                "codex",
+            ][..],
+            &["agents", "add", "--fork", "a", "--name", "b"][..],
+            &["agents", "ls", "--worktrees", "--project", "app"][..],
+            &["agents", "rm", "a", "--delete-worktree", "--keep-branch"][..],
+            &[
+                "agents",
+                "tabs",
+                "stop",
+                "a",
+                "t",
+                "--dangerously-ignore-connected",
+            ][..],
+            &["terminals", "add", "--agent", "a"][..],
+            &["terminals", "add"][..],
         ] {
             assert!(parse(args).is_ok(), "{args:?}");
+        }
+        for args in [
+            &["agents", "add", "--name", "a"][..],
+            &["agents", "add", "--fork", "a", "--copy-uncommitted"][..],
+            &["agents", "add", "--project", "app", "--fork", "a"][..],
+            &["agents", "add", "--from-pr", "42"][..],
+            &["agents", "add", "--project", "app", "--provider", "codex"][..],
+            &[
+                "agents",
+                "add",
+                "--project",
+                "app",
+                "--from-pr",
+                "42",
+                "--existing-branch",
+            ][..],
+            &["agents", "rm", "a", "--delete-branch", "--keep-branch"][..],
+            &["terminals", "add", "--agent", "a", "--project", "p"][..],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
         }
     }
 

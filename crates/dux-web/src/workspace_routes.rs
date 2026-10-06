@@ -12,11 +12,21 @@
 //!   on the owner. Moving terminals to a flat collection changed what the BROWSER
 //!   receives and deliberately not these, so they re-nest each owner's terminals
 //!   through [`SessionWithTerminals`] and [`ProjectWithTerminals`].
+//! - `GET /api/v1/terminals` is the thin read of every terminal, flat and
+//!   owner-tagged, standalone ones included.
+//! - The thin reads answer from the engine as it is at the request, while the
+//!   workspace document is the last one pushed, rebuilt on the engine's next
+//!   spine check; a client reading right after its own change reads a thin one.
 //! - `GET /api/v1/sessions` also lists, after the live agents, each agent a
 //!   followed delete is still removing, as it looked when the delete started,
 //!   with `"removing": true` and no terminals, until the delete's operation
 //!   record finishes. The workspace document never does: the agent left it when
 //!   the delete started.
+//! - `GET /api/v1/sessions` (its live rows) and `GET /api/v1/sessions/:id`
+//!   carry `remote_viewers`: how many browser attachments the agent has, from
+//!   the attachment registry. The workspace document leaves it out, because it
+//!   is pushed on every change and a count that moves with every attach would
+//!   push the whole document each time.
 //!
 //! A nested terminal entry carries a tagged `owner` field. That is additive and it
 //! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
@@ -62,6 +72,12 @@ pub struct SessionWithTerminals {
     /// delete's operation record finishes. Absent on every other row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     removing: bool,
+    /// How many browser attachments the agent has across its tabs and its own
+    /// terminals, leaving out the terminal UI: set on the live rows of
+    /// `GET /api/v1/sessions` and on `GET /api/v1/sessions/:id`, absent on
+    /// every other answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_viewers: Option<usize>,
 }
 
 impl SessionWithTerminals {
@@ -70,7 +86,27 @@ impl SessionWithTerminals {
             session,
             terminals,
             removing: false,
+            remote_viewers: None,
         }
+    }
+
+    /// This row with its count of remote viewers, read from the attachment
+    /// registry, the one record of who is attached to what.
+    fn counting_viewers(mut self, attachments: &dux_core::attachments::Attachments) -> Self {
+        let scope = dux_core::attachments::Scope {
+            agents: [self.session.id.clone()].into(),
+            ..Default::default()
+        };
+        self.remote_viewers = Some(
+            attachments
+                .blockers(
+                    &scope,
+                    Some(dux_core::attachments::TERMINAL_UI_CONNECTION),
+                    std::time::Instant::now(),
+                )
+                .len(),
+        );
+        self
     }
 }
 
@@ -139,6 +175,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/projects", get(get_projects))
         .route("/api/v1/sessions", get(get_sessions))
         .route("/api/v1/sessions/{id}", get(get_session))
+        .route("/api/v1/terminals", get(get_terminals))
 }
 
 async fn get_workspace(State(state): State<AppState>) -> Response {
@@ -170,6 +207,15 @@ async fn get_projects(State(state): State<AppState>) -> Response {
     }
 }
 
+/// Every terminal, flat and owner-tagged, in manual order: the one thin read
+/// that lists standalone terminals, which own nothing to nest under.
+async fn get_terminals(State(state): State<AppState>) -> Response {
+    match state.engine.spine().await {
+        Some(spine) => Json(spine.terminals).into_response(),
+        None => engine_unavailable(),
+    }
+}
+
 async fn get_sessions(State(state): State<AppState>) -> Response {
     match state.engine.spine().await {
         Some(spine) => {
@@ -180,6 +226,7 @@ async fn get_sessions(State(state): State<AppState>) -> Response {
                 .map(|session| {
                     let terminals = by_session.remove(&session.id).unwrap_or_default();
                     SessionWithTerminals::new(session, terminals)
+                        .counting_viewers(state.engine.attachments())
                 })
                 .collect();
             // The agents a delete is still removing, after the live ones. An
@@ -194,6 +241,7 @@ async fn get_sessions(State(state): State<AppState>) -> Response {
                     session,
                     terminals: Vec::new(),
                     removing: true,
+                    remote_viewers: None,
                 })
                 .collect();
             let mut sessions = sessions;
@@ -213,9 +261,11 @@ async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> R
     // Project ONLY the requested session, not the whole spine. The outer `None`
     // is a dead engine (503); the inner `None` is an unknown session id (404).
     match state.engine.session(id).await {
-        Some(Some((session, terminals))) => {
-            Json(SessionWithTerminals::new(session, terminals)).into_response()
-        }
+        Some(Some((session, terminals))) => Json(
+            SessionWithTerminals::new(session, terminals)
+                .counting_viewers(state.engine.attachments()),
+        )
+        .into_response(),
         Some(None) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
         None => engine_unavailable(),
     }
@@ -249,9 +299,12 @@ mod tests {
     /// An agent whose delete is still removing its worktree has already left
     /// the workspace. The thin list a script reads still names it, marked as
     /// being removed, until the delete's record finishes; the document the
-    /// browser reads does not.
+    /// browser reads does not. Every live row counts the browsers attached to
+    /// the agent, leaving out the terminal UI, on the thin reads.
     #[tokio::test]
-    async fn an_agent_still_being_removed_is_listed_as_removing_on_the_thin_read_only() {
+    async fn the_thin_read_lists_agents_being_removed_and_counts_remote_viewers() {
+        use dux_core::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
+
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
         engine
@@ -261,23 +314,65 @@ mod tests {
         engine.sessions.clear();
         engine.open_operation("op-d", OperationKind::AgentDelete);
         engine.operations.set_removing("op-d", view);
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("live"));
+        let slot = Target {
+            kind: TargetKind::Tab,
+            id: "live-slot".to_string(),
+            agent: Some("live".to_string()),
+        };
+        for (connection, surface) in [
+            ("e1", Surface::Browser),
+            ("e2", Surface::Browser),
+            (
+                dux_core::attachments::TERMINAL_UI_CONNECTION,
+                Surface::TerminalUi,
+            ),
+        ] {
+            engine.attachments.register(
+                connection,
+                ConnectionFacts {
+                    surface,
+                    device: None,
+                    address: None,
+                    verified: true,
+                    events: true,
+                },
+                Some(Heard::now()),
+            );
+            engine
+                .attachments
+                .attach(connection, slot.clone(), Some(Heard::now()), None)
+                .unwrap();
+        }
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         let app = crate::server::router(handle.clone());
 
         let listed = get_json(&app, "/api/v1/sessions").await;
         let rows = listed.as_array().expect("an array");
-        assert_eq!(rows.len(), 1, "{listed}");
-        assert_eq!(rows[0]["id"], "gone");
-        assert_eq!(rows[0]["removing"], true);
-        assert_eq!(rows[0]["terminals"], serde_json::json!([]));
+        assert_eq!(rows.len(), 2, "{listed}");
+        assert_eq!(rows[0]["id"], "live");
+        assert_eq!(rows[0]["remote_viewers"], 2, "{listed}");
+        assert_eq!(rows[1]["id"], "gone");
+        assert_eq!(rows[1]["removing"], true);
+        assert_eq!(rows[1]["terminals"], serde_json::json!([]));
+        let shown = get_json(&app, "/api/v1/sessions/live").await;
+        assert_eq!(shown["remote_viewers"], 2, "{shown}");
 
         let document = get_json(&app, "/api/v1/workspace").await;
-        assert_eq!(document["sessions"], serde_json::json!([]), "{document}");
+        let ids: Vec<&str> = document["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["live"], "{document}");
 
         handle
             .operations()
             .finish("op-d", StatusTone::Info, "Deleted.", None, Instant::now());
         let listed = get_json(&app, "/api/v1/sessions").await;
-        assert_eq!(listed, serde_json::json!([]));
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
     }
 }

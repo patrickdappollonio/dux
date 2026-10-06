@@ -609,7 +609,7 @@ async fn delete_extra_tab_removes_its_row() {
 }
 
 #[tokio::test]
-async fn delete_extra_tab_with_live_sibling_does_not_detach() {
+async fn stopping_or_closing_an_extra_tab_with_a_live_sibling_does_not_detach() {
     // G15 companion case: closing an extra tab while a sibling (here, the
     // session-slot tab) is still live must report `detached: false`, not just
     // default to `true` because the closed tab itself is gone.
@@ -630,6 +630,36 @@ async fn delete_extra_tab_with_live_sibling_does_not_detach() {
         launch_resp.status()
     );
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
+
+    // Stopping the extra tab, followed as an operation, ends inside the call:
+    // its process is gone, its row stays, and the agent keeps running.
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &tab)).await;
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/tabs/{tab}/stop?operation=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let record = followed_outcome(&client, addr, resp).await;
+    assert_eq!(record["kind"], "tab.stop");
+    assert_eq!(record["state"], "succeeded");
+    assert_eq!(
+        record["message"],
+        "Stopped the Claude 2 tab. Its other tabs are still running."
+    );
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    let session = wait_for_session(&client, addr, "s1", |_| true).await;
+    assert!(!tab_has_live_process(&session, &tab), "{session}");
+    assert!(tab_has_live_process(&session, &slot), "{session}");
+    assert!(
+        session["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some(tab.as_str())),
+        "a stopped tab keeps its row: {session}"
+    );
 
     let resp = client
         .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
@@ -1264,21 +1294,24 @@ async fn a_failed_launch_is_published_and_an_explicit_start_tries_again() {
     assert_eq!(record["state"], "failed");
 }
 
-/// The start route answers about the tab, not about a guess: an id that is not a
-/// tab of the path session is a 404, the same as every other tab verb.
+/// The start and stop routes answer about the tab, not about a guess: an id
+/// that is not a tab of the path session is a 404, the same as every other tab
+/// verb.
 #[tokio::test]
-async fn start_refuses_a_tab_that_is_not_the_sessions() {
+async fn start_and_stop_refuse_a_tab_that_is_not_the_sessions() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
     let other = create_extra_tab(&client, addr, "s2").await;
-    let resp = client
-        .post(format!(
-            "http://{addr}/api/v1/sessions/s1/tabs/{other}/start"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
+    for verb in ["start", "stop"] {
+        let resp = client
+            .post(format!(
+                "http://{addr}/api/v1/sessions/s1/tabs/{other}/{verb}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "{verb}");
+    }
 }
 
 /// Both address forms of the session-slot tab reach the SAME pty.
