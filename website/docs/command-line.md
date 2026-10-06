@@ -171,7 +171,8 @@ The environment's values are usually secrets, so they are treated like it:
 A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
 hidden, the same rule `dux config get` follows: `ls` lists it under a placeholder name, and
 `dux macros show '<name>'` finds it by its real name but prints only that placeholder and
-its surface. The macro editor in the browser shows it in full.
+its surface. `ls -q` leaves it out, since a placeholder is no id another command takes,
+and says on stderr how many it left out. The macro editor in the browser shows it in full.
 
 ## Another machine's dux
 

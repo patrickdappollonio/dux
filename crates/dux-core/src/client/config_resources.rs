@@ -139,7 +139,26 @@ fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 
 /// `dux macros ls`.
 pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
-    let rows = macro_items(source)?
+    let mut items = macro_items(source)?;
+    // A macro whose name is not shown is listed by a placeholder no later
+    // command takes, so the ids leave it out and say how many they left.
+    if shape == Shape::Ids {
+        let listed = items.len();
+        items.retain(|item| item.text.is_some());
+        let hidden = listed - items.len();
+        match hidden {
+            0 => {}
+            1 => eprintln!(
+                "Left out 1 macro whose name is not shown, so it has no id to use; \"dux \
+                 macros ls\" lists it."
+            ),
+            _ => eprintln!(
+                "Left out {hidden} macros whose names are not shown, so they have no id to \
+                 use; \"dux macros ls\" lists them."
+            ),
+        }
+    }
+    let rows = items
         .into_iter()
         .map(|item| Row {
             id: item.name.clone(),
