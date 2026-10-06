@@ -206,6 +206,21 @@ pub fn open(lock: &mut crate::lockfile::SingleInstanceLock, path: &Path) -> Opti
     }
 }
 
+/// What a config reload says when it moved `[server] control_socket`: the
+/// socket is bound once per process, so the new path waits for the next start
+/// of dux itself, whichever way it serves. `None` when the setting did not
+/// change.
+pub fn moved_warning(
+    prev: &crate::config::ServerConfig,
+    next: &crate::config::ServerConfig,
+) -> Option<String> {
+    (prev.control_socket != next.control_socket).then(|| {
+        "The [server] control_socket setting changed; dux binds its control socket when it \
+         starts, so command-line clients keep using the old one until the next time dux starts."
+            .to_string()
+    })
+}
+
 /// The user id of this process: the only user a control socket serves.
 pub fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()

@@ -528,6 +528,10 @@ fn server_restart_warning_copy(
              `dux server`, so it applies the next time you start `dux server`.",
         );
     }
+    let socket_moved = dux_core::control_socket::moved_warning(prev, next);
+    if let Some(sentence) = &socket_moved {
+        sentences.push(sentence);
+    }
     if surface == ServeSurface::Flip && server_log_viewer_settings_changed(prev, next) {
         sentences.push(
             "The [server] log_viewer_lines setting changed; the log viewer is sized when \
@@ -2742,6 +2746,13 @@ impl EngineService {
             server_restart_warning_copy(&before.server, &engine.config.server, self.surface)
         {
             let _ = self.status.send(WireStatus::new("warning", warning));
+        }
+        // `dux server` has no status line, and its operator reads the console.
+        if let ShutdownEcho::Console(console, _) = &self.shutdown_echo
+            && let Some(warning) =
+                dux_core::control_socket::moved_warning(&before.server, &engine.config.server)
+        {
+            console.warn(&warning);
         }
         // `[server] tailscale` IS live, so a reload that changed it acts rather
         // than warning. This is the reload owner for `dux server` and for the
@@ -6481,6 +6492,28 @@ mod tests {
         let mut next = prev.clone();
         next.host = "0.0.0.0".to_string();
         assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    /// The control socket is bound once per process, so a new path waits for
+    /// the next start of dux itself, whichever way it serves.
+    #[test]
+    fn a_control_socket_change_says_it_applies_the_next_time_dux_starts() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.control_socket = "/run/user/1000/dux.sock".to_string();
+        for surface in [
+            ServeSurface::DuxServer,
+            ServeSurface::Flip,
+            ServeSurface::Background,
+        ] {
+            let copy = server_restart_warning_copy(&prev, &next, surface).expect("a warning");
+            assert!(copy.contains("control_socket"), "{copy}");
+            assert!(copy.contains("next time dux starts"), "{copy}");
+            assert!(
+                !copy.contains("stopping and starting"),
+                "restarting a server does not rebind the socket: {copy}"
+            );
+        }
     }
 
     #[test]

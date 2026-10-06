@@ -6587,6 +6587,38 @@ mod auth_warning_mode_tests {
         );
     }
 
+    /// `dux server` has no status line, so a reload that moves the control
+    /// socket says on its console that the new path waits for the next start.
+    #[test]
+    fn dux_server_says_on_its_console_that_a_new_control_socket_waits_for_a_restart() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = engine_in(tmp.path());
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (handle, _join) = engine_actor::spawn_engine_thread_with_console(
+            engine,
+            console,
+            Arc::new(QuitForce::default()),
+        );
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[server]\ncontrol_socket = \"/run/user/1000/dux.sock\"\n",
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(handle.apply_wire(dux_core::wire::WireCommand::ReloadConfig {}))
+            .expect("the reload runs");
+        until(
+            "dux server's console never said the socket moves at the next start",
+            || sink.contents().contains("control_socket"),
+        );
+        assert!(
+            sink.contents().contains("next time dux starts"),
+            "{}",
+            sink.contents()
+        );
+    }
+
     /// The flip serves through `ServeCore` with a capturing console; its log
     /// shows the alarm once the Tailscale leg puts dux on the tailnet.
     #[test]
