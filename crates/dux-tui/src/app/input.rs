@@ -277,6 +277,9 @@ enum PromptMouseTarget {
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
+    CloneAddressInput,
+    CloneDestinationInput,
+    CloneAgentNameInput,
     PullRequestInput,
     PullRequestChooseProject,
     AttachPullRequestInput,
@@ -459,6 +462,9 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::Checkbox(_)
             | PromptMouseTarget::RenameInput
             | PromptMouseTarget::NameNewAgentInput
+            | PromptMouseTarget::CloneAddressInput
+            | PromptMouseTarget::CloneDestinationInput
+            | PromptMouseTarget::CloneAgentNameInput
             | PromptMouseTarget::PullRequestInput
             | PromptMouseTarget::AttachPullRequestInput
             | PromptMouseTarget::NameStandaloneAgentInput
@@ -636,6 +642,21 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
     (column.saturating_sub(rect.x), row.saturating_sub(rect.y))
 }
 
+/// [`cursor_from_single_line_position`] for a field drawn scrolled to its
+/// caret: the click is mapped through the same offset
+/// (`render::single_line_scroll`) the field was drawn at, for the caret the
+/// field held when it was drawn.
+fn cursor_from_single_line_click(
+    text: &str,
+    cursor: usize,
+    text_area: Rect,
+    prefix_width: usize,
+    column: u16,
+) -> usize {
+    let skip = super::render::single_line_scroll(text, cursor, prefix_width, text_area.width);
+    skip + cursor_from_single_line_position(&text[skip..], text_area, prefix_width, column)
+}
+
 /// Map a clicked terminal column to a BYTE caret offset inside a single-line
 /// field, measured in DISPLAY COLUMNS rather than characters.
 ///
@@ -643,10 +664,13 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
 /// cells, so walking `char_indices().nth(col)` drifts one character further
 /// right for every wide glyph left of the click.
 ///
+/// It walks extended grapheme clusters, the unit the renderer draws in, so a
+/// click never lands the caret inside an emoji sequence such as `👩‍💻`.
+///
 /// A click on the second cell of a wide glyph resolves to the caret position
 /// before that glyph, deliberately: the renderer
 /// ([`super::render::render_single_line_cursor_input`]) paints the caret as an
-/// inverted cell over the whole character at the caret, so "before the glyph" is
+/// inverted cell over the whole glyph at the caret, so "before the glyph" is
 /// the only offset that highlights the glyph the user clicked on.
 ///
 /// A click past the end of the text yields `text.len()`.
@@ -656,23 +680,18 @@ fn cursor_from_single_line_position(
     prefix_width: usize,
     column: u16,
 ) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
     let relative_col = usize::from(column.saturating_sub(text_area.x));
     let mut target_col = relative_col.saturating_sub(prefix_width);
-    for (idx, ch) in text.char_indices() {
-        let width = char_display_width(ch);
-        if target_col < width.max(1) {
+    for (idx, glyph) in text.grapheme_indices(true) {
+        let width = cluster_width(glyph).max(1);
+        if target_col < width {
             return idx;
         }
-        target_col -= width.max(1);
+        target_col -= width;
     }
     text.len()
-}
-
-/// Display width of one character in terminal cells, measured by the same
-/// unicode-width table the renderer uses, so a click agrees with what is drawn.
-fn char_display_width(ch: char) -> usize {
-    let mut buf = [0u8; 4];
-    usize::from(ch.encode_utf8(&mut buf).cell_width())
 }
 
 fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
@@ -1904,6 +1923,9 @@ impl App {
                 if matches!(focus, NameNewAgentFocus::Input) {
                     input.insert_str(text);
                 }
+            }
+            PromptState::CloneProject { .. } => {
+                self.edit_clone_field(|input| input.insert_str(text));
             }
 
             // Full-text modal fields take a paste only while ENGAGED: an
@@ -5547,6 +5569,144 @@ impl App {
         Ok(Some(false))
     }
 
+    fn handle_clone_project_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::CloneProject { focus, .. } = &self.prompt else {
+            return None;
+        };
+        let checkbox_focused = *focus == CloneProjectFocus::RandomizedNameCheckbox;
+        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, !checkbox_focused) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Confirm => self.confirm_clone_project(),
+            ModalKeyStep::MoveFocus(forward) => self.focus_next_clone_project_control(forward),
+            ModalKeyStep::ActivateFocus if checkbox_focused => self.toggle_clone_randomized_name(),
+            ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::FallThroughToField => {
+                self.edit_clone_field(|input| {
+                    input.handle_key(key);
+                });
+            }
+        }
+        Some(false)
+    }
+
+    /// Run an edit on the clone form's focused text field (nothing happens
+    /// while the checkbox has focus). Typing in the address re-derives the
+    /// destination until the user has edited the destination themselves, and
+    /// any change to the destination counts as that edit.
+    fn edit_clone_field(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        let PromptState::CloneProject {
+            address,
+            destination,
+            destination_edited,
+            start_folder,
+            agent_name,
+            focus,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        match *focus {
+            CloneProjectFocus::Address => {
+                let before = address.text.clone();
+                edit(address);
+                if address.text != before && !*destination_edited {
+                    destination.set_text(super::sessions::clone_destination_for(
+                        start_folder,
+                        &address.text,
+                    ));
+                }
+            }
+            CloneProjectFocus::Destination => {
+                let before = destination.text.clone();
+                edit(destination);
+                if destination.text != before {
+                    *destination_edited = true;
+                }
+            }
+            CloneProjectFocus::AgentName => edit(agent_name),
+            CloneProjectFocus::RandomizedNameCheckbox => {}
+        }
+    }
+
+    fn focus_next_clone_project_control(&mut self, forward: bool) {
+        if let PromptState::CloneProject { focus, .. } = &mut self.prompt {
+            *focus = next_focus(
+                &[
+                    (CloneProjectFocus::Address, true),
+                    (CloneProjectFocus::Destination, true),
+                    (CloneProjectFocus::AgentName, true),
+                    (CloneProjectFocus::RandomizedNameCheckbox, true),
+                ],
+                *focus,
+                forward,
+            );
+        }
+    }
+
+    /// Flip the random-name box, filling the name field with a fresh pet name
+    /// when it turns on and clearing it again when it turns off, as the New
+    /// agent dialog's box does. Focus follows, so a click is visibly acted on.
+    fn toggle_clone_randomized_name(&mut self) {
+        if let PromptState::CloneProject {
+            agent_name,
+            randomize_name,
+            randomized_name,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            *focus = CloneProjectFocus::RandomizedNameCheckbox;
+            *randomize_name = !*randomize_name;
+            if *randomize_name {
+                let name = crate::git::docker_style_name();
+                agent_name.set_text(name.clone());
+                *randomized_name = Some(name);
+            } else if randomized_name.as_deref() == Some(agent_name.text.as_str()) {
+                agent_name.clear();
+                *randomized_name = None;
+            } else {
+                *randomized_name = None;
+            }
+        }
+    }
+
+    fn set_clone_cursor_from_mouse(&mut self, field: CloneProjectFocus, column: u16) {
+        let OverlayMouseLayout::CloneProject {
+            address,
+            destination,
+            agent_name,
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
+        };
+        if let PromptState::CloneProject {
+            address: address_input,
+            destination: destination_input,
+            agent_name: agent_name_input,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            let (input, area) = match field {
+                CloneProjectFocus::Address => (address_input, address),
+                CloneProjectFocus::Destination => (destination_input, destination),
+                CloneProjectFocus::AgentName => (agent_name_input, agent_name),
+                CloneProjectFocus::RandomizedNameCheckbox => return,
+            };
+            // The single-line renderer pads by one leading space.
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, area, 1, column);
+            *focus = field;
+        }
+    }
+
     fn handle_form_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
             self.handle_edit_macros_key(key)?;
@@ -5559,6 +5719,9 @@ impl App {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_clone_project_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_standalone_agent_prompt_key(key) {
@@ -7078,6 +7241,21 @@ impl App {
                 checkbox,
                 copy_checkbox,
             } => Self::name_new_agent_target(input, checkbox, copy_checkbox, column, row),
+            OverlayMouseLayout::CloneProject {
+                address,
+                destination,
+                agent_name,
+                checkbox,
+            } => Self::checkbox_before_buttons_target(
+                Some(checkbox),
+                &[
+                    (address, PromptMouseTarget::CloneAddressInput),
+                    (destination, PromptMouseTarget::CloneDestinationInput),
+                    (agent_name, PromptMouseTarget::CloneAgentNameInput),
+                ],
+                column,
+                row,
+            ),
         }
     }
 
@@ -7336,8 +7514,13 @@ impl App {
         };
         if let PromptState::Command { input, .. } = &mut self.prompt {
             let prefix_width = 2; // "> "
-            input.cursor =
-                cursor_from_single_line_position(&input.text, input_area, prefix_width, column);
+            input.cursor = cursor_from_single_line_click(
+                &input.text,
+                input.cursor,
+                input_area,
+                prefix_width,
+                column,
+            );
         }
     }
 
@@ -7406,11 +7589,21 @@ impl App {
         } = &mut self.prompt
         {
             if *editing_path {
-                path_input.cursor =
-                    cursor_from_single_line_position(&path_input.text, input_area, 4, column);
+                path_input.cursor = cursor_from_single_line_click(
+                    &path_input.text,
+                    path_input.cursor,
+                    input_area,
+                    4,
+                    column,
+                );
             } else {
-                filter.cursor =
-                    cursor_from_single_line_position(&filter.text, input_area, 2, column);
+                filter.cursor = cursor_from_single_line_click(
+                    &filter.text,
+                    filter.cursor,
+                    input_area,
+                    2,
+                    column,
+                );
                 *searching = true;
             }
         }
@@ -7426,8 +7619,13 @@ impl App {
             _ => return,
         };
         if let PromptState::PickProject { list, .. } = &mut self.prompt {
-            list.filter.cursor =
-                cursor_from_single_line_position(&list.filter.text, input_area, 2, column);
+            list.filter.cursor = cursor_from_single_line_click(
+                &list.filter.text,
+                list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             list.searching = true;
         }
     }
@@ -7442,8 +7640,13 @@ impl App {
             _ => return,
         };
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
-            prompt.list.filter.cursor =
-                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.filter.cursor = cursor_from_single_line_click(
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             prompt.list.searching = true;
         }
     }
@@ -7457,8 +7660,13 @@ impl App {
             _ => return,
         };
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-            prompt.filter.cursor =
-                cursor_from_single_line_position(&prompt.filter.text, input_area, 0, column);
+            prompt.filter.cursor = cursor_from_single_line_click(
+                &prompt.filter.text,
+                prompt.filter.cursor,
+                input_area,
+                0,
+                column,
+            );
             prompt.searching = true;
             // Search is a mode over the list, not a stop of its own, so a
             // click into the filter leaves focus where the mode belongs. Same
@@ -7487,8 +7695,13 @@ impl App {
             _ => return,
         };
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
-            prompt.list.filter.cursor =
-                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.filter.cursor = cursor_from_single_line_click(
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                input_area,
+                2,
+                column,
+            );
             prompt.list.searching = true;
             prompt.focus = KillRunningFocus::List;
         }
@@ -8726,7 +8939,8 @@ impl App {
         };
         if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             *focus = RenameSessionFocus::Input;
         }
     }
@@ -8738,7 +8952,8 @@ impl App {
         };
         if let PromptState::PullRequestInput { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             // Focus follows the click, or the caret the click just placed would
             // sit in a field that takes no keystrokes.
             *focus = PullRequestInputFocus::Input;
@@ -8753,7 +8968,8 @@ impl App {
         if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
             // move: the field is the modal's only control and always has it.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
         }
     }
 
@@ -8765,7 +8981,8 @@ impl App {
         if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
             // move: the field is the modal's only control and always has it.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
         }
     }
 
@@ -8776,7 +8993,8 @@ impl App {
         };
         if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            input.cursor =
+                cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
             *focus = NameNewAgentFocus::Input;
         }
     }
@@ -8787,8 +9005,13 @@ impl App {
         };
         if let Some(state) = self.macro_edit_state_mut() {
             // The single-line renderer pads by one leading space.
-            state.name_input.cursor =
-                cursor_from_single_line_position(&state.name_input.text, name_input, 1, column);
+            state.name_input.cursor = cursor_from_single_line_click(
+                &state.name_input.text,
+                state.name_input.cursor,
+                name_input,
+                1,
+                column,
+            );
         }
     }
 
@@ -9079,6 +9302,9 @@ impl App {
             }
             OverlayCheckboxId::NameNewAgentCopyChanges => {
                 self.toggle_name_new_agent_copy_changes();
+            }
+            OverlayCheckboxId::CloneProjectRandomizedPetName => {
+                self.toggle_clone_randomized_name();
             }
             OverlayCheckboxId::ConfigReloadRecoverOldConfig => {
                 if let PromptState::ConfigReloadFailed {
@@ -9584,6 +9810,15 @@ impl App {
             }
             PromptMouseTarget::NameNewAgentInput => {
                 self.set_name_new_agent_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::CloneAddressInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::Address, mouse.column);
+            }
+            PromptMouseTarget::CloneDestinationInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::Destination, mouse.column);
+            }
+            PromptMouseTarget::CloneAgentNameInput => {
+                self.set_clone_cursor_from_mouse(CloneProjectFocus::AgentName, mouse.column);
             }
             PromptMouseTarget::PullRequestInput => {
                 self.set_pull_request_cursor_from_mouse(mouse.column);
@@ -11900,7 +12135,7 @@ mod tests {
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
-        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
+        CloneProjectFocus, ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
         DeleteAgentFocus, FirstLoadButton, FirstLoadPrompt, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
@@ -29187,6 +29422,396 @@ cyan = "#00ffff"
         }
     }
 
+    fn clone_prompt_fields(app: &App) -> (String, String, String, CloneProjectFocus) {
+        match &app.prompt {
+            PromptState::CloneProject {
+                address,
+                destination,
+                agent_name,
+                focus,
+                ..
+            } => (
+                address.text.clone(),
+                destination.text.clone(),
+                agent_name.text.clone(),
+                *focus,
+            ),
+            other => panic!("expected the clone form, got {other:?}"),
+        }
+    }
+
+    fn app_with_start_folder(folder: &std::path::Path) -> App {
+        let mut app = test_app(default_bindings());
+        app.engine.config.defaults.start_directory = Some(folder.display().to_string());
+        app
+    }
+
+    #[test]
+    fn clone_command_opens_a_form_whose_destination_follows_the_address() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+
+        app.execute_command("clone-project".to_string()).unwrap();
+        let (address, destination, _, focus) = clone_prompt_fields(&app);
+        assert_eq!(address, "");
+        assert_eq!(destination, format!("{}/", start.path().display()));
+        assert_eq!(focus, CloneProjectFocus::Address);
+
+        app.handle_paste("git@github.com:acme/wid");
+        let (_, destination, _, _) = clone_prompt_fields(&app);
+        assert_eq!(destination, format!("{}/wid", start.path().display()));
+
+        type_text(&mut app, "get.git");
+        let (address, destination, _, _) = clone_prompt_fields(&app);
+        assert_eq!(address, "git@github.com:acme/widget.git");
+        assert_eq!(destination, format!("{}/widget", start.path().display()));
+    }
+
+    #[test]
+    fn clone_destination_stops_following_the_address_once_edited() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        type_text(&mut app, "https://example.com/acme/widget");
+
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-mine");
+        tap(&mut app, KeyCode::BackTab);
+        type_text(&mut app, ".git");
+
+        let (_, destination, _, focus) = clone_prompt_fields(&app);
+        assert_eq!(focus, CloneProjectFocus::Address);
+        assert_eq!(
+            destination,
+            format!("{}/widget-mine", start.path().display())
+        );
+    }
+
+    #[test]
+    fn clone_form_tab_order_and_space_on_the_checkbox() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+
+        // With random names on by default the box starts ticked and the name
+        // filled.
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
+        app.execute_command("clone-project".to_string()).unwrap();
+        let PromptState::CloneProject {
+            randomize_name,
+            agent_name,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the clone form, got {:?}", app.prompt);
+        };
+        assert!(*randomize_name);
+        assert!(!agent_name.text.is_empty());
+        tap(&mut app, KeyCode::Esc);
+
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = false;
+        app.execute_command("clone-project".to_string()).unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            tap(&mut app, KeyCode::Tab);
+            seen.push(clone_prompt_fields(&app).3);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                CloneProjectFocus::Destination,
+                CloneProjectFocus::AgentName,
+                CloneProjectFocus::RandomizedNameCheckbox,
+                CloneProjectFocus::Address,
+            ]
+        );
+        tap(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::RandomizedNameCheckbox
+        );
+
+        // Space toggles the box and fills the name, then clears it again.
+        tap(&mut app, KeyCode::Char(' '));
+        assert!(!clone_prompt_fields(&app).2.is_empty());
+        tap(&mut app, KeyCode::Char(' '));
+        assert_eq!(clone_prompt_fields(&app).2, "");
+
+        // In a text field the same key is a typed space.
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "a b");
+        assert_eq!(clone_prompt_fields(&app).0, "a b");
+    }
+
+    #[test]
+    fn clone_form_enter_dispatches_and_closes_a_refusal_keeps_it_open_and_a_failed_clone_hands_it_back()
+     {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+
+        // An empty address is refused and the form stays for a correction.
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::CloneProject { .. }));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+
+        // A local path that is no repository still starts the clone (git is
+        // what refuses it, later), from any field.
+        type_text(
+            &mut app,
+            &format!("{}/no-such-remote", start.path().display()),
+        );
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let destination = start
+            .path()
+            .canonicalize()
+            .expect("canonical start folder")
+            .join("no-such-remote");
+        let key = InFlightKey::Clone(destination);
+        assert!(app.engine.is_in_flight(&key));
+
+        // The clone's final ends the git it ran, so nothing outlives the
+        // test's folder: git refuses a source that is no repository.
+        drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
+        assert!(!app.engine.is_in_flight(&key), "the clone is still running");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a failed clone does not reopen the form by itself"
+        );
+
+        // The next open hands back what the failed clone was given.
+        let typed = |app: &App| match &app.prompt {
+            PromptState::CloneProject {
+                address,
+                destination,
+                agent_name,
+                randomize_name,
+                ..
+            } => (
+                address.text.clone(),
+                destination.text.clone(),
+                agent_name.text.clone(),
+                *randomize_name,
+            ),
+            other => panic!("expected the clone form, got {other:?}"),
+        };
+        app.execute_command("clone-project".to_string()).unwrap();
+        let (address, destination, _, _) = typed(&app);
+        assert_eq!(
+            address,
+            format!("{}/no-such-remote", start.path().display())
+        );
+        assert_eq!(
+            destination,
+            format!("{}/no-such-remote", start.path().display())
+        );
+
+        // A fresh submit replaces it: the worker refuses a destination that
+        // is not empty, and the next open has this submit's fields, the
+        // destination still the user's own rather than following the address.
+        let taken = start.path().join("no-such-remote-taken");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("file"), "x").unwrap();
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-taken");
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "named");
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Char(' '));
+        let submitted = typed(&app);
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let key = InFlightKey::Clone(taken.canonicalize().unwrap());
+        drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
+        assert!(!app.engine.is_in_flight(&key), "the clone is still running");
+        app.execute_command("clone-project".to_string()).unwrap();
+        assert_eq!(typed(&app), submitted);
+        type_text(&mut app, "x");
+        assert_eq!(
+            typed(&app).1,
+            format!("{}/no-such-remote-taken", start.path().display())
+        );
+        tap(&mut app, KeyCode::Backspace);
+
+        // A clone that succeeds leaves nothing to hand back. Its worker's
+        // answer is swapped for a success, since a real one goes on to start
+        // an agent's provider.
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, PromptState::None));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let succeeded = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match app.engine.worker_rx.recv_timeout(remaining) {
+                Ok(dux_core::worker::WorkerEvent::RepositoryCloned {
+                    status_op_id,
+                    path,
+                    agent_name,
+                    ..
+                }) => {
+                    break dux_core::worker::WorkerEvent::RepositoryCloned {
+                        status_op_id,
+                        path,
+                        agent_name,
+                        result: Ok(dux_core::clone_project::ClonedRepository {
+                            address: "/srv/remote.git".to_string(),
+                            branch: "main".to_string(),
+                            leading_branch: "main".to_string(),
+                            name_taken: false,
+                        }),
+                    };
+                }
+                Ok(other) => app.engine.worker_tx.send(other).unwrap(),
+                Err(_) => panic!("the clone never answered"),
+            }
+        };
+        app.engine.worker_tx.send(succeeded).unwrap();
+        drain_until(&mut app, |app| {
+            !app.engine.is_in_flight(&key) && !app.engine.is_in_flight(&InFlightKey::CreateAgent)
+        });
+        assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
+        app.execute_command("clone-project".to_string()).unwrap();
+        assert_eq!(typed(&app).0, "");
+    }
+
+    #[test]
+    fn clone_form_escape_closes_with_nothing_dispatched() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        type_text(
+            &mut app,
+            &format!("{}/no-such-remote", start.path().display()),
+        );
+
+        assert!(matches!(app.prompt, PromptState::CloneProject { .. }));
+
+        tap(&mut app, KeyCode::Esc);
+
+        assert!(matches!(app.prompt, PromptState::None));
+        let destination = start
+            .path()
+            .canonicalize()
+            .expect("canonical start folder")
+            .join("no-such-remote");
+        assert!(!app.engine.is_in_flight(&InFlightKey::Clone(destination)));
+    }
+
+    #[test]
+    fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        app.execute_command("clone-project".to_string()).unwrap();
+        if let PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            randomize_name,
+            ..
+        } = &mut app.prompt
+        {
+            // Far longer than the field, with the caret at its end.
+            *address = TextInput::with_text(format!(
+                "https://example.com/{}/address-text",
+                "a".repeat(120)
+            ));
+            *destination = TextInput::with_text("/dest-text".to_string());
+            *agent_name = TextInput::with_text("agent-text".to_string());
+            *randomize_name = false;
+        }
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        let OverlayMouseLayout::CloneProject { checkbox, .. } = app.overlay_layout.active else {
+            panic!("expected the clone form's layout");
+        };
+        // Where the renderer drew `text`: the cell of its first character.
+        let drawn_at = |text: &str| -> (u16, u16) {
+            let cells: Vec<String> = text.chars().map(String::from).collect();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width.saturating_sub(cells.len() as u16) {
+                    if cells
+                        .iter()
+                        .enumerate()
+                        .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c)
+                    {
+                        return (x, y);
+                    }
+                }
+            }
+            panic!("{text:?} is not on screen");
+        };
+
+        // The long address is drawn scrolled to its end, with the caret in
+        // the cell after it.
+        let (x, y) = drawn_at("address-text");
+        assert_eq!(
+            buf[(x + 12, y)].bg,
+            app.theme.input_cursor_bg,
+            "the caret is not drawn after the address"
+        );
+
+        // A click on the fourth character drawn puts the caret before it.
+        let address_len = 20 + 120 + "/address-text".len();
+        for (text, want_focus, want_cursor) in [
+            ("agent-text", CloneProjectFocus::AgentName, 3),
+            ("/dest-text", CloneProjectFocus::Destination, 3),
+            (
+                "address-text",
+                CloneProjectFocus::Address,
+                address_len - "address-text".len() + 3,
+            ),
+        ] {
+            let (x, y) = drawn_at(text);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x + 3, y));
+            match &app.prompt {
+                PromptState::CloneProject {
+                    address,
+                    destination,
+                    agent_name,
+                    focus,
+                    ..
+                } => {
+                    let field = match want_focus {
+                        CloneProjectFocus::Address => address,
+                        CloneProjectFocus::Destination => destination,
+                        _ => agent_name,
+                    };
+                    assert_eq!(*focus, want_focus);
+                    assert_eq!(field.cursor, want_cursor);
+                }
+                other => panic!("expected the clone form, got {other:?}"),
+            }
+        }
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            checkbox.rect.x,
+            checkbox.rect.y,
+        ));
+        match &app.prompt {
+            PromptState::CloneProject {
+                randomize_name,
+                focus,
+                ..
+            } => {
+                assert!(*randomize_name);
+                assert_eq!(*focus, CloneProjectFocus::RandomizedNameCheckbox);
+            }
+            other => panic!("expected the clone form, got {other:?}"),
+        }
+    }
+
     #[test]
     fn mouse_click_while_prompt_open_does_not_change_underlying_focus() {
         let mut app = test_app(default_bindings());
@@ -37824,6 +38449,15 @@ cyan = "#00ffff"
         assert_eq!(at(3), "🚀".len());
         assert_eq!(at(4), "🚀a".len());
         assert_eq!(at(99), text.len());
+
+        // A ZWJ sequence is one two-cell glyph: the cell after it is the
+        // next letter, never a position inside the sequence.
+        let text = "👩\u{200d}💻ab";
+        let at = |col: u16| cursor_from_single_line_position(text, area, 1, col);
+        assert_eq!(at(1), 0);
+        assert_eq!(at(2), 0);
+        assert_eq!(at(3), "👩\u{200d}💻".len());
+        assert_eq!(at(4), "👩\u{200d}💻a".len());
     }
 
     /// A field the user cannot click into is a gap. The project chooser's

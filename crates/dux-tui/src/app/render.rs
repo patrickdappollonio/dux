@@ -6,7 +6,7 @@ use super::components::ellipsis::{
     truncate_to_width,
 };
 use super::components::pane_card::CardPlan;
-use super::components::wrap_lines::{char_display_width, display_width};
+use super::components::wrap_lines::{char_display_width, cluster_width, display_width};
 use super::components::{
     Button, ButtonKind, ButtonPressedTarget, CardBlockPlan, CardContent, Checkbox, CheckboxState,
     Hint, Modal, PaneCardBlock, button_state_for, button_width_for, labelled_name, modal_hint_line,
@@ -2607,13 +2607,14 @@ impl App {
                 .as_ref()
                 .map(|input| (input.text.clone(), input.cursor))
                 .unwrap_or_default();
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &text,
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                search_area.width,
             ))
             .block(
                 Block::default()
@@ -5763,13 +5764,14 @@ impl App {
             .themed_overlay_block("Command Palette")
             .title_bottom(hints);
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             "> ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -6105,13 +6107,14 @@ impl App {
             };
             let input_block = self.themed_overlay_block_prose(&title);
             let input_inner = input_block.inner(filter_area);
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 prefix,
                 text,
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                input_inner.width,
             ))
             .block(input_block)
             .render(filter_area, frame.buffer_mut());
@@ -7083,13 +7086,14 @@ impl App {
             .is_filtering()
             .then(|| details_block.inner(details_area));
         if list.is_filtering() {
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &list.filter.text,
                 list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                filter_input_rect.map_or(0, |rect| rect.width),
             ))
             .block(details_block)
             .render(details_area, frame.buffer_mut());
@@ -7365,6 +7369,12 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(76, 70, frame.area());
         self.clear_overlay_area(frame, area);
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(3)])
+            .areas(area);
+        let details_block = self.themed_overlay_block("Change Base Branch");
+        let details_inner = details_block.inner(details_area);
 
         let label_style = Style::default().fg(self.theme.hint_desc_fg);
         let text_style = Style::default().fg(self.theme.text_fg);
@@ -7377,13 +7387,14 @@ impl App {
             None => first.push(Span::styled("no base recorded yet", text_style)),
         }
         let second = if prompt.list.is_filtering() {
-            render_single_line_cursor_input(
+            render_single_line_field(
                 "/ ",
                 &prompt.list.filter.text,
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                details_inner.width,
             )
         } else if let Some(note) = &prompt.fetch_note {
             Line::from(Span::styled(
@@ -7420,12 +7431,6 @@ impl App {
         };
         let hint_line = modal_hint_line(&self.theme, &hints, area.width.saturating_sub(2));
 
-        let [details_area, list_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(3)])
-            .areas(area);
-        let details_block = self.themed_overlay_block("Change Base Branch");
-        let details_inner = details_block.inner(details_area);
         Paragraph::new(vec![Line::from(first), second])
             .block(details_block)
             .render(details_area, frame.buffer_mut());
@@ -9103,13 +9108,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             input_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9169,6 +9175,162 @@ impl App {
                 id: OverlayCheckboxId::RenameSessionBranch,
                 rect,
             }),
+        };
+    }
+
+    fn render_clone_project_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            randomize_name,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let checkbox_state = if *focus == CloneProjectFocus::RandomizedNameCheckbox {
+            CheckboxState::Focused
+        } else {
+            CheckboxState::Normal
+        };
+        let checkbox_label = "Use randomized pet name";
+        let dialog_width = 80.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let checkbox = Checkbox::new(checkbox_label)
+            .checked(*randomize_name)
+            .state(checkbox_state);
+        let checkbox_height = checkbox
+            .layout(
+                inner_width,
+                checkbox.marker_style(Style::default()),
+                checkbox.label_style(Style::default()),
+            )
+            .height
+            .saturating_add(1);
+        let area = centered_rect_exact(dialog_width, 17 + checkbox_height, frame.area());
+        let inner = self
+            .open_modal_frame(frame, "Clone a Repository", area)
+            .inner;
+
+        let [
+            address_label,
+            address_area,
+            destination_label,
+            destination_area,
+            name_label,
+            name_area,
+            _,
+            checkbox_area,
+            _,
+            hint_area,
+        ] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(checkbox_height),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .areas(inner);
+
+        let label_style = Style::default().fg(self.theme.input_label_fg);
+        let mut field_rects = Vec::new();
+        for (label_area, label, field_area, input, field) in [
+            (
+                address_label,
+                " Repository address (anything git clone accepts):",
+                address_area,
+                address,
+                CloneProjectFocus::Address,
+            ),
+            (
+                destination_label,
+                " Clone into:",
+                destination_area,
+                destination,
+                CloneProjectFocus::Destination,
+            ),
+            (
+                name_label,
+                " Name for the first agent (used as branch name):",
+                name_area,
+                agent_name,
+                CloneProjectFocus::AgentName,
+            ),
+        ] {
+            Paragraph::new(Line::from(Span::styled(label, label_style)))
+                .render(label_area, frame.buffer_mut());
+            // The caret only appears while the field has focus: a field that
+            // takes no keystrokes must not look like it does.
+            let focused = *focus == field;
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(self.theme.overlay_field_border_style(focused));
+            let text_rect = block.inner(field_area);
+            field_rects.push(text_rect);
+            Paragraph::new(render_single_line_field(
+                " ",
+                &input.text,
+                input.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                focused,
+                text_rect.width,
+            ))
+            .block(block)
+            .render(field_area, frame.buffer_mut());
+        }
+
+        let (checkbox_rect, _) = self.render_overlay_checkbox(
+            frame,
+            checkbox_area,
+            checkbox_label,
+            *randomize_name,
+            checkbox_state,
+            Some(Line::from(Span::styled(
+                format!(
+                    "{}Fills the name with a fresh pet-tool name",
+                    Checkbox::indent()
+                ),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ))),
+        );
+
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        // Name only a binding that can still move focus out of a text field.
+        let focus_key = self
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection);
+        let mut hints = vec![
+            Hint::key(confirm_key, "clone"),
+            Hint::maybe_key(focus_key, "focus"),
+        ];
+        // Space is a typed character in every field, so the hint appears only
+        // while the checkbox has focus.
+        if *focus == CloneProjectFocus::RandomizedNameCheckbox {
+            hints.push(Hint::plain("Space toggle"));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::CloneProject {
+            address: field_rects[0],
+            destination: field_rects[1],
+            agent_name: field_rects[2],
+            checkbox: OverlayCheckbox {
+                id: OverlayCheckboxId::CloneProjectRandomizedPetName,
+                rect: checkbox_rect,
+            },
         };
     }
 
@@ -9327,13 +9489,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(field_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             field_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9445,13 +9608,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(true));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9529,13 +9693,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(true));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9917,13 +10082,14 @@ impl App {
             } else {
                 // The one single-line renderer, never a hand-rolled
                 // copy.
-                Paragraph::new(render_single_line_cursor_input(
+                Paragraph::new(render_single_line_field(
                     "",
                     &prompt.filter.text,
                     prompt.filter.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
                     prompt.searching,
+                    filter_inner.width,
                 ))
                 .style(Style::default().fg(self.theme.text_fg))
                 .render(filter_inner, frame.buffer_mut());
@@ -9934,10 +10100,11 @@ impl App {
                 // past the end of anything non-ASCII.
                 let cursor_x = filter_inner
                     .x
-                    .saturating_add(single_line_caret_column(
+                    .saturating_add(single_line_field_caret_column(
                         &prompt.filter.text,
                         prompt.filter.cursor,
                         0,
+                        filter_inner.width,
                     ))
                     .min(filter_inner.x + filter_inner.width.saturating_sub(1));
                 frame.set_cursor_position((cursor_x, filter_inner.y));
@@ -10105,13 +10272,14 @@ impl App {
         let (input, list) = if let Some(input_area) = top_area {
             let input_block = self.themed_overlay_block(title);
             let input_inner = input_block.inner(input_area);
-            Paragraph::new(render_single_line_cursor_input(
+            Paragraph::new(render_single_line_field(
                 "/ ",
                 &prompt.list.filter.text,
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
                 true,
+                input_inner.width,
             ))
             .block(input_block)
             .render(input_area, frame.buffer_mut());
@@ -10605,13 +10773,14 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &input.text,
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             input_focused,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -10843,6 +11012,7 @@ impl App {
             }
             PromptState::DebugInput { .. } => self.render_debug_input_prompt(frame),
             PromptState::NameNewAgent { .. } => self.render_name_new_agent_prompt(frame),
+            PromptState::CloneProject { .. } => self.render_clone_project_prompt(frame),
             PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
             PromptState::AttachPullRequestInput { .. } => {
                 self.render_attach_pull_request_input_prompt(frame)
@@ -11040,13 +11210,14 @@ impl App {
         );
         // The one single-line renderer, never a hand-rolled copy: it owns the
         // caret model and the character-boundary clamp.
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             " ",
             &state.name_input.text,
             state.name_input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             focus == MacroEditFocus::Name,
+            name_inner.width,
         ))
         .render(name_inner, frame.buffer_mut());
 
@@ -11101,8 +11272,12 @@ impl App {
         // on the body while the body is ENGAGED. An unengaged body takes no
         // keystrokes, so showing a caret there would be a lie.
         if focus == MacroEditFocus::Name {
-            let cursor_col =
-                single_line_caret_column(&state.name_input.text, state.name_input.cursor, 1);
+            let cursor_col = single_line_field_caret_column(
+                &state.name_input.text,
+                state.name_input.cursor,
+                1,
+                name_inner.width,
+            );
             let (cx, cy) = (name_inner.x + cursor_col, name_inner.y);
             if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
                 frame.set_cursor_position((cx, cy));
@@ -11623,18 +11798,19 @@ impl App {
             .themed_overlay_block("Search log")
             .title_bottom(bottom_spans);
         let input_inner = input_block.inner(bar_area);
-        Paragraph::new(render_single_line_cursor_input(
+        Paragraph::new(render_single_line_field(
             "/ ",
             &query,
             cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
             true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(bar_area, frame.buffer_mut());
 
-        let cursor_col = single_line_caret_column(&query, cursor, 2);
+        let cursor_col = single_line_field_caret_column(&query, cursor, 2, input_inner.width);
         let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
@@ -11703,14 +11879,20 @@ impl App {
             .themed_overlay_block("Macros")
             .title_bottom(bottom_spans);
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_cursor_input(
-            "", &query, cursor, cursor_fg, cursor_bg, true,
+        Paragraph::new(render_single_line_field(
+            "",
+            &query,
+            cursor,
+            cursor_fg,
+            cursor_bg,
+            true,
+            input_inner.width,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
 
         // Place hardware cursor inside the input.
-        let cursor_col = single_line_caret_column(&query, cursor, 0);
+        let cursor_col = single_line_field_caret_column(&query, cursor, 0, input_inner.width);
         let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
@@ -12722,22 +12904,107 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
 /// The exact inverse of `input::cursor_from_single_line_position`, so a click and
 /// the caret it produces agree about where the caret is.
 fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16 {
-    let mut cursor = cursor.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
+    let cursor = glyph_start(text, cursor);
     prefix_width.saturating_add(text[..cursor].cell_width())
 }
 
-/// The one single-line text-field renderer.
+/// The byte where the glyph (extended grapheme cluster) holding byte `cursor`
+/// of `text` starts, or `text.len()` for a caret at or past the end: where a
+/// single-line field's caret sits when `cursor` falls inside a glyph.
+fn glyph_start(text: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    if cursor >= text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= cursor)
+        .last()
+        .unwrap_or(0)
+}
+
+/// Where a single-line field `width` cells wide starts drawing `text`, as a
+/// byte offset, so the caret stays in view: the start while the text up to and
+/// including the caret's cell fits beside the prefix, and otherwise the first
+/// glyph that leaves the caret's glyph ending in the field's last cells. The
+/// prefix is never scrolled.
+///
+/// Decided from the text and the caret alone, so the click mapping
+/// (`input::cursor_from_single_line_click`) recomputes the very offset the
+/// field was drawn at.
+pub(super) fn single_line_scroll(
+    text: &str,
+    cursor: usize,
+    prefix_width: usize,
+    width: u16,
+) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let room = usize::from(width).saturating_sub(prefix_width);
+    let cursor = glyph_start(text, cursor);
+    let caret_width = text[cursor..]
+        .graphemes(true)
+        .next()
+        .map_or(1, cluster_width)
+        .max(1);
+    let before: usize = text[..cursor].graphemes(true).map(cluster_width).sum();
+    let needed = before + caret_width;
+    if room == 0 || needed <= room {
+        return 0;
+    }
+    let mut excess = needed - room;
+    for (idx, glyph) in text[..cursor].grapheme_indices(true) {
+        if excess == 0 {
+            return idx;
+        }
+        excess = excess.saturating_sub(cluster_width(glyph));
+    }
+    cursor
+}
+
+/// The single-line field renderer for a field `width` cells wide: the text is
+/// drawn from [`single_line_scroll`], so a caret at the end of a long line is
+/// still on screen. Every single-line field draws through this.
+fn render_single_line_field(
+    prefix: &str,
+    text: &str,
+    cursor: usize,
+    cursor_fg: Color,
+    cursor_bg: Color,
+    focused: bool,
+    width: u16,
+) -> Line<'static> {
+    let skip = single_line_scroll(text, cursor, usize::from(prefix.cell_width()), width);
+    render_single_line_cursor_input(
+        prefix,
+        &text[skip..],
+        cursor.saturating_sub(skip),
+        cursor_fg,
+        cursor_bg,
+        focused,
+    )
+}
+
+/// The display column of a field's caret once the field is scrolled by
+/// [`single_line_scroll`], for placing the hardware cursor.
+fn single_line_field_caret_column(text: &str, cursor: usize, prefix_width: u16, width: u16) -> u16 {
+    let skip = single_line_scroll(text, cursor, usize::from(prefix_width), width);
+    single_line_caret_column(&text[skip..], cursor.saturating_sub(skip), prefix_width)
+}
+
+/// The single-line text-field renderer, drawing the whole line; fields call
+/// it through [`render_single_line_field`], which scrolls it to the caret.
 ///
 /// `focused` decides whether the caret is painted at all: a field that cannot
 /// take a keystroke must not look like it can, so callers whose modal has more
 /// than one control pass whether focus actually sits on the field. Callers that
 /// own the only control pass `true`.
 ///
-/// The caret offset is a byte offset and is clamped to a character boundary
-/// before any slicing, so a name holding an accent or an emoji cannot panic.
+/// The caret offset is a byte offset and is clamped to the start of the glyph
+/// (extended grapheme cluster) it falls in before any slicing, so a name
+/// holding an accent or an emoji cannot panic, and the caret covers a whole
+/// emoji sequence rather than its first character.
 fn render_single_line_cursor_input(
     prefix: &str,
     text: &str,
@@ -12749,20 +13016,18 @@ fn render_single_line_cursor_input(
     if !focused {
         return Line::from(Span::raw(format!("{prefix}{text}")));
     }
-    let mut cursor = cursor.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let cursor = glyph_start(text, cursor);
     if cursor < text.len() {
         let (before, after) = text.split_at(cursor);
-        let cursor_char = after.chars().next().expect("cursor within text");
-        let cursor_len = cursor_char.len_utf8();
-        let rest = &after[cursor_len..];
+        let cursor_glyph = after.graphemes(true).next().expect("cursor within text");
+        let rest = &after[cursor_glyph.len()..];
         Line::from(vec![
             Span::raw(prefix.to_string()),
             Span::raw(before.to_string()),
             Span::styled(
-                cursor_char.to_string(),
+                cursor_glyph.to_string(),
                 Style::default().fg(cursor_fg).bg(cursor_bg),
             ),
             Span::raw(rest.to_string()),
@@ -23825,6 +24090,68 @@ mod tests {
                 ],
                 "{id}: caret-styled text is word-wrapped, the chip kept whole"
             );
+        }
+    }
+
+    /// A field narrower than its text draws the part that keeps the caret
+    /// in view, the prefix staying put; text that fits is drawn from its start.
+    #[test]
+    fn a_single_line_field_scrolls_to_keep_the_caret_in_view() {
+        let drawn = |prefix: &str, text: &str, cursor: usize, width: u16| -> (String, String) {
+            let line = render_single_line_field(
+                prefix,
+                text,
+                cursor,
+                Color::White,
+                Color::Black,
+                true,
+                width,
+            );
+            let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+            let caret: String = line
+                .spans
+                .iter()
+                .filter(|span| span.style.bg == Some(Color::Black))
+                .map(|span| span.content.to_string())
+                .collect();
+            (all, caret)
+        };
+        // Caret at the end: the last cells hold the tail and the caret.
+        assert_eq!(
+            drawn(" ", "abcdefghij", 10, 6),
+            (" ghij ".into(), " ".into())
+        );
+        // Caret inside: the field ends on the glyph under the caret.
+        assert_eq!(
+            drawn(" ", "abcdefghij", 7, 6),
+            (" defghij".into(), "h".into())
+        );
+        // Text that fits, and a caret near the start, draw from the start.
+        assert_eq!(drawn(" ", "abc", 3, 6), (" abc ".into(), " ".into()));
+        assert_eq!(
+            drawn(" ", "abcdefghij", 1, 6),
+            (" abcdefghij".into(), "b".into())
+        );
+        // A wide glyph is skipped whole: four cells hold "語" and the caret.
+        assert_eq!(drawn("", "日本語", 9, 4), ("語 ".into(), " ".into()));
+    }
+
+    #[test]
+    fn render_single_line_cursor_input_paints_the_caret_over_a_whole_emoji_sequence() {
+        let text = "👩\u{200d}💻a";
+        // At the sequence, and at a byte inside it, the caret covers all of it.
+        for cursor in [0, "👩".len()] {
+            let line =
+                render_single_line_cursor_input("", text, cursor, Color::White, Color::Black, true);
+            let caret: Vec<&str> = line
+                .spans
+                .iter()
+                .filter(|span| span.style.bg == Some(Color::Black))
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(caret, vec!["👩\u{200d}💻"], "caret at byte {cursor}");
+            let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+            assert_eq!(all, text);
         }
     }
 

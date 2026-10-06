@@ -25,6 +25,10 @@ pub enum Action {
     ChangeProjectDefaultProvider,
     FocusAgent,
     OpenProjectBrowser,
+    /// Palette-only: open the clone form, which clones a repository as a new
+    /// project and starts an agent on it. The web counterpart is "Clone a
+    /// repository…" in the Add project menu.
+    CloneProject,
     CopyPath,
     OpenWorktreeInEditor,
     ChooseWorktreeEditor,
@@ -234,6 +238,7 @@ impl Action {
             Action::ChangeProjectDefaultProvider => "change_project_default_provider",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
+            Action::CloneProject => "clone_project",
             Action::CopyPath => "copy_path",
             Action::OpenWorktreeInEditor => "open_worktree_in_editor",
             Action::ChooseWorktreeEditor => "choose_worktree_editor",
@@ -389,6 +394,7 @@ impl Action {
                 "Focus the selected agent's pane. With the pane focused, this key types into a live agent and launches a dormant one."
             }
             Action::OpenProjectBrowser => "Open the project browser.",
+            Action::CloneProject => "Clone a repository as a new project and start an agent on it.",
             // "Directory" rather than "worktree": these act on the agent's
             // working directory, which is a worktree dux made for a managed
             // agent and the user's own folder for a standalone one. Both work.
@@ -757,6 +763,7 @@ impl Action {
             | Action::StopBackgroundServer
             | Action::ViewServerLog
             | Action::SetTailscaleMode
+            | Action::CloneProject
             | Action::ToggleAlwaysShowTabs
             | Action::ToggleTabReachesAgent
             | Action::OpenAgentInfo

@@ -228,6 +228,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // so the rule asks no button of them.
         PromptState::RenameSession { .. }
         | PromptState::NameNewAgent { .. }
+        // Three single-line fields and the random-name checkbox: Enter submits
+        // from any control, so the rule asks no button of it.
+        | PromptState::CloneProject { .. }
         | PromptState::PullRequestInput { .. }
         | PromptState::AttachPullRequestInput { .. }
         // The standalone-agent name field: one single-line control, so Enter
@@ -316,6 +319,13 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::NameStandaloneAgent { input, .. }
         | PromptState::NameNewAgent { input, .. } => vec![input],
 
+        PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            ..
+        } => vec![address, destination, agent_name],
+
         PromptState::StartupCommandLogs(prompt) => vec![&prompt.filter],
         PromptState::PickProject { list, .. } => vec![&list.filter],
         PromptState::KillRunning(prompt) => vec![&prompt.list.filter],
@@ -380,6 +390,8 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::AttachPullRequestInput { .. }
         // Likewise one single-line field and nothing else.
         | OverlayMouseLayout::NameStandaloneAgent { .. }
+        // Three single-line fields and a checkbox: Enter submits.
+        | OverlayMouseLayout::CloneProject { .. }
         | OverlayMouseLayout::NameNewAgent { .. } => false,
 
         // A button that commits.
@@ -1201,6 +1213,19 @@ pub(super) mod tests {
                     randomized_name: None,
                     copy_changes: false,
                     focus: NameNewAgentFocus::Input,
+                },
+            ),
+            (
+                "CloneProject",
+                PromptState::CloneProject {
+                    address: TextInput::with_text("https://example.com/acme/widget".to_string()),
+                    destination: TextInput::with_text("/srv/code/widget".to_string()),
+                    destination_edited: false,
+                    start_folder: std::path::PathBuf::from("/srv/code"),
+                    agent_name: TextInput::with_text("first-agent".to_string()),
+                    randomize_name: false,
+                    randomized_name: None,
+                    focus: crate::app::CloneProjectFocus::Address,
                 },
             ),
             (

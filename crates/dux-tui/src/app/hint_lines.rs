@@ -837,6 +837,7 @@ const DIALOG_WORDS: &[(&str, &[Action])] = &[
     ("resolve", &[Action::Confirm]),
     ("attach", &[Action::Confirm]),
     ("create agent", &[Action::Confirm]),
+    ("clone", &[Action::Confirm]),
     ("expand/collapse", &[Action::Confirm]),
 ];
 

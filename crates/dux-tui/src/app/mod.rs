@@ -225,6 +225,8 @@ struct ChangedFilesAnswer {
 
 struct DrainedEventMetadata {
     pr_lookup_completion: Option<(String, bool)>,
+    /// A clone's worker answered: its op id, and whether it refused or failed.
+    clone_completion: Option<(String, bool)>,
     checkout_inspect_completion: Option<String>,
     reference_resolution: Option<PrReferenceResolutionAnswer>,
     changed_files_answer: Option<ChangedFilesAnswer>,
@@ -407,6 +409,9 @@ pub struct App {
     /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
     /// and it is spent by the create's own outcome, success or failure.
     pub(crate) create_agent_started_here: bool,
+    /// What the clone form held when it last started a clone, until that
+    /// clone succeeds or another submit replaces it.
+    pub(crate) clone_draft: Option<CloneDraft>,
     /// The macro list's version as the editor last saw it, on open and after each
     /// of its own writes; a save is refused once the list has moved on since.
     pub(crate) macro_editor_version: Option<String>,
@@ -2533,6 +2538,35 @@ pub(crate) enum NameNewAgentFocus {
     CopyChangesCheckbox,
 }
 
+/// Which control has focus in the Clone modal, in Tab order: the three
+/// single-line fields, then the random-name checkbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloneProjectFocus {
+    Address,
+    Destination,
+    AgentName,
+    RandomizedNameCheckbox,
+}
+
+/// The clone form's fields as they were submitted, kept for the clone they
+/// started. When the worker refuses that clone or it fails, the form has long
+/// closed on its busy, so the next open of the form restores these instead of
+/// asking for everything again.
+#[derive(Clone, Debug)]
+pub(crate) struct CloneDraft {
+    /// The clone's status operation, which its worker's answer names.
+    pub(crate) op_id: String,
+    /// The clone was refused or failed, so the next open restores the draft.
+    pub(crate) restorable: bool,
+    pub(crate) address: String,
+    pub(crate) destination: String,
+    pub(crate) destination_edited: bool,
+    pub(crate) start_folder: PathBuf,
+    pub(crate) agent_name: String,
+    pub(crate) randomize_name: bool,
+    pub(crate) randomized_name: Option<String>,
+}
+
 /// What the folder browser is picking a directory for.
 ///
 /// One prompt with a purpose rather than two prompts, because the browsing
@@ -2945,6 +2979,23 @@ pub(crate) enum PromptState {
         /// Absolute path of the folder the browser committed to.
         folder: String,
         input: TextInput,
+    },
+    /// Clone a repository as a new project and start an agent on it: the remote's
+    /// address, where the clone goes, and the first agent's name. Three
+    /// single-line fields and one checkbox, so Enter submits from any control.
+    CloneProject {
+        address: TextInput,
+        /// Filled from `start_folder` and the address's repository name until
+        /// the user edits it, after which it is theirs.
+        destination: TextInput,
+        destination_edited: bool,
+        /// The folder the default destination is built in: the add-project
+        /// browser's start directory.
+        start_folder: PathBuf,
+        agent_name: TextInput,
+        randomize_name: bool,
+        randomized_name: Option<String>,
+        focus: CloneProjectFocus,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -3595,6 +3646,7 @@ pub(crate) enum OverlayCheckboxId {
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
     NameNewAgentCopyChanges,
+    CloneProjectRandomizedPetName,
     ConfigReloadRecoverOldConfig,
 }
 
@@ -3835,6 +3887,13 @@ pub(crate) enum OverlayMouseLayout {
     /// The standalone-agent name modal's single text field (its only control).
     NameStandaloneAgent {
         input: Rect,
+    },
+    /// The clone form's three single-line fields and its random-name checkbox.
+    CloneProject {
+        address: Rect,
+        destination: Rect,
+        agent_name: Rect,
+        checkbox: OverlayCheckbox,
     },
     NameNewAgent {
         input: Rect,
@@ -4480,6 +4539,7 @@ impl App {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
@@ -5579,6 +5639,7 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
+            "clone-project" => self.open_clone_project_prompt(),
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
             "manage-worktrees" => self.manage_project_worktrees(),

@@ -1140,6 +1140,44 @@ fn the_new_agent_dialog_chips_the_worktree_it_starts_in() {
     assert_chipped(&app, &buf, "/srv/wt-na");
 }
 
+/// The clone form shows its names only inside its own fields, which are
+/// typed text rather than prose, so its body carries no name to chip.
+#[test]
+fn the_clone_dialog_shows_names_only_in_its_fields() {
+    let mut app = test_app(default_bindings());
+    let buf = open(
+        &mut app,
+        PromptState::CloneProject {
+            address: TextInput::with_text("https://example.com/acme/widget-cl".to_string()),
+            destination: TextInput::with_text("/srv/code/widget-cl".to_string()),
+            destination_edited: false,
+            start_folder: std::path::PathBuf::from("/srv/code"),
+            agent_name: TextInput::new(),
+            randomize_name: false,
+            randomized_name: None,
+            focus: CloneProjectFocus::Address,
+        },
+    );
+    let OverlayMouseLayout::CloneProject {
+        address,
+        destination,
+        ..
+    } = app.overlay_layout.active
+    else {
+        panic!("expected the clone form's layout");
+    };
+    let rows: Vec<u16> = occurrences(&buf, "widget-cl")
+        .into_iter()
+        .map(|(_, y)| y)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![address.y, destination.y],
+        "the name appears outside the fields:\n{}",
+        screen(&buf)
+    );
+}
+
 #[test]
 fn the_macro_dialogs_chip_the_macro() {
     let mut app = test_app(default_bindings());

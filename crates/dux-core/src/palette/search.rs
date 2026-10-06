@@ -431,6 +431,7 @@ mod tests {
                 "sort-agents",
                 "close-tab",
                 "read-startup-command-logs",
+                "clone-project",
                 "attach-pull-request",
                 "recreate-working-copy",
                 "toggle-always-show-tabs",

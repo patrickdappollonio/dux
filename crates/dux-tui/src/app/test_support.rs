@@ -304,6 +304,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_pty_resize_target: None,
         tui_launched_ptys: Default::default(),
         create_agent_started_here: false,
+        clone_draft: None,
         macro_editor_version: None,
         pending_pty_takeover: None,
         last_refused_pty_resize: None,
