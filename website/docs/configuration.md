@@ -359,6 +359,11 @@ If `path` points at a symlink, dux follows it once at startup: the live log and
 its rotated copies all live beside the file the link points at, and the link
 itself is left alone.
 
+`path` may not point at a file dux keeps for itself: `config.toml`, the sessions
+database (with its `-wal` and `-shm` files), `dux.lock`, `remotes.toml` or the
+control socket, however the path reaches it. dux refuses to start, and a reload is
+refused, naming the setting.
+
 > [!TIP]
 > `tail -F ~/.config/dux/dux.log` (note the capital F) follows the log across a
 > rotation. Plain `tail -f` keeps watching the rotated copy and goes quiet.

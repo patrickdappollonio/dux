@@ -308,6 +308,13 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
         }
     };
 
+    // Before either log opens: a log path naming one of dux's own files would
+    // write into it.
+    if let Some(refusal) = dux_core::config::log_path_refusal(&config, &paths) {
+        eprintln!("error: dux server cannot start: {refusal}");
+        std::process::exit(1);
+    }
+
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.
     // OnceLock::set is idempotent, so it is safe if the TUI already initialized it (flip).

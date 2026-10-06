@@ -52,9 +52,13 @@ impl ConfigSurface for WebConfigSurface {
             };
             // The one list of start checks: what stops `dux server` starting
             // stops its reload too.
-            if let Some(raw) = config.source_text.as_str()
-                && let Some(refusal) =
+            if let Some(refusal) = config
+                .source_text
+                .as_str()
+                .and_then(|raw| {
                     dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+                })
+                .or_else(|| dux_core::config::log_path_refusal(&config, &paths))
             {
                 guard.complete(Err(format!(
                     "The config was not reloaded, and the running settings are unchanged: \
@@ -127,9 +131,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The one list of start checks, the same the terminal UI and `dux config
     // get`/`set` ask. A host or port the command line can override is left to
     // `resolve_server_plan`, which knows the command line.
-    if let Some(raw) = config.source_text.as_str()
-        && let Some(refusal) =
-            dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+    if let Some(refusal) = config
+        .source_text
+        .as_str()
+        .and_then(|raw| dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer))
+        .or_else(|| dux_core::config::log_path_refusal(&config, paths))
     {
         anyhow::bail!("dux cannot start: {refusal}");
     }
@@ -318,11 +324,16 @@ mod tests {
     /// `dux server` and every engine bootstrap refuse to start when
     /// `[server.auth]` cannot be read, instead of serving with no password.
     #[test]
-    fn bootstrap_engine_refuses_to_start_when_server_auth_cannot_be_read() {
-        for body in [
-            "[server.auth]]\n",
-            "[server.auth]\npassword_hash = \"$argon2id$v=19$m=1,t=1,p=1$x$y\"\n",
-            "[server.auth]\nrequire = [\"network\"]\n",
+    fn bootstrap_engine_refuses_to_start_with_a_file_it_cannot_run_with() {
+        for (body, about) in [
+            ("[server.auth]]\n", "server.auth"),
+            (
+                "[server.auth]\npassword_hash = \"$argon2id$v=19$m=1,t=1,p=1$x$y\"\n",
+                "server.auth",
+            ),
+            ("[server.auth]\nrequire = [\"network\"]\n", "server.auth"),
+            // A log that would be written into a file dux keeps for itself.
+            ("[server]\nlog_path = \"dux.log\"\n", "[server] log_path"),
         ] {
             let (_tmp, paths) = temp_paths();
             std::fs::write(&paths.config_path, body).expect("write config");
@@ -331,7 +342,7 @@ mod tests {
                 Err(err) => format!("{err:#}"),
             };
             assert!(err.contains("dux cannot start"), "{body:?}: {err}");
-            assert!(err.contains("server.auth"), "{body:?}: {err}");
+            assert!(err.contains(about), "{body:?}: {err}");
             assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), body);
         }
     }

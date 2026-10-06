@@ -105,6 +105,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // own `[keys]` check included (installed above).
     if let Some(refusal) =
         dux_core::config::start_refusal(&raw, dux_core::config::Surface::TerminalUi)
+            .or_else(|| dux_core::config::log_path_refusal(&config, paths))
     {
         anyhow::bail!("{}: {refusal}", paths.config_path.display());
     }
@@ -477,7 +478,10 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Relative paths are resolved from the dux config directory.\n\
                  # The log file is opened once, so changing this needs a restart.\n\
                  # A symlink here is followed once at startup: the log and its rotated\n\
-                 # copies live beside the file it points at, and the link is left alone.",
+                 # copies live beside the file it points at, and the link is left alone.\n\
+                 # It may not point at a file dux keeps for itself (config.toml, the\n\
+                 # sessions database, dux.lock, remotes.toml, the control socket): dux\n\
+                 # refuses to start or reload with such a path.",
             )),
             value_fn: |c| FieldValue::Str(c.logging.path.clone()),
         },
@@ -1115,7 +1119,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # ran with no terminal in front of it can still be read. dux.log keeps\n\
                  # the debugging trail and is not affected. Relative paths are resolved\n\
                  # from the dux config directory. The file is readable only by you.\n\
-                 # Read when a server starts.",
+                 # It may not be dux.log or a file dux keeps for itself (config.toml, the\n\
+                 # sessions database, dux.lock, remotes.toml, the control socket): dux\n\
+                 # refuses to start or reload with such a path. Read when a server starts.",
             )),
             value_fn: |c| FieldValue::Str(c.server.log_path.clone()),
         },
@@ -4756,7 +4762,7 @@ args = [\"-l\"]
     }
 
     #[test]
-    fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
+    fn ensure_config_refuses_a_file_it_cannot_start_with_and_writes_nothing() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path().to_path_buf();
         let paths = dux_core::config::DuxPaths {
@@ -4767,16 +4773,31 @@ args = [\"-l\"]
             worktrees_root: root.join("worktrees"),
             root,
         };
-        for body in [
-            "[server.auth\npassword_hash = \"\"\n",
-            "[server.auth]\npassword_hash = \"$argon2id$v=19$broken\"\n",
-            "[server.auth]\nmax_failed_logins = \"five\"\n",
-            "[server]\nbind = \"127.0.0.1:3890\"\n\n[server.auth]\nrequire = \"nowhere\"\n",
+        for (body, about) in [
+            ("[server.auth\npassword_hash = \"\"\n", "server.auth"),
+            (
+                "[server.auth]\npassword_hash = \"$argon2id$v=19$broken\"\n",
+                "server.auth",
+            ),
+            (
+                "[server.auth]\nmax_failed_logins = \"five\"\n",
+                "server.auth",
+            ),
+            (
+                "[server]\nbind = \"127.0.0.1:3890\"\n\n[server.auth]\nrequire = \"nowhere\"\n",
+                "server.auth",
+            ),
+            // A log that would be written into a file dux keeps for itself.
+            ("[logging]\npath = \"sessions.sqlite3\"\n", "[logging] path"),
+            (
+                "[server]\nlog_path = \"config.toml\"\n",
+                "[server] log_path",
+            ),
         ] {
             fs::write(&paths.config_path, body).expect("seed config");
             let err = ensure_config(&paths).expect_err(body);
             let text = format!("{err:#}");
-            assert!(text.contains("server.auth"), "{body:?}: {text}");
+            assert!(text.contains(about), "{body:?}: {text}");
             assert!(
                 text.contains(&paths.config_path.display().to_string()),
                 "{body:?}: {text}"
