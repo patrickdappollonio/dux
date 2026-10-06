@@ -29,9 +29,8 @@ impl App {
             .is_some_and(|companion| companion.has_core())
     }
 
-    /// Serve the control socket from this terminal UI, so a command-line
-    /// client reaches it while nothing serves the web. Called as the run loop
-    /// starts, before `serve_while_tui` is honoured.
+    /// Serve the control socket so a command-line client reaches this terminal
+    /// UI while nothing serves the web; called before `serve_while_tui` is honoured.
     pub(crate) fn start_control_socket(&mut self) {
         if let Some(companion) = self.companion.as_mut() {
             companion.start_control_socket(&mut self.engine);
@@ -135,12 +134,8 @@ impl App {
         ))
     }
 
-    /// Lend the engine to the companion for ONE reaction, before this surface
-    /// applies it.
-    ///
-    /// Pre-consume because `apply_reaction` takes the reaction by value, and
-    /// per-reaction rather than per-batch so the companion sees them in the order
-    /// they were drained. A no-op when no core is up.
+    /// Lend the engine to the companion for one reaction, before this surface
+    /// consumes it, so the companion sees reactions in the order they were drained.
     pub(crate) fn notify_companion(&mut self, reaction: &EventReaction) {
         if let Some(companion) = self.companion.as_mut()
             && companion.has_core()
@@ -149,15 +144,8 @@ impl App {
         }
     }
 
-    /// Snapshot the ownership verdict source for reactions about to be drained.
-    ///
-    /// Taken BEFORE `notify_companion` lends anything to the web layer, because
-    /// the web layer's own follow-ups REMOVE the pending-op entries the verdict is
-    /// read from: ask afterwards and a browser's PR create or project add answers
-    /// "the drainer owns this", and this surface runs its arm too. Empty when
-    /// no core is up, which routes every reaction here. A core serving only the
-    /// control socket routes too: a command-line client's change is a web
-    /// request like a browser's.
+    /// Must be taken before [`Self::notify_companion`]: the web layer's follow-ups
+    /// remove the pending-op entries the verdict reads. No core up routes everything here.
     pub(crate) fn companion_routing(&self) -> CompanionRouting {
         if self.companion_has_core() {
             CompanionRouting::Serving(self.engine.web_followup_ops())
@@ -189,10 +177,8 @@ impl App {
         }
     }
 
-    /// Lend the engine to the companion for its per-iteration work, and do this
+    /// Lend the engine to the companion once per run-loop iteration, then do this
     /// surface's own follow-up when the companion changed shared state.
-    ///
-    /// Called once per run-loop iteration. A no-op when no core is up.
     pub(crate) fn service_companion(&mut self) {
         let applies = self.engine.command_applies;
         // A web-owned follow-up ran during this iteration's drain, which can have
@@ -216,11 +202,8 @@ impl App {
             self.mark_frame_dirty();
             self.refresh_after_companion_mutation();
         }
-        // The serve retired itself (a required listener died, or its request
-        // channel closed). Say so where the user is looking: the last thing the
-        // status line told them was the address it was serving on.
-        // What a command-line change made through the serve raised for every
-        // surface: no browser stands in for this line.
+        // Statuses a command-line change raised through the serve: no browser
+        // stands in for this line.
         for status in outcome.statuses {
             let mut update = dux_core::engine::StatusUpdate::info(status.message);
             update.tone = StatusTone::from_wire(&status.tone);
@@ -228,6 +211,8 @@ impl App {
             update.sticky = status.sticky;
             self.apply_reaction(dux_core::engine::EventReaction::Status(update));
         }
+        // The serve retired itself: the status line last showed the address it
+        // was serving on.
         if let Some(message) = outcome.retirement {
             self.status.set(
                 Instant::now(),
@@ -853,10 +838,8 @@ impl App {
         // pre-flight lands afterwards and starts serving anyway.
         let on = self.background_server_is_serving() || self.background_server_preflight_pending;
         match (on, wanted) {
-            // A reload that turned it on is a live act the user just took, so it
-            // reports like the palette command rather than like the startup
-            // autostart. The bind ends later; a start the terminal UI refuses
-            // is a listener change that did not happen.
+            // A user request, not the startup autostart: a reload turning it on
+            // is a live act and reports like the palette command.
             (false, true) => {
                 match self.try_start_background_server(BackgroundServerStart::UserRequest) {
                     Ok(()) => self.note_reload_serve_change_started(),
@@ -916,9 +899,8 @@ impl StartRefusal {
     }
 }
 
-/// The listener changes a config reload set off that have not ended yet. A
-/// reload's record is not finished until they have, so a failure of one is
-/// part of how the reload ended.
+/// The listener changes a config reload set off that have not ended yet; the
+/// reload is not finished until they have.
 #[derive(Debug, Default)]
 pub(crate) struct ReloadListenerChanges {
     /// A background-server start (or the cancelling of one) is binding.

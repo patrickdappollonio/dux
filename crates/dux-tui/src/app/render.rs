@@ -1435,13 +1435,8 @@ impl App {
         lines
     }
 
-    /// Who a guarded dialog's confirm would cut off, once the guard has named
-    /// them: a blank row, the shared opening line in the warning tone, then
-    /// one indented line each, every name a chip. Nothing while nobody is
-    /// named.
-    ///
-    /// Wrapped here, to `inner_width`, so every row keeps its own indent: the
-    /// frame's own wrap would run a continuation back to the dialog's edge.
+    /// Rows naming who a guarded confirm would cut off, wrapped here so every row
+    /// keeps its indent: the frame's own wrap runs continuations to the dialog's edge.
     fn attached_section(
         &self,
         blockers: &[dux_core::attachments::Blocker],
@@ -8139,10 +8134,8 @@ impl App {
         };
     }
 
-    /// The stop-tab confirmation. Prose plus a Cancel/Stop pair, the Confirm
-    /// family, Cancel focused. Says what the browser's dialog says: the tab's
-    /// session ends, the tab stays, and the agent detaches when this was its
-    /// last running tab.
+    /// The stop-tab confirmation; its sentences match the browser's
+    /// `ConfirmStopTabDialog.tsx`.
     fn render_confirm_stop_tab_prompt(&mut self, frame: &mut Frame) {
         let PromptState::ConfirmStopTab {
             session_id,

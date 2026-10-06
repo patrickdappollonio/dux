@@ -1518,10 +1518,8 @@ impl App {
         };
     }
 
-    /// Stop-tab entry point: the focused tab of the selected agent. A tab
-    /// with nothing running gets no dialog, only a line saying so; a running
-    /// one is confirmed first, and the dialog says when stopping it detaches
-    /// the agent.
+    /// Stop the selected agent's focused tab: one with nothing running gets only
+    /// a line saying so, a running one is confirmed first.
     pub(crate) fn stop_focused_tab_prompt(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -1583,9 +1581,8 @@ impl App {
         // either. See `launch_claims_its_pty`.
         let tab_id = super::pty_ownership::launch_claims_its_pty(&request.kind)
             .then(|| request.tab_id.clone());
-        // A start somebody asked for here is refused while another surface's
-        // change holds the tab or its agent. The startup sweep and a create's
-        // own launch are not starts of something that already exists.
+        // Only a start of an existing tab is admission-checked: the startup sweep
+        // and a create's own launch start nothing another change could hold.
         if matches!(
             request.kind,
             AgentLaunchKind::Reconnect { .. }
@@ -2239,9 +2236,8 @@ impl App {
         })
     }
 
-    /// Start deleting an agent. A refusal because somebody else is attached
-    /// to it comes back for the dialog to name them; any other failure is on
-    /// the status line.
+    /// Start deleting an agent. A refusal naming who is attached is returned for
+    /// the dialog; any other failure goes on the status line.
     pub(crate) fn begin_delete_session(
         &mut self,
         session_id: &str,
@@ -2351,9 +2347,8 @@ impl App {
         Ok(())
     }
 
-    /// Close a terminal. A refusal because somebody else is attached to it
-    /// comes back for the dialog to name them; any other failure is on the
-    /// status line.
+    /// Close a terminal. A refusal naming who is attached is returned for the
+    /// dialog; any other failure goes on the status line.
     pub(crate) fn do_delete_terminal(
         &mut self,
         terminal_id: &str,
@@ -3770,9 +3765,7 @@ impl App {
             status_op_id: Some(op_id.clone()),
         }) {
             Ok(reaction) => reaction,
-            // Refused before anything ran (somebody else is attached, or
-            // another change holds the project): no final will ever come for
-            // this op, so it leaves nothing behind.
+            // Refused before anything ran, so no final will ever come for this op.
             Err(error) => {
                 self.pending_persist_ops.remove(&op_id);
                 self.engine.retire_status_key(&op_id);
@@ -3863,9 +3856,8 @@ impl App {
         force: bool,
         seek_fullscreen: bool,
     ) -> Result<()> {
-        // A start stops any other agent running in the same folder, and a
-        // forced one ends this agent's own run first: refused while somebody
-        // else is attached to what it would end, before anything is torn down.
+        // A start ends any other agent in the same folder, a forced one this
+        // agent's own run too: all of it is reserved before anything is torn down.
         let mut scope = self.engine.launch_conflict_scope(session_id);
         if force {
             scope.extend(self.engine.agent_scope(session_id));
@@ -8983,9 +8975,6 @@ mod tests {
         );
     }
 
-    /// Confirming reaches the shared engine teardown: the provider leaves for
-    /// the terminating set (SIGTERM, not a drop), the row goes Detached at once,
-    /// and a keyed spinner explains the wait until the reaper replaces it.
     /// Hold agent `session_id` from another surface: a followed stop, as a
     /// browser or the command line would leave it, open as `op-held`.
     fn hold_agent_elsewhere(app: &mut App, session_id: &str) {
@@ -9061,6 +9050,9 @@ mod tests {
         );
     }
 
+    /// Confirming reaches the shared engine teardown: the provider leaves for
+    /// the terminating set (SIGTERM, not a drop), the row goes Detached at once,
+    /// and a keyed spinner explains the wait until the reaper replaces it.
     #[test]
     fn detach_agent_confirm_asks_the_engine_and_raises_the_keyed_busy() {
         let session = make_session("s1", "claude", "/tmp/wt/a");

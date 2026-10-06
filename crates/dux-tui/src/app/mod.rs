@@ -317,10 +317,8 @@ pub struct App {
     pub(crate) notes_fetch_explicit_request: Arc<AtomicBool>,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
-    /// The server log, full-screen over everything while it is `Some`: opened by
-    /// the `view-server-log` palette command while dux serves in the background,
-    /// closed by its own keys. Not a modal and not a fullscreen pane: it takes
-    /// every key and the whole frame until it closes.
+    /// The server log, full-screen while `Some`: neither a modal nor a fullscreen
+    /// pane, it takes every key and the whole frame until it closes.
     pub(crate) server_log_viewer: Option<crate::server_screen::ServerLogViewer>,
     pub(crate) status: KeyedStatusController,
     /// The generation of the missing-project warning this App last wrote to the
@@ -409,10 +407,8 @@ pub struct App {
     /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
     /// and it is spent by the create's own outcome, success or failure.
     pub(crate) create_agent_started_here: bool,
-    /// The macro list's version (`dux_core::wire::macros_version`) as the
-    /// macro editor last saw it: when it opened, then after each of its own
-    /// writes. A save finding the list moved on since (a browser or the command
-    /// line changed it) is refused rather than written over that change.
+    /// The macro list's version as the editor last saw it, on open and after each
+    /// of its own writes; a save is refused once the list has moved on since.
     pub(crate) macro_editor_version: Option<String>,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
@@ -622,9 +618,8 @@ pub struct App {
     /// The terminals the frame being drawn shows, in the attachment registry's
     /// terms. Filled while a frame renders; see `attachment_presence`.
     pub(crate) drawn_ptys: Vec<dux_core::attachments::Target>,
-    /// What this surface last told the attachment registry it is attached to,
-    /// with its seat in the ownership record then, so an unchanged frame
-    /// tells it nothing.
+    /// What this surface last published to the attachment registry, with its
+    /// ownership seat then, so an unchanged frame publishes nothing.
     pub(crate) published_ptys: Option<(Vec<dux_core::attachments::Target>, Option<u64>)>,
     /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
     /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
@@ -2351,9 +2346,7 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) action: KillRunningAction,
     pub(crate) target_ids: Vec<RuntimeTargetId>,
     pub(crate) focus: ConfirmFocus,
-    /// Everybody else attached to what confirming would end, filled in when
-    /// the guard refused the confirm: the dialog names them and its confirm
-    /// becomes the override. Empty until then.
+    /// Who confirming would cut off, named once the guard refuses it.
     pub(crate) attached: Vec<dux_core::attachments::Blocker>,
 }
 
@@ -2726,9 +2719,7 @@ pub(crate) enum PromptState {
         /// dialog says nothing about commits in both cases rather than
         /// guessing a number.
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     ConfirmDeleteTerminal {
@@ -2740,9 +2731,7 @@ pub(crate) enum PromptState {
         /// an idle terminal merely ends the shell.
         foreground_cmd: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Delete
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Close one agent tab. Closing it ends that tab's session for good
@@ -2759,15 +2748,11 @@ pub(crate) enum PromptState {
         /// first" are two different promises and the user is owed both.
         promoted_label: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Close
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
-    /// Stop one running agent tab: its process ends and the tab stays in the
-    /// strip, dormant. Destructive (whatever the tab is doing is interrupted),
-    /// so it defaults to Cancel. Whether it is the agent's last running tab is
-    /// captured when the dialog opens, because the dialog promises it.
+    /// Stop one running agent tab, leaving it dormant in the strip. Whether it is
+    /// the last running tab is captured on open, because the dialog promises it.
     ConfirmStopTab {
         session_id: String,
         tab_id: String,
@@ -2775,9 +2760,7 @@ pub(crate) enum PromptState {
         /// Stopping it detaches the agent, because no other tab of it runs.
         last_running: bool,
         focus: ConfirmFocus, // Cancel (default) or Stop
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Ask the selected agent to shut down and leave it Detached. Destructive
@@ -2796,9 +2779,7 @@ pub(crate) enum PromptState {
         /// the grace, for the same reason.
         live_tabs: usize,
         focus: ConfirmFocus, // Cancel (default) or Detach
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     /// The way out of a working copy the agent deleted from under itself.
@@ -2856,9 +2837,7 @@ pub(crate) enum PromptState {
         /// The project action list this was opened from; a cancel steps back
         /// to it.
         return_to: Option<Box<ProjectActionsPrompt>>,
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Asked before `remove-project` runs anything, the same question the
@@ -2876,9 +2855,7 @@ pub(crate) enum PromptState {
         /// The project action list this was opened from; a cancel steps back
         /// to it.
         return_to: Option<Box<ProjectActionsPrompt>>,
-        /// Everybody else attached to what confirming would end, filled in when
-        /// the guard refused the confirm: the dialog names them and its confirm
-        /// becomes the override. Empty until then.
+        /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
     ConfirmQuit {
@@ -4248,9 +4225,8 @@ impl App {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
 
-        // The lock is held and the config read and accepted: bind the control
-        // socket now, before anything can ask for it. A dux without it still
-        // starts.
+        // Bound with the lock held and the config accepted, before anything can
+        // ask for it; dux still starts without it.
         let paths = paths.with_control_socket(&config.server.control_socket);
         let socket_warning =
             dux_core::control_socket::open(&mut single_instance_lock, &paths.socket_path);

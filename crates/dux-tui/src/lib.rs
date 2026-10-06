@@ -64,9 +64,8 @@ pub enum TuiExit {
     },
 }
 
-/// Run `dux config <args>`: the arguments after the word `config`, exactly as
-/// the user typed them. The binary's command tree hands them over untouched, so
-/// every message and exit code here is the config code's own.
+/// Run `dux config <args>`, given the arguments after the word `config` exactly
+/// as typed; every message and exit code is the config code's own.
 pub fn run_config(config_args: &[String]) -> Result<()> {
     let paths = config::DuxPaths::discover()?;
     // Help anywhere in a config command (before a literal `--`) prints the
@@ -88,21 +87,15 @@ pub fn run_config(config_args: &[String]) -> Result<()> {
     cli::run(config_args, &paths)
 }
 
-/// Run the terminal UI. Called by the `dux` binary crate when no command was
-/// given.
-///
-/// `companion` is the background web server this TUI may serve through. It is a
-/// `dux-core` trait object because this crate never sees `dux-web`: the binary
-/// implements it and is the only place the two surfaces meet.
+/// Run the terminal UI; the `dux` binary calls it when no command was given.
+/// `companion` is the background web server it may serve through, which the binary implements.
 pub fn run(
     companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
 ) -> Result<TuiExit> {
     let paths = config::DuxPaths::discover()?;
 
-    // The SIGUSR1 (reload config) handler goes in BEFORE the lock: a person
-    // reloading by hand with `kill -USR1` signals whoever holds the lock, and
-    // the signal's default action would end this process. Idempotent, so the
-    // binary having installed it already is fine.
+    // Before the lock: `kill -USR1` reaches whoever holds it, and the signal's
+    // default action would end this process. Idempotent.
     if let Err(err) = dux_core::reload_signal::install() {
         eprintln!("warning: {err}; `kill -USR1` cannot reload this dux, use Reload config in it");
     }
@@ -182,48 +175,35 @@ enum ConfigLock {
     NothingToReset,
 }
 
-/// Takes the single-instance lock for the `config` subcommands that mutate
-/// shared on-disk state, creating the config folder owner-only first so the
-/// lock file never sits in a folder other users can read.
+/// Take the single-instance lock for the `config` subcommands that mutate shared
+/// on-disk state, creating the config folder owner-only first.
 fn lock_for_config_subcommand(
     config_args: &[String],
     paths: &config::DuxPaths,
 ) -> Result<ConfigLock> {
     let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
-    // Acquire the single-instance lock only for subcommands that
-    // mutate shared on-disk state. Read-only operations (path, diff,
-    // regenerate preview) skip the lock entirely.
     Ok(match sub {
-        // reset mutates state when root exists. When root is absent there
-        // is nothing to reset, and this is where that is decided, so the
-        // directory is not created just to take a lock.
+        // Decided here, so a missing root is not created just to take a lock.
         "reset" if !paths.root.exists() => ConfigLock::NothingToReset,
         "reset" => {
             create_private_root(paths)?;
             ConfigLock::Held(acquire_lock_or_exit(&paths.lock_path))
         }
 
-        // regenerate --yes creates directories and writes config.
-        // Create root (so the lockfile can be opened) and lock before
-        // any writes, preventing a concurrent TUI from starting
-        // between directory creation and the config write.
+        // Locked before any write, so a TUI cannot start between creating
+        // the root and writing the config.
         "regenerate" if config_args.iter().any(|a| a == "--yes") => {
             create_private_root(paths)?;
             ConfigLock::Held(acquire_lock_or_exit(&paths.lock_path))
         }
 
-        // `set` deliberately runs beside a live dux: its write takes the
-        // config file's own lock (never this one, which the running dux
-        // holds for its whole life), and it then signals that dux to
-        // reload. Everything else is read-only or prints help, so there
-        // is no shared state to protect.
+        // `set` runs beside a live dux, which holds this lock for its whole
+        // life; its write takes the config file's own lock instead.
         _ => ConfigLock::NotNeeded,
     })
 }
 
-/// Creates the config folder owner-only. Every path that is about to open the
-/// lock file calls this first, so the lock never sits in a folder other users
-/// can read.
+/// Create the config folder owner-only, before any path opens the lock file in it.
 fn create_private_root(paths: &config::DuxPaths) -> Result<()> {
     dux_core::file_modes::create_private_dir_all(&paths.root)?;
     Ok(())

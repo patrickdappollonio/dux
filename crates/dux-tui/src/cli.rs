@@ -144,11 +144,8 @@ struct ResetLeftover {
     reason: String,
 }
 
-/// Why `reset --all` deleted nothing: something is still running (a program
-/// dux started, or any program of this user working in a folder the reset
-/// would delete), or a check whose answer dux could not get, which counts the
-/// same because it cannot know nothing runs. Carried as the command's error,
-/// so it is printed once and the exit code is 1.
+/// Why `reset --all` deleted nothing: something still runs, or a check had no
+/// answer. Carried as the command's error, so it prints once and exits 1.
 #[derive(Debug, Default)]
 struct ResetRefused {
     running: Vec<ResetLeftover>,
@@ -189,9 +186,8 @@ impl std::fmt::Display for ResetRefused {
 
 impl std::error::Error for ResetRefused {}
 
-/// Why `reset --all` stopped part-way: a folder could not be removed. Nothing
-/// after it was touched, the database and the config included, so a second
-/// run starts from what is left.
+/// Why `reset --all` stopped part-way: a folder could not be removed, and
+/// nothing after it, the database and the config included, was touched.
 #[derive(Debug)]
 struct ResetFailed {
     removed: Vec<PathBuf>,
@@ -239,10 +235,8 @@ fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<()> {
         eprintln!("warning: {error}");
     }
     prune_empty_ancestors(&log_path, &paths.root)?;
-    // The server log goes with its rotated copies, and the saved remotes with
-    // the sign-in tokens they hold.
-    // Only from inside the config folder: a path that leaves it, by an absolute
-    // name, a `..` or a symlinked folder, is the user's to delete.
+    // Only from inside the config folder: a server log path that leaves it, by an
+    // absolute name, a `..` or a symlinked folder, is the user's to delete.
     if is_plainly_inside(&server_log_path, &paths.root) {
         // A log that will not go is a warning, as for dux.log, never a reason
         // to keep the config.
@@ -858,19 +852,8 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
                 "the sessions could not be loaded from the database: {error}"
             ))
         })?;
-        // A standalone agent's folder is the user's and is never removed, not
-        // even by a factory reset; its record goes with the database below
-        // like every other agent's.
-        //
-        // The filter is on the workspace, not on the managed-root path check
-        // inside the removal: a standalone agent pointed at a directory under
-        // dux's managed root sails past that check and has the ground deleted
-        // from under it.
-        //
-        // Collect in a pass of its own, before any removal: a managed worktree
-        // that contains or is such a folder ends in an unconditional
-        // `remove_dir_all`, so a half-filled list makes the folder's survival
-        // depend on row order.
+        // A standalone agent's folder is never removed. Filtered on the workspace (the
+        // managed-root check passes one under that root) and collected before any removal.
         for session in &sessions {
             if session.workspace.as_managed().is_none() {
                 occupied_folders.push(canonical_or_original(Path::new(session.directory())));
@@ -895,9 +878,8 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
             .collect();
     }
 
-    // Everything dux started is stopped first, then one last look decides
-    // whether anything is left in the way. Only then is anything deleted: a
-    // reset that stopped half-way would leave a confusing mix of old and new.
+    // Nothing is deleted until everything dux started has stopped and one last
+    // look finds nothing left in the way.
     let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
     stop_recorded_programs(paths, &recorded)?;
     ensure_nothing_runs(&recorded, &removing)?;
@@ -917,11 +899,8 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
     }
     println!("{}", removed_worktrees_line(removed.len()));
 
-    // The sweep that finishes the job: whatever the per-session loop could not
-    // account for (a worktree whose row was already gone, a stray directory)
-    // goes with the root, except a folder a standalone agent occupies, which
-    // removing the root wholesale would undo the filter above for. It stops at
-    // the first entry it cannot remove, before the database and config go.
+    // What the loop above could not account for goes with the root, except a folder
+    // a standalone agent occupies; it stops at the first entry it cannot remove.
     sweep_worktrees_root(
         &paths.worktrees_root,
         &occupied_folders,
@@ -1011,12 +990,8 @@ fn reset_grace(paths: &DuxPaths) -> std::time::Duration {
     dux_core::config::shutdown_grace(timeout_seconds)
 }
 
-/// Stop every program dux recorded starting (this boot only), wherever it
-/// works and whoever's folder it is in, with the same SIGTERM, configured
-/// grace and SIGKILL as an agent delete's removal. A program is found by the
-/// identity dux recorded (its session and start time), never by a guess, and
-/// the process list is read strictly: one that cannot be read refuses the
-/// reset. One that survives the grace period refuses it too.
+/// Stop every program dux recorded starting this boot, by its recorded identity, as an
+/// agent delete does; an unreadable process list or a program that survives refuses the reset.
 fn stop_recorded_programs(
     paths: &DuxPaths,
     recorded: &[dux_core::process_sessions::StoredSession],
@@ -1057,10 +1032,8 @@ fn stop_recorded_programs(
     }
 }
 
-/// The last look before anything is deleted: nothing dux recorded starting
-/// runs any more (a child forked while the rest shut down is still a member),
-/// and no program of this user works in a folder the reset is about to remove,
-/// recorded or not. Reads the process list fresh and strictly.
+/// The last look before anything is deleted: nothing dux recorded still runs, forked
+/// children included, and no program of this user works in a folder about to go.
 fn ensure_nothing_runs(
     recorded: &[dux_core::process_sessions::StoredSession],
     removing: &[PathBuf],
@@ -1103,15 +1076,8 @@ fn ensure_nothing_runs(
     }
 }
 
-/// Clear the managed worktrees root entry by entry, leaving every entry that
-/// CONTAINS OR IS a folder a standalone agent occupies. It stops at the first
-/// entry that could not be removed, naming it and everything removed so far
-/// (`removed` carries the earlier removals in and the sweep's own out). The
-/// root itself goes when nothing is left in it.
-///
-/// Containment, not equality: an agent pointed at `worktrees/a/b` must keep
-/// `worktrees/a` too, or removing the parent takes the child with it. Compared
-/// canonically, so a symlinked spelling cannot slip past.
+/// Clear the worktrees root, keeping every entry that contains or canonically is a
+/// standalone agent's folder; stops at the first failure, with `removed` extended so far.
 fn sweep_worktrees_root(
     root: &Path,
     occupied: &[PathBuf],
@@ -1338,9 +1304,8 @@ fn resolve_reset_log_paths(paths: &DuxPaths) -> (PathBuf, PathBuf) {
     )
 }
 
-/// Whether `path` is a name under `root` that reaches it by plain folders: no
-/// `..`, and no folder on the way (the last name, a file, excepted) that is a
-/// symlink. The last name may itself be a symlink: removing it unlinks the link.
+/// Whether `path` reaches under `root` by plain folders, with no `..` and no symlinked
+/// folder on the way; the last name may be a symlink, which removing only unlinks.
 fn is_plainly_inside(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
@@ -1491,7 +1456,7 @@ mod tests {
         );
     }
 
-    /// Review 21: a startup command's job that dux left running (recorded in
+    /// A startup command's job that dux left running (recorded in
     /// the saved process registry for agent m1, in m1's worktree) is still
     /// running when `dux config reset --all` runs. The reset ends it first and
     /// then removes everything, so nothing is left running in a folder that

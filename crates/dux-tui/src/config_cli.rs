@@ -1,16 +1,10 @@
 //! `dux config get <path>` and `dux config set <path> [value]`.
 //!
-//! Thin over [`dux_core::config_keys`], which owns what a path means, how a
-//! value is checked and how it is written (comment-keeping, under the config
-//! file's write lock). This module owns the command line: argument parsing,
-//! the hidden password prompt with its live strength line, and telling a
-//! running dux to reload.
-//!
-//! Neither command takes the single-instance lock: `get` only reads, and
-//! `set` is meant to run beside a live dux. Its write takes the config file's
-//! own lock, and it then asks the dux holding `dux.lock` to reload over its
-//! control socket and prints how that went (see
-//! [`dux_core::client::reload`]).
+//! Thin over [`dux_core::config_keys`], which owns what a path means and how a
+//! value is checked and written. Neither command takes the single-instance lock:
+//! `set` runs beside a live dux, writes under the config file's own lock, then
+//! asks the dux holding `dux.lock` to reload over its control socket
+//! ([`dux_core::client::reload`]).
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -340,12 +334,8 @@ pub(crate) fn run_set(
     Ok(())
 }
 
-/// Say how the running dux answered the request to reload. A reload with no
-/// answer in time ends the command with the unknown code (6), as everywhere
-/// else on the command line. A reload it refused, or applied with a step
-/// failed, fails the command (exit 1): the
-/// sentence says whether the change is in force, and why not or what failed,
-/// and goes out as the error so it reaches standard error.
+/// Say how the running dux answered the reload: no answer in time exits with the
+/// unknown code (6), a refusal or a failed step fails the command on standard error.
 fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
     let sentence = reload_sentence(answer, problems_remain);
     if matches!(answer, ReloadAnswer::Unknown(_)) {
@@ -632,14 +622,8 @@ fn user_inputs() -> Vec<String> {
     dux_core::auth::guess_words()
 }
 
-/// What happens next, from how the running dux answered the request to
-/// reload. With `problems_remain`, what each surface makes of the file is said
-/// above it (see [`write_surface_verdicts`]), so this says only what the
-/// running dux did, never that the change applies.
-///
-/// A refused reload is the one answer that fails the command, so the caller
-/// turns it into an error; its sentence says the file is saved and not in
-/// force, and why.
+/// What happens next, from the reload answer. With `problems_remain` the verdicts
+/// of [`write_surface_verdicts`] come first, so this never says the change applies.
 fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
     let then = if problems_remain {
         " A kind that refuses this file will not start with it until the problems above are \
@@ -681,10 +665,8 @@ fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
     }
 }
 
-/// What a new web UI password does to a running dux, from how it answered the
-/// request to reload and nothing else: a dux that has the new file in force
-/// signs every browser out. `None` where the reload sentence already says it
-/// all.
+/// What a new web UI password does to a running dux, judged from its reload
+/// answer alone; `None` where the reload sentence already says it all.
 fn password_sentence(answer: &ReloadAnswer) -> Option<String> {
     match answer {
         ReloadAnswer::Applied(_) | ReloadAnswer::PartlyApplied(_) => Some(
@@ -725,9 +707,13 @@ impl SecretSource for TerminalSecrets {
     }
 }
 
-/// A password for `dux remote login`: piped in with `from_stdin` (refused on
-/// a terminal, which would show it), else asked for once on the terminal
-/// without echo. With neither a pipe asked for nor a terminal, it is refused.
+/// A password for `dux remote login`: read from standard input with `from_stdin`,
+/// else asked for once on the terminal without echo.
+///
+/// # Errors
+///
+/// When `from_stdin` is set on a terminal or standard input is too large, or
+/// there is no terminal to ask on.
 pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> {
     use std::io::IsTerminal;
     if from_stdin {
@@ -739,9 +725,13 @@ pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> 
     prompt_hidden(label, None)
 }
 
-/// An environment value for `dux env set <name>`: piped in with
-/// `from_stdin` (refused on a terminal, which would show it), else asked for
-/// twice on the terminal without echo, as `dux config set env.<name>` asks.
+/// An environment value for `dux env set <name>`: read from standard input with
+/// `from_stdin`, else asked for twice on the terminal without echo.
+///
+/// # Errors
+///
+/// When `from_stdin` is set on a terminal or standard input is too large, when
+/// there is no terminal to ask on, or when the two answers differ.
 pub fn read_env_value(from_stdin: bool, name: &str) -> Result<Password> {
     let mut secrets = TerminalSecrets;
     if from_stdin {
