@@ -2763,6 +2763,15 @@ impl EngineService {
             for key in pr_followup.clear_keys {
                 self.status.clear(key);
             }
+            // A clone is ready: add the project and dispatch its agent, whose
+            // busy takes over from the clone's, which is dismissed.
+            let clone_followup = engine.drive_clone_followup(reaction);
+            for status in clone_followup.statuses {
+                let _ = self.status.send(status);
+            }
+            for key in clone_followup.clear_keys {
+                self.status.clear(key);
+            }
         }
 
         // A reconnect / force-restart launch reported back: resolve the web

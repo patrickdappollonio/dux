@@ -249,6 +249,27 @@ impl Default for CliConfig {
     }
 }
 
+/// Default for `[git] clone_stall_seconds`.
+pub const DEFAULT_CLONE_STALL_SECONDS: u64 = 300;
+
+/// `[git]`: how dux runs git for you.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    /// Seconds a "Clone a repository" may go without git printing any
+    /// progress before dux stops it. There is no limit on the clone's total
+    /// time, because a big repository is slow rather than stuck.
+    pub clone_stall_seconds: u64,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            clone_stall_seconds: DEFAULT_CLONE_STALL_SECONDS,
+        }
+    }
+}
+
 /// Default cap on concurrent events (`/ws`) WebSocket connections; see
 /// [`ServerConfig::max_websocket_events_connections`]. Shared so the config
 /// default and the server's router default cannot drift apart.
@@ -2818,6 +2839,8 @@ pub struct Config {
     pub editor: EditorConfig,
     pub cli: CliConfig,
     #[serde(default)]
+    pub git: GitConfig,
+    #[serde(default)]
     pub server: ServerConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
@@ -2974,6 +2997,7 @@ impl Default for Config {
             capabilities: CapabilitiesConfig::default(),
             editor: EditorConfig::default(),
             cli: CliConfig::default(),
+            git: GitConfig::default(),
             server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),

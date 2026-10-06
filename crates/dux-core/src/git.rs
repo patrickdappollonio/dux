@@ -14,7 +14,9 @@ use crate::logger;
 use crate::model::{ChangedFile, ProjectBranchStatus};
 use crate::worker::BranchWarningKind;
 
+mod clone;
 mod folding;
+pub use clone::{CloneError, CloneProcesses, clone_repository};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
     rows_answering, untracked_directory_kind,
@@ -1484,7 +1486,7 @@ fn parse_ref_worktree_records(bytes: &[u8]) -> Vec<(String, String)> {
 /// process per branch; git stays the one that decides. `check-ref-format`
 /// takes no `--`, but a dash-leading argument after `--branch` is read as the
 /// name and refused (measured on git 2.53 with `--normalize`).
-fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
+pub(crate) fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
     if !(name.starts_with('-') || name == "HEAD" || name.contains('@')) {
         return true;
     }
@@ -1616,7 +1618,7 @@ pub struct UnpushedCommits {
 ///
 /// `for-each-ref` is plumbing and prints nothing at all for an empty namespace,
 /// so "no output" is the whole answer and no parsing is involved.
-fn has_remote_tracking_refs(repo_path: &Path) -> bool {
+pub(crate) fn has_remote_tracking_refs(repo_path: &Path) -> bool {
     let repo = repo_path.to_string_lossy();
     Command::new("git")
         .args([
@@ -5714,6 +5716,74 @@ pub(crate) mod test_support {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env_remove("GIT_CONFIG_COUNT")
             .env_remove("GIT_CONFIG_PARAMETERS");
+    }
+
+    fn run(args: &[&std::ffi::OsStr]) {
+        let out = git_command().args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A bare repository at `dir/remote.git` to clone from, whose default
+    /// branch `main` has one commit and which also has a branch `feature`.
+    pub(crate) fn bare_remote_with_commit(dir: &std::path::Path) -> std::path::PathBuf {
+        let seed = dir.join("seed");
+        let remote = dir.join("remote.git");
+        run(&[
+            "init".as_ref(),
+            "-q".as_ref(),
+            "-b".as_ref(),
+            "main".as_ref(),
+            seed.as_os_str(),
+        ]);
+        let in_seed = |args: &[&str]| {
+            let mut all: Vec<&std::ffi::OsStr> = vec!["-C".as_ref(), seed.as_os_str()];
+            all.extend(args.iter().map(std::ffi::OsStr::new));
+            run(&all);
+        };
+        in_seed(&["config", "user.name", "test"]);
+        in_seed(&["config", "user.email", "t@t"]);
+        in_seed(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        in_seed(&["branch", "feature"]);
+        run(&[
+            "clone".as_ref(),
+            "-q".as_ref(),
+            "--bare".as_ref(),
+            seed.as_os_str(),
+            remote.as_os_str(),
+        ]);
+        remote
+    }
+
+    /// A bare repository at `dir/empty.git` with no commits at all.
+    pub(crate) fn empty_bare_remote(dir: &std::path::Path) -> std::path::PathBuf {
+        let remote = dir.join("empty.git");
+        run(&[
+            "init".as_ref(),
+            "-q".as_ref(),
+            "--bare".as_ref(),
+            "-b".as_ref(),
+            "main".as_ref(),
+            remote.as_os_str(),
+        ]);
+        remote
+    }
+
+    /// [`bare_remote_with_commit`] whose `HEAD` names a branch that does not
+    /// exist, so a clone of it cannot check its default branch out.
+    pub(crate) fn bare_remote_with_missing_head(dir: &std::path::Path) -> std::path::PathBuf {
+        let remote = bare_remote_with_commit(dir);
+        run(&[
+            "--git-dir".as_ref(),
+            remote.as_os_str(),
+            "symbolic-ref".as_ref(),
+            "HEAD".as_ref(),
+            "refs/heads/missing".as_ref(),
+        ]);
+        remote
     }
 }
 

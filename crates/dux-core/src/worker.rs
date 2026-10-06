@@ -652,6 +652,15 @@ pub enum WorkerEvent {
         /// op (dismissed in `drain_events`). `None` when no keyed status is driven.
         status_op_id: Option<String>,
     },
+    /// A clone's worker finished, at `path` (the destination's identity, which
+    /// names its in-flight key). `Ok` is a clone ready to add as a project;
+    /// `Err` says how it stopped short of one (never `HandedOff`).
+    RepositoryCloned {
+        status_op_id: Option<String>,
+        path: PathBuf,
+        agent_name: String,
+        result: Result<crate::clone_project::ClonedRepository, crate::clone_project::CloneOutcome>,
+    },
     /// Background inspection of the selected project checkout before opening
     /// the New Agent prompt.
     CreateAgentBranchInspected {

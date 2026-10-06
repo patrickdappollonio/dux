@@ -945,6 +945,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U64(c.cli.wait_timeout_seconds),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("git"),
+        ConfigEntry::Field {
+            key: "clone_stall_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long \"Clone a repository\" lets git go without printing any progress,\n\
+                 # in seconds, before dux stops the clone and says so. There is no limit on\n\
+                 # how long a whole clone takes, because a big repository is slow rather than\n\
+                 # stuck; a clone that stops printing progress is the stuck one. Raise this\n\
+                 # for a remote that is slow to start sending. Values below 1 count as 1.\n\
+                 # Default 300 (5 minutes).",
+            )),
+            value_fn: |c| FieldValue::U64(c.git.clone_stall_seconds),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
             "# The dux web UI: one workspace for one owner, with one optional password\n\

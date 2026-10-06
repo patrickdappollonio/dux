@@ -1318,7 +1318,7 @@ fn removing_the_first_of_two_projects_at_one_path_keeps_the_seconds_keys() {
     m.projects.remove(0);
     q.save_eager(m.clone()).unwrap();
     let t = read(&path);
-    assert!(!t.contains("one") && !t.contains("n1"), "{t}");
+    assert!(!t.contains("\"one\"") && !t.contains("n1"), "{t}");
     assert!(t.contains("two") && t.contains("n2"), "{t}");
 }
 

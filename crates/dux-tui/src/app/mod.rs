@@ -4365,6 +4365,7 @@ impl App {
             pending_change_base_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
+            clones: Default::default(),
             pending_pr_attach_ops: HashMap::new(),
             pending_recreate_ops: HashMap::new(),
             pending_delete_ops_web: HashMap::new(),
@@ -4907,6 +4908,9 @@ impl App {
     /// this a child that ignores SIGTERM traps the operator for the full grace
     /// period with only `kill -9` as an out.
     fn shutdown_agents_gracefully(&mut self) {
+        // A clone runs in a session of its own; quitting must stop it even
+        // with no agent to wait for.
+        self.engine.stop_clones();
         let agents = self.engine.providers.len();
         let terminals = self.engine.companion_terminals.len();
         if agents + terminals == 0 {

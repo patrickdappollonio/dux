@@ -84,11 +84,21 @@ struct AddProjectBody {
     /// be, or sit inside, a repository).
     #[serde(default)]
     init_repo: bool,
+    /// Clone this address into `path` as a new project instead of adding a
+    /// folder, then start an agent there named `agent_name` (or a random name
+    /// when it is blank and `random_name` is set). Outranks every other flag.
+    #[serde(default)]
+    clone_url: Option<String>,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    random_name: bool,
 }
 
 /// Pick the add command the body's flags ask for.
 ///
-/// A strict precedence ladder: `init_repo` subsumes `create_initial_commit`, which
+/// A strict precedence ladder: a non-empty `clone_url` makes it a clone, whatever
+/// else is set. Otherwise `init_repo` subsumes `create_initial_commit`, which
 /// outranks `checkout_default`, since an unborn repo has no default branch to check
 /// out. The engine validates the path, serializes per repo path and runs the commit
 /// on a worker, so no mutating git work runs on the async reactor and a failure
@@ -100,8 +110,18 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
         checkout_default,
         create_initial_commit,
         init_repo,
+        clone_url,
+        agent_name,
+        random_name,
     } = body;
-    if init_repo {
+    if let Some(url) = clone_url.filter(|url| !url.trim().is_empty()) {
+        WireCommand::CloneProject {
+            url,
+            path,
+            agent_name,
+            random_name,
+        }
+    } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
     } else if create_initial_commit {
         WireCommand::AddProjectCreateInitialCommit { path, name }
@@ -149,6 +169,37 @@ async fn add_project(
     };
 
     let cmd = add_project_command(body);
+
+    // A clone can take far longer than the create wait, so it answers as soon
+    // as it has started, with the operation to follow; a check that refused it
+    // is a 400 with its sentence.
+    if matches!(cmd, WireCommand::CloneProject { .. }) {
+        let scope = scope_from_headers(&headers, &state.connections);
+        if operation.asked() {
+            return match state
+                .engine
+                .apply_wire_operation(cmd, scope, OperationKind::ProjectAdd)
+                .await
+            {
+                Ok((_, op)) => operation_accepted(&op),
+                Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            };
+        }
+        return match state
+            .engine
+            .apply_wire_recorded(cmd, scope, OperationKind::ProjectAdd)
+            .await
+        {
+            Ok(outcome) => (
+                StatusCode::ACCEPTED,
+                Json(Accepted {
+                    op_id: outcome.operation_id,
+                }),
+            )
+                .into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+    }
 
     // Followed as an operation: the record answers at once. A plain add has
     // finished by then; the adds that run git first are still running.
@@ -715,6 +766,9 @@ mod tests {
             checkout_default,
             create_initial_commit,
             init_repo,
+            clone_url: None,
+            agent_name: None,
+            random_name: false,
         }
     }
 
@@ -831,6 +885,25 @@ mod tests {
     #[test]
     fn add_project_command_follows_the_flag_precedence_ladder() {
         use dux_core::wire::WireCommand;
+        let clone = |url: &str| super::AddProjectBody {
+            clone_url: Some(url.to_string()),
+            agent_name: Some("first".to_string()),
+            random_name: true,
+            ..add_body(true, true, true)
+        };
+        assert_eq!(
+            super::add_project_command(clone("https://example.com/r.git")),
+            WireCommand::CloneProject {
+                url: "https://example.com/r.git".to_string(),
+                path: "/repo".to_string(),
+                agent_name: Some("first".to_string()),
+                random_name: true,
+            }
+        );
+        assert!(matches!(
+            super::add_project_command(clone("  ")),
+            WireCommand::AddProjectInitRepo { .. }
+        ));
         assert!(matches!(
             super::add_project_command(add_body(true, true, true)),
             WireCommand::AddProjectInitRepo { .. }
@@ -880,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_repo_outranks_the_other_add_flags() {
+    async fn clone_url_then_init_repo_outrank_the_other_add_flags() {
         // The precedence ladder: a plain folder sent with every flag set must be
         // initialized as a repository, which only `init_repo` can do.
         let folder = tempfile::tempdir().unwrap();
@@ -898,6 +971,48 @@ mod tests {
         assert!(
             folder.path().join(".git").exists(),
             "init_repo must win and initialize the folder"
+        );
+
+        // A clone address outranks it in turn: the route answers at once with
+        // the clone's operation, and a check that refuses answers 400 with its
+        // sentence.
+        let (_tmp, app) = router_no_auth();
+        let dest = std::fs::canonicalize(folder.path()).unwrap().join("clone");
+        let flags = r#","clone_url":"/nowhere/remote.git","agent_name":"first","init_repo":true,"create_initial_commit":true,"checkout_default":true"#;
+        let resp = app
+            .clone()
+            .oneshot(post_add_flags(&dest.to_string_lossy(), flags))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let accepted = json_body(resp).await;
+        let op_id = accepted["op_id"]
+            .as_str()
+            .expect("the clone's operation id");
+        let record = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/operations/{op_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(record["kind"], "project.add");
+        let resp = app
+            .oneshot(post_add_flags("relative/clone", flags))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let sentence = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&sentence).contains("isn't an absolute path"),
+            "{sentence:?}"
         );
     }
 

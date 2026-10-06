@@ -321,6 +321,10 @@ pub enum EventReaction {
         status_op_id: Option<String>,
     },
 
+    /// A clone is ready to become a project: add it and start its first
+    /// agent, through [`Engine::finish_clone`], on exactly one surface.
+    AddProjectAfterClone(Box<crate::clone_project::ClonedProject>),
+
     // -- Branch inspection follow-ups (App helpers). --
     ContinueCreateAgentAfterInspection {
         project: Project,
@@ -4538,6 +4542,12 @@ impl Engine {
                 result,
                 status_op_id,
             } => self.process_initial_commit_created(add, result, status_op_id),
+            WorkerEvent::RepositoryCloned {
+                status_op_id,
+                path,
+                agent_name,
+                result,
+            } => self.process_repository_cloned(status_op_id, path, agent_name, result),
             WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result,
@@ -5687,6 +5697,7 @@ mod tests {
             EventReaction::ResourceStatsArrived(_, _) => "ResourceStatsArrived",
             EventReaction::AddProjectAfterBranchCheckout { .. } => "AddProjectAfterBranchCheckout",
             EventReaction::AddProjectAfterInitialCommit { .. } => "AddProjectAfterInitialCommit",
+            EventReaction::AddProjectAfterClone(_) => "AddProjectAfterClone",
             EventReaction::ContinueCreateAgentAfterInspection { .. } => {
                 "ContinueCreateAgentAfterInspection"
             }

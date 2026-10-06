@@ -60,6 +60,17 @@ pub enum Command {
         status_op_id: Option<String>,
     },
 
+    /// Clone `url` into `path` as a new project on the remote's default branch,
+    /// then start an agent named `agent_name` there (a random name when it is
+    /// blank and `random_name` is set). Returns the clone's busy, or an error
+    /// status saying which check refused it; see [`crate::clone_project`].
+    CloneProject {
+        url: String,
+        path: String,
+        agent_name: Option<String>,
+        random_name: bool,
+    },
+
     /// Remove a project and cascade-delete its agents' records and runtime,
     /// keeping their worktrees on disk. Tolerates a ghost project id that exists
     /// only through orphaned sessions: those are cleared and the project-record
@@ -550,6 +561,26 @@ impl Engine {
                 action,
                 status_op_id,
             } => self.apply_project_persistence(*action, status_op_id),
+
+            Command::CloneProject {
+                url,
+                path,
+                agent_name,
+                random_name,
+            } => {
+                let request = crate::clone_project::CloneRequest {
+                    url,
+                    path,
+                    agent_name,
+                    random_name,
+                };
+                Ok(EventReaction::Status(
+                    match self.begin_clone_project(&request, false) {
+                        Ok(busy) => busy,
+                        Err(refused) => StatusUpdate::error(refused),
+                    },
+                ))
+            }
 
             Command::RemoveProject {
                 project_id,

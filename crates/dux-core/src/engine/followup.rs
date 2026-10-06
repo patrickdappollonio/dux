@@ -34,6 +34,8 @@ pub trait WebFollowupOpsView {
     fn has_pr_lookup(&self, id: &str) -> bool;
     fn has_add_project(&self, id: &str) -> bool;
     fn has_checkout(&self, id: &str) -> bool;
+    /// A clone a browser asked for: one the terminal UI started is its own.
+    fn has_web_clone(&self, id: &str) -> bool;
 }
 
 impl WebFollowupOpsView for Engine {
@@ -46,6 +48,12 @@ impl WebFollowupOpsView for Engine {
     fn has_checkout(&self, id: &str) -> bool {
         self.pending_web_checkout_ops.contains_key(id)
     }
+    fn has_web_clone(&self, id: &str) -> bool {
+        self.clones
+            .pending
+            .get(id)
+            .is_some_and(|pending| pending.from_web)
+    }
 }
 
 /// A point-in-time copy of the web pending-op ids, so an ownership verdict is
@@ -56,6 +64,7 @@ pub struct WebFollowupOps {
     pr_lookup: HashSet<String>,
     add_project: HashSet<String>,
     checkout: HashSet<String>,
+    web_clone: HashSet<String>,
 }
 
 impl WebFollowupOps {
@@ -74,6 +83,9 @@ impl WebFollowupOpsView for WebFollowupOps {
     }
     fn has_checkout(&self, id: &str) -> bool {
         self.checkout.contains(id)
+    }
+    fn has_web_clone(&self, id: &str) -> bool {
+        self.web_clone.contains(id)
     }
 }
 
@@ -109,6 +121,13 @@ impl Engine {
             pr_lookup: self.pending_web_pr_lookup_ops.keys().cloned().collect(),
             add_project: self.pending_web_add_project_ops.keys().cloned().collect(),
             checkout: self.pending_web_checkout_ops.keys().cloned().collect(),
+            web_clone: self
+                .clones
+                .pending
+                .iter()
+                .filter(|(_, pending)| pending.from_web)
+                .map(|(id, _)| id.clone())
+                .collect(),
         }
     }
 }
@@ -134,6 +153,12 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             EventReaction::AddProjectAfterBranchCheckout { status_op_id, .. }
             | EventReaction::AddProjectAfterInitialCommit { status_op_id, .. } => {
                 owner_by_id(status_op_id, |id| ops.has_add_project(id))
+            }
+
+            // A clone is ready to add as a project, and the follow-up dispatches
+            // its agent create. Twice is two projects and two agents.
+            EventReaction::AddProjectAfterClone(done) => {
+                owner_by_id(&done.status_op_id, |id| ops.has_web_clone(id))
             }
 
             // Worker 1 inspected the default branch and the follow-up SPAWNS

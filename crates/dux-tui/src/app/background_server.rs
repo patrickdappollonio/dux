@@ -1103,6 +1103,11 @@ pub(crate) mod tests {
         /// happen BEFORE this surface applies the reaction, which is exactly the
         /// window the ownership snapshot exists to survive.
         fanout_consumes_ops: bool,
+        /// The clones the fanout's clone follow-up finished, by op id.
+        clones_driven: Vec<String>,
+        /// The clone keys it dismissed, one per clone it handed to an agent
+        /// create.
+        clone_handed_off: Vec<String>,
         /// Every ownership fact the seam published, in order, standing in for the
         /// `pty.owner` and grid broadcasts a real serve would have emitted.
         pub(crate) published: Vec<PtyOwnershipEvent>,
@@ -1169,6 +1174,18 @@ pub(crate) mod tests {
             recorded.reactions.push(reaction_kind(reaction).to_string());
             if !recorded.fanout_consumes_ops {
                 return;
+            }
+            // The clone follow-up is the real one, run where the real fanout
+            // runs it: only for a clone the routing gives the web.
+            if matches!(
+                engine.followup_owner(reaction),
+                dux_core::engine::FollowupOwner::Web
+            ) {
+                if let EventReaction::AddProjectAfterClone(done) = reaction {
+                    recorded.clones_driven.extend(done.status_op_id.clone());
+                }
+                let followup = engine.drive_clone_followup(reaction);
+                recorded.clone_handed_off.extend(followup.clear_keys);
             }
             // What the real `drive_pr_lookup_followup` / `finish_web_project_add`
             // do: resolve their keyed op, which means REMOVING it from the map the
@@ -1363,6 +1380,39 @@ pub(crate) mod tests {
         EventReaction::OpenNewAgentPromptForPr {
             pr: Box::new(resolved_pr()),
             status_op_id,
+        }
+    }
+
+    /// A clone's op waiting for its worker, as a browser (`from_web`) or this
+    /// surface would have left it.
+    fn a_clone_op(app: &mut App, from_web: bool) -> String {
+        let op = dux_core::engine::status_op("Cloning…".to_string()).resolve_in_handler(
+            |outcome: &dux_core::clone_project::CloneOutcome| outcome.final_status(),
+        );
+        let id = op.id().to_string();
+        app.engine.clones.pending.insert(
+            id.clone(),
+            dux_core::clone_project::PendingClone { op, from_web },
+        );
+        id
+    }
+
+    /// A clone of `path` ready to add, its worker's event for op `id`.
+    fn a_finished_clone(
+        id: String,
+        path: std::path::PathBuf,
+        agent: &str,
+    ) -> dux_core::worker::WorkerEvent {
+        dux_core::worker::WorkerEvent::RepositoryCloned {
+            status_op_id: Some(id),
+            path,
+            agent_name: agent.to_string(),
+            result: Ok(dux_core::clone_project::ClonedRepository {
+                address: "/srv/remote.git".to_string(),
+                branch: "main".to_string(),
+                leading_branch: "main".to_string(),
+                name_taken: false,
+            }),
         }
     }
 
@@ -2310,8 +2360,12 @@ pub(crate) mod tests {
     /// `drive_pr_lookup_followup` does, and the whole thing goes through the real
     /// `drain_events` on a real worker event, so "the verdict is taken before the
     /// fanout" is what is being asserted rather than "the helper works".
+    ///
+    /// A browser's clone is the same shape: its follow-up adds a project and
+    /// dispatches an agent, so it runs once, in the web layer, while a clone this
+    /// surface started is this surface's to finish, serving or not.
     #[test]
-    fn a_web_pr_create_pops_no_prompt_even_after_the_fanout_consumed_its_op() {
+    fn a_web_create_runs_once_even_after_the_fanout_consumed_its_op() {
         let mut app = test_app(default_bindings());
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
@@ -2336,6 +2390,64 @@ pub(crate) mod tests {
             matches!(app.prompt, PromptState::None),
             "a browser's PR create must not open the terminal's name prompt; the verdict has \
              to be taken before the fanout can empty the map it is read from"
+        );
+
+        let folder = tempfile::tempdir().unwrap();
+        let web_clone = a_clone_op(&mut app, true);
+        app.engine
+            .worker_tx
+            .send(a_finished_clone(
+                web_clone.clone(),
+                folder.path().join("web"),
+                "web-agent",
+            ))
+            .expect("the engine's worker channel is open");
+        app.drain_events();
+        let added = |app: &App, name: &str| {
+            app.engine
+                .projects
+                .iter()
+                .filter(|p| p.path.ends_with(name))
+                .count()
+        };
+        let driven = |recorded: &Arc<Mutex<Recorded>>| {
+            recorded.lock().expect("not poisoned").clones_driven.clone()
+        };
+        assert_eq!(added(&app, "web"), 1, "the browser's clone is added once");
+        assert_eq!(
+            recorded.lock().expect("not poisoned").clone_handed_off,
+            vec![web_clone.clone()],
+            "the browser's clone dispatches one create, from the web layer"
+        );
+        assert!(
+            !app.create_agent_started_here,
+            "the browser's agent was taken for this surface's"
+        );
+
+        // The browser's create is over, so this surface's can start.
+        app.engine
+            .clear_in_flight(&dux_core::engine::InFlightKey::CreateAgent);
+        // One event the way the drain handles it, and no further: the create
+        // this dispatches fails at once on a folder that is no repository, and
+        // draining its failure would spend the flag this part checks.
+        let own_clone = a_clone_op(&mut app, false);
+        let reaction = app.engine.process_worker_event(a_finished_clone(
+            own_clone,
+            folder.path().join("own"),
+            "own-agent",
+        ));
+        let routing = app.companion_routing();
+        app.notify_companion(&reaction);
+        app.apply_routed_reaction(reaction, &routing);
+        assert_eq!(added(&app, "own"), 1, "this surface's clone is added here");
+        assert_eq!(
+            driven(&recorded),
+            vec![web_clone],
+            "the web layer drove a clone this surface started"
+        );
+        assert!(
+            app.create_agent_started_here,
+            "the agent this surface's clone starts is this surface's"
         );
     }
 

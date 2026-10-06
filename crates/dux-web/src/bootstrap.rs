@@ -197,6 +197,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
+        clones: Default::default(),
         pending_pr_attach_ops: HashMap::new(),
         pending_recreate_ops: HashMap::new(),
         pending_delete_ops_web: HashMap::new(),

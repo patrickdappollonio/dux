@@ -1972,6 +1972,7 @@ impl Engine {
         abort: Option<&AtomicBool>,
         mut on_wait: impl FnMut(),
     ) -> ShutdownReport {
+        self.stop_clones();
         let totals = ShutdownTotals {
             agents: self.providers.len(),
             terminals: self.companion_terminals.len(),
