@@ -4867,6 +4867,27 @@ mod tests {
     }
 
     /// Helper: issue a request through the real router and return the status.
+    /// [`oneshot_status`]'s request, answering the body instead.
+    async fn oneshot_body(app: &Router, method: &str, uri: &str, body: Option<&str>) -> String {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(b) => {
+                builder = builder.header("content-type", "application/json");
+                axum::body::Body::from(b.to_string())
+            }
+            None => axum::body::Body::empty(),
+        };
+        let response = app
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     async fn oneshot_status(
         app: &Router,
         method: &str,
@@ -4892,14 +4913,14 @@ mod tests {
     /// `/api/v1/git/checkout-default`) were removed in favor of the path-keyed
     /// `/api/v1/projects/:id/{pull,checkout-default}` actions, so they must no
     /// longer reach the git handler. Like any unregistered `/api/v1/git/*` path,
-    /// they now fall through to the SPA static fallback.
+    /// they now fall through to the API's not-found answer.
     #[tokio::test]
     async fn removed_project_git_routes_are_gone() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
         let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
-        // A path under /api/v1/git that was never a route hits the SPA fallback.
+        // A path under /api/v1/git that was never a route hits the fallback.
         // The removed project endpoints must now behave identically.
         let fallback = oneshot_status(
             &app,
@@ -5032,7 +5053,7 @@ mod tests {
     /// The session-nested git/file routes reach their handlers: an unknown session
     /// resolves to 404 (auth off so the gate passes). Body-keyed
     /// `/api/v1/git/*` and `/api/v1/file/*` paths do not exist: they fall through
-    /// to the SPA fallback, which never returns the handler's 404.
+    /// to the fallback's `{"error":"not_found"}`, never a handler's answer.
     #[tokio::test]
     async fn nested_git_and_file_routes_reach_handlers() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
@@ -5062,26 +5083,26 @@ mod tests {
             "the nested file route must reach the file handler and 404 the unknown session"
         );
         // Body-keyed paths must not reach the handler (no 404 from it).
-        assert_ne!(
-            oneshot_status(
+        assert_eq!(
+            oneshot_body(
                 &app,
                 "POST",
                 "/api/v1/git/stage",
                 Some(r#"{"session_id":"nope","path":"a.txt"}"#)
             )
             .await,
-            StatusCode::NOT_FOUND,
+            r#"{"error":"not_found"}"#,
             "the old body-keyed /api/v1/git/* path must be gone"
         );
-        assert_ne!(
-            oneshot_status(
+        assert_eq!(
+            oneshot_body(
                 &app,
                 "POST",
                 "/api/v1/file/read",
                 Some(r#"{"session_id":"nope","path":"a.txt"}"#)
             )
             .await,
-            StatusCode::NOT_FOUND,
+            r#"{"error":"not_found"}"#,
             "the old body-keyed /api/v1/file/* path must be gone"
         );
     }
@@ -5666,7 +5687,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/me")
+                    .uri("/api/v1/build")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5735,7 +5756,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("/api/me 200"),
+            out.contains("/api/v1/build 200"),
             "the 200 request must be logged: {out}"
         );
         assert!(!out.contains("/healthz"), "/healthz must be skipped: {out}");
@@ -5761,7 +5782,7 @@ mod tests {
         let _ = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/me")
+                    .uri("/api/v1/build")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5790,7 +5811,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/me")
+                    .uri("/api/v1/build")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5802,7 +5823,7 @@ mod tests {
         let _ = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/me")
+                    .uri("/api/v1/build")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5810,7 +5831,7 @@ mod tests {
             .unwrap();
         let out = sink.contents();
         assert!(
-            out.contains("/api/me 200"),
+            out.contains("/api/v1/build 200"),
             "turning it on must not need a restart: {out}"
         );
     }
@@ -5836,7 +5857,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/me")
+                    .uri("/api/v1/build")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

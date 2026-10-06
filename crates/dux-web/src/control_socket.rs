@@ -67,9 +67,17 @@ pub(crate) async fn control_socket_routes(request: Request, next: Next) -> Respo
     next.run(request).await
 }
 
-/// What answers a request no route matched: the static UI for a browser, and
-/// 404 over the control socket, which serves no page.
+/// What answers a request no route matched: `404 {"error":"not_found"}` for
+/// an API path on every listener, 404 for anything else over the control
+/// socket, which serves no page, and the static UI for the rest.
 pub(crate) async fn fallback(request: Request) -> Response {
+    if request.uri().path().starts_with("/api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "not_found" })),
+        )
+            .into_response();
+    }
     if crate::auth::provenance::over_control_socket(&request) {
         return (
             StatusCode::NOT_FOUND,
