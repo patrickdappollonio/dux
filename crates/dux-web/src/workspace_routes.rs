@@ -23,7 +23,8 @@
 //!   record finishes. The workspace document never does: the agent left it when
 //!   the delete started.
 //! - The live rows of `GET /api/v1/sessions` carry `remote_viewers`: how many
-//!   browser attachments the agent has, from the attachment registry. The
+//!   browser connections are attached to the agent, from the attachment
+//!   registry. The
 //!   workspace document leaves it out, because it is pushed on every change
 //!   and a count that moves with every attach would push the whole document
 //!   each time; `GET /api/v1/sessions/:id` leaves it out to keep serving the
@@ -73,8 +74,9 @@ pub struct SessionWithTerminals {
     /// delete's operation record finishes. Absent on every other row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     removing: bool,
-    /// How many browser attachments the agent has across its tabs and its own
-    /// terminals, leaving out the terminal UI: set on the live rows of
+    /// How many browser connections are attached to the agent's tabs or its
+    /// own terminals, each counted once, a presence the grace keeps included,
+    /// and the terminal UI never: set on the live rows of
     /// `GET /api/v1/sessions`, absent on every other answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_viewers: Option<usize>,
@@ -97,15 +99,7 @@ impl SessionWithTerminals {
             agents: [self.session.id.clone()].into(),
             ..Default::default()
         };
-        self.remote_viewers = Some(
-            attachments
-                .blockers(
-                    &scope,
-                    Some(dux_core::attachments::TERMINAL_UI_CONNECTION),
-                    std::time::Instant::now(),
-                )
-                .len(),
-        );
+        self.remote_viewers = Some(attachments.remote_viewers(&scope, std::time::Instant::now()));
         self
     }
 }
@@ -344,6 +338,21 @@ mod tests {
                 .attach(connection, slot.clone(), Some(Heard::now()), None)
                 .unwrap();
         }
+        // A second terminal of the agent on the same browser tab is still
+        // one viewer.
+        engine
+            .attachments
+            .attach(
+                "e1",
+                Target {
+                    kind: TargetKind::Terminal,
+                    id: "live-term".to_string(),
+                    agent: Some("live".to_string()),
+                },
+                Some(Heard::now()),
+                None,
+            )
+            .unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         let app = crate::server::router(handle.clone());
 

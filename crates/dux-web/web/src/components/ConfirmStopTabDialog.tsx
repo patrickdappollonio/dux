@@ -7,9 +7,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { InlineCode } from "@/components/ui/inline-code"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { closeDetachesAgent, closeTabConsequences } from "@/lib/agentTabs"
-import { renderProse } from "@/lib/prose"
+import { closeDetachesAgent, tabProseLabel } from "@/lib/agentTabs"
+import { sessionLabel } from "@/lib/agentWorkspace"
 import { closeStopTab, stopTab, useDux } from "@/lib/store"
 
 // Confirmation before stopping a tab, from a running tab's menu. Stopping ends
@@ -25,7 +26,11 @@ export function ConfirmStopTabDialog() {
   const tab = stopTabTarget
     ? session?.tabs.find((t) => t.id === stopTabTarget.tabId)
     : undefined
-  const { sessionLabel } = closeTabConsequences(session, tab)
+  // Named as the terminal UI's dialog names them: the tab by its strip label,
+  // the agent by its display name.
+  const tabLabel =
+    session && tab ? (tabProseLabel(session.tabs, tab.id) ?? tab.provider) : ""
+  const agentLabel = session ? sessionLabel(session) : ""
   const willDetach = closeDetachesAgent(session, tab)
 
   // Closes the dialog when the tab (or its whole session) vanishes from the
@@ -52,9 +57,10 @@ export function ConfirmStopTabDialog() {
         <DialogHeader>
           <DialogTitle>Stop tab?</DialogTitle>
           <DialogDescription>
-            This ends {renderProse(sessionLabel)} in this tab, interrupting
-            whatever it is doing. The tab stays in the strip, ready to start
-            again.
+            Stop the <InlineCode>{tabLabel}</InlineCode> tab on{" "}
+            <InlineCode>{agentLabel}</InlineCode>? This ends its session,
+            interrupting whatever it is doing. The tab stays in the strip,
+            ready to start again.
             {willDetach
               ? " It's this agent's last running tab, so the agent detaches and stays in Projects, reopenable."
               : ""}

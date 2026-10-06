@@ -306,9 +306,10 @@ pub enum BranchKeptReason {
     /// provenance default stood. Carries the provenance so the sentence can
     /// say which kind of "predates" it was.
     NotDuxs(BranchProvenance),
-    /// The delete dialog offered to remove the branch and the user left the
-    /// box unticked. Reachable for a branch dux created too, which is exactly
-    /// the case the provenance sentence cannot describe.
+    /// The person asked to keep the branch: an unticked box in a delete
+    /// dialog, or `--keep-branch` on the command line, so the sentence names
+    /// the choice and not the box. Reachable for a branch dux created too,
+    /// which is exactly the case the provenance sentence cannot describe.
     UserDeclined,
 }
 
@@ -330,7 +331,7 @@ impl BranchKeptReason {
                         q(branch_name),
                         " and ",
                         q(initial_branch),
-                        " were kept because you left the branch box unticked. Delete either \
+                        " were kept because you chose to keep them. Delete either \
                          yourself with ",
                         n(crate::git::branch_delete_command(branch_name)),
                         " or ",
@@ -341,7 +342,7 @@ impl BranchKeptReason {
                     crate::status_text![
                         "Its branch ",
                         q(branch_name),
-                        " was kept because you left the branch box unticked. Delete it yourself \
+                        " was kept because you chose to keep it. Delete it yourself \
                          with ",
                         n(crate::git::branch_delete_command(branch_name)),
                         " if you no longer need it."
@@ -1576,7 +1577,7 @@ mod tests {
     fn a_declined_branch_deletion_says_so_rather_than_blaming_the_provenance() {
         let declined = BranchKeptReason::UserDeclined.kept_branches_note("feature", "feature");
         assert!(
-            declined.contains("you left the branch box unticked"),
+            declined.contains("was kept because you chose to keep it"),
             "got {declined:?}"
         );
         assert!(

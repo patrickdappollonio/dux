@@ -492,6 +492,21 @@ impl Attachments {
         self.with(|state| state.blockers(scope, exempt, now))
     }
 
+    /// How many browser connections are attached to `scope` at `now`, a
+    /// presence the grace keeps included: the people a change to it would
+    /// cut off, each counted once however many of its terminals they stream.
+    pub fn remote_viewers(&self, scope: &Scope, now: Instant) -> usize {
+        self.with(|state| {
+            let browsers: BTreeSet<String> = state
+                .in_scope(scope, None, now)
+                .into_iter()
+                .filter(|(_, blocker)| blocker.surface == Surface::Browser)
+                .map(|(connection, _)| connection)
+                .collect();
+            browsers.len()
+        })
+    }
+
     /// In one step: refuse a change to `scope` with the connections in its
     /// way, unless there are none or the policy forces it, and otherwise
     /// refuse every new attachment to `scope` for `life`. A forced change also
@@ -607,6 +622,20 @@ impl State {
     }
 
     fn blockers(&self, scope: &Scope, exempt: Option<&str>, now: Instant) -> Vec<Blocker> {
+        self.in_scope(scope, exempt, now)
+            .into_iter()
+            .map(|(_, blocker)| blocker)
+            .collect()
+    }
+
+    /// Every attachment and kept presence in `scope` that counts at `now`,
+    /// leaving out `exempt`, with the connection it belongs to.
+    fn in_scope(
+        &self,
+        scope: &Scope,
+        exempt: Option<&str>,
+        now: Instant,
+    ) -> Vec<(String, Blocker)> {
         let exempted = |id: &str| Some(id) == exempt;
         let mut attached: Vec<(&u64, &Attachment)> = self.attachments.iter().collect();
         attached.sort_by_key(|(token, _)| **token);
@@ -628,10 +657,9 @@ impl State {
             {
                 continue;
             }
-            blockers.push(blocker(
-                facts,
-                &attachment.target,
-                self.drives(facts, attachment),
+            blockers.push((
+                attachment.connection.clone(),
+                blocker(facts, &attachment.target, self.drives(facts, attachment)),
             ));
         }
         for presence in &self.presences {
@@ -641,7 +669,10 @@ impl State {
             {
                 continue;
             }
-            blockers.push(blocker(&presence.facts, &presence.target, false));
+            blockers.push((
+                presence.connection.clone(),
+                blocker(&presence.facts, &presence.target, false),
+            ));
         }
         blockers
     }
@@ -939,7 +970,52 @@ mod tests {
             let blockers =
                 attachments.blockers(&agent_scope("s1"), None, beat + Duration::from_secs(60));
             assert_eq!(!blockers.is_empty(), blocks, "{case}: {blockers:?}");
+            // A presence the grace keeps is a remote viewer for as long.
+            assert_eq!(
+                attachments.remote_viewers(&agent_scope("s1"), beat + Duration::from_secs(60)),
+                usize::from(blocks),
+                "{case}"
+            );
         }
+    }
+
+    /// Remote viewers are browser connections, not attachments: one tab
+    /// streaming two of an agent's terminals is one viewer, and the terminal
+    /// UI drawing the agent is none.
+    #[test]
+    fn remote_viewers_count_each_browser_connection_once() {
+        let attachments = Attachments::default();
+        let now = Instant::now();
+        attachments.register(
+            "e1",
+            browser("192.168.1.5", "Firefox"),
+            Some(Heard::at(now)),
+        );
+        for pty in ["s1-slot", "t2"] {
+            attachments
+                .attach("e1", tab(pty, "s1"), Some(Heard::at(now)), None)
+                .unwrap();
+        }
+        attachments.register(
+            TERMINAL_UI_CONNECTION,
+            ConnectionFacts {
+                surface: Surface::TerminalUi,
+                device: None,
+                address: None,
+                verified: true,
+                events: false,
+            },
+            None,
+        );
+        attachments.set_terminal_ui(vec![tab("s1-slot", "s1")], None);
+        assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 1);
+
+        attachments.register("e2", browser("192.168.1.6", "Safari"), Some(Heard::at(now)));
+        attachments
+            .attach("e2", tab("t2", "s1"), Some(Heard::at(now)), None)
+            .unwrap();
+        assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 2);
+        assert_eq!(attachments.remote_viewers(&agent_scope("s9"), now), 0);
     }
 
     /// The grace runs from the socket's last viewed beat, not from when the

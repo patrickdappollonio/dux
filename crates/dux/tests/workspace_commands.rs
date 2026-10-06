@@ -59,6 +59,42 @@ fn get(port: u16, path: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{path}: {e}: {body}"))
 }
 
+/// Open a browser's terminal socket on `tab` of `agent`, the way the web UI
+/// attaches to it, and keep it open for as long as the stream lives.
+fn watch_tab(port: u16, agent: &str, tab: &str) -> std::net::TcpStream {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET /ws/sessions/{agent}/tabs/{tab}/pty HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+         Origin: http://127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .unwrap();
+    let mut status = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut status)
+        .unwrap();
+    assert!(status.starts_with("HTTP/1.1 101"), "{status}");
+    // The socket registers its attachment after its handshake: wait until
+    // the agent counts it as a remote viewer.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let agents = get(port, "/api/v1/sessions");
+        let viewers = agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == agent)
+            .map(|a| a["remote_viewers"].clone());
+        if viewers == Some(serde_json::json!(1)) {
+            return stream;
+        }
+        assert!(Instant::now() < deadline, "the watcher never attached");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// The last line `run` printed: the id a create prints after its sentence.
 fn last_line(run: &Run) -> String {
     run.stdout().lines().last().unwrap_or_default().to_string()
@@ -74,7 +110,6 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     let root = home("running");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(root.join("home")).unwrap();
 
     // The pull request's origin, served by the stand-in ssh.
     let origin = root.join("origin");
@@ -82,7 +117,9 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     // SAFETY: this binary runs this one test, and no other thread is running
     // yet.
     unsafe {
-        std::env::set_var("HOME", root.join("home"));
+        // The config folder is home, so dux shortens its worktrees to `~/`
+        // wherever it shows a label.
+        std::env::set_var("HOME", &root);
         std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         for (name, value) in [
@@ -161,6 +198,11 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     assert_eq!(agents[0]["id"], agent.as_str(), "{agents}");
     assert_eq!(agents[0]["name"], "feat-a");
     assert_eq!(agents[0]["provider"], "claude");
+    // The table's WORKTREE column is the whole path, as the JSON's is.
+    let path = agents[0]["worktree_path"].as_str().unwrap().to_string();
+    let run = ok(dux(&root, &["agents", "ls"], ""));
+    let row = run.stdout().lines().nth(1).unwrap_or_default().to_string();
+    assert!(row.contains(&format!(" {path} ")), "{}", run.stdout());
 
     // Its only tab cannot be closed: the engine's own sentence, and a
     // non-zero exit.
@@ -190,12 +232,40 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
         "{}",
         run.stdout()
     );
-    let run = ok(dux(
+    // A browser watching the tab stops a plain stop, which names it and
+    // changes nothing; saying to go ahead over it stops the tab.
+    let watcher = watch_tab(port, &agent, &tab);
+    let run = dux(
         &root,
         &["agents", "tabs", "stop", "feat-a", &tab, "--yes"],
         "",
+    );
+    assert_eq!(run.code(), 3, "{}", run.stderr());
+    assert!(
+        run.stderr().contains(&format!("tab {tab}")),
+        "{}",
+        run.stderr()
+    );
+    assert!(
+        run.stderr().contains("--dangerously-ignore-connected"),
+        "{}",
+        run.stderr()
+    );
+    let run = ok(dux(
+        &root,
+        &[
+            "agents",
+            "tabs",
+            "stop",
+            "feat-a",
+            &tab,
+            "--yes",
+            "--dangerously-ignore-connected",
+        ],
+        "",
     ));
     assert!(run.stdout().starts_with("Stopped the "), "{}", run.stdout());
+    drop(watcher);
     ok(dux(
         &root,
         &["agents", "tabs", "rm", "feat-a", &tab, "--yes"],
@@ -247,6 +317,12 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     );
     assert!(
         run.stdout().contains("branch: feat-a kept"),
+        "{}",
+        run.stdout()
+    );
+    assert!(
+        run.stdout()
+            .contains("Its branch \"feat-a\" was kept because you chose to keep it."),
         "{}",
         run.stdout()
     );

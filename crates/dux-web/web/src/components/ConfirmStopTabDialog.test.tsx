@@ -52,7 +52,16 @@ function tab(overrides: Partial<AgentTabView>): AgentTabView {
 function seed(tabId: string, tabs: AgentTabView[]) {
   mockState = {
     stopTabTarget: { sessionId: "s1", tabId },
-    spine: { sessions: [{ id: "s1", tabs }] },
+    spine: {
+      sessions: [
+        {
+          id: "s1",
+          title: null,
+          workspace: { kind: "managed", branch_name: "fix-auth" },
+          tabs,
+        },
+      ],
+    },
   } as unknown as DuxState
 }
 
@@ -68,15 +77,17 @@ afterEach(() => {
 })
 
 describe("ConfirmStopTabDialog", () => {
-  it("names the session it ends and keeps the tab, and Stop stops that tab", () => {
+  it("names the tab and the agent as chips, keeps the tab, and Stop stops it", () => {
     seed("b2", [
       tab({ id: "s1", provider: "claude" }),
       tab({ id: "b2", provider: "codex" }),
     ])
     render(<ConfirmStopTabDialog />)
     expect(screen.getByText("Stop tab?")).toBeTruthy()
-    const body = screen.getByText(/This ends the/).textContent ?? ""
-    expect(body).toContain("This ends the codex session")
+    const body = screen.getByText(/This ends its session/).textContent ?? ""
+    expect(body).toContain("Stop the Codex tab on fix-auth?")
+    expect(screen.getByText("Codex", { selector: "code" })).toBeTruthy()
+    expect(screen.getByText("fix-auth", { selector: "code" })).toBeTruthy()
     expect(body).toContain("stays in the strip")
     expect(body).not.toContain("detaches")
     fireEvent.click(screen.getByRole("button", { name: "Stop tab" }))
@@ -93,7 +104,7 @@ describe("ConfirmStopTabDialog", () => {
     expect(screen.getByText(/last running tab, so the agent detaches/)).toBeTruthy()
   })
 
-  it("closes itself when the tab is gone, and Cancel stops nothing", () => {
+  it("closes itself when the tab is gone, and Cancel has focus and stops nothing", () => {
     seed("gone", [tab({ id: "s1" })])
     render(<ConfirmStopTabDialog />)
     expect(closeStopTab).toHaveBeenCalled()
@@ -101,7 +112,9 @@ describe("ConfirmStopTabDialog", () => {
     closeStopTab.mockClear()
     seed("s1", [tab({ id: "s1" })])
     render(<ConfirmStopTabDialog />)
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    const cancel = screen.getByRole("button", { name: "Cancel" })
+    expect(document.activeElement).toBe(cancel)
+    fireEvent.click(cancel)
     expect(closeStopTab).toHaveBeenCalled()
     expect(stopTab).not.toHaveBeenCalled()
   })

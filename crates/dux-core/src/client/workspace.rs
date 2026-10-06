@@ -52,7 +52,6 @@ enum Workspace {
         project_id: String,
         branch_name: String,
         worktree_path: String,
-        worktree_label: String,
     },
     Folder {
         folder_path: String,
@@ -377,20 +376,11 @@ pub fn agents_ls(
     }
     let rows = listed
         .map(|agent| {
-            let (project_cell, label) = match &agent.workspace {
-                Workspace::Managed {
-                    project_id,
-                    worktree_label,
-                    ..
-                } => (
-                    project_names
-                        .get(project_id.as_str())
-                        .map_or(project_id.clone(), |name| name.to_string()),
-                    worktree_label.clone(),
-                ),
-                Workspace::Folder { folder_label, .. } => {
-                    (format!("folder {folder_label}"), folder_label.clone())
-                }
+            let project_cell = match &agent.workspace {
+                Workspace::Managed { project_id, .. } => project_names
+                    .get(project_id.as_str())
+                    .map_or(project_id.clone(), |name| name.to_string()),
+                Workspace::Folder { folder_label, .. } => format!("folder {folder_label}"),
             };
             let running = agent.tabs.iter().filter(|t| t.has_live_process).count();
             let viewers = agent.remote_viewers.unwrap_or(0);
@@ -400,7 +390,7 @@ pub fn agents_ls(
                     agent.id.clone(),
                     agent.name(),
                     project_cell,
-                    label,
+                    agent.directory().to_string(),
                     agent.provider.clone(),
                     agent.state().to_string(),
                     format!("{running}/{}", agent.tabs.len()),
