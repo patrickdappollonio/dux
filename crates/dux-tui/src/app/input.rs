@@ -11198,6 +11198,10 @@ impl App {
             self.takeover_press = None;
             return false;
         }
+        if self.mouse_drag.is_some() {
+            // A pane divider grabbed beside the card is dragged across it.
+            return false;
+        }
         let on_button = |app: &Self, mouse: &MouseEvent| {
             app.mouse_layout.takeover_button.is_some_and(|rect| {
                 crate::app::modal::click_target(&[(rect, ())], mouse.column, mouse.row).is_some()
