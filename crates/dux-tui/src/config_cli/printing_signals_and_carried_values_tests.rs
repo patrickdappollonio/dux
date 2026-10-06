@@ -1,10 +1,13 @@
 //! Adversarial review probes.
 use super::*;
 
+// Only the Linux-only password test below sets a value.
+#[cfg(target_os = "linux")]
 struct Canned {
     stdin: Option<&'static str>,
 }
 
+#[cfg(target_os = "linux")]
 impl SecretSource for Canned {
     fn read_stdin(&mut self) -> Result<Password> {
         read_secret(self.stdin.expect("stdin was not expected").as_bytes())
@@ -46,6 +49,7 @@ fn get(paths: &DuxPaths, list: &[&str]) -> (String, String) {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn set(paths: &DuxPaths, list: &[&str], stdin: Option<&'static str>) -> Result<String> {
     let mut out = Vec::new();
     run_set(&args(list), paths, &mut Canned { stdin }, &mut out)?;

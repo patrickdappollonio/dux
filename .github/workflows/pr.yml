@@ -256,11 +256,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # cargo test is deliberately NOT run here yet. Twelve dux-core lifecycle
-      # and file-drop tests build deliberately racy PTY states whose fixture
-      # premises do not hold under macOS PTY semantics on shared runners (each
-      # fails its own "without this the test proves nothing" check, before any
-      # product code runs). Greening those fixtures on BSD-style PTYs is a
-      # tracked follow-up that needs iteration on a Mac; until then this job is
-      # the compile-and-lint gate, which is the half that catches the
-      # platform-gated rot the Ubuntu jobs cannot see.
+      # Same reason as the Linux test job: the plain-folder adoption test
+      # commits under whatever identity git can see.
+      - name: Give git the identity a developer's machine has
+        run: |
+          git config --global user.name "dux ci"
+          git config --global user.email "ci@getdux.app"
+      - name: Run tests
+        run: cargo test
