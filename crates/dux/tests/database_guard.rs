@@ -102,6 +102,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "checks a variable's name",
     ),
     (
+        "dux_core::operations::CREATE_IN_FLIGHT_REFUSAL",
+        Vetted::Data,
+        "the sentence a create gets while another create runs",
+    ),
+    (
         "dux_core::config_keys::NOT_SHOWN",
         Vetted::Data,
         "the placeholder printed for a hidden value",
