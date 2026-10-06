@@ -37,7 +37,7 @@ pub enum Reply {
 impl Reply {
     pub fn json(status: u16, body: &str) -> Self {
         Reply::Raw(format!(
-            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         ))
     }
