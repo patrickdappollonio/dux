@@ -112,7 +112,9 @@ pub trait Transport {
 
     /// Send `request` and hand its reply's body to `on_body` as it arrives,
     /// each piece with the reply's status, until the reply ends or `on_body`
-    /// answers [`ControlFlow::Break`]. For a reply that has no end of its own
+    /// answers [`ControlFlow::Break`]. It is called once with an empty piece as
+    /// soon as the status is known, so a reply with no body still tells its
+    /// caller what it was. For a reply that has no end of its own
     /// (a followed log), so once connected there is no deadline of any kind:
     /// a quiet stream is not a dead one, and the caller ends it. A reply that
     /// ends before its framing says it is whole is [`TransportError::Dropped`].
@@ -242,6 +244,9 @@ impl Transport for UnixTransport {
         let mut reader = BufReader::new(stream);
         let (status, framing) = read_head(&mut reader)?;
         let mut piece = |bytes: &[u8]| on_body(status, bytes);
+        if piece(&[]).is_break() {
+            return Ok(());
+        }
         match framing {
             Framing::Chunked => each_chunk_piece(&mut reader, &mut piece),
             Framing::Length(length) => {
@@ -600,6 +605,9 @@ impl HttpTransport {
     ) -> Result<(), TransportError> {
         let mut response = self.open(request, base, host, None)?;
         let status = response.status().as_u16();
+        if on_body(status, &[]).is_break() {
+            return Ok(());
+        }
         let mut reader = response.body_mut().as_reader();
         let mut buffer = [0u8; STREAM_PIECE];
         loop {
@@ -779,6 +787,9 @@ mod tests {
                     .collect(),
                 Duration::from_millis(700),
             ),
+            "/no-body" => Reply::Raw(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string(),
+            ),
             "/cut-short" => Reply::Raw(
                 "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n".to_string(),
             ),
@@ -828,7 +839,20 @@ mod tests {
             std::ops::ControlFlow::Continue(())
         });
         assert_eq!(ended, Ok(()));
-        assert_eq!(refused, [(404, b"unknown session".to_vec())]);
+        assert_eq!(
+            refused.last(),
+            Some(&(404, b"unknown session".to_vec())),
+            "the body, with the status it came with"
+        );
+        // The status reaches the caller even when the body has nothing in it:
+        // a reply with no body is told apart from no reply.
+        let mut statuses = Vec::new();
+        let ended = transport.stream(&Request::get("/no-body"), &mut |status, piece| {
+            assert!(piece.is_empty());
+            statuses.push(status);
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!((ended, statuses), (Ok(()), vec![401]));
         assert!(
             matches!(
                 transport.stream(&Request::get("/cut-short"), &mut |_, _| {
@@ -851,6 +875,9 @@ mod tests {
                 ..Request::get("/endless")
             },
             &mut |_, piece| {
+                if piece.is_empty() {
+                    return std::ops::ControlFlow::Continue(());
+                }
                 first = Some((started.elapsed(), piece.to_vec()));
                 std::ops::ControlFlow::Break(())
             },
@@ -1020,6 +1047,9 @@ mod tests {
                 .collect(),
                 Duration::from_millis(700),
             ),
+            "/no-body" => {
+                Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string())
+            }
             _ => Reply::json(200, r#"{"ok":true}"#),
         });
         let reply = HttpTransport::new(&format!("http://{addr}/"), false)
@@ -1049,6 +1079,16 @@ mod tests {
             "the request still names the host it was given"
         );
 
+        let mut statuses = Vec::new();
+        let ended = HttpTransport::new(&format!("http://{addr}"), false).stream(
+            &Request::get("/no-body"),
+            &mut |status, _| {
+                statuses.push(status);
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+        assert_eq!((ended, statuses), (Ok(()), vec![401]));
+
         // Its body is handed over as it arrives too, past the request's own time.
         let started = std::time::Instant::now();
         let mut first = None;
@@ -1058,6 +1098,9 @@ mod tests {
                 ..Request::get("/endless")
             },
             &mut |status, piece| {
+                if piece.is_empty() {
+                    return std::ops::ControlFlow::Continue(());
+                }
                 first = Some((status, started.elapsed(), piece.to_vec()));
                 std::ops::ControlFlow::Break(())
             },

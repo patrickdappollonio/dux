@@ -17,6 +17,7 @@ use super::{CliError, Exit};
 use crate::attachments::{ConnectionView, Surface, TargetKind};
 use crate::background_serve::TUI_DEVICE_LABEL;
 use crate::config::DuxPaths;
+use crate::file_follow::{LogError, MAX_LINES, open_log};
 
 /// How many lines `dux server logs` shows when `--lines` does not say.
 pub const DEFAULT_LINES: usize = 100;
@@ -96,13 +97,21 @@ fn attached_cell(connection: &ConnectionView) -> String {
 #[derive(Deserialize)]
 struct LogRead {
     lines: Vec<String>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
-/// The last `lines` lines of a running dux's server log.
-pub fn log_tail(client: &Client, lines: usize) -> Result<Vec<String>, CliError> {
+/// The last `lines` lines of a running dux's server log, and the sentence it
+/// adds when the answer was cut short.
+pub fn log_tail(client: &Client, lines: usize) -> Result<(Vec<String>, Option<String>), CliError> {
     let read: LogRead = client.get_json(&format!("{LOG_ROUTE}?lines={lines}"))?;
-    Ok(read.lines)
+    Ok((read.lines, read.note))
 }
+
+/// The most of an error's body the client keeps, and the longest log line it
+/// reads: a dux that sends more is not one to keep listening to.
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
+const LINE_LIMIT: usize = 1024 * 1024;
 
 /// The last `lines` lines of a running dux's server log, then every line it
 /// writes after, handed to `on_line` as they arrive, until `on_line` breaks.
@@ -115,7 +124,8 @@ pub fn log_follow(
 ) -> Result<(), CliError> {
     let mut status = 200;
     let mut refusal = Vec::new();
-    let mut pending: Vec<u8> = Vec::new();
+    let mut oversized = None;
+    let mut line: Vec<u8> = Vec::new();
     let mut stopped = false;
     client.stream(
         Request::get(format!("{LOG_ROUTE}?follow=true&lines={lines}")),
@@ -123,20 +133,41 @@ pub fn log_follow(
             status = code;
             if code != 200 {
                 refusal.extend_from_slice(piece);
+                if refusal.len() > ERROR_BODY_LIMIT {
+                    oversized = Some("an error longer than 64 KiB");
+                    return ControlFlow::Break(());
+                }
                 return ControlFlow::Continue(());
             }
-            pending.extend_from_slice(piece);
-            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = pending.drain(..=end).collect();
-                let text = String::from_utf8_lossy(&line[..end]);
+            // Only the bytes that just arrived are looked at for a line end.
+            let mut rest = piece;
+            while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+                line.extend_from_slice(&rest[..end]);
+                rest = &rest[end + 1..];
+                let text = String::from_utf8_lossy(&line).into_owned();
+                line.clear();
                 if on_line(text.trim_end_matches('\r')).is_break() {
                     stopped = true;
                     return ControlFlow::Break(());
                 }
             }
+            line.extend_from_slice(rest);
+            if line.len() > LINE_LIMIT {
+                oversized = Some("a log line longer than 1 MiB");
+                return ControlFlow::Break(());
+            }
             ControlFlow::Continue(())
         },
     )?;
+    if let Some(what) = oversized {
+        return Err(CliError::new(
+            Exit::Failed,
+            format!(
+                "{} sent {what}, so the client stopped reading it (HTTP status {status})",
+                client.target()
+            ),
+        ));
+    }
     if status != 200 {
         return Err(client.refusal(&super::transport::Response {
             status,
@@ -157,40 +188,51 @@ pub fn log_follow(
 }
 
 /// Where the server log is on this machine: `[server] log_path`, read from
-/// `config.toml`, which is the defaults when there is none.
+/// `config.toml` (the defaults when there is none), with a link at that path
+/// resolved the way the server's own log resolves it.
 pub fn log_file(paths: &DuxPaths) -> Result<PathBuf, CliError> {
     let config = crate::config::load_config(paths)
         .map_err(|error| CliError::new(Exit::Failed, error.to_string()))?;
-    Ok(crate::logger::resolve_server_log_path(
-        &config.server,
-        paths,
-    ))
+    Ok(crate::logger::server_log_file(&config.server, paths))
 }
 
-/// The last `lines` lines of the log file, which may not exist yet.
-pub fn file_tail(path: &std::path::Path, lines: usize) -> Vec<String> {
-    crate::file_follow::open_log(path, None, lines).0
+fn unreadable(error: LogError) -> CliError {
+    CliError::new(Exit::Failed, error.to_string())
+}
+
+/// The last `lines` lines of the log file, which may not exist yet, and the
+/// sentence that says the answer was cut short, if it was.
+pub fn file_tail(
+    path: &std::path::Path,
+    lines: usize,
+) -> Result<(Vec<String>, Option<String>), CliError> {
+    let (read, _) = open_log(path, None, lines, MAX_LINES).map_err(unreadable)?;
+    Ok((read.lines, read.note))
 }
 
 /// The last `lines` lines of the log file, then every line written to it
-/// after, across rotations, handed to `on_line` until it breaks.
+/// after, across rotations, handed to `on_line` until it breaks. A link put
+/// where the file is ends it with an error.
 pub fn file_follow(
     path: &std::path::Path,
     lines: usize,
     on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,
-) {
-    let (first, _, mut follower) = crate::file_follow::open_log(path, None, lines);
-    for line in first {
+) -> Result<(), CliError> {
+    let (first, mut follower) = open_log(path, None, lines, usize::MAX).map_err(unreadable)?;
+    for line in first.lines {
         if on_line(&line).is_break() {
-            return;
+            return Ok(());
         }
     }
     loop {
         std::thread::sleep(crate::file_follow::FOLLOW_INTERVAL);
         for line in follower.poll() {
             if on_line(&line).is_break() {
-                return;
+                return Ok(());
             }
+        }
+        if follower.refused() {
+            return Err(unreadable(LogError::Symlink(path.to_path_buf())));
         }
     }
 }
@@ -338,6 +380,20 @@ mod tests {
             "/api/v1/server/log?follow=true&lines=1" => {
                 chunked(&["only"], std::time::Duration::ZERO, true)
             }
+            "/api/v1/server/log?follow=true&lines=4" => Reply::Raw(format!(
+                "HTTP/1.1 500 X\r\ncontent-length: 70000\r\n\r\n{}",
+                "e".repeat(70_000)
+            )),
+            "/api/v1/server/log?follow=true&lines=5" => {
+                let line = "a".repeat(1_500_000);
+                Reply::Raw(format!(
+                    "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{line}\r\n",
+                    line.len()
+                ))
+            }
+            "/api/v1/server/log?follow=true&lines=6" => {
+                Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string())
+            }
             "/api/v1/server/log?follow=true&lines=3" => {
                 chunked(&["cut"], std::time::Duration::ZERO, false)
             }
@@ -358,6 +414,26 @@ mod tests {
         let cut = log_follow(&client, 3, &mut |_| ControlFlow::Continue(())).unwrap_err();
         assert_eq!(cut.exit, Exit::NotRunning);
 
+        // An error body past 64 KiB and a line past 1 MiB end the read with
+        // one sentence, never echoing what they carried.
+        let flood = log_follow(&client, 4, &mut |_| ControlFlow::Continue(())).unwrap_err();
+        assert_eq!(flood.exit, Exit::Failed);
+        assert!(flood.message.contains("64 KiB"), "{}", flood.message);
+        assert!(flood.message.len() < 400, "{}", flood.message.len());
+        let mut lines_seen = 0;
+        let long = log_follow(&client, 5, &mut |_| {
+            lines_seen += 1;
+            ControlFlow::Continue(())
+        })
+        .unwrap_err();
+        assert_eq!((long.exit, lines_seen), (Exit::Failed, 0));
+        assert!(long.message.contains("1 MiB"), "{}", long.message);
+        // A refusal with no body at all is still a refusal, not a dux that
+        // went away.
+        let bare = log_follow(&client, 6, &mut |_| ControlFlow::Continue(())).unwrap_err();
+        assert_eq!(bare.exit, Exit::Failed);
+        assert!(bare.message.contains("401"), "{}", bare.message);
+
         let refused = log_follow(&client, 2, &mut |_| ControlFlow::Continue(())).unwrap_err();
         assert_eq!(
             (refused.exit, refused.message.as_str()),
@@ -366,13 +442,46 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_that_asks_for_a_sign_in_says_so_even_when_its_refusal_has_no_body() {
+        let (_fake, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
+            "/api/v1/auth/status" => Reply::json(200, r#"{"required_here":false}"#),
+            "/api/v1/build" => Reply::json(200, BUILD),
+            _ => Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".into()),
+        });
+        let target = Target::Remote {
+            name: "work".into(),
+            remote: crate::client::remotes::Remote {
+                url: format!("http://{addr}"),
+                insecure: false,
+                token: None,
+            },
+        };
+        let client = connect(&target, std::path::Path::new("/nonexistent/dux.lock")).unwrap();
+        let refused = log_follow(&client, 5, &mut |_| ControlFlow::Continue(())).unwrap_err();
+        assert_eq!(refused.exit, Exit::PasswordNeeded);
+        assert!(
+            refused.message.contains("dux remote login work"),
+            "{refused}"
+        );
+    }
+
+    #[test]
     fn the_tail_of_a_running_dux_is_what_its_route_answers() {
         let dir = private_dir();
         let (_fake, _lock, client) = local_dux(dir.path(), |path| match path {
-            "/api/v1/server/log?lines=2" => Reply::json(200, r#"{"lines":["a","b"],"cursor":9}"#),
+            "/api/v1/server/log?lines=2" => Reply::json(
+                200,
+                r#"{"lines":["a","b"],"cursor":"1.2:9","note":"cut short"}"#,
+            ),
             _ => Reply::json(404, "{}"),
         });
-        assert_eq!(log_tail(&client, 2).unwrap(), ["a", "b"]);
+        assert_eq!(
+            log_tail(&client, 2).unwrap(),
+            (
+                vec!["a".to_string(), "b".to_string()],
+                Some("cut short".to_string())
+            )
+        );
     }
 
     #[test]
@@ -395,16 +504,26 @@ mod tests {
         let named = log_file(&paths).unwrap();
         assert_eq!(named, dir.path().join("logs/web.log"));
 
-        assert!(file_tail(&named, 2).is_empty(), "no file yet, no lines");
+        assert!(file_tail(&named, 2).unwrap().0.is_empty(), "no file yet");
         std::fs::create_dir_all(named.parent().unwrap()).unwrap();
         std::fs::write(&named, "one\ntwo\nthree\n").unwrap();
-        assert_eq!(file_tail(&named, 2), ["two", "three"]);
+        assert_eq!(file_tail(&named, 2).unwrap().0, ["two", "three"]);
 
         let mut seen = Vec::new();
         file_follow(&named, 1, &mut |line| {
             seen.push(line.to_string());
             ControlFlow::Break(())
-        });
+        })
+        .unwrap();
         assert_eq!(seen, ["three"]);
+
+        // A link put where the log was is refused, not read.
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "secret\n").unwrap();
+        std::fs::remove_file(&named).unwrap();
+        std::os::unix::fs::symlink(&secret, &named).unwrap();
+        let refused = file_tail(&named, 2).unwrap_err();
+        assert_eq!(refused.exit, Exit::Failed);
+        assert!(refused.message.contains("symbolic link"), "{refused}");
     }
 }

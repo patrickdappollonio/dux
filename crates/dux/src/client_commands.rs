@@ -437,10 +437,14 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
     match client {
         Some(client) if follow => server_inspect::log_follow(&client, lines, &mut print)?,
         Some(client) => {
-            for line in server_inspect::log_tail(&client, lines)? {
+            let (tail, note) = server_inspect::log_tail(&client, lines)?;
+            for line in tail {
                 if print(&line).is_break() {
                     break;
                 }
+            }
+            if let Some(note) = note {
+                eprintln!("{note}");
             }
         }
         None => {
@@ -452,12 +456,16 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
                 );
             }
             if follow {
-                server_inspect::file_follow(&path, lines, &mut print);
+                server_inspect::file_follow(&path, lines, &mut print)?;
             } else {
-                for line in server_inspect::file_tail(&path, lines) {
+                let (tail, note) = server_inspect::file_tail(&path, lines)?;
+                for line in tail {
                     if print(&line).is_break() {
                         break;
                     }
+                }
+                if let Some(note) = note {
+                    eprintln!("{note}");
                 }
             }
         }

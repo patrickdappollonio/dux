@@ -886,10 +886,6 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             live_limits: Arc::clone(&live_limits),
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
             paths: Arc::new(engine.paths.clone()),
-            server_log_path: Arc::new(dux_core::logger::resolve_server_log_path(
-                &engine.config.server,
-                &engine.paths,
-            )),
             reload_surface: engine.surface.start_surface(),
             admission: process_admission(engine),
             worktree_ops: engine.worktree_ops().clone(),
@@ -1025,8 +1021,6 @@ pub struct EngineHandle {
     /// layer's own writes (a password, a ban, the warning's dismissal) and its
     /// stored sessions.
     paths: Arc<dux_core::config::DuxPaths>,
-    /// Where the server log file is, resolved from `[server] log_path` at start.
-    server_log_path: Arc<std::path::PathBuf>,
     /// Which surface's start checks this engine's reload refuses a file by:
     /// `dux server`'s, or the terminal UI's for the flip and the background
     /// server, which run on the terminal UI's engine.
@@ -1933,12 +1927,6 @@ impl EngineHandle {
     /// Where this engine's config and session database live.
     pub fn paths(&self) -> Arc<dux_core::config::DuxPaths> {
         Arc::clone(&self.paths)
-    }
-
-    /// The file the server log is written to, as `[server] log_path` named it
-    /// when this engine started (the setting only applies at a restart).
-    pub fn server_log_path(&self) -> &std::path::Path {
-        &self.server_log_path
     }
 
     /// Which surface's start checks this engine's reload refuses a file by.

@@ -254,8 +254,13 @@ From a shell, `dux server logs` prints the last 100 lines of `server.log` (`--li
 changes how many). `dux server logs -f` keeps printing each new line as it is written,
 across rotations, until you press `Ctrl-c`. With a dux running it asks that dux, and
 `--remote <name>` asks a saved remote one. With none running it reads the file itself, and
-says so when the file does not exist yet. A followed log also ends when the server stops
-or the sign-in it was opened with ends.
+says so when the file does not exist yet. A followed log the server ends (because it is
+stopping, or because the sign-in the command was using ended) makes `dux server logs -f` stop with
+exit status 4; run it again to carry on. One answer holds at most 10000 lines, and a command
+that asks for more says it was cut short.
+
+dux reads only the file it is writing the log to: if a symbolic link takes that file's place,
+the command refuses with a message instead of reading what the link points at.
 
 ### Who is connected
 

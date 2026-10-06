@@ -378,6 +378,13 @@ impl Console {
         self
     }
 
+    /// The file this console writes the server log to, as its writer opened it
+    /// (a link at the configured path already resolved), or `None` when it
+    /// writes none: the log could not be opened, or nothing here serves.
+    pub fn server_log_path(&self) -> Option<std::path::PathBuf> {
+        self.0.file.as_ref().map(|log| log.path().to_path_buf())
+    }
+
     /// The background server's console: prints nothing (the terminal UI owns the
     /// terminal) and writes every line to `log`.
     pub fn server_log_only(log: Arc<ServerLog>) -> Self {
