@@ -159,8 +159,7 @@ pub struct AppState {
     /// holds a watch on it (see [`crate::auth`]).
     pub auth: Arc<crate::auth::AuthState>,
     /// Flips to `true` when the core serving this router starts handing the
-    /// engine over to the next one. A long wait on an operation record answers
-    /// at once when it does, so a hand-over never waits it out or cuts it.
+    /// engine to the next one; a long operation wait then answers at once.
     pub hand_over: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
@@ -270,17 +269,12 @@ fn peer_went_quiet(heard: &dux_core::attachments::Heard) -> bool {
     heard.quiet_for(std::time::Instant::now()) > PONG_DEADLINE
 }
 
-/// How long a liveness ping or a closing frame may take to send before the
-/// socket gives up on it. Both go to a peer that may already be gone, and an
-/// unbounded send to a dead peer holds the socket's loop, and everything it
-/// is still holding, for as long as the kernel keeps retrying.
+/// How long a liveness ping or closing frame may take to send: the peer may be
+/// gone, and an unbounded send holds the socket's loop while the kernel retries.
 const LIVENESS_SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// What a socket's opening request says about who it is: the events
-/// connection a terminal socket names as its browser tab (`?events=<id>`), the
-/// lost events connection a tab's new events socket succeeds (`?after=<id>`),
-/// and the client's address, the verified one when the auth layer could
-/// verify it.
+/// Who a socket's opening request says it is: the browser tab's events
+/// connection (`?events=`), the lost one it succeeds (`?after=`), and its address.
 pub(crate) struct SocketClient {
     link: Option<String>,
     after: Option<String>,
@@ -451,11 +445,8 @@ pub struct RouterParams {
     /// MagicDNS name. `None` in tests and on any path with no serve loop behind
     /// it, which reads as nothing published.
     pub live_exposure: Option<crate::exposure::ExposureCell>,
-    /// What the auth layer calls after dux wrote `config.toml` itself (a
-    /// password, a ban, the no-password warning's dismissal), so the running
-    /// config catches up the way it does after `dux config set`. `None` sends
-    /// the engine the same `ReloadConfig` the reload route sends, so each way of
-    /// serving's own reload owner handles it.
+    /// What the auth layer calls after dux wrote `config.toml` itself (a password,
+    /// a ban), so the running config catches up. `None` asks the engine to reload.
     pub auth_reload: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Test seam: awaited by a PTY or events socket right before it checks its
     /// session for its opening frames, so a test can revoke the session in
@@ -540,12 +531,6 @@ impl RouterParams {
         }
     }
 
-    /// Ask `build_app`'s connection registry to keep its live browser-tab count in
-    /// `gauge`, so the terminal UI's serving chip can read it.
-    ///
-    /// Only the background serve calls this, for the same reason as
-    /// [`Self::with_ownership_publisher`]: it is the one path with a second surface
-    /// that has somewhere to show the number.
     /// Answer the router's operation waits when `hand_over` flips.
     pub(crate) fn with_hand_over(
         mut self,
@@ -555,6 +540,8 @@ impl RouterParams {
         self
     }
 
+    /// Ask `build_app`'s connection registry to keep its live browser-tab count in
+    /// `gauge`, for the terminal UI's serving chip. Only the background serve calls this.
     pub(crate) fn with_connections_gauge(
         mut self,
         gauge: Arc<std::sync::atomic::AtomicUsize>,
@@ -757,9 +744,8 @@ impl RouterParams {
     }
 }
 
-/// What the auth layer calls after dux wrote `config.toml` itself: ask the
-/// engine to reload, the way `POST /api/v1/config/reload` does. Whichever way
-/// of serving this is, its own reload owner then handles the reload.
+/// Ask the engine to reload after dux wrote `config.toml` itself, as
+/// `POST /api/v1/config/reload` does, so each serving mode's reload owner handles it.
 pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> Arc<dyn Fn() + Send + Sync> {
     Arc::new(move || {
         let engine = engine.clone();
@@ -1119,20 +1105,7 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
     .await
 }
 
-/// The shared access-log core. CONSOLE-ONLY (never `dux.log`: piping
-/// `dux server`'s stdout IS the access log). Skips `/healthz` so a health checker
-/// does not flood the log, and is gated on `access_log && console.is_recording()`
-/// so a disabled console emits nothing. The flip's capturing console records,
-/// so the flip's viewer carries the access log exactly as `dux server` prints it.
-///
-/// The path is printed WITHOUT its query string. Query parameters can carry
-/// sensitive values (`GET /api/v1/sessions/<id>/files/raw?path=…` puts a
-/// worktree-relative filesystem path in the query), and this log is the
-/// `dux server` stdout an operator may forward to a file or aggregator, so the
-/// query is dropped to avoid leaking secrets. The session id is an opaque `:id`
-/// path segment (not a query parameter) and so still appears in the logged path.
-/// A macro or global environment name that breaks its table's rule is replaced
-/// (see [`dux_core::config_resources::logged_path`]).
+/// The shared access-log core, written to the console only and never to `dux.log`.
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -1147,10 +1120,8 @@ async fn log_request(
         return next.run(request).await;
     }
     let method = request.method().as_str().to_string();
-    // Log the PATH ONLY, never the query string. Query params can carry secrets
-    // (e.g. /api/v1/sessions/<id>/files/raw?path=…), and this log is stdout an
-    // operator may persist, so dropping the query avoids leaking them. The session
-    // id is an opaque path segment now, so it still appears in the logged path.
+    // The path only: a query can carry secrets (`files/raw?path=…`), and a config
+    // entry name that breaks its table's rule may be a pasted token, so it is masked.
     let path = dux_core::config_resources::logged_path(request.uri().path()).into_owned();
     let over_socket = crate::auth::provenance::over_control_socket(&request);
     let started = std::time::Instant::now();
@@ -2063,12 +2034,8 @@ async fn handle_pty_socket(
         return;
     }
 
-    // This connection's id in the ownership record, allocated before the
-    // subscribe so the attachment below can carry it, but NOT a claim:
-    // attaching is not taking over. A connection becomes the owner only by
-    // resizing an UNOWNED pty or by sending a resize explicitly flagged as a
-    // take-over (see the resize arm below), so no attach of any kind can steal
-    // the device that is actually being typed on.
+    // Allocated before the subscribe so the attachment can carry it, and not a
+    // claim: only a resize of an unowned pty or a flagged take-over claims.
     let conn_id = pty_size_owners.next_conn_id();
     // The release, on EVERY exit path. A socket that gave up on its opening
     // sends has to let go of the pty too (it may have claimed it at the
@@ -2082,10 +2049,8 @@ async fn handle_pty_socket(
         owners: Arc::clone(&pty_size_owners),
         bus: Arc::clone(&bus),
     };
-    // Attached before the subscribe, which can launch the provider: a change
-    // that is ending this PTY has reserved it, and a socket that arrives in
-    // that window is turned away with the provider-gone close rather than
-    // launching what is being torn down.
+    // Attached before the subscribe, which can launch the provider: a PTY that a
+    // change has reserved turns the socket away instead of relaunching it.
     let heard = dux_core::attachments::Heard::now();
     let Some(attachment) = AttachmentGuard::attach(
         &engine,
@@ -2099,9 +2064,8 @@ async fn handle_pty_socket(
         send_close(&sink, provider_gone_close()).await;
         return;
     };
-    // The deadline has its own timer, started once the receive loop runs:
-    // past it this attachment and its input rights are revoked whatever the
-    // loop is stuck on, and the loop is cancelled.
+    // Its own timer, started once the receive loop runs, revokes the attachment
+    // and its input rights past the deadline whatever the loop is stuck on.
     let expired = Arc::new(tokio::sync::Notify::new());
     let quiet_watch = QuietWatch {
         heard: heard.clone(),
@@ -4124,19 +4088,15 @@ impl Drop for PtyOwnershipGuard {
     }
 }
 
-/// A terminal socket's place in the attachment registry, for exactly as long
-/// as the socket lives. The socket counts as part of the browser tab whose
-/// events connection it named, when that connection is live and came from the
-/// same address; otherwise it is a connection of its own, registered here and
-/// forgotten on drop.
+/// A terminal socket's place in the attachment registry while it lives: part of the
+/// tab it named when that tab is live from the same address, else its own connection.
 struct AttachmentGuard {
     attachments: dux_core::attachments::Attachments,
     token: u64,
     own_connection: Option<String>,
     live_limits: Arc<crate::engine_actor::LiveServerLimits>,
-    /// Set when the socket ends on purpose (a clean close from the client, a
-    /// sign-out, the PTY gone). Otherwise its end is a loss, and a terminal
-    /// its page was looking at keeps counting for the grace.
+    /// Set when the socket ends on purpose (a clean close, a sign-out, the PTY gone);
+    /// otherwise its end is a loss, and its terminal keeps counting for the grace.
     deliberate: std::sync::atomic::AtomicBool,
 }
 
@@ -4219,10 +4179,8 @@ fn ending_of(deliberate: &std::sync::atomic::AtomicBool) -> dux_core::attachment
     }
 }
 
-/// A browser tab's events connection in the attachment registry, forgotten
-/// when the socket ends: with everything the tab still counted as attached to
-/// when it ended on purpose (a clean close, a sign-out), and leaving that to
-/// its grace when it was lost.
+/// A browser tab's events connection in the attachment registry, forgotten when the
+/// socket ends: its attachments end with it if deliberate, else wait out their grace.
 struct TabPresenceGuard {
     attachments: dux_core::attachments::Attachments,
     id: String,
@@ -4272,12 +4230,8 @@ struct QuietWatch {
     live_limits: Arc<crate::engine_actor::LiveServerLimits>,
 }
 
-/// A timer of its own for a terminal socket's quiet deadline, independent of
-/// whatever the socket's loop is waiting on: past the deadline it ends the
-/// attachment as lost (so a terminal its page was looking at keeps counting
-/// for the grace) and revokes the socket's input rights at once (announcing
-/// the cleared owner as a disconnect would), and tells the loop to end.
-/// Aborted on drop.
+/// A terminal socket's quiet-deadline timer, independent of whatever its loop waits
+/// on: past the deadline it expires the socket as lost. Aborted on drop.
 struct QuietWatchdog(tokio::task::JoinHandle<()>);
 
 impl QuietWatchdog {
@@ -4312,9 +4266,8 @@ impl QuietWatchdog {
     }
 }
 
-/// Start a socket's quiet clock now that its receive loop is running: the
-/// opening (the handshake and a scrollback replay that can take a long time on
-/// a slow link) reads nothing from the peer, so it must not count as silence.
+/// Start a socket's quiet clock once its receive loop runs: the opening (handshake
+/// and scrollback replay) reads nothing from the peer and is not silence.
 fn start_quiet_watch(watch: QuietWatch) -> QuietWatchdog {
     watch.heard.touch();
     QuietWatchdog::spawn(watch)
@@ -4330,10 +4283,8 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Run a socket's loop until it ends or its quiet watchdog has expired it,
-/// whichever comes first, answering whether it expired. Expiry cancels the
-/// whole loop, a send it is parked on included, and with it every guard and
-/// task it owns.
+/// Run a socket's loop until it ends or its quiet watchdog expires it, answering
+/// whether it expired; expiry cancels the loop with every guard and task it owns.
 async fn until_expired<F: std::future::Future>(socket: F, expired: &tokio::sync::Notify) -> bool {
     tokio::select! {
         _ = socket => false,
@@ -4866,7 +4817,6 @@ mod tests {
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Helper: issue a request through the real router and return the status.
     /// [`oneshot_status`]'s request, answering the body instead.
     async fn oneshot_body(app: &Router, method: &str, uri: &str, body: Option<&str>) -> String {
         let mut builder = axum::http::Request::builder().method(method).uri(uri);
@@ -4888,6 +4838,7 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    /// Helper: issue a request through the real router and return the status.
     async fn oneshot_status(
         app: &Router,
         method: &str,

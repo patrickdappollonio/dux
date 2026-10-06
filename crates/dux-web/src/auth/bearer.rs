@@ -3,10 +3,8 @@
 
 use axum::http::HeaderMap;
 
-/// Every token presented as `Authorization: Bearer <token>`, in the order the
-/// headers came. Parsed from the raw bytes, one header at a time (as the
-/// cookie is): a header that is not ASCII is skipped on its own and never hides
-/// another. The scheme's case does not matter.
+/// Every `Authorization: Bearer <token>` value, in header order, any scheme case.
+/// Each header is read from its own raw bytes, so a non-ASCII one never hides another.
 pub(crate) fn read_all(headers: &HeaderMap) -> Vec<String> {
     headers
         .get_all(axum::http::header::AUTHORIZATION)

@@ -34,7 +34,6 @@ const DEFAULT_LINES: usize = 100;
 /// The log streams open right now.
 static OPEN_FOLLOWS: AtomicUsize = AtomicUsize::new(0);
 
-/// How many log streams are open now.
 #[cfg(test)]
 fn open_follows() -> usize {
     OPEN_FOLLOWS.load(Ordering::SeqCst)
@@ -155,9 +154,8 @@ fn text_of(lines: &[String]) -> Bytes {
     Bytes::from(text)
 }
 
-/// Feed `tx` the first lines, then every line `follower` finds, until the
-/// client goes (`tx` closes) or the session this stream was opened under ends.
-/// Ending drops `tx`, which ends the reply.
+/// Stream the first lines, then each new one, until the client goes or the session the
+/// stream was opened under ends; returning drops the sender, which ends the reply.
 async fn follow(
     first: Vec<String>,
     mut follower: FileFollower,

@@ -38,10 +38,8 @@ pub struct BackgroundServer {
     /// The engine's total apply count as of the last iteration, so a change can
     /// be spotted without every terminal UI apply site announcing itself.
     last_command_applies: u64,
-    /// This serve's PTY-ownership registry and the terminal UI's seat in it, taken
-    /// at start. Both die with the serve, which is what releases everything on stop.
-    /// `None` for a core that serves only the control socket, which serves no
-    /// terminal and so gives the terminal UI no seat.
+    /// This serve's PTY-ownership registry and the terminal UI's seat in it; both die
+    /// with the serve, which releases everything on stop. `None` on a control-only core.
     ownership: Option<dux_core::background_serve::TuiOwnership>,
     /// The two buses this serve announces the terminal UI's ownership changes on,
     /// filled by `build_app`. Empty is survivable: nothing is announced and
@@ -84,9 +82,8 @@ impl BackgroundServer {
         startup: dux_core::serve_log::StartupNotes,
     ) -> Result<Self> {
         crate::warn_if_ui_not_built();
-        // Prints nothing over the terminal UI's frame, but keeps `server.log`:
-        // the lines `dux server` prints, written to the file, access lines
-        // included when `[server] access_log` is on.
+        // Prints nothing over the terminal UI's frame, but writes `server.log`
+        // as `dux server` would.
         let server_log = crate::open_server_log(&engine.config, &engine.paths);
         let log_path = server_log.as_ref().map(|log| log.path().to_path_buf());
         let console = match server_log {
@@ -173,10 +170,8 @@ impl BackgroundServer {
         Ok(server)
     }
 
-    /// Serve only the control socket `engine`'s lock holds: the plain terminal
-    /// UI's core, so a command-line client can reach a dux that serves no web
-    /// UI. `None` when dux runs without the socket. It claims no terminal,
-    /// counts no connection and serves nothing a browser could open.
+    /// Serve only the control socket `engine`'s lock holds, `None` when dux runs
+    /// without one. Claims no terminal and serves nothing a browser could open.
     pub fn start_control_only(engine: &mut Engine) -> Result<Option<Self>> {
         let Some(control) = crate::control_socket::listener_of(engine) else {
             return Ok(None);
@@ -204,13 +199,10 @@ impl BackgroundServer {
     }
 
     /// Stop serving, first letting the control socket finish the requests it
-    /// already accepted, servicing `engine` meanwhile. A connection that
-    /// arrives from then on waits in the socket's backlog for the next core.
+    /// already accepted, servicing `engine` meanwhile; later connections wait for the next core.
     ///
-    /// An operation wait answers at once when this begins. Any other request
-    /// held open across a hand-over has [`HAND_OVER_BOUND`] to finish and is
-    /// cut past it; the command line never sends one, because every change it
-    /// makes answers with an operation id within the call and is then polled.
+    /// An operation wait answers at once; any other request still open after
+    /// [`HAND_OVER_BOUND`] is cut.
     pub fn hand_over(mut self, engine: &mut Engine) -> Option<anyhow::Error> {
         self.core.stop_control_socket();
         let deadline = std::time::Instant::now() + HAND_OVER_BOUND;

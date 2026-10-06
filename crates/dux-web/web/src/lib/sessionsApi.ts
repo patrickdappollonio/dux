@@ -155,7 +155,6 @@ export const sessionsApi = {
   // `deleteBranch` is the delete dialog's "also delete the branch" answer.
   // `null` means nobody was asked (a standalone agent, whose dialog has no
   // checkbox), and the server then keeps its provenance default.
-  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
   remove: (
     id: string,
     deleteWorktree: boolean,
@@ -182,8 +181,6 @@ export const sessionsApi = {
       `/api/v1/sessions/${encodeURIComponent(id)}`,
       body,
     ),
-  // `accepted` goes ahead over exactly those blockers (their keys), the ones a
-  // dialog showed.
   reconnect: (id: string, force: boolean, accepted: readonly string[] | null = null) =>
     request<void>(
       "POST",
@@ -195,7 +192,6 @@ export const sessionsApi = {
   // the shutdown grace and ends them at once, for the Task Manager's "Stop
   // everything"; without it the agent is asked to shut down and given the
   // configured wait. A non-2xx throws.
-  // `accepted` goes ahead over exactly those blockers (their keys), the ones a dialog showed.
   kill: (id: string, force = false, accepted: readonly string[] | null = null) =>
     request<void>(
       "POST",

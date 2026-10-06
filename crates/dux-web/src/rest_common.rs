@@ -19,22 +19,13 @@
 //! create that fails is answered when it fails rather than at the end of the
 //! window.
 //!
-//! A client that would rather learn the real outcome than any of these asks
-//! with `?operation=1` ([`OperationQuery`]): the project add and remove, the
-//! agent create, delete, stop and start, the tab create, close and start, the
-//! terminal create and close, and the one-entry macro and global environment
-//! changes then answer at once with [`operation_accepted`], and the outcome is
-//! read from `GET /api/v1/operations/{id}` (see [`crate::operation_routes`]).
-//! Refusals answer exactly as they do without it. Asked or not, each of those
-//! changes opens a record (`EngineHandle::apply_wire_recorded` when it was
-//! not asked), so what it changes is held for as long as it runs; the flag
-//! decides only what the route answers.
-//!
-//! Every one of those changes, asked with `?operation=1` or not, is refused
-//! with a `409` and a sentence naming the operation in the way while another
-//! followed change still holds what it would change (see
-//! [`dux_core::operations`]); [`refusal`] is how a route tells that refusal
-//! from an invalid request.
+//! A change route that takes [`OperationQuery`] answers `?operation=1` at once with
+//! [`operation_accepted`], and the real outcome is read from
+//! `GET /api/v1/operations/{id}` ([`crate::operation_routes`]); refusals answer as
+//! without it. Asked or not, such a change opens a record that holds what it changes
+//! while it runs, so a second change to the same thing is refused with a `409`
+//! naming the one in the way ([`dux_core::operations`]); [`refusal`] tells that
+//! refusal from an invalid request.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -307,10 +298,8 @@ pub(crate) fn delete_wire_response(result: Result<WireCommandOutcome, String>) -
     }
 }
 
-/// `?operation=1` on a change route: answer at once with the change's
-/// operation record instead of the route's usual reply, so a client learns the
-/// real outcome by polling `GET /api/v1/operations/{id}`. Absent, or `0`, the
-/// route answers exactly as it always has.
+/// `?operation=1` on a change route (see the module doc); absent or `0`, the route
+/// gives its usual reply.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct OperationQuery {
     #[serde(default)]
@@ -323,11 +312,8 @@ impl OperationQuery {
     }
 }
 
-/// The reply to a change followed as an operation: `202 Accepted`, a
-/// `Location` naming the record, and the record as the engine handed it back
-/// when the change answered, which is already final when the change ended
-/// inside the call. A snapshot rather than a read here, so neither a slow
-/// reply nor a record kept for no time at all can lose it.
+/// `202 Accepted`, a `Location` naming the record, and the record itself: the snapshot
+/// the engine handed back rather than a fresh read, so a record already retired still answers.
 pub(crate) fn operation_accepted(record: &dux_core::operations::OperationView) -> Response {
     let location = format!("/api/v1/operations/{}", record.id);
     (
@@ -338,9 +324,8 @@ pub(crate) fn operation_accepted(record: &dux_core::operations::OperationView) -
         .into_response()
 }
 
-/// [`operation_accepted`] for a change sent with an
-/// [`crate::engine_actor::OperationTicket`], from the record the engine left
-/// in its slot.
+/// [`operation_accepted`] from the record the engine left in an
+/// [`crate::engine_actor::OperationTicket`]'s slot.
 pub(crate) fn ticket_accepted(
     record: &std::sync::OnceLock<dux_core::operations::OperationView>,
 ) -> Response {
@@ -373,14 +358,8 @@ pub(crate) fn delete_operation_response(
     }
 }
 
-/// `force_connected` on a change that would end terminals: go ahead even
-/// though somebody else is attached to them. `true` goes ahead over everybody
-/// (the command line's flag); a comma-separated list of blocker keys
-/// ([`dux_core::attachments::Blocker::key`]) goes ahead over exactly the
-/// blockers a dialog showed, and is refused again, naming everybody, when
-/// anybody else is in the way by then. Only that refusal is skipped; every
-/// other check still runs, and nobody can attach to what the change is ending
-/// until it has finished.
+/// `force_connected`: `true` skips the attached refusal over everybody; a comma-separated
+/// list of [`dux_core::attachments::Blocker::key`]s skips it over exactly those.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct ForceConnectedQuery {
     #[serde(default)]
@@ -408,12 +387,8 @@ impl ForceConnectedQuery {
     }
 }
 
-/// The answer to a change refused because somebody else is attached to what
-/// it would end: `409 {"error":"attached","blockers":[...]}`, one entry per
-/// attachment in the way, each saying which surface, which device and from
-/// which address (and whether dux could verify it), whether it is typing in
-/// or watching, which tab or terminal, and the key a dialog sends back to go ahead
-/// over exactly the blockers it showed.
+/// `409 {"error":"attached","blockers":[...]}`: each blocker as it serializes, plus the
+/// `key` a dialog sends back in `force_connected` to go ahead over exactly those.
 pub(crate) fn attached_refusal(blockers: &[dux_core::attachments::Blocker]) -> Response {
     let blockers: Vec<serde_json::Value> = blockers
         .iter()
@@ -433,11 +408,8 @@ pub(crate) fn attached_refusal(blockers: &[dux_core::attachments::Blocker]) -> R
         .into_response()
 }
 
-/// The connection a guarded change is exempt from the attachments of: the
-/// browser tab whose events connection the request named, only when that
-/// connection is live and came from the request's own address. Protection
-/// against accidents, not hostile clients (any client can ask to go ahead
-/// over everybody), so a matching address is all it asks for.
+/// The requesting tab's own events connection, exempt from the guard, when it is live and
+/// from the request's address: the guard stops accidents, and any client may force past it.
 pub(crate) fn exempt_requester(
     attachments: &dux_core::attachments::Attachments,
     scope: &StatusScope,
@@ -450,12 +422,8 @@ pub(crate) fn exempt_requester(
     }
 }
 
-/// Dispatch a change that would end terminals (an agent delete, stop or
-/// forced restart, a tab or terminal close, a project removal), covered by an
-/// operation record of `kind` and followed when the client asked
-/// (`?operation=1`). A refusal because somebody else is attached is answered
-/// here, as [`attached_refusal`]; anything else is handed back as the route's
-/// usual outcome, with the record when the change was followed.
+/// Dispatch a change that would end terminals under an operation record of `kind`. The
+/// attached refusal comes back as the finished `Err`; any other outcome is the route's to answer.
 pub(crate) async fn dispatch_guarded(
     state: &crate::server::AppState,
     command: dux_core::wire::WireCommand,

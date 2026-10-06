@@ -8,16 +8,12 @@
 // Callers omit the header while it is null, and the server then broadcasts to every client.
 let connectionId: string | null = null
 
-// The last id this tab held, kept across a drop: the tab's next events socket
-// names it (`?after=`) so the server hands what the lost connection still
-// counted as attached to over to the new one.
+// The last id this tab held, kept across a drop: the next events socket names it
+// (`?after=`) so the server hands the lost connection's attachments to the new one.
 let previousConnectionId: string | null = null
 
-// How long a terminal socket waits, at most, for this tab's events id before
-// opening without one. An id lets the server count the terminal as part of
-// this tab, so the tab is never in its own way when it deletes or stops what
-// it shows; a second is far longer than the `connected` frame takes, and short
-// enough that a terminal never sits blank on its account.
+// The most a terminal socket waits for this tab's events id, which keeps the tab out
+// of its own way when it deletes or stops what it shows; `connected` arrives far sooner.
 export const CONNECTION_ID_WAIT_MS = 1000
 
 let pendingTimer: ReturnType<typeof setTimeout> | null = null

@@ -10,9 +10,7 @@ import {
 import { renderProse } from "@/lib/prose"
 import { useDux } from "@/lib/store"
 
-// The parts every guarded confirmation shares (see `useAttachedOverride`): the
-// list of who the server named, and the confirm that becomes the override, one
-// more click rather than a new flow.
+// The parts every guarded confirmation shares (see `useAttachedOverride`).
 
 /** Who the server named, listed under the dialog's body. Nothing until then. */
 export function AttachedSection({
@@ -34,10 +32,8 @@ export function AttachedSection({
   )
 }
 
-/** A guarded dialog's destructive confirm: its own verb, followed by the word
- * anyway once the server has named somebody. Disabled while the request is out, and
- * the second click of a double click never reaches the override that replaced
- * the button under it. */
+/** A guarded dialog's destructive confirm. A double click's second click never
+ * reaches the override that replaced the button under it. */
 export function GuardedConfirmButton({
   verb,
   blockers,

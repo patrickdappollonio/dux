@@ -35,8 +35,6 @@ export const terminalsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/terminals`,
     ),
-  // Every close takes `accepted`, the keys of the blockers a dialog showed, to go ahead over
-  // exactly them.
   remove: (sessionId: string, terminalId: string, accepted: readonly string[] | null = null) =>
     request<void>(
       "DELETE",

@@ -561,9 +561,8 @@ impl AuthState {
             };
         if !presented.is_empty() || !bearer.is_empty() {
             self.sessions.ready().await;
-            // Every valid credential is refreshed, so none idles out while it
-            // is being presented; the first valid one names the session, and
-            // a planted or stale one beside it changes nothing.
+            // Checks every credential rather than stopping at the first valid
+            // one, because a check also refreshes it; the first valid one wins.
             let idle = idle_windows(&snapshot.config);
             session = presented
                 .iter()

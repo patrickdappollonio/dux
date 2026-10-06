@@ -12,23 +12,17 @@
 //!   on the owner. Moving terminals to a flat collection changed what the BROWSER
 //!   receives and deliberately not these, so they re-nest each owner's terminals
 //!   through [`SessionWithTerminals`] and [`ProjectWithTerminals`].
-//! - `GET /api/v1/terminals` is the thin read of every terminal, flat and
-//!   owner-tagged, standalone ones included.
-//! - The thin reads answer from the engine as it is at the request, while the
-//!   workspace document is the last one pushed, rebuilt on the engine's next
-//!   spine check; a client reading right after its own change reads a thin one.
-//! - `GET /api/v1/sessions` also lists, after the live agents, each agent a
-//!   followed delete is still removing, as it looked when the delete started,
-//!   with `"removing": true` and no terminals, until the delete's operation
-//!   record finishes. The workspace document never does: the agent left it when
-//!   the delete started.
-//! - The live rows of `GET /api/v1/sessions` carry `remote_viewers`: how many
-//!   browser connections are attached to the agent, from the attachment
-//!   registry. The
-//!   workspace document leaves it out, because it is pushed on every change
-//!   and a count that moves with every attach would push the whole document
-//!   each time; `GET /api/v1/sessions/:id` leaves it out to keep serving the
-//!   shape the create's replay serves, field for field.
+//! - `GET /api/v1/terminals` lists every terminal flat and owner-tagged, standalone
+//!   ones included.
+//! - The thin reads answer from the engine at the request; the workspace document is
+//!   the last one pushed, so a client reading right after its own change reads a thin one.
+//! - `GET /api/v1/sessions` also lists, after the live agents, each agent a followed
+//!   delete is still removing, with `"removing": true` and no terminals, until the
+//!   delete's record finishes; the workspace document drops it when the delete starts.
+//! - Its live rows carry `remote_viewers`, the browser connections attached to the
+//!   agent. The pushed workspace document leaves the count out, or every attach would
+//!   re-push it, and so does `GET /api/v1/sessions/{id}`, which keeps the create
+//!   replay's shape.
 //!
 //! A nested terminal entry carries a tagged `owner` field. That is additive and it
 //! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
@@ -69,15 +63,11 @@ pub struct SessionWithTerminals {
     #[serde(flatten)]
     session: SessionView,
     terminals: Vec<TerminalView>,
-    /// Set only on `GET /api/v1/sessions`, for an agent whose delete is still
-    /// running: it has left the workspace, and stays listed, marked, until the
-    /// delete's operation record finishes. Absent on every other row.
+    /// Set only on `GET /api/v1/sessions`, for an agent a delete is still removing.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     removing: bool,
-    /// How many browser connections are attached to the agent's tabs or its
-    /// own terminals, each counted once, a presence the grace keeps included,
-    /// and the terminal UI never: set on the live rows of
-    /// `GET /api/v1/sessions`, absent on every other answer.
+    /// Browser connections attached to the agent's tabs or terminals, each counted once;
+    /// present only on the live rows of `GET /api/v1/sessions`.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_viewers: Option<usize>,
 }

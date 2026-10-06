@@ -389,9 +389,8 @@ export interface DuxState {
   // to the next tab in strip order, and closing the agent's last live tab
   // detaches the agent (which stays in Projects, reopenable).
   closeTabTarget: { sessionId: string; tabId: string } | null
-  // The tab pending stop confirmation, or null. Stopping ends the tab's
-  // process and keeps the tab, dormant, in the strip; stopping the agent's last
-  // running tab detaches the agent.
+  // The tab pending stop confirmation, or null. Stopping keeps the tab, dormant;
+  // stopping the agent's last running tab detaches the agent.
   stopTabTarget: { sessionId: string; tabId: string } | null
   // The agent pending the POLITE detach confirmation, or null. Distinct from
   // `closeTabTarget`: detaching ends the agent's processes and leaves the tab
@@ -422,18 +421,14 @@ export interface DuxState {
   // every discard (it's destructive); the web mirrors that.
   discardTarget: DiscardTarget | null
   globalEnvOpen: boolean
-  // The global environment dialog's stale-save state, the macro editor's
-  // shape: the `global_env_version` the open dialog read, the edit a refused
-  // save brought back (null: seed from the bootstrap), the server's sentence
-  // while a refusal is on screen, and a counter that remounts the form when
-  // its seed changes.
+  // Stale-save state, shaped like the macro editor's: the version the dialog read, a
+  // refused edit to reseed from (null: the bootstrap), the refusal, a remount counter.
   globalEnvVersion: string | null
   globalEnvDraft: Record<string, string> | null
   globalEnvConflict: string | null
   globalEnvEpoch: number
-  // Which opening of the dialog is on screen, so a refusal that answers after
-  // the dialog was opened again leaves that newer edit alone; the refused
-  // table is kept here instead.
+  // Which opening of the dialog is on screen: a refusal answering an earlier
+  // opening is kept aside rather than put back over the newer edit.
   globalEnvSession: number
   globalEnvRejected: Record<string, string> | null
   projectSettingsTarget: string | null
@@ -643,9 +638,8 @@ export interface DuxState {
   // there is no set-state-in-effect. Empty draft when closed.
   macrosDialogOpen: boolean
   macrosDraft: MacroView[]
-  // The `macros_version` the draft was read at, sent back with every save so
-  // a list that changed since (a `dux macros add`, another browser) is refused
-  // rather than overwritten. Moves on with each save this dialog makes.
+  // The `macros_version` the draft was read at, sent with every save so a list that
+  // changed since is refused; moves on with each save this dialog makes.
   macrosDraftVersion: string | null
   // The server's sentence while a refused save's notice is on screen.
   macrosConflict: string | null
@@ -1658,9 +1652,8 @@ function loadBootstrap(): void {
     })
 }
 
-// Fetch the bootstrap document now and fold it in, under the same newest-wins
-// rule as `loadBootstrap`, answering the document itself for a caller that
-// reseeds from it. Unlike `loadBootstrap`, a failure reaches the caller.
+// `loadBootstrap` under the same newest-wins rule, but resolving the document for
+// a caller that reseeds from it and letting a failure reach that caller.
 function refetchBootstrap(): Promise<Bootstrap> {
   const seq = ++loadBootstrapSeq
   return fetchBootstrap().then((b) => {
@@ -3847,9 +3840,6 @@ function terminalDeleteRequest(
 // owner kind, since a session-only scan would make project terminals
 // undeletable, and a terminal that already vanished is a no-op. A focused
 // terminal's selection clears through the spine prune, not from here.
-//
-// Resolves the blockers when somebody else is attached to the terminal, for the
-// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
 export function deleteTerminal(
   terminalId: string,
   accepted: readonly string[] | null = null,
@@ -3912,12 +3902,8 @@ export function closeStopTab(): void {
   setState({ stopTabTarget: null })
 }
 
-// Stop a tab via REST: its process ends and the tab stays in the strip,
-// dormant. The server raises the outcome as a status, so only a refused
-// request toasts here. Focus stays where it is: the pane shows the dormant
-// card the tab now is.
-// Resolves the blockers when somebody else is attached to the tab, for the
-// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
+// The server raises a stop's outcome as a status, so only a refused request
+// toasts here; focus stays, since the pane now shows the tab's dormant card.
 export function stopTab(
   sessionId: string,
   tabId: string,
@@ -3971,9 +3957,6 @@ export function closeForceStopAgent(): void {
 // Nothing is optimistic: focus and latches move only once the DELETE resolves,
 // or a failed request would leave the UI navigated away from a live tab with no
 // rollback. Focus must leave the closed tab, since subscribing relaunches it.
-//
-// Resolves the blockers when somebody else is attached to the tab, for the
-// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
 export function closeTab(
   sessionId: string,
   tabId: string,
@@ -4384,8 +4367,6 @@ export function closeDelete(): void {
 // destructive removal of the git worktree on disk (default off in the UI).
 // `deleteBranch` is the dialog's branch answer, or `null` when it had no
 // checkbox to answer with.
-// Resolves the blockers when somebody else is attached to the agent, for the
-// dialog to name them and offer the override (`accepted`, their keys); `null` otherwise.
 export function deleteSession(
   sessionId: string,
   deleteWorktree: boolean,
@@ -4575,10 +4556,6 @@ export function toggleSessionAutoReopen(
 // the provider supports it. `terminalEpoch` is bumped so the pane remounts and
 // re-subscribes: the reconnect swaps in a new provider and the attached
 // forwarder is dead, so even an already-focused pane must re-issue `subscribe`.
-//
-// Resolves the blockers when somebody else is attached to what a forced one
-// would end, for the dialog to name them and offer the override (`accepted`,
-// their keys); `null` otherwise.
 export function reconnectSession(
   sessionId: string,
   force: boolean,
@@ -4633,9 +4610,8 @@ export function closeGlobalEnv(): void {
   setState({ globalEnvOpen: false, globalEnvDraft: null, globalEnvConflict: null })
 }
 
-// The dialog closes as it saves. A save the server refuses because the table
-// changed since the dialog read it brings the dialog back with these edits
-// and the refusal on it, so nothing typed is lost.
+// The dialog closes as it saves; a save refused because the table changed since
+// the dialog read it reopens the dialog with these edits and the refusal on it.
 export function saveGlobalEnv(env: Record<string, string>): void {
   const version = state.globalEnvVersion
   const session = state.globalEnvSession
@@ -5084,9 +5060,6 @@ export function closeRemoveProject(): void {
   setState({ removeProjectTarget: null })
 }
 
-// Resolves the blockers when somebody else is attached to a terminal the removal
-// ends, for the dialog to name them and offer the override (`accepted`, their keys); `null`
-// otherwise.
 export function removeProject(
   projectId: string,
   accepted: readonly string[] | null = null,
@@ -5105,14 +5078,8 @@ export function closeDeleteProject(): void {
 }
 
 // The destructive cascade: removes the project, its agents, AND their worktrees
-// from disk (delete_worktrees=true → WireCommand::DeleteProject). The plain
-// keep-worktrees variant is `removeProject`. Fire-and-forget like the other
-// project mutations; the keyed status stream reports the outcome, and a refusal
-// (e.g. a tab still launching) surfaces as an error toast.
-//
-// Resolves the blockers when somebody else is attached to a terminal the delete
-// ends, for the dialog to name them and offer the override (`accepted`, their keys); `null`
-// otherwise.
+// from disk, where `removeProject` keeps the worktrees. The keyed status stream
+// reports the outcome.
 export function deleteProject(
   projectId: string,
   accepted: readonly string[] | null = null,
@@ -5960,9 +5927,7 @@ export function closeMacrosDialog(): void {
   setState({ macrosDialogOpen: false, macrosDraft: [], macrosConflict: null })
 }
 
-/// The notice for a whole-set save refused after its dialog was opened again:
-/// the edit on screen is a newer one, so the refused edits are kept aside
-/// rather than put back over it.
+/// The notice for a whole-set save refused after its dialog was opened again.
 function earlierSaveRefused(what: string): string {
   return `An earlier save of the ${what} was not written: it changed after that save's dialog read it. What you are editing now is untouched. Reload to see the change.`
 }
@@ -5989,13 +5954,8 @@ export function dismissMacrosConflict(): void {
   setState({ macrosConflict: null })
 }
 
-// Persist the draft wholesale via `update_macros`. The server validates
-// (empty/duplicate names, empty text, unknown surface) and reports the outcome
-// on the status lane; a config reload emits `config.changed`, refetching
-// `bootstrap.macros`. The dialog closes optimistically; a rejection surfaces as
-// an error toast, and reopening re-seeds from the (unchanged) bootstrap. A
-// save refused because the list changed since the dialog read it brings the
-// dialog back with these edits and the refusal on it instead.
+// Persist the draft wholesale; the server validates and reports on the status lane. The
+// dialog closes optimistically, and a save refused because the list changed reopens it.
 export function saveMacros(macros: MacroView[]): void {
   // `update_macros` is a WHOLESALE replace of the entire `[macros]` map. Before
   // the bootstrap document has loaded, `openMacrosDialog` seeded an EMPTY draft,
@@ -6597,23 +6557,8 @@ export function closeStopAll(): void {
   setState({ stopAllOpen: false })
 }
 
-// Stop every running agent and companion terminal. Agents are DETACHED (the
-// worktree and session survive and can be reconnected), which is why this stops
-// each agent as a whole rather than closing its tabs one by one: closing tabs
-// would also destroy the extra tabs' pills, and the panic button should leave as
-// much recoverable as possible. Terminals have no detached state (existence ==
-// running), so they are destroyed. Gated by its own confirmation.
-//
-// FORCED, like every other stop on the Task Manager: this is the escape hatch
-// somebody reaches for when the machine is already in trouble, and waiting out a
-// shutdown grace per agent is the opposite of what they asked for. The polite
-// path is the agent row menu's Detach agent. Both dialogs say "immediately" so
-// the difference is stated, not implied.
-//
-// Nothing somebody else is attached to is stopped: the stops refused for that
-// come back, with everybody named, for the confirmation to show and offer to
-// go ahead over. `only` retries exactly those, with `accepted` the keys of the
-// blockers the confirmation showed; everything else already stopped.
+// Force-stop every running agent (detached, not closed, so its tabs survive) and every
+// terminal. Stops refused for somebody attached come back; `only` retries exactly those.
 export async function stopAllRunning(
   only: StopAllRefusal | null = null,
   accepted: readonly string[] | null = null,
@@ -6852,9 +6797,6 @@ export function recreateWorkingCopy(sessionId: string): void {
     )
 }
 
-// Resolves the blockers when somebody else is attached to the agent, for the
-// dialog to name them and offer the override (`accepted`, their keys); `null`
-// otherwise.
 export function killSessionPty(
   sessionId: string,
   force = false,
@@ -6865,9 +6807,8 @@ export function killSessionPty(
   )
 }
 
-// A guarded change's answer: the blockers when somebody else is attached to what
-// it would end, `null` when it went ahead or failed some other way, which
-// `onError` reports.
+// Resolves the blockers when somebody else is attached to what the change would
+// end; `null` when it went ahead or failed some other way, which `onError` reports.
 function guardedChange(
   request: Promise<unknown>,
   onError: (e: unknown) => void,

@@ -21,9 +21,7 @@ async function responseError(
   createError: RequestErrorFactory,
 ): Promise<Error> {
   const detail = (await response.text().catch(() => "")).trim()
-  // A refusal because somebody else is attached is the same answer from every
-  // guarded route, so it is read here once, as itself, rather than handed on as
-  // a raw JSON message for each client to toast.
+  // Every guarded route refuses with the same `attached` body, read here once.
   const blockers = attachedBlockers(response.status, parseJson(detail))
   if (blockers !== null) return new AttachedError(blockers)
   const message = detail || `request failed (${response.status})`

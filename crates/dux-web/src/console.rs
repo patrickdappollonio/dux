@@ -4,27 +4,18 @@
 //! Every line is a [`dux_core::serve_log::LogLine`], built here once. Where it
 //! goes depends on how the console was made:
 //!
-//! - [`Console::stdout`] is `dux server`'s terminal: a writer thread prints each
-//!   line, colored or plain per [`detect`].
-//! - [`Console::capture`] is the `start-web-server` flip: it writes nothing to
-//!   the terminal (the flip's status screen owns it) and records each line into
-//!   the `ActivityRing` that screen's log viewer draws.
+//! - [`Console::stdout`] is `dux server`'s terminal, colored or plain per [`detect`].
+//! - [`Console::capture`] is the `start-web-server` flip; it prints nothing and
+//!   records each line into the `ActivityRing` the flip's log viewer draws.
 //! - [`Console::noop`] does neither.
+//! - [`Console::server_log_only`] is the background server's; it prints nothing.
 //!
-//! Any of them can also carry a [`ServerLog`], the `server.log` file: every
-//! line the console produces is written there too, in the plain spelling
-//! `dux server` prints with color off. [`Console::server_log_only`] is the
-//! background server's console, which has nothing to print over the terminal
-//! UI's frame but still keeps the file.
+//! Any of them can also write every line to a [`ServerLog`], the `server.log`
+//! file, in the plain spelling `dux server` prints with color off. The flip
+//! shows exactly the lines `dux server` prints, access log included.
 //!
-//! The two real sinks receive the same lines, so the flip shows exactly what
-//! `dux server` prints, access log included (the user decided on 2026-10-02 that
-//! the two logs match completely; the flip's viewer used to leave the access
-//! log out).
-//!
-//! The console is additive to `dux.log`, which keeps logging every lifecycle
-//! event it already logged. The access log is the one line `dux.log` never
-//! gets; it lives in the console and `server.log`.
+//! The console is additive to `dux.log`. The access log is the one line
+//! `dux.log` never gets; it lives in the console and `server.log`.
 //!
 //! Color is hand-rolled minimal ANSI in [`dux_core::serve_log`]. [`detect`]
 //! decides from the `[server] color` setting plus `IsTerminal`, `NO_COLOR` and
@@ -378,9 +369,8 @@ impl Console {
         self
     }
 
-    /// The file this console writes the server log to, as its writer opened it
-    /// (a link at the configured path already resolved), or `None` when it
-    /// writes none: the log could not be opened, or nothing here serves.
+    /// The file this console writes `server.log` to, a link at the configured
+    /// path already resolved; `None` when it writes none.
     pub fn server_log_path(&self) -> Option<std::path::PathBuf> {
         self.0.file.as_ref().map(|log| log.path().to_path_buf())
     }
@@ -498,7 +488,6 @@ impl Console {
         self.is_active() || self.0.capture.is_some() || self.0.file.is_some()
     }
 
-    /// Write one line to `server.log`, if this console keeps one.
     fn write_to_file(&self, line: &LogLine) {
         if let Some(file) = &self.0.file {
             file.write_line(&format!("{} {}", (self.0.stamp)(), line.render(false)));
@@ -721,10 +710,8 @@ impl Console {
         self.emit(LogTone::Info, message);
     }
 
-    /// One access-log line. Gated by the caller on the `access_log` setting.
-    /// Returns early, before any formatting, on a console that records nothing.
-    /// An access line for a request that came over the control socket, which
-    /// has no address to show, so the line says how it came instead.
+    /// [`Self::access`] for a request over the control socket, which has no
+    /// address to show, so the line says how it came instead.
     pub fn access_over_control_socket(
         &self,
         method: &str,
@@ -744,6 +731,8 @@ impl Console {
         ));
     }
 
+    /// One access-log line. Gated by the caller on the `access_log` setting.
+    /// Returns early, before any formatting, on a console that records nothing.
     pub fn access(&self, method: &str, path: &str, status: u16, latency_ms: u128) {
         if !self.is_recording() {
             return;

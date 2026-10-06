@@ -1,9 +1,7 @@
-//! SIGUSR1 for the serves that own the engine: `dux server` and the
-//! start-web-server flip. Each turns the signal into the engine actor's own
-//! reload arm, exactly as the "Reload config" command does, so a hand edit
-//! followed by `kill -USR1` is live at once. The background serve installs nothing
-//! here: the terminal UI beside it drives the engine and reloads for both
-//! (see `dux_core::reload_signal`).
+//! SIGUSR1 for the serves that own the engine, `dux server` and the start-web-server
+//! flip: the signal runs the engine actor's own reload arm, as "Reload config" does.
+//! The background serve installs nothing here; the terminal UI beside it reloads for
+//! both (see `dux_core::reload_signal`).
 
 use dux_core::wire::WireCommand;
 

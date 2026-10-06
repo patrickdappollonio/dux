@@ -21,12 +21,8 @@ use axum::serve::IncomingStream;
 
 use crate::auth::Arrival;
 
-/// What the socket does NOT serve, as path patterns under `/api/v1/`, `*`
-/// standing for one segment: the browser's file editor and file drop. Neither
-/// is something a command-line client asks for, and both write files the
-/// browser's own checks guard. Everything outside `/api/v1/` (the PTY and
-/// event sockets, the static UI) is not served either. One list, so serving
-/// more later is a change here and nowhere else.
+/// Patterns under `/api/v1/` the socket refuses, `*` standing for one segment:
+/// the browser's file editor and file drop, which write files its checks guard.
 const NOT_ON_SOCKET: &[&str] = &[
     "file-drop",
     "file",
@@ -51,9 +47,8 @@ pub(crate) fn served_on_control_socket(path: &str) -> bool {
     })
 }
 
-/// The outermost layer of every router: a request over the control socket
-/// for a route the socket does not serve is answered 404, before the Host
-/// guard or anything else sees it.
+/// Must be the outermost layer of every router: a request over the control
+/// socket for a route it does not serve is answered 404 before anything else.
 pub(crate) async fn control_socket_routes(request: Request, next: Next) -> Response {
     if crate::auth::provenance::over_control_socket(&request)
         && !served_on_control_socket(request.uri().path())
@@ -67,9 +62,7 @@ pub(crate) async fn control_socket_routes(request: Request, next: Next) -> Respo
     next.run(request).await
 }
 
-/// What answers a request no route matched: `404 {"error":"not_found"}` for
-/// an API path on every listener, 404 for anything else over the control
-/// socket, which serves no page, and the static UI for the rest.
+/// What answers a request no route matched, on every listener.
 pub(crate) async fn fallback(request: Request) -> Response {
     if request.uri().path().starts_with("/api/") {
         return (
@@ -172,10 +165,8 @@ pub fn listener_of(engine: &dux_core::engine::Engine) -> Option<std::os::unix::n
     }
 }
 
-/// Serve `app` on the control socket until `stop` resolves, then finish the
-/// requests already accepted. A failure is logged and ends only this task: the
-/// web listeners, when there are any, keep serving. Spawned on the current
-/// runtime.
+/// Serve `app` on the control socket, on the current runtime, until `stop`
+/// resolves, then finish the requests already accepted. A failure ends only this task.
 pub(crate) fn spawn_control_leg(
     app: Router,
     listener: std::os::unix::net::UnixListener,

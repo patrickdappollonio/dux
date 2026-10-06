@@ -18,10 +18,8 @@ import { closeDetachesAgent, tabProseLabel } from "@/lib/agentTabs"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { closeStopTab, stopTab, useDux } from "@/lib/store"
 
-// Confirmation before stopping a tab, from a running tab's menu. Stopping ends
-// the tab's process and keeps the tab, dormant, in the strip, so unlike a
-// close it names no successor and deletes nothing; the agent detaches only
-// when this was its last running tab. Cancel is the default focus.
+// Confirmation before stopping a tab: the tab stays in the strip, dormant, so
+// unlike ConfirmCloseTabDialog it names no successor and deletes nothing.
 export function ConfirmStopTabDialog() {
   const { stopTabTarget, spine } = useDux()
 
@@ -38,8 +36,6 @@ export function ConfirmStopTabDialog() {
   const agentLabel = session ? sessionLabel(session) : ""
   const willDetach = closeDetachesAgent(session, tab)
 
-  // Closes the dialog when the tab (or its whole session) vanishes from the
-  // ViewModel; see the hook.
   const isOpen = useVanishedTargetGuard(
     stopTabTarget !== null,
     tab !== undefined,

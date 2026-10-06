@@ -5,13 +5,11 @@
 //! "Detach agent" action, which stops every tab at once, is `POST .../kill`.)
 //!
 //! Every tab of `:id` is addressable at `.../tabs/:tab`, the session-slot tab
-//! included, and so is its PTY socket. What each verb does with the slot tab is a
-//! stated decision per route rather than a consequence of the slot tab having no
-//! `agent_tabs` row: `DELETE` closes it by PROMOTING the next tab in strip order
-//! into the slot, which is a pointer move, so the successor keeps its own id, row,
-//! process and sockets and only changes role; `PATCH` accepts it and delegates to
-//! the session-level provider change. Neither infers slot-ness from a missing row;
-//! both ask `EngineHandle::is_slot_tab`.
+//! included, and so is its PTY socket. `DELETE` closes the slot tab by PROMOTING
+//! the next tab in strip order into the slot, a pointer move, so the successor keeps
+//! its own id, row, process and sockets and only changes role; `PATCH` accepts it
+//! and delegates to the session-level provider change. Both ask
+//! `EngineHandle::is_slot_tab` rather than infer slot-ness from a missing row.
 //!
 //! Closing an agent's ONLY tab is refused with a 400: an agent always has a slot,
 //! and that gesture is the agent's detach. A `:tab` not owned by `:id` is a 404,
@@ -258,12 +256,9 @@ async fn start_tab(
     }
 }
 
-/// `POST /api/v1/sessions/:id/tabs/:tab/stop` - end one tab's process and
-/// keep the tab, dormant, in the strip. Any tab, the session-slot tab
-/// included; the agent detaches only when this was its last running tab, and
-/// a tab that is not running is a successful no-op that says so. Guarded like
-/// a close: refused with `409 attached` while somebody else is attached to
-/// the tab, unless `force_connected` says to go ahead. Ends inside the call.
+/// `POST /api/v1/sessions/:id/tabs/:tab/stop` - end any tab's process and keep it dormant;
+/// the agent detaches only when it was its last running tab, and a stopped tab is a no-op
+/// that says so. `409 attached` while somebody else is attached, unless `force_connected`.
 async fn stop_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
