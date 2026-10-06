@@ -526,6 +526,10 @@ mod tests {
                 cancel_button,
                 confirm_button,
             }
+            | L::ConfirmStopTab {
+                cancel_button,
+                confirm_button,
+            }
             | L::ConfirmDetachAgent {
                 cancel_button,
                 confirm_button,

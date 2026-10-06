@@ -184,13 +184,23 @@ fn resource_commands_answer_with_no_dux_running_and_never_create_the_database() 
     const NOT_BUILT: &str = "this command is not built yet\n";
     const NOT_RUNNING: &str = "dux isn't running; start it with \"dux\" or \"dux server\"\n";
     for (args, code, stdout, stderr) in [
-        (&["projects", "ls"][..], 2, "", NOT_BUILT),
-        (&["projects", "list"][..], 2, "", NOT_BUILT),
-        (&["projects", "worktrees", "ls", "p"][..], 2, "", NOT_BUILT),
-        (&["agents", "rm", "a"][..], 2, "", NOT_BUILT),
-        (&["agents", "remove", "a", "--yes"][..], 2, "", NOT_BUILT),
-        (&["agents", "tabs", "stop", "a", "t"][..], 2, "", NOT_BUILT),
-        (&["terminals", "ls", "-q"][..], 2, "", NOT_BUILT),
+        (&["projects", "ls"][..], 4, "", NOT_RUNNING),
+        (&["projects", "list"][..], 4, "", NOT_RUNNING),
+        (
+            &["projects", "worktrees", "ls", "p"][..],
+            4,
+            "",
+            NOT_RUNNING,
+        ),
+        (&["agents", "rm", "a"][..], 4, "", NOT_RUNNING),
+        (&["agents", "remove", "a", "--yes"][..], 4, "", NOT_RUNNING),
+        (
+            &["agents", "tabs", "stop", "a", "t"][..],
+            4,
+            "",
+            NOT_RUNNING,
+        ),
+        (&["terminals", "ls", "-q"][..], 4, "", NOT_RUNNING),
         (
             &["macros", "show", "m"][..],
             1,

@@ -168,6 +168,7 @@ impl PromptState {
             PromptState::ConfirmDeleteAgent { attached, .. }
             | PromptState::ConfirmDeleteTerminal { attached, .. }
             | PromptState::ConfirmCloseTab { attached, .. }
+            | PromptState::ConfirmStopTab { attached, .. }
             | PromptState::ConfirmDetachAgent { attached, .. }
             | PromptState::ConfirmDeleteProject { attached, .. }
             | PromptState::ConfirmRemoveProject { attached, .. }
@@ -189,6 +190,9 @@ impl PromptState {
                 attached, focus, ..
             }
             | PromptState::ConfirmCloseTab {
+                attached, focus, ..
+            }
+            | PromptState::ConfirmStopTab {
                 attached, focus, ..
             }
             | PromptState::ConfirmDetachAgent {

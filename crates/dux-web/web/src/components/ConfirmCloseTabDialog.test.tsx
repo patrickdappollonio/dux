@@ -261,7 +261,13 @@ describe("ConfirmCloseTabDialog", () => {
     render(<ConfirmCloseTabDialog />)
 
     fireEvent.click(screen.getByRole("button", { name: "Close tab" }))
-    const override = await screen.findByRole("button", { name: "Close tab anyway" })
+    // The refusal travels the real store and client, which takes longer than
+    // the default wait when the machine is busy.
+    const override = await screen.findByRole(
+      "button",
+      { name: "Close tab anyway" },
+      { timeout: 5000 },
+    )
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Cancel" }),
     )
@@ -270,7 +276,7 @@ describe("ConfirmCloseTabDialog", () => {
     expect(closeCloseTab).not.toHaveBeenCalled()
 
     fireEvent.click(override)
-    await vi.waitFor(() => expect(closeCloseTab).toHaveBeenCalled())
+    await vi.waitFor(() => expect(closeCloseTab).toHaveBeenCalled(), { timeout: 5000 })
     const urls = fetchMock.mock.calls.map((call) => String(call[0]))
     expect(urls).toEqual([
       "/api/v1/sessions/s1/tabs/s1",

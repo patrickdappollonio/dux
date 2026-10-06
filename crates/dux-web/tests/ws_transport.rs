@@ -3139,6 +3139,26 @@ async fn terminal_rest_create_and_delete() {
     let client = reqwest::Client::new();
 
     let terminal_id = create_terminal_via_rest(addr, "s1").await;
+    // The flat terminals read answers from the engine as it is now, so it
+    // already lists the terminal its create just answered for.
+    let listed: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/terminals"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = listed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|t| t["id"] == terminal_id.as_str())
+        .unwrap_or_else(|| panic!("{terminal_id} is not listed: {listed}"));
+    assert_eq!(
+        entry["owner"],
+        serde_json::json!({ "kind": "session", "session_id": "s1" })
+    );
     assert!(
         wait_for_workspace(addr, |spine| spine_has_terminal(spine, &terminal_id)).await,
         "spine never contained the REST-created terminal {terminal_id}"

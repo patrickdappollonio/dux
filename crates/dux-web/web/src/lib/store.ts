@@ -389,6 +389,10 @@ export interface DuxState {
   // to the next tab in strip order, and closing the agent's last live tab
   // detaches the agent (which stays in Projects, reopenable).
   closeTabTarget: { sessionId: string; tabId: string } | null
+  // The tab pending stop confirmation, or null. Stopping ends the tab's
+  // process and keeps the tab, dormant, in the strip; stopping the agent's last
+  // running tab detaches the agent.
+  stopTabTarget: { sessionId: string; tabId: string } | null
   // The agent pending the POLITE detach confirmation, or null. Distinct from
   // `closeTabTarget`: detaching ends the agent's processes and leaves the tab
   // and the agent in the list, where closing destroys the tab for good. Raised
@@ -1001,6 +1005,7 @@ let state: DuxState = {
   deleteTarget: null,
   deleteTerminalTarget: null,
   closeTabTarget: null,
+  stopTabTarget: null,
   stopAgentTarget: null,
   recreateWorkingCopyTarget: null,
   forceStopAgentTarget: null,
@@ -3895,6 +3900,32 @@ export function openCloseTab(sessionId: string, tabId: string): void {
 
 export function closeCloseTab(): void {
   setState({ closeTabTarget: null })
+}
+
+// Open the stop-tab confirmation, from a running tab's menu. Stopping always
+// confirms: it ends whatever the tab's session was doing.
+export function openStopTab(sessionId: string, tabId: string): void {
+  setState({ stopTabTarget: { sessionId, tabId } })
+}
+
+export function closeStopTab(): void {
+  setState({ stopTabTarget: null })
+}
+
+// Stop a tab via REST: its process ends and the tab stays in the strip,
+// dormant. The server raises the outcome as a status, so only a refused
+// request toasts here. Focus stays where it is: the pane shows the dormant
+// card the tab now is.
+// Resolves the blockers when somebody else is attached to the tab, for the
+// dialog to name them and offer the override (`force`); `null` otherwise.
+export function stopTab(
+  sessionId: string,
+  tabId: string,
+  force = false,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(tabsApi.stop(sessionId, tabId, force), (e) =>
+    notifyError(e instanceof Error ? e.message : "Could not stop the tab."),
+  )
 }
 
 // Open the POLITE detach confirmation, from the agent's row menu.

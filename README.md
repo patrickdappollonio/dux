@@ -333,6 +333,23 @@ dux keys ls              # Every action, its keys, and whether you changed them
 dux themes ls            # The themes the picker offers, the current one marked
 ```
 
+Projects, agents, their tabs and worktrees, and terminals live in the running dux, so
+their commands talk to it (over its control socket on this machine, or `--remote <name>`)
+and say so when no dux is running. A change asks first (`--yes` answers for you, and is
+needed without a terminal), waits until it has really finished and prints how it went,
+ending with the id of anything it created. One that would cut off somebody attached to a
+terminal is refused, naming them, unless you add `--dangerously-ignore-connected`.
+
+```bash
+dux projects ls                     # Also: show <p>, add <path> [--name] [--checkout-default] [--init], rm <p> [--delete-worktrees]
+dux projects worktrees ls <p>       # The project's worktrees, and which agent holds each
+dux agents ls                       # Also: --project <p>, --worktrees; show <a>, stop <a>, start <a>
+dux agents add --project <p> --name feat   # Also: --existing-branch, --copy-uncommitted, --from-pr <pr>, --from-worktree <path>, --fork <a>, --standalone <folder> [--provider]
+dux agents rm <a> --delete-worktree --keep-branch   # Neither branch flag: the branch goes only if dux created it
+dux agents tabs ls <a>              # Also: add <a> [--provider], rm|start|stop <a> <tab>
+dux terminals ls                    # Also: add [--agent <a> | --project <p>], rm <t>
+```
+
 `dux config diff` is derived from the config structure rather than from a list
 somebody has to remember to update, so a new setting shows up in it the day it
 ships. It summarizes instead of printing two things: `[env]` reports only that it

@@ -185,8 +185,13 @@ const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+/// `text` escaped to stand as one segment of a request path.
+pub(super) fn segment(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, SEGMENT).to_string()
+}
+
 fn operation_path(id: &str, wait_seconds: u64) -> String {
-    let id = percent_encoding::utf8_percent_encode(id, SEGMENT);
+    let id = segment(id);
     if wait_seconds == 0 {
         format!("/api/v1/operations/{id}")
     } else {
@@ -266,14 +271,18 @@ pub fn describe(record: &OperationRecord) -> String {
     if !record.removed.is_empty() {
         lines.push(format!("removed:  {}", record.removed.join(", ")));
     }
-    for part in &record.parts {
-        let mut line = format!("{}: {} {}", part.part, part.subject, part.outcome);
-        if let Some(reason) = &part.reason {
-            line.push_str(&format!(" ({reason})"));
-        }
-        lines.push(line);
-    }
+    lines.extend(record.parts.iter().map(part_line));
     lines.join("\n")
+}
+
+/// One piece of a change and what became of it, as one line:
+/// `branch: web refused (not merged)`.
+pub fn part_line(part: &RecordPart) -> String {
+    let mut line = format!("{}: {} {}", part.part, part.subject, part.outcome);
+    if let Some(reason) = &part.reason {
+        line.push_str(&format!(" ({reason})"));
+    }
+    line
 }
 
 #[cfg(test)]
@@ -421,6 +430,10 @@ mod tests {
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, |seen| match seen.path.as_str() {
             "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/sessions/a2?operation=1" => Reply::json(
+                409,
+                r#"{"error":"attached","blockers":[{"surface":"browser","device":null,"address":"192.168.1.5","verified":true,"driving":true,"target":{"kind":"tab","id":"t9","agent":"a2"}}]}"#,
+            ),
             _ => Reply::json(
                 409,
                 r#"{"error":"busy","message":"op-1 is still deleting web"}"#,
@@ -443,6 +456,25 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.exit, Exit::Refused);
         assert_eq!(error.message, "op-1 is still deleting web");
+
+        // Somebody attached: who, and how to go ahead over them.
+        let error = client
+            .change(Method::Delete, "/api/v1/sessions/a2", None)
+            .unwrap_err();
+        assert_eq!(error.exit, Exit::Refused);
+        assert!(
+            error
+                .message
+                .contains("a browser at 192.168.1.5, typing in tab t9"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("--dangerously-ignore-connected"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("{"), "{}", error.message);
     }
 
     #[test]

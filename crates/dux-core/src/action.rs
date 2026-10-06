@@ -42,6 +42,7 @@ pub enum Action {
     PrevTab,
     NewTab,
     CloseTab,
+    StopTab,
     SelectTab1,
     SelectTab2,
     SelectTab3,
@@ -248,6 +249,7 @@ impl Action {
             Action::PrevTab => "prev_tab",
             Action::NewTab => "new_tab",
             Action::CloseTab => "close_tab",
+            Action::StopTab => "stop_tab",
             Action::SelectTab1 => "select_tab_1",
             Action::SelectTab2 => "select_tab_2",
             Action::SelectTab3 => "select_tab_3",
@@ -417,6 +419,9 @@ impl Action {
             Action::PrevTab => "Focus the previous tab of the selected agent.",
             Action::NewTab => "Add a tab to the selected agent (starts fresh).",
             Action::CloseTab => "Close the focused tab of the selected agent.",
+            Action::StopTab => {
+                "Stop the focused tab of the selected agent; the tab stays, ready to start again."
+            }
             Action::SelectTab1 => "Focus tab 1 of the selected agent.",
             Action::SelectTab2 => "Focus tab 2 of the selected agent.",
             Action::SelectTab3 => "Focus tab 3 of the selected agent.",
@@ -661,6 +666,7 @@ impl Action {
             | Action::PrevTab
             | Action::NewTab
             | Action::CloseTab
+            | Action::StopTab
             | Action::SelectTab1
             | Action::SelectTab2
             | Action::SelectTab3

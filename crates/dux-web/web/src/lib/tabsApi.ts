@@ -64,6 +64,16 @@ export const tabsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/start`,
     ),
+  // Stop a tab: its process ends and the tab stays, dormant. The agent detaches
+  // when it was the last running tab. Refused with a 409 while somebody else is
+  // attached to the tab.
+  // `force` goes ahead over everybody attached to the tab.
+  stop: (sessionId: string, tabId: string, force = false) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/stop` +
+        forceConnectedQuery(force, true),
+    ),
   // Retarget a tab's provider (effective on its next launch).
   patch: (sessionId: string, tabId: string, provider: string) =>
     request<void>(

@@ -53,6 +53,7 @@
 //! | `POST /sessions/{id}/tabs` | the new tab's launch report |
 //! | `DELETE /sessions/{id}/tabs/{tab}` | inside the call |
 //! | `POST /sessions/{id}/tabs/{tab}/start` | inside the call when the tab already runs, else its launch report |
+//! | `POST /sessions/{id}/tabs/{tab}/stop` | inside the call |
 //! | `POST` and `DELETE` on the three terminal addresses | inside the call |
 //! | `PUT` and `DELETE` on `/macros/{name}` and `/global-env/{name}` | inside the call |
 //! | `POST /config/reload` | its reload's owner saying how it ended (`Engine::finish_config_reload_operations`) |
@@ -114,6 +115,8 @@ pub enum OperationKind {
     TabClose,
     #[serde(rename = "tab.start")]
     TabStart,
+    #[serde(rename = "tab.stop")]
+    TabStop,
     #[serde(rename = "terminal.create")]
     TerminalCreate,
     #[serde(rename = "terminal.close")]
@@ -144,6 +147,7 @@ impl OperationKind {
             Self::TabCreate => "opening a tab",
             Self::TabClose => "closing a tab",
             Self::TabStart => "starting a tab",
+            Self::TabStop => "stopping a tab",
             Self::TerminalCreate => "opening a terminal",
             Self::TerminalClose => "closing a terminal",
             Self::MacroSet => "saving a macro",

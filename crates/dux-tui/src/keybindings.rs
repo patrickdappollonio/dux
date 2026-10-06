@@ -612,6 +612,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::StopTab,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::DeleteSession,
         default_keys: &[key!(ctrl - d)],
         scopes: &[BindingScope::Left, BindingScope::Center],
@@ -3392,6 +3399,7 @@ mod tests {
             "sort-agents",
             "start-background-server",
             "start-web-server",
+            "stop-agent-tab",
             "stop-background-server",
             "toggle-agent-auto-reopen",
             "toggle-always-show-tabs",

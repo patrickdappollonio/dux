@@ -450,7 +450,7 @@ async fn an_explicit_false_spares_a_branch_dux_created() {
     );
     let status = wait_for_delete_status(&mut ws, "duxs").await;
     assert!(
-        status.contains("\"dux/made-this\" was kept because you left the branch box unticked"),
+        status.contains("\"dux/made-this\" was kept because you chose to keep it"),
         "the outcome must say the answer is what spared the branch: {status}"
     );
     assert_session_gone(f.addr, "duxs").await;

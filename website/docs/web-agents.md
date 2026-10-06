@@ -295,15 +295,15 @@ and why rather than reporting a deletion that did not happen.
 
 ### When somebody else is connected
 
-Deleting an agent, detaching it, force-stopping it, restarting it from scratch, closing a
-tab, closing a terminal, removing a project, and starting an agent that would stop another
+Deleting an agent, detaching it, force-stopping it, restarting it from scratch, stopping or
+closing a tab, closing a terminal, removing a project, and starting an agent that would stop another
 agent already working in the same folder all end terminals, and somebody else may be
 looking at one: another browser tab, a phone, or the terminal app. dux refuses the change
 while anybody else is connected to what it would end, and says who: the device, the address
 it connects from (marked unverified when dux cannot vouch for it), whether they are typing
 in it or watching, and which tab or terminal. Nothing is changed.
 
-The delete, detach, force stop, close tab, close terminal and project dialogs say it in place,
+The delete, detach, force stop, stop tab, close tab, close terminal and project dialogs say it in place,
 on both the browser and the terminal app: the dialog stays open, lists everybody it would cut
 off, moves focus back to Cancel, and its button becomes **Delete anyway** (or **Detach
 anyway**, **Close tab anyway**, and so on). Pressing that goes ahead over them; Cancel or

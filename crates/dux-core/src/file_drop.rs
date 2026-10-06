@@ -1600,7 +1600,6 @@ fn read_process_cwd(pid: u32) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn read_process_cwd(pid: u32) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
     let pid = libc::c_int::try_from(pid).ok()?;
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>();
     // SAFETY: zeroed is a valid value for this plain-data struct.
@@ -1624,6 +1623,15 @@ fn read_process_cwd(pid: u32) -> Option<PathBuf> {
     let bytes = unsafe {
         std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), std::mem::size_of_val(path))
     };
+    path_from_nul_terminated(bytes)
+}
+
+/// The path in a NUL-terminated buffer the kernel filled, as its exact bytes:
+/// nothing decodes, escapes or replaces them. `None` for an empty or
+/// unterminated buffer.
+#[cfg(any(target_os = "macos", test))]
+fn path_from_nul_terminated(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
     let end = bytes.iter().position(|byte| *byte == 0)?;
     (end > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
 }
@@ -2133,8 +2141,8 @@ mod tests {
             ),
         ] {
             // APFS, the macOS file system, refuses a name that is not UTF-8
-            // (EILSEQ), so that row cannot be built on a Mac and the case
-            // cannot arise on its own disk; the Linux run covers it.
+            // (EILSEQ), so that row cannot be built on a Mac; the check it
+            // reaches runs there in `a_path_that_is_not_utf8_is_refused_as_such`.
             if want == UnreportablePath::NotUtf8 && cfg!(target_os = "macos") {
                 continue;
             }
@@ -2199,6 +2207,17 @@ mod tests {
         assert_eq!(
             check_reportable_dir_path(Path::new("/tmp/fine")),
             Ok("/tmp/fine")
+        );
+    }
+
+    /// Built in memory, so it runs where the file system refuses such names
+    /// (macOS): a path that is not UTF-8 cannot be pasted losslessly.
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_as_such() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            check_reportable_dir_path(Path::new(std::ffi::OsStr::from_bytes(b"/tmp/dir\xffname"))),
+            Err(UnreportablePath::NotUtf8)
         );
     }
 
@@ -3102,9 +3121,21 @@ mod tests {
 
     /// A directory whose name is not valid UTF-8 is read back with its exact
     /// bytes: nothing decodes, escapes or replaces them on the way.
+    /// The decode macOS reads a working directory with keeps bytes that are
+    /// not UTF-8 exactly, and stops at the terminator. Built in memory.
+    #[test]
+    fn a_working_directory_buffer_that_is_not_utf8_is_decoded_exactly() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = path_from_nul_terminated(b"/tmp/od\xffd\0left over").expect("a path");
+        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/od\xffd");
+        assert_eq!(path_from_nul_terminated(b"\0"), None, "an empty answer");
+        assert_eq!(path_from_nul_terminated(b"/no/end"), None, "no terminator");
+    }
+
     // Linux only: APFS, the macOS file system, refuses a name that is not
-    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac and the case
-    // cannot arise on its own disk; the Linux run covers the shared code.
+    // UTF-8 (EILSEQ), so this fixture cannot be built on a Mac. The decode
+    // macOS uses runs there in
+    // `a_working_directory_buffer_that_is_not_utf8_is_decoded_exactly`.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_working_directory_that_is_not_valid_utf8_is_read_back_exactly() {
@@ -3146,8 +3177,9 @@ mod independent_path_safety_check {
             b"dir\xffname".as_slice(),
         ] {
             // APFS, the macOS file system, refuses a name that is not UTF-8
-            // (EILSEQ), so that row cannot be built on a Mac and the case
-            // cannot arise on its own disk; the Linux run covers it.
+            // (EILSEQ), so that row cannot be built on a Mac; the check it
+            // reaches runs there in
+            // `tests::a_path_that_is_not_utf8_is_refused_as_such`.
             if std::str::from_utf8(raw).is_err() && cfg!(target_os = "macos") {
                 continue;
             }

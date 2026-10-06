@@ -46,7 +46,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::operations::RecordWatch;
 use crate::pty_owners::PtySizeOwners;
@@ -62,7 +62,7 @@ pub const QUIET_DEADLINE: Duration = Duration::from_secs(75);
 pub const TERMINAL_UI_CONNECTION: &str = "terminal-ui";
 
 /// Which kind of client a connection is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Browser,
@@ -70,7 +70,7 @@ pub enum Surface {
 }
 
 /// What an attachment streams.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
     /// An agent's tab (its first tab included).
@@ -81,7 +81,7 @@ pub enum TargetKind {
 
 /// One agent tab or terminal, with the agent it belongs to when it belongs to
 /// one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub kind: TargetKind,
     /// The PTY's id: the tab id or the terminal id.
@@ -193,8 +193,9 @@ pub enum Life {
     Key { key: String, until: Instant },
 }
 
-/// One connection in the way of a change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// One connection in the way of a change. Read back from a refusal by the
+/// command line, which prints it the way the engine words it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blocker {
     pub surface: Surface,
     pub device: Option<String>,
@@ -202,6 +203,36 @@ pub struct Blocker {
     pub verified: bool,
     pub driving: bool,
     pub target: Target,
+}
+
+impl Blocker {
+    /// One blocker in words: who, from where, doing what, to which tab or
+    /// terminal.
+    pub fn describe(&self) -> String {
+        let who = self
+            .device
+            .as_deref()
+            .and_then(crate::device_label::short_device_label)
+            .unwrap_or_else(|| match self.surface {
+                Surface::Browser => "a browser".to_string(),
+                Surface::TerminalUi => crate::background_serve::TUI_DEVICE_LABEL.to_string(),
+            });
+        let place = match &self.address {
+            Some(address) if self.verified => format!(" at {address}"),
+            Some(address) => format!(" at {address} (unverified)"),
+            None => String::new(),
+        };
+        let doing = if self.driving {
+            "typing in"
+        } else {
+            "watching"
+        };
+        let what = match self.target.kind {
+            TargetKind::Tab => "tab",
+            TargetKind::Terminal => "terminal",
+        };
+        format!("{who}{place}, {doing} {what} {}", self.target.id)
+    }
 }
 
 /// How a connection or an attachment ended.
@@ -461,6 +492,21 @@ impl Attachments {
         self.with(|state| state.blockers(scope, exempt, now))
     }
 
+    /// How many browser connections are attached to `scope` at `now`, a
+    /// presence the grace keeps included: the people a change to it would
+    /// cut off, each counted once however many of its terminals they stream.
+    pub fn remote_viewers(&self, scope: &Scope, now: Instant) -> usize {
+        self.with(|state| {
+            let browsers: BTreeSet<String> = state
+                .in_scope(scope, None, now)
+                .into_iter()
+                .filter(|(_, blocker)| blocker.surface == Surface::Browser)
+                .map(|(connection, _)| connection)
+                .collect();
+            browsers.len()
+        })
+    }
+
     /// In one step: refuse a change to `scope` with the connections in its
     /// way, unless there are none or the policy forces it, and otherwise
     /// refuse every new attachment to `scope` for `life`. A forced change also
@@ -576,6 +622,20 @@ impl State {
     }
 
     fn blockers(&self, scope: &Scope, exempt: Option<&str>, now: Instant) -> Vec<Blocker> {
+        self.in_scope(scope, exempt, now)
+            .into_iter()
+            .map(|(_, blocker)| blocker)
+            .collect()
+    }
+
+    /// Every attachment and kept presence in `scope` that counts at `now`,
+    /// leaving out `exempt`, with the connection it belongs to.
+    fn in_scope(
+        &self,
+        scope: &Scope,
+        exempt: Option<&str>,
+        now: Instant,
+    ) -> Vec<(String, Blocker)> {
         let exempted = |id: &str| Some(id) == exempt;
         let mut attached: Vec<(&u64, &Attachment)> = self.attachments.iter().collect();
         attached.sort_by_key(|(token, _)| **token);
@@ -597,10 +657,9 @@ impl State {
             {
                 continue;
             }
-            blockers.push(blocker(
-                facts,
-                &attachment.target,
-                self.drives(facts, attachment),
+            blockers.push((
+                attachment.connection.clone(),
+                blocker(facts, &attachment.target, self.drives(facts, attachment)),
             ));
         }
         for presence in &self.presences {
@@ -610,7 +669,10 @@ impl State {
             {
                 continue;
             }
-            blockers.push(blocker(&presence.facts, &presence.target, false));
+            blockers.push((
+                presence.connection.clone(),
+                blocker(&presence.facts, &presence.target, false),
+            ));
         }
         blockers
     }
@@ -908,7 +970,52 @@ mod tests {
             let blockers =
                 attachments.blockers(&agent_scope("s1"), None, beat + Duration::from_secs(60));
             assert_eq!(!blockers.is_empty(), blocks, "{case}: {blockers:?}");
+            // A presence the grace keeps is a remote viewer for as long.
+            assert_eq!(
+                attachments.remote_viewers(&agent_scope("s1"), beat + Duration::from_secs(60)),
+                usize::from(blocks),
+                "{case}"
+            );
         }
+    }
+
+    /// Remote viewers are browser connections, not attachments: one tab
+    /// streaming two of an agent's terminals is one viewer, and the terminal
+    /// UI drawing the agent is none.
+    #[test]
+    fn remote_viewers_count_each_browser_connection_once() {
+        let attachments = Attachments::default();
+        let now = Instant::now();
+        attachments.register(
+            "e1",
+            browser("192.168.1.5", "Firefox"),
+            Some(Heard::at(now)),
+        );
+        for pty in ["s1-slot", "t2"] {
+            attachments
+                .attach("e1", tab(pty, "s1"), Some(Heard::at(now)), None)
+                .unwrap();
+        }
+        attachments.register(
+            TERMINAL_UI_CONNECTION,
+            ConnectionFacts {
+                surface: Surface::TerminalUi,
+                device: None,
+                address: None,
+                verified: true,
+                events: false,
+            },
+            None,
+        );
+        attachments.set_terminal_ui(vec![tab("s1-slot", "s1")], None);
+        assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 1);
+
+        attachments.register("e2", browser("192.168.1.6", "Safari"), Some(Heard::at(now)));
+        attachments
+            .attach("e2", tab("t2", "s1"), Some(Heard::at(now)), None)
+            .unwrap();
+        assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 2);
+        assert_eq!(attachments.remote_viewers(&agent_scope("s9"), now), 0);
     }
 
     /// The grace runs from the socket's last viewed beat, not from when the

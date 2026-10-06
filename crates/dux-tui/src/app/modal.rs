@@ -166,6 +166,7 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
+        | PromptState::ConfirmStopTab { .. }
         | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmRecreateWorkingCopy { .. }
         | PromptState::ConfirmCheckoutDefaultBranch { .. }
@@ -278,6 +279,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
+        | PromptState::ConfirmStopTab { .. }
         | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmRecreateWorkingCopy { .. }
         | PromptState::ConfirmCheckoutDefaultBranch { .. }
@@ -387,6 +389,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ConfirmDeleteWorktree { .. }
         | OverlayMouseLayout::ConfirmDeleteTerminal { .. }
         | OverlayMouseLayout::ConfirmCloseTab { .. }
+        | OverlayMouseLayout::ConfirmStopTab { .. }
         | OverlayMouseLayout::ConfirmDetachAgent { .. }
         | OverlayMouseLayout::ConfirmRecreateWorkingCopy { .. }
         | OverlayMouseLayout::ConfirmCheckoutDefaultBranch { .. }
@@ -1059,6 +1062,17 @@ pub(super) mod tests {
                     tab_id: "t1".to_string(),
                     provider_label: "Claude Code".to_string(),
                     promoted_label: Some("Codex Two".to_string()),
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmStopTab",
+                PromptState::ConfirmStopTab {
+                    attached: Vec::new(),
+                    session_id: "s1".to_string(),
+                    tab_id: "t1".to_string(),
+                    provider_label: "Claude Code".to_string(),
+                    last_running: true,
                     focus: ConfirmFocus::Cancel,
                 },
             ),

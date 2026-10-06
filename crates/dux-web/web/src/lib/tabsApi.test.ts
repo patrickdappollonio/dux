@@ -90,6 +90,17 @@ describe("tabsApi", () => {
     expect(c.method).toBe("POST")
   })
 
+  it("stop POSTs the stop endpoint, going ahead over everybody attached only when told to", async () => {
+    const fetchMock = stubOkFetch(200, {})
+    await tabsApi.stop("s1", "b2")
+    expect(lastCall(fetchMock).url).toBe("/api/v1/sessions/s1/tabs/b2/stop")
+    expect(lastCall(fetchMock).method).toBe("POST")
+    await tabsApi.stop("s1", "b2", true)
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1/tabs/b2/stop?force_connected=true",
+    )
+  })
+
   it("patch PATCHes the tab endpoint with the new provider", async () => {
     const fetchMock = stubOkFetch(200, {})
     await tabsApi.patch("s1", "b1", "opencode")

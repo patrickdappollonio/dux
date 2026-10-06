@@ -239,6 +239,8 @@ enum PromptMouseTarget {
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,
     ConfirmCloseTabConfirm,
+    ConfirmStopTabCancel,
+    ConfirmStopTabConfirm,
     ConfirmDetachAgentCancel,
     ConfirmDetachAgentConfirm,
     ConfirmRecreateWorkingCopyCancel,
@@ -331,6 +333,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmCloseTabConfirm => {
                 Some(ButtonPressedTarget::ConfirmCloseTabConfirm)
+            }
+            PromptMouseTarget::ConfirmStopTabCancel => {
+                Some(ButtonPressedTarget::ConfirmStopTabCancel)
+            }
+            PromptMouseTarget::ConfirmStopTabConfirm => {
+                Some(ButtonPressedTarget::ConfirmStopTabConfirm)
             }
             PromptMouseTarget::ConfirmDetachAgentCancel => {
                 Some(ButtonPressedTarget::ConfirmDetachAgentCancel)
@@ -1537,6 +1545,7 @@ impl App {
             Action::PrevTab => self.focus_tab_relative(false),
             Action::NewTab => self.open_new_tab_provider_prompt()?,
             Action::CloseTab => self.close_focused_tab_prompt(),
+            Action::StopTab => self.stop_focused_tab_prompt(),
             Action::SelectTab1 => self.focus_tab_index(0),
             Action::SelectTab2 => self.focus_tab_index(1),
             Action::SelectTab3 => self.focus_tab_index(2),
@@ -1935,6 +1944,7 @@ impl App {
             | PromptState::ConfirmDeleteAgent { .. }
             | PromptState::ConfirmDeleteTerminal { .. }
             | PromptState::ConfirmCloseTab { .. }
+            | PromptState::ConfirmStopTab { .. }
             | PromptState::ConfirmDetachAgent { .. }
             | PromptState::ConfirmRecreateWorkingCopy { .. }
             | PromptState::ConfirmCheckoutDefaultBranch { .. }
@@ -4943,6 +4953,23 @@ impl App {
         Some(false)
     }
 
+    fn handle_confirm_stop_tab_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmStopTab { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
+                return Some(self.resolve_confirm_stop_tab(confirm));
+            }
+            ModalKeyStep::FallThroughToField => {}
+        }
+        Some(false)
+    }
+
     fn handle_confirm_detach_agent_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::ConfirmDetachAgent { focus, .. } = &mut self.prompt else {
             return None;
@@ -5229,6 +5256,9 @@ impl App {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_close_tab_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_stop_tab_prompt_key(key) {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_detach_agent_prompt_key(key) {
@@ -6773,6 +6803,17 @@ impl App {
                 column,
                 row,
             ),
+            OverlayMouseLayout::ConfirmStopTab {
+                cancel_button,
+                confirm_button,
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmStopTabCancel),
+                    (confirm_button, PromptMouseTarget::ConfirmStopTabConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmRecreateWorkingCopy {
                 cancel_button,
                 confirm_button,
@@ -8288,6 +8329,40 @@ impl App {
         false
     }
 
+    /// Stop the tab the dialog named, through the same engine command the
+    /// browser's and the command line's stop send, so it is checked against
+    /// the changes another surface holds and the people attached to it in the
+    /// same place, and its sentence is the one they print.
+    pub(super) fn resolve_confirm_stop_tab(&mut self, confirm: bool) -> bool {
+        let (session_id, tab_id) = match &self.prompt {
+            PromptState::ConfirmStopTab {
+                session_id, tab_id, ..
+            } => (session_id.clone(), tab_id.clone()),
+            _ => return false,
+        };
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
+        if !confirm {
+            return false;
+        }
+        match self.guarded_by(&asked, |app| {
+            app.engine
+                .apply_wire(dux_core::wire::WireCommand::StopAgentTab { session_id, tab_id })
+        }) {
+            Ok(outcome) => {
+                self.engine.sync_has_active_processes();
+                self.rebuild_left_items();
+                if let Some(status) = outcome.status {
+                    self.set_info(status.message);
+                }
+            }
+            Err(error) => match super::attachment_presence::attached_refusal(error) {
+                Ok(refused) => self.reopen_naming_attached(asked, refused),
+                Err(error) => self.set_error(error.to_string()),
+            },
+        }
+        false
+    }
+
     pub(super) fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmCloseTab {
@@ -9559,6 +9634,8 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
             | PromptMouseTarget::ConfirmCloseTabCancel
             | PromptMouseTarget::ConfirmCloseTabConfirm
+            | PromptMouseTarget::ConfirmStopTabCancel
+            | PromptMouseTarget::ConfirmStopTabConfirm
             | PromptMouseTarget::ConfirmDetachAgentCancel
             | PromptMouseTarget::ConfirmDetachAgentConfirm
             | PromptMouseTarget::ConfirmRecreateWorkingCopyCancel
@@ -9678,6 +9755,8 @@ impl App {
             }
             ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
             ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
+            ButtonPressedTarget::ConfirmStopTabCancel => self.resolve_confirm_stop_tab(false),
+            ButtonPressedTarget::ConfirmStopTabConfirm => self.resolve_confirm_stop_tab(true),
             ButtonPressedTarget::ConfirmDetachAgentCancel => {
                 self.resolve_confirm_detach_agent(false)
             }
@@ -22583,6 +22662,7 @@ not_a_real_action = ["x"]
             palette_names(&app, "agent tab"),
             vec![
                 "new-agent-tab",
+                "stop-agent-tab",
                 "toggle-always-show-tabs",
                 "toggle-tab-to-agent",
                 "close-tab"
@@ -22592,20 +22672,21 @@ not_a_real_action = ["x"]
 
     #[test]
     fn palette_movement_clamps_at_both_ends() {
-        // Four commands, and the cursor stops at each end of them.
+        // Five commands, and the cursor stops at each end of them.
         let mut app = palette_app("agent tab", 0);
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
 
-        for expected in [1, 2, 3, 3, 3] {
+        for expected in [1, 2, 3, 4, 4] {
             app.handle_key(down).unwrap();
             assert_eq!(palette_selection(&app), expected, "moving down");
         }
-        for expected in [2, 1, 0, 0, 0] {
+        for expected in [3, 2, 1, 0, 0] {
             app.handle_key(up).unwrap();
             assert_eq!(palette_selection(&app), expected, "moving up");
         }
         // Crossing from the phrase matches into the loose ones is one step.
+        app.handle_key(down).unwrap();
         app.handle_key(down).unwrap();
         app.handle_key(down).unwrap();
         let commands = app.filtered_palette_commands("agent tab");
@@ -22617,7 +22698,7 @@ not_a_real_action = ["x"]
 
     #[test]
     fn tab_completes_and_enter_runs_the_first_loose_match() {
-        let mut app = palette_app("agent tab", 2);
+        let mut app = palette_app("agent tab", 3);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
@@ -22627,7 +22708,7 @@ not_a_real_action = ["x"]
             other => panic!("expected the palette, got {other:?}"),
         }
 
-        let mut app = palette_app("agent tab", 2);
+        let mut app = palette_app("agent tab", 3);
         let before = app.engine.config.ui.tab_reaches_agent;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
@@ -22675,10 +22756,10 @@ not_a_real_action = ["x"]
 
     #[test]
     fn clicks_land_on_the_right_command_once_the_list_has_scrolled() {
-        // Selecting the last command scrolls the first two off the top, so a
+        // Selecting the last command scrolls the first three off the top, so a
         // click has to be read through the renderer's own offset.
-        let (mut app, list, offset) = scrolled_palette("agent tab", 3);
-        assert_eq!(offset, 2, "the fixture must have scrolled");
+        let (mut app, list, offset) = scrolled_palette("agent tab", 4);
+        assert_eq!(offset, 3, "the fixture must have scrolled");
         click_palette_row(&mut app, list, 0);
         assert_eq!(
             palette_names(&app, "agent tab")[palette_selection(&app)],
@@ -22701,7 +22782,7 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
         assert_eq!(
             palette_names(&app, "agent tab")[palette_selection(&app)],
-            "toggle-tab-to-agent"
+            "toggle-always-show-tabs"
         );
     }
 

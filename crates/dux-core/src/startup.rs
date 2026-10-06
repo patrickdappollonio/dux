@@ -1502,22 +1502,27 @@ mod tests {
     /// after the run has returned and its log is written, nothing ever reads
     /// it, no file names it, and it grows on disk in dux's config folder for
     /// as long as the job runs.
-    // Linux only: the job's output is measured through /proc, which macOS does
-    // not have, so there the size would read 0 and the test would pass without
-    // looking. The capture is the same code on both; the Linux run covers it.
-    #[cfg(target_os = "linux")]
     #[test]
     fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let pidfile = tmp.path().join("job.pid");
+        // The job measures its own standard output once it has written, with
+        // fstat, and reports the size through a file: the same answer on Linux
+        // and macOS, with no /proc. The report is renamed into place so a
+        // partial one is never read.
+        let report = tmp.path().join("stdout-size");
         let registry = crate::process_sessions::AgentProcessRegistry::default();
         let result = run_startup_command(
             &paths,
             sleeper_run(
                 tmp.path(),
                 &format!(
-                    "(sleep 0.3; head -c 20000000 /dev/zero; sleep 30) & echo $! > '{}'; exit 0",
+                    "(sleep 0.3; head -c 20000000 /dev/zero; \
+                     python3 -c \"import os,sys; t=sys.argv[1]+'.tmp'; \
+                     open(t,'w').write(str(os.fstat(1).st_size)); os.rename(t,sys.argv[1])\" '{}'; \
+                     sleep 30) & echo $! > '{}'; exit 0",
+                    report.display(),
                     pidfile.display()
                 ),
             ),
@@ -1525,11 +1530,19 @@ mod tests {
         );
         assert!(result.status.is_ok(), "{:?}", result.status);
         let job = wait_for_pid(&pidfile);
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let stdout = fs::read_link(format!("/proc/{job}/fd/1")).ok();
-        let size = fs::metadata(format!("/proc/{job}/fd/1"))
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let size = loop {
+            if let Some(size) = fs::read_to_string(&report)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                break Some(size);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         for leader in &registry.sessions_of("session-1") {
             if let Some(group) = rustix::process::Pid::from_raw(leader.sid as i32) {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
@@ -1538,10 +1551,11 @@ mod tests {
         if let Some(pid) = rustix::process::Pid::from_raw(job) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
+        let size = size.expect("the job never reported the size of its standard output");
         assert!(
             size < 1_000_000,
-            "the job wrote {size} bytes into {stdout:?}, an unlinked file in dux's own folder \
-             that nothing reads and no listing shows"
+            "the job's standard output holds {size} bytes: an unlinked file in dux's own \
+             folder that nothing reads and no listing shows"
         );
     }
 }

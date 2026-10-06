@@ -156,7 +156,8 @@ impl Engine {
                     takes: holds,
                 })
             }
-            WireCommand::CloseAgentTab { session_id, tab_id } => {
+            WireCommand::CloseAgentTab { session_id, tab_id }
+            | WireCommand::StopAgentTab { session_id, tab_id } => {
                 Some(self.tab_admission(session_id, TabId::new(tab_id.clone())))
             }
             WireCommand::DeleteTerminal { terminal_id } => {
@@ -423,6 +424,18 @@ mod tests {
             panic!("a kill of an agent a browser watches went ahead");
         };
         assert!(refused.to_string().contains("192.168.1.5"), "{refused}");
+        // So is a stop of one tab: of an agent a change holds, naming that
+        // change, and of a tab a browser watches, naming who.
+        let stop_tab = |agent: &str| WireCommand::StopAgentTab {
+            session_id: agent.to_string(),
+            tab_id: format!("{agent}-slot"),
+        };
+        for (agent, needle) in [("s1", "op-held"), ("s2", "192.168.1.5")] {
+            let Err(refused) = engine.apply_wire(stop_tab(agent)) else {
+                panic!("a stop of {agent}'s tab went ahead");
+            };
+            assert!(refused.to_string().contains(needle), "{refused}");
+        }
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
         assert!(engine.sessions.iter().any(|s| s.id == "s2"));
         assert!(engine.projects.iter().any(|p| p.id == "p1"));

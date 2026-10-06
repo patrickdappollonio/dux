@@ -452,35 +452,47 @@ mod tests {
         path
     }
 
-    // Linux only: the fixture is a real folder just under the 4096-character
-    // cap, and macOS refuses any path longer than its PATH_MAX of 1024, so the
-    // folder cannot be made there. The cap is the same string check on both;
-    // the Linux run covers it.
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn mkdir_rejects_a_join_that_overruns_the_path_cap() {
         // Catches the gap between the two bounded strings: a parent inside the
         // cap plus a name inside its own limit can still join into a path the
-        // inspect route would refuse to look at.
-        let dir = tempfile::tempdir().unwrap();
-        let deep = deep_dir(dir.path(), MAX_PATH_LEN - 6);
-        let parent = deep.to_string_lossy().to_string();
+        // inspect route would refuse to look at. The route checks the strings
+        // before it touches the filesystem, so the parent need not exist,
+        // which keeps this on every platform (macOS cannot make a folder this
+        // long: its PATH_MAX is 1024).
+        let parent = format!("/{}", "p".repeat(MAX_PATH_LEN - 7));
+        assert_eq!(parent.chars().count(), MAX_PATH_LEN - 6);
 
-        let long_name = "n".repeat(32);
         let (_tmp, app) = router_no_auth();
-        let resp = post_mkdir(app, &parent, &long_name).await;
+        let resp = post_mkdir(app, &parent, &"n".repeat(32)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             String::from_utf8(bytes.to_vec()).unwrap(),
             "the folder's full path is too long"
         );
+    }
+
+    // Linux only: the fixture is a real folder just under the 4096-character
+    // cap, and macOS refuses any path longer than its PATH_MAX of 1024, so the
+    // folder cannot be made there. The cap's refusal runs on macOS in
+    // `mkdir_rejects_a_join_that_overruns_the_path_cap`, and an ordinary
+    // create in `mkdir_creates_a_folder_and_returns_its_path`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn mkdir_under_a_parent_near_the_path_cap_creates_a_name_the_join_can_carry() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = deep_dir(dir.path(), MAX_PATH_LEN - 6);
+        let parent = deep.to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, &"n".repeat(32)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(
-            !deep.join(&long_name).exists(),
+            !deep.join("n".repeat(32)).exists(),
             "a refused join must create nothing"
         );
 
-        // The same parent still works for a name the join can carry.
         let (_tmp, app) = router_no_auth();
         let resp = post_mkdir(app, &parent, "ok").await;
         assert_eq!(resp.status(), StatusCode::OK);

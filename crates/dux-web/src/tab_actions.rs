@@ -17,6 +17,9 @@
 //! and that gesture is the agent's detach. A `:tab` not owned by `:id` is a 404,
 //! and a provider that is not configured is a 400.
 //!
+//! `POST .../tabs/:tab/stop` ends one tab's process and keeps the tab; the
+//! agent detaches only when it was the last running one.
+//!
 //! `POST .../tabs/:tab/start` is the only start that gets past a recorded launch
 //! failure: opening a failed tab's PTY socket deliberately refuses to launch it, so
 //! a tab that cannot come up never relaunches itself.
@@ -52,6 +55,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/sessions/{id}/tabs/{tab}", delete(delete_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", patch(retarget_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}/start", post(start_tab))
+        .route("/api/v1/sessions/{id}/tabs/{tab}/stop", post(stop_tab))
         .route(
             "/api/v1/sessions/{id}/focused-tab",
             put(set_focused_tab_route),
@@ -250,6 +254,56 @@ async fn start_tab(
     match state.engine.start_agent_tab(tab, ticket).await {
         Ok(()) if let Some(record) = &followed => ticket_accepted(record),
         Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// `POST /api/v1/sessions/:id/tabs/:tab/stop` - end one tab's process and
+/// keep the tab, dormant, in the strip. Any tab, the session-slot tab
+/// included; the agent detaches only when this was its last running tab, and
+/// a tab that is not running is a successful no-op that says so. Guarded like
+/// a close: refused with `409 attached` while somebody else is attached to
+/// the tab, unless `force_connected` says to go ahead. Ends inside the call.
+async fn stop_tab(
+    State(state): State<AppState>,
+    Path((id, tab)): Path<(String, String)>,
+    Query(operation): Query<OperationQuery>,
+    Query(force): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
+        return *resp;
+    }
+    let command = WireCommand::StopAgentTab {
+        session_id: id,
+        tab_id: tab,
+    };
+    let result = match dispatch_guarded(
+        &state,
+        command,
+        &headers,
+        OperationKind::TabStop,
+        &operation,
+        &force,
+        &client,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(refused) => return refused.into_response(),
+    };
+    let result = result.and_then(|guarded| {
+        if operation.asked() {
+            guarded.followed().map(|(_, op)| Some(op))
+        } else {
+            Ok(None)
+        }
+    });
+    match result {
+        Ok(Some(op)) => operation_accepted(&op),
+        Ok(None) => StatusCode::OK.into_response(),
+        Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }

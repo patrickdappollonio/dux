@@ -5,12 +5,13 @@ use dux_core::client::config_resources::{self as resources, Source, Writer};
 use dux_core::client::connect::{self, REMOTE_VARIABLE, Target};
 use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
-use dux_core::client::{CliError, Exit, sign_in, wait};
+use dux_core::client::{CliError, Exit, sign_in, wait, workspace};
 use dux_core::config::DuxPaths;
 
 use crate::commands::{
-    ChangeFlags, EnvSub, Format, ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub,
-    RemoteSub,
+    AddAgentArgs, AgentsSub, ChangeFlags, EnvSub, Format, GuardedChangeFlags, ListFlags,
+    ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSub, TabsSub,
+    TerminalsSub, WorktreesSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
@@ -397,5 +398,230 @@ pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
             false,
             |writer| resources::remove_env(writer, &name),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Projects, agents, tabs, worktrees and terminals: always a running dux
+// ---------------------------------------------------------------------------
+
+/// The selected dux, which must be running: these resources live in its
+/// database and engine, never in a file this command could read instead.
+fn running(selection: &Selection) -> Result<(DuxPaths, connect::Client), CliError> {
+    let paths = discover()?;
+    let client = connect::connect(&selection.target(&paths)?, &paths.lock_path)?;
+    Ok((paths, client))
+}
+
+fn read_on_dux(
+    selection: &Selection,
+    read: impl FnOnce(&connect::Client) -> Result<String, CliError>,
+) -> Result<String, CliError> {
+    let (_, client) = running(selection)?;
+    read(&client)
+}
+
+/// Plan a change on the running dux, ask about it, send it and, unless told
+/// not to, wait for how it ended.
+fn change_on_dux(
+    selection: &Selection,
+    flags: &ChangeFlags,
+    plan: impl FnOnce(&connect::Client, &std::path::Path) -> Result<workspace::Planned, CliError>,
+) -> Result<String, CliError> {
+    let (paths, client) = running(selection)?;
+    let cwd = std::env::current_dir().map_err(|error| {
+        CliError::new(
+            Exit::Failed,
+            format!("could not read the current folder: {error}"),
+        )
+    })?;
+    let planned = plan(&client, &cwd)?;
+    ask(&planned.question, client.target(), flags.yes, false)?;
+    let wait = if flags.no_wait {
+        None
+    } else {
+        Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path)?)
+    };
+    workspace::perform(&client, planned, wait)
+}
+
+/// A guarded change: the same, going ahead over whoever is attached only
+/// when asked to in so many words.
+fn guarded_on_dux(
+    selection: &Selection,
+    flags: &GuardedChangeFlags,
+    plan: impl FnOnce(&connect::Client, bool) -> Result<workspace::Planned, CliError>,
+) -> Result<String, CliError> {
+    let force = flags.dangerously_ignore_connected;
+    change_on_dux(selection, &flags.change, |client, _| plan(client, force))
+}
+
+pub fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        ProjectsSub::Ls(list) => read_on_dux(selection, |client| {
+            workspace::projects_ls(client, shape(&list))
+        }),
+        ProjectsSub::Show { project } => read_on_dux(selection, |client| {
+            workspace::projects_show(client, &project)
+        }),
+        ProjectsSub::Add {
+            path,
+            name,
+            checkout_default,
+            init,
+            change,
+        } => change_on_dux(selection, &change, |client, cwd| {
+            workspace::projects_add(client, &path, name.as_deref(), checkout_default, init, cwd)
+        }),
+        ProjectsSub::Rm {
+            project,
+            delete_worktrees,
+            guarded,
+        } => guarded_on_dux(selection, &guarded, |client, force| {
+            workspace::projects_rm(client, &project, delete_worktrees, force)
+        }),
+        ProjectsSub::Worktrees {
+            command: WorktreesSub::Ls { project, list },
+        } => read_on_dux(selection, |client| {
+            workspace::worktrees_ls(client, &project, shape(&list))
+        }),
+    }
+}
+
+pub fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        AgentsSub::Ls {
+            project,
+            worktrees,
+            list,
+        } => read_on_dux(selection, |client| {
+            workspace::agents_ls(client, project.as_deref(), worktrees, shape(&list))
+        }),
+        AgentsSub::Show { agent } => {
+            read_on_dux(selection, |client| workspace::agents_show(client, &agent))
+        }
+        AgentsSub::Add(args) => {
+            let how = new_agent(&args);
+            change_on_dux(selection, &args.change, |client, cwd| {
+                workspace::agents_add(client, how, args.name.as_deref(), cwd)
+            })
+            .map_err(workspace::existing_branch_refusal)
+        }
+        AgentsSub::Rm {
+            agent,
+            delete_worktree,
+            delete_branch,
+            keep_branch,
+            guarded,
+        } => {
+            // Neither flag leaves it to how the branch came to be, as the
+            // delete dialogs do.
+            let branch = match (delete_branch, keep_branch) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            guarded_on_dux(selection, &guarded, |client, force| {
+                workspace::agents_rm(client, &agent, delete_worktree, branch, force)
+            })
+        }
+        AgentsSub::Stop { agent, guarded } => {
+            guarded_on_dux(selection, &guarded, |client, force| {
+                workspace::agents_stop(client, &agent, force)
+            })
+        }
+        AgentsSub::Start { agent, change } => change_on_dux(selection, &change, |client, _| {
+            workspace::agents_start(client, &agent)
+        }),
+        AgentsSub::Tabs { command } => tabs(command, selection),
+    }
+}
+
+/// Which kind of create `dux agents add` was asked for. The command tree
+/// guarantees exactly one source.
+fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
+    if let Some(agent) = &args.fork {
+        return workspace::NewAgent::Fork {
+            agent: agent.clone(),
+        };
+    }
+    if let Some(folder) = &args.standalone {
+        return workspace::NewAgent::Standalone {
+            folder: folder.clone(),
+            provider: args.provider.clone(),
+        };
+    }
+    let project = args.project.clone().unwrap_or_default();
+    if let Some(reference) = &args.from_pr {
+        return workspace::NewAgent::PullRequest {
+            project,
+            reference: reference.clone(),
+        };
+    }
+    if let Some(path) = &args.from_worktree {
+        return workspace::NewAgent::Worktree {
+            project,
+            path: path.clone(),
+        };
+    }
+    workspace::NewAgent::Branch {
+        project,
+        existing_branch: args.existing_branch,
+        copy_uncommitted: args.copy_uncommitted,
+    }
+}
+
+fn tabs(command: TabsSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        TabsSub::Ls { agent, list } => read_on_dux(selection, |client| {
+            workspace::tabs_ls(client, &agent, shape(&list))
+        }),
+        TabsSub::Add {
+            agent,
+            provider,
+            change,
+        } => change_on_dux(selection, &change, |client, _| {
+            workspace::tabs_add(client, &agent, provider.as_deref())
+        }),
+        TabsSub::Rm {
+            agent,
+            tab,
+            guarded,
+        } => guarded_on_dux(selection, &guarded, |client, force| {
+            workspace::tabs_rm(client, &agent, &tab, force)
+        }),
+        TabsSub::Start { agent, tab, change } => change_on_dux(selection, &change, |client, _| {
+            workspace::tabs_start(client, &agent, &tab)
+        }),
+        TabsSub::Stop {
+            agent,
+            tab,
+            guarded,
+        } => guarded_on_dux(selection, &guarded, |client, force| {
+            workspace::tabs_stop(client, &agent, &tab, force)
+        }),
+    }
+}
+
+pub fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        TerminalsSub::Ls(list) => read_on_dux(selection, |client| {
+            workspace::terminals_ls(client, shape(&list))
+        }),
+        TerminalsSub::Add(args) => {
+            let owner = match (&args.agent, &args.project) {
+                (Some(agent), _) => workspace::TerminalFor::Agent(agent.clone()),
+                (_, Some(project)) => workspace::TerminalFor::Project(project.clone()),
+                (None, None) => workspace::TerminalFor::Standalone,
+            };
+            change_on_dux(selection, &args.change, |client, _| {
+                workspace::terminals_add(client, owner)
+            })
+        }
+        TerminalsSub::Rm { terminal, guarded } => {
+            guarded_on_dux(selection, &guarded, |client, force| {
+                workspace::terminals_rm(client, &terminal, force)
+            })
+        }
     }
 }
