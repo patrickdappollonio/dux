@@ -392,9 +392,9 @@ function AgentIdentityAndSetupItems({
         <Info />
         Agent info…
       </DropdownMenuItem>
-      <DropdownMenuSeparator />
       {branchGit ? (
         <>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
             <SquareChevronRight />
             Configure startup command…

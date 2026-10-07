@@ -388,6 +388,37 @@ describe("AgentActionsMenu for a standalone agent", () => {
   })
 })
 
+// A group that is absent for one kind of agent must take its separator with
+// it, or the menu draws two rules with nothing between them.
+describe("AgentActionsMenu separators", () => {
+  function rows(): string[] {
+    return Array.from(
+      document.querySelectorAll('[role="menuitem"], [role="separator"]'),
+    ).map((el) => el.getAttribute("role") ?? "")
+  }
+
+  for (const [kind, build] of [
+    ["a managed agent", () => makeSession({ id: "s1" })],
+    ["a standalone agent", () => makeStandaloneSession("sa1")],
+  ] as const) {
+    it(`never puts two separators together, nor one at either end, for ${kind}`, async () => {
+      const session = build()
+      seed(session, true)
+      await openMenu(session)
+      const seen = rows()
+      expect(seen.length).toBeGreaterThan(0)
+      expect(seen[0]).not.toBe("separator")
+      expect(seen.at(-1)).not.toBe("separator")
+      for (let i = 1; i < seen.length; i += 1) {
+        expect(
+          seen[i] === "separator" && seen[i - 1] === "separator",
+          `separators at ${i - 1} and ${i}`,
+        ).toBe(false)
+      }
+    })
+  }
+})
+
 describe("AgentActionsMenu terminal entry names where the shell opens", () => {
   it("says the worktree for a managed agent and the folder for a standalone one", async () => {
     seed(makeSession({ id: "s1" }), false)
