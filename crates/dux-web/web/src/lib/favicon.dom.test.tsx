@@ -207,19 +207,24 @@ describe("applyAttentionFavicon", () => {
 })
 
 describe("applyAttentionFavicon blink", () => {
-  // A 2D context that records the dot's alpha, and a toDataURL that names the
-  // frame it was asked for from that alpha, so a test can tell the frames apart.
+  // A 2D context that records whether a dot was painted and at what alpha, and
+  // a toDataURL that names the frame from that: ON for a full dot, DIM for a
+  // faded one, OFF for none, so a test can tell the frames apart.
   let composes = 0
   let lastAlpha = 1
+  let fills = 0
   let images: Array<{ onload?: () => void; onerror?: () => void; src?: string }> = []
 
   function installCanvas() {
     const ctx = {
-      clearRect: () => {},
+      clearRect: () => {
+        fills = 0
+      },
       drawImage: () => {},
       beginPath: () => {},
       arc: () => {},
       fill: () => {
+        fills += 1
         lastAlpha = ctx.globalAlpha
       },
       fillStyle: "",
@@ -230,7 +235,8 @@ describe("applyAttentionFavicon blink", () => {
     )
     vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(() => {
       composes += 1
-      return `data:image/png;base64,${lastAlpha === 1 ? "ON" : "DIM"}-${composes}`
+      const frame = fills === 0 ? "OFF" : lastAlpha === 1 ? "ON" : "DIM"
+      return `data:image/png;base64,${frame}-${composes}`
     })
     vi.stubGlobal(
       "Image",
@@ -320,7 +326,7 @@ describe("applyAttentionFavicon blink", () => {
     document.head.innerHTML = ""
   })
 
-  it("blinks between the dotted and dimmed frames on the shared rhythm while attention holds", async () => {
+  it("blinks between the dotted icon and the plain one on the shared rhythm while attention holds", async () => {
     applyAttentionFavicon("", true)
     await loadImages()
     expect(shownHref()).toContain("ON")
@@ -328,7 +334,7 @@ describe("applyAttentionFavicon blink", () => {
     const seen = new Set<string>()
     for (let t = 0; t < ATTENTION_PULSE_PERIOD_MS; t += 10) {
       vi.advanceTimersByTime(10)
-      seen.add(shownHref().includes("DIM") ? "dim" : "on")
+      seen.add(shownHref().includes("OFF") ? "dim" : "on")
     }
     expect(seen).toEqual(new Set(["on", "dim"]))
   })
@@ -382,7 +388,7 @@ describe("applyAttentionFavicon blink", () => {
       vi.advanceTimersByTime(10)
       // The store re-applies on every spine push.
       applyAttentionFavicon("", true)
-      frames.push(shownHref().includes("DIM") ? "dim" : "on")
+      frames.push(shownHref().includes("OFF") ? "dim" : "on")
     }
     expect(frames).toContain("dim")
   })
@@ -435,7 +441,7 @@ describe("applyAttentionFavicon blink", () => {
     const seen = new Set<string>()
     for (let t = 0; t < ATTENTION_PULSE_PERIOD_MS; t += 10) {
       vi.advanceTimersByTime(10)
-      seen.add(shownHref().includes("DIM") ? "dim" : "on")
+      seen.add(shownHref().includes("OFF") ? "dim" : "on")
     }
     expect(seen).toEqual(new Set(["on", "dim"]))
 
@@ -458,14 +464,14 @@ describe("applyAttentionFavicon blink", () => {
     expect(motionListeners.size).toBe(0)
   })
 
-  it("switches to the even blink when the tab is hidden and back when it returns", async () => {
+  it("switches to the even blink when the tab is hidden with only the page's own timers, and back when it returns", async () => {
     const t0 = Date.now()
     applyAttentionFavicon("", true)
     await loadImages()
 
     // Half a second in, the rhythm is in its second dip...
     vi.advanceTimersByTime(500 - (Date.now() - t0))
-    expect(shownHref()).toContain("DIM")
+    expect(shownHref()).toContain("OFF")
 
     // ...while the hidden tab's even blink is still in its on half.
     setHidden(true)
@@ -473,7 +479,7 @@ describe("applyAttentionFavicon blink", () => {
     vi.advanceTimersByTime(499)
     expect(shownHref()).toContain("ON")
     vi.advanceTimersByTime(1)
-    expect(shownHref()).toContain("DIM")
+    expect(shownHref()).toContain("OFF")
 
     // Back in front, 1.5 s into the cycle is the rhythm's hold.
     vi.advanceTimersByTime(500)

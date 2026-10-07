@@ -24,9 +24,10 @@ looking.
   you visiting it.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
   above zero, and the dot blinks with the same double pulse as the sidebar's, so it
-  catches your eye from the tab strip. While you are in another tab it settles into
-  a plain, slower on-off blink, which is what a browser lets a background tab keep
-  up. It holds still if you have reduced-motion turned on.
+  catches your eye from the tab strip, even while you are in another tab. Each
+  blink takes the dot away entirely rather than fading it. In the rare browser that
+  cannot keep that pace for a background tab, it falls back to a plain, slower
+  on-off blink there. It holds still if you have reduced-motion turned on.
 
 Turning `attention_indicator` off (below) takes the tab-title count and the favicon dot
 away at once, in every open browser tab, even for an agent that was already waiting.

@@ -7,7 +7,6 @@
 // a validated `#rrggbb` from the map below, so nothing untrusted is
 // interpolated into the markup.
 
-import { ATTENTION_PULSE_FLOOR } from "./attentionPulse"
 import {
   createWakeTimer,
   startAttentionBlink,
@@ -186,7 +185,8 @@ const ATTENTION_DOT_FILL = "#cffafe"
 const ATTENTION_DOT_RIM = "#1a1a1a"
 
 // The two frames the favicon blinks between: the dot at full strength, and the
-// dot at the bottom of the row dot's dip. Both are PNG data URLs.
+// icon with no dot at all, because a dot faded to the row dot's floor still
+// reads as a dot at favicon size. Both are PNG data URLs.
 type DotFrames = { on: string; dim: string }
 
 // Composed frame pairs, keyed by the base href, so a base is drawn onto a
@@ -356,8 +356,8 @@ function stopAttentionMotion(): void {
   unwatchReducedMotion()
 }
 
-/** Draw the base favicon plus a cyan corner dot onto a canvas, once at full
- * strength and once at the pulse's floor, and return both as PNG data URLs, or
+/** Draw the base favicon onto a canvas once with a cyan corner dot and once
+ * without, and return both as PNG data URLs, or
  * `null` when canvas/image loading is unavailable (e.g. jsdom). */
 function composeDotFrames(href: string): Promise<DotFrames | null> {
   return new Promise((resolve) => {
@@ -374,15 +374,14 @@ function composeDotFrames(href: string): Promise<DotFrames | null> {
       return
     }
     const img = new Image()
-    const draw = (dotAlpha: number): string => {
+    const draw = (withDot: boolean): string => {
       ctx.clearRect(0, 0, size, size)
       ctx.globalAlpha = 1
       ctx.drawImage(img, 0, 0, size, size)
+      if (!withDot) return canvas.toDataURL("image/png")
       const r = size * 0.26
       const cx = size - r - size * 0.05
       const cy = size - r - size * 0.05
-      // The whole dot fades, rim included, the way the row dot's opacity does.
-      ctx.globalAlpha = dotAlpha
       // Dark rim first for contrast against the duck, then the cyan fill.
       ctx.beginPath()
       ctx.arc(cx, cy, r + size * 0.06, 0, Math.PI * 2)
@@ -392,13 +391,12 @@ function composeDotFrames(href: string): Promise<DotFrames | null> {
       ctx.arc(cx, cy, r, 0, Math.PI * 2)
       ctx.fillStyle = ATTENTION_DOT_FILL
       ctx.fill()
-      ctx.globalAlpha = 1
       return canvas.toDataURL("image/png")
     }
     img.onload = () => {
       try {
-        const on = draw(1)
-        const dim = draw(ATTENTION_PULSE_FLOOR)
+        const on = draw(true)
+        const dim = draw(false)
         resolve({ on, dim })
       } catch (err) {
         console.warn("[dux] favicon dot compositing failed", err)

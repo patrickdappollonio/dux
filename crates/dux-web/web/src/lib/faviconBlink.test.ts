@@ -69,7 +69,7 @@ describe("startAttentionBlink", () => {
     expect(shown).toEqual(expected)
   })
 
-  it("switches to the steady blink while the page is hidden, and back on resync", () => {
+  it("switches to the steady blink while the page is hidden on its own timers, and back on resync", () => {
     let hidden = false
     const shown: Array<[number, string]> = []
     const start = Date.now()
@@ -190,6 +190,44 @@ describe("the wake timers", () => {
       expect(vi.getTimerCount()).toBe(0)
     })
   }
+
+  it("plays the full rhythm in a hidden tab while the worker keeps time", () => {
+    vi.stubGlobal("Worker", FakeWorker)
+    const shown: string[] = []
+    const blink = startAttentionBlink({
+      timer: createWakeTimer(),
+      show: (f) => shown.push(f),
+      hidden: () => true,
+    })
+    const worker = FakeWorker.instances[0]
+    // The first wake asked of the worker is the rhythm's first dip, not the
+    // half-period flip of the even blink.
+    expect(worker.posted.at(-1)).toMatchObject({
+      type: "set",
+      delay: attentionFrameAt(0, "rhythm").msUntilChange,
+    })
+    expect(attentionFrameAt(0, "rhythm").msUntilChange).toBeLessThan(
+      ATTENTION_PULSE_PERIOD_MS / 2,
+    )
+    blink.stop()
+  })
+
+  it("falls back to the even blink in a hidden tab once the worker has failed", () => {
+    vi.stubGlobal("Worker", FakeWorker)
+    const timer = createWakeTimer()
+    FakeWorker.instances[0].onerror?.({})
+    const shown: Array<[number, string]> = []
+    const start = Date.now()
+    const blink = startAttentionBlink({
+      timer,
+      show: (f) => shown.push([Date.now() - start, f]),
+      hidden: () => true,
+    })
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 2)
+    const times = shown.map(([t]) => t % (ATTENTION_PULSE_PERIOD_MS / 2))
+    expect(new Set(times)).toEqual(new Set([0]))
+    blink.stop()
+  })
 
   it("keeps a blink going when its worker fails to load", () => {
     vi.stubGlobal("Worker", FakeWorker)

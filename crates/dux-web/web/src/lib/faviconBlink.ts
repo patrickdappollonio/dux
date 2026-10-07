@@ -20,11 +20,11 @@
 // runs in a worker, with the page's own timers as the fallback when a worker
 // cannot be made.
 //
-// WHY TWO MODES. None of that is a guarantee, so a hidden page does not bet the
-// visible result on it: while hidden the favicon plays the `steady` on/off blink
-// over the same period, which still alternates on every wake of a clock held to
-// one per second, where the two quick dips would be sampled away. On a visible
-// page (whose favicon is in the tab strip too) it plays the full rhythm.
+// WHY TWO MODES. The favicon plays the full rhythm, hidden or not, whenever its
+// clock is the worker. Only a hidden page left on its own timers (no worker
+// could be made, or it failed) plays the `steady` on/off blink over the same
+// period, which still alternates on every wake of a clock held to one per
+// second, where the two quick dips would be sampled away.
 
 import {
   attentionFrameAt,
@@ -37,6 +37,9 @@ export interface WakeTimer {
   clear(): void
   /** Release the timer for good (terminates a worker). */
   dispose(): void
+  /** Whether its wakes keep their cadence in a hidden tab: true for a live
+   * worker clock, false for the page's own timers. */
+  keepsTimeWhenHidden(): boolean
 }
 
 /** A wake timer on the page's own `setTimeout`. */
@@ -56,6 +59,7 @@ export function windowWakeTimer(): WakeTimer {
     },
     clear,
     dispose: clear,
+    keepsTimeWhenHidden: () => false,
   }
 }
 
@@ -126,6 +130,7 @@ export function workerWakeTimer(): WakeTimer | null {
       if (fallback) fallback.dispose()
       else worker.terminate()
     },
+    keepsTimeWhenHidden: () => fallback === null,
   }
 }
 
@@ -159,9 +164,10 @@ export function startAttentionBlink(opts: {
 
   const tick = () => {
     if (stopped) return
+    const throttled = opts.hidden() && !opts.timer.keepsTimeWhenHidden()
     const { frame, msUntilChange } = attentionFrameAt(
       now() - started,
-      opts.hidden() ? "steady" : "rhythm",
+      throttled ? "steady" : "rhythm",
     )
     if (frame !== last) {
       last = frame
