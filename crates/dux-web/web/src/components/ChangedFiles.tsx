@@ -153,10 +153,11 @@ const BULK_CONTROL = "h-9 max-md:h-11"
 // lands on the row's open-diff click rather than an invisible target. A
 // touchscreen reporting a fine pointer lands here too, where a fingertip inside
 // the 16px box ticks the row instead of opening the diff.
-const STATUS_SLOT = "size-5 pointer-coarse:size-11"
-// Touch: the slot is the selection control, since a finger cannot hover, so it
-// carries the 44px floor on both axes. Its only neighbours are the row's path
-// and the row itself, where a stray tap costs a read-only diff.
+const STATUS_SLOT = "w-5 h-5 pointer-coarse:h-11"
+// Touch: the slot is the selection control, since a finger cannot hover, so
+// its checkbox carries the 44px floor on both axes. The floor lives in the
+// halo, not the layout: the slot keeps the mouse's 20px column so the path and
+// the section heading line up with the marker exactly as they do on a mouse.
 
 interface StatusSlotProps {
   status: string
@@ -239,11 +240,16 @@ function StatusSlot({
             "opacity-0 group-hover:opacity-100",
             `${keyboard}opacity-100`,
             selected && "opacity-100",
-            // On touch the halo is the tap target, grown to fill the slot: the
-            // pseudo-element is sized from the 14px padding box, so 15px a side
-            // makes 44px. On a mouse it is suppressed so it cannot reach past
-            // the slot into the path.
-            "after:hidden pointer-coarse:after:block pointer-coarse:after:-inset-[15px]",
+            // On touch the halo is the tap target, measured from the 14px
+            // padding box: 44px tall (15px a side fills the row) and 42px wide.
+            // It reaches 17px left, across the 3px left in the slot and the
+            // touch row's 12px padding into the list's gutter, stopping where
+            // the pane divider's grab zone begins (measured: it reaches about
+            // 10px into that gutter and wins a tap there); and 11px right,
+            // across the slot's other 3px and the row's 8px gap, to where the
+            // path starts. On a mouse it is suppressed so a near-miss opens
+            // the diff instead.
+            "after:hidden pointer-coarse:after:block pointer-coarse:after:-inset-y-[15px] pointer-coarse:after:-left-[17px] pointer-coarse:after:-right-[11px]",
           )}
         />
       </div>
@@ -358,7 +364,9 @@ const ROW_FOCUS = cn("border border-transparent", FOCUS_RING)
 // How far each level of an expanded folder steps its rows in.
 const DEPTH_INDENT_REM = 1
 function depthIndent(depth: number): React.CSSProperties | undefined {
-  return depth > 0 ? { paddingLeft: `${0.25 + depth * DEPTH_INDENT_REM}rem` } : undefined
+  return depth > 0
+    ? { paddingLeft: `calc(var(--row-pad) + ${depth * DEPTH_INDENT_REM}rem)` }
+    : undefined
 }
 
 // Memoized: the list re-renders on every scroll step and selection change, and
@@ -443,7 +451,10 @@ const FileRow = memo(function FileRow({
       aria-expanded={expandable ? expanded : undefined}
       {...gridRowAttrs(grid)}
       className={cn(
-        "group flex items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11",
+        // The left padding is a variable so a nested row's indent adds to it.
+        // Touch sits 8px further in, matching the section heading, so the
+        // checkbox's halo stops short of the pane divider's grab zone.
+        "group flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
         ROW_FOCUS,
         folderCount === null && "cursor-pointer",
       )}
@@ -743,7 +754,7 @@ function GroupHeader({
       aria-controls={controls}
       tabIndex={inTabOrder ? undefined : -1}
       onClick={onToggleOpen}
-      className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11"
+      className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11 pointer-coarse:pl-3"
     >
       <span className="flex-1 text-left">{heading}</span>
       <ChangesRecap scope={heading} recap={recap} />

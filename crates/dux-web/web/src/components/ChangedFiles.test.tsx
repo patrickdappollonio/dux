@@ -795,8 +795,8 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
     expect(box.className).toContain("after:hidden")
-    expect(box.parentElement!.className).toContain("size-5")
-    expect(box.parentElement!.className).toContain("pointer-coarse:size-11")
+    expect(box.parentElement!.className).toContain("w-5")
+    expect(box.parentElement!.className).toContain("h-5")
   })
 
   // The reveal is keyed on KEYBOARD focus of the checkbox, never focus-within
@@ -999,15 +999,29 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(openEditor).not.toHaveBeenCalled()
   })
 
-  // The 44px floor on BOTH axes, and the checkbox halo grown to fill it rather
-  // than suppressed the way the desktop one is. Class pins: the geometry they
-  // stand for is measured in the preview container.
-  it("gives coarse pointers a larger slot and halo without a React media subscription", () => {
+  // The 44px floor on BOTH axes, carried by the checkbox halo rather than by
+  // the slot's layout box: the slot keeps the desktop's 20px column, so the
+  // path and the section heading line up with the marker as they do on a
+  // mouse, and the halo reaches left across the list's empty gutter to the
+  // pane edge and right to where the path starts. Class pins: the geometry
+  // they stand for is measured in the preview container.
+  it("gives coarse pointers a 44px halo without widening the slot or a React media subscription", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
-    expect(box.parentElement!.className).toContain("pointer-coarse:size-11")
-    expect(box.className).toContain("pointer-coarse:after:-inset-[15px]")
+    expect(box.parentElement!.className).toContain("w-5")
+    expect(box.parentElement!.className).toContain("pointer-coarse:h-11")
+    expect(box.parentElement!.className).not.toContain("pointer-coarse:size-11")
+    expect(box.className).toContain("pointer-coarse:after:-inset-y-[15px]")
+    expect(box.className).toContain("pointer-coarse:after:-left-[17px]")
+    expect(box.className).toContain("pointer-coarse:after:-right-[11px]")
     expect(box.className).toContain("pointer-coarse:after:block")
+    // The halo stops short of the pane divider's grab zone, which reaches
+    // into the list's gutter and wins a tap there, so touch rows and the
+    // section heading both sit 8px further in, keeping them lined up.
+    const row = box.closest('[role="row"]') as HTMLElement
+    expect(row.className).toContain("pointer-coarse:[--row-pad:--spacing(3)]")
+    const heading = screen.getByText("Unstaged").closest("button") as HTMLElement
+    expect(heading.className).toContain("pointer-coarse:pl-3")
   })
 
   // The row's ⋯ answers the same question the slot above answers, and used to
