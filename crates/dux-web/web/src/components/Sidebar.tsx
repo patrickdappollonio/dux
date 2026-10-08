@@ -1,4 +1,4 @@
-import { Bot, EllipsisVertical, Plus } from "lucide-react"
+import { Bot, EllipsisVertical, Plus, SquareTerminal } from "lucide-react"
 import type * as React from "react"
 import { useCallback, useEffect, useRef, useState } from "react"
 
@@ -32,6 +32,13 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
+import { isQuietSession } from "@/lib/flatList"
+import {
+  overlaidFlatTerminals,
+  sortFlatTerminals,
+  type FlatTerminal,
+} from "@/lib/flatTerminals"
+import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   DIVIDER_CHROME,
@@ -52,6 +59,7 @@ import {
   openNewAgentPicker,
   selectSession,
   selectTerminal,
+  agentSortValue,
   setSidebarWidth,
   SIDEBAR_INITIAL_WIDTH,
   useDux,
@@ -64,11 +72,15 @@ import { sessionLabel } from "@/lib/agentWorkspace"
 import {
   agentRowKey,
   selectedRowKey,
+  terminalRowKey,
   useRevealSelectedRow,
 } from "@/hooks/use-reveal-selected-row"
 
-// The icon rail replaces the flat agent list at `collapsible="icon"` width: every
-// agent, flattened in project-then-agent order, with the same cues and selection.
+// The icon rail replaces the flat agent list at `collapsible="icon"` width: the
+// live work, flattened. Agents the expanded list shows in its main section come
+// first, in project-then-agent order, then the live terminals in the Terminals
+// section's order, all with the same cues and selection. The Inactive tail stays
+// off the rail, so a selected inactive agent has no icon here.
 function CollapsedAgentIcon({
   session,
   projectName,
@@ -136,6 +148,61 @@ function CollapsedAgentIcon({
   )
 }
 
+function CollapsedTerminalIcon({
+  entry,
+  selected,
+}: {
+  entry: FlatTerminal
+  selected: boolean
+}) {
+  const { terminal, owner, ownerLabel, siblings } = entry
+  // The expanded row's title: a plain "Terminal" while the shell is idle, the
+  // foreground app once one runs.
+  const title =
+    terminalForeground(terminal) === null
+      ? "Terminal"
+      : terminalTitle(terminal, siblings)
+  // The row's cue ladder: typing outranks working, and the glyph hands over.
+  const working = terminal.working && !terminal.typing
+  return (
+    <SidebarMenuItem data-sidebar-row={terminalRowKey(terminal.id)}>
+      <SimpleTooltip
+        content={
+          <div className="flex flex-col gap-0.5">
+            <span className="font-medium">{title}</span>
+            <span>{ownerLabel}</span>
+          </div>
+        }
+        side="right"
+      >
+        <SidebarMenuButton
+          isActive={selected}
+          aria-label={`${title} (${ownerLabel})`}
+          onClick={() => selectTerminal(terminal.id, owner)}
+          className="touch-manipulation"
+        >
+          <span
+            aria-label={terminal.typing ? "Typing" : undefined}
+            className={cn(
+              "inline-flex shrink-0",
+              terminal.typing
+                ? "text-dux-typing"
+                : "text-sidebar-accent-foreground",
+            )}
+          >
+            <WorkingGlyph
+              icon={SquareTerminal}
+              working={working}
+              handover={terminal.typing}
+              className="size-4.5!"
+            />
+          </span>
+        </SidebarMenuButton>
+      </SimpleTooltip>
+    </SidebarMenuItem>
+  )
+}
+
 function CollapsedAgentRail({
   projectIds,
   grouped,
@@ -143,6 +210,7 @@ function CollapsedAgentRail({
   projectName,
   changes,
   selectedTarget,
+  terminals,
 }: {
   projectIds: string[]
   grouped: Map<string, SessionView[]>
@@ -152,22 +220,28 @@ function CollapsedAgentRail({
   projectName: (id: string) => string
   changes: ChangesSlice
   selectedTarget: SelectedTarget | null
+  /** The live terminals, already in the Terminals section's order. */
+  terminals: FlatTerminal[]
 }) {
   // The rail scrolls on its own, so it reveals a newly selected agent too.
   const railRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
   const entries = [
     ...projectIds.flatMap((projectId) =>
-      (grouped.get(projectId) ?? []).map((session) => ({
+      (grouped.get(projectId) ?? [])
+        .filter((session) => !isQuietSession(session))
+        .map((session) => ({
         session,
         // The tooltip's project line, empty for an agent with no project; the
         // tooltip drops the separator with it and names the folder instead.
         projectLabel: projectName(projectId),
       })),
     ),
-    ...standalone.map((session) => ({ session, projectLabel: "" })),
+    ...standalone
+      .filter((session) => !isQuietSession(session))
+      .map((session) => ({ session, projectLabel: "" })),
   ]
 
-  if (entries.length === 0) return null
+  if (entries.length === 0 && terminals.length === 0) return null
 
   return (
     <SidebarGroup
@@ -188,6 +262,16 @@ function CollapsedAgentRail({
               selected={
                 selectedTarget?.kind === "agent" &&
                 selectedTarget.sessionId === session.id
+              }
+            />
+          ))}
+          {terminals.map((entry) => (
+            <CollapsedTerminalIcon
+              key={entry.terminal.id}
+              entry={entry}
+              selected={
+                selectedTarget?.kind === "terminal" &&
+                selectedTarget.terminalId === entry.terminal.id
               }
             />
           ))}
@@ -425,13 +509,26 @@ function SidebarDragEdge({
 }
 
 export function AppSidebar() {
-  const { spine, bootstrap, selectedTarget, changes } = useDux()
+  const dux = useDux()
+  const { spine, bootstrap, selectedTarget, changes } = dux
   const sessions = spine?.sessions ?? []
   const projects = spine?.projects ?? []
   const { grouped, withAgents, projectName } = partitionProjects(
     spine?.sidebar,
     projects,
     sessions,
+  )
+  // The same order the expanded Terminals section lists; the search box filters
+  // only that list, so the rail never inherits a half-typed query.
+  const railTerminals = sortFlatTerminals(
+    overlaidFlatTerminals({
+      terminals: spine?.terminals ?? [],
+      sessions,
+      projects,
+      projectName,
+      pendingOrder: dux.pendingTerminalOrder,
+    }),
+    agentSortValue(dux),
   )
   // The agents `partitionProjects` groups under no project, kept in list order.
   const standaloneSessions = sessions.filter(
@@ -512,6 +609,7 @@ export function AppSidebar() {
           projectName={projectName}
           changes={changes}
           selectedTarget={selectedTarget}
+          terminals={railTerminals}
         />
       </SidebarContent>
 

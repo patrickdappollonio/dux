@@ -85,8 +85,8 @@ import {
   type StateWord,
 } from "@/lib/flatList"
 import {
-  assembleFlatTerminals,
   displayedTerminalOrder,
+  overlaidFlatTerminals,
   sortFlatTerminals,
   terminalStateWord,
   type FlatTerminal,
@@ -1006,7 +1006,7 @@ function flatAgentListModel(dux: DuxState) {
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
   const rawTerminals = spine?.terminals ?? []
-  const { withAgents, withoutAgents, projectName } = partitionProjects(
+  const { projectName } = partitionProjects(
     spine?.sidebar,
     rawProjects,
     rawSessions,
@@ -1020,31 +1020,13 @@ function flatAgentListModel(dux: DuxState) {
   const query = agentSearch
   const visibleMain = matchingSessions(sortedMain, projectName, query)
   const visibleQuiet = matchingSessions(sortedQuiet, projectName, query)
-  const orderedProjects = [...withAgents, ...withoutAgents]
-    .map((id) => rawProjects.find((project) => project.id === id))
-    .filter((project): project is (typeof rawProjects)[number] =>
-      project !== undefined
-    )
-  const assembledTerminals = assembleFlatTerminals(
-    rawTerminals,
-    coreSessions,
-    orderedProjects,
+  const overlaidTerminals = overlaidFlatTerminals({
+    terminals: rawTerminals,
+    sessions: coreSessions,
+    projects: rawProjects,
     projectName,
-  )
-  const baseTerminals = assembledTerminals
-    .slice()
-    .sort((left, right) =>
-      left.terminal.sort_order - right.terminal.sort_order
-    )
-  const overlaidTerminals: FlatTerminal[] = pendingTerminalOrder
-    ? reorderById(
-        baseTerminals.map((terminal) => ({
-          id: terminal.terminal.id,
-          terminal,
-        })),
-        pendingTerminalOrder,
-      ).map((wrapped) => wrapped.terminal)
-    : baseTerminals
+    pendingOrder: pendingTerminalOrder,
+  })
   const flatTerminals = sortFlatTerminals(overlaidTerminals, agentSort).filter(
     (terminal) =>
       matchesTerminalQuery(

@@ -23,6 +23,7 @@ import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 let mockState: DuxState
 const addTabMock = vi.fn()
 const selectSessionMock = vi.fn()
+const selectTerminalMock = vi.fn()
 const createProjectTerminalMock = vi.fn()
 // Counted, not replaced: the resize tests below assert what actually reaches
 // localStorage, so this has to keep doing the real thing while recording how
@@ -35,6 +36,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     addTab: addTabMock,
     selectSession: selectSessionMock,
+    selectTerminal: selectTerminalMock,
     createProjectTerminal: createProjectTerminalMock,
     setSidebarWidth: (width: string, persist?: boolean) => {
       setSidebarWidthSpy(width, persist)
@@ -210,6 +212,7 @@ beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
   selectSessionMock.mockClear()
+  selectTerminalMock.mockClear()
   createProjectTerminalMock.mockClear()
   setSidebarWidthSpy.mockClear()
 })
@@ -408,8 +411,9 @@ describe("AppSidebar flat Terminals section", () => {
     )
     // The section header.
     expect(screen.getByText("Terminals")).toBeTruthy()
-    // Row 1 primary label = the running foreground command.
-    expect(screen.getByText("vim")).toBeTruthy()
+    // Row 1 primary label = the running foreground command. The collapsed
+    // rail's tooltip (rendered inline by the mock, hidden by CSS) names it too.
+    expect(screen.getAllByText("vim").length).toBeGreaterThan(0)
     // Row 2: the owner label repeats the agent name (the agent row plus the
     // terminal's ↳ owner tag, and the vitals tooltips), so it appears more than
     // once, proving the terminal carries its owner label.
@@ -1626,6 +1630,16 @@ function makeTwoProjectSpine(): DuxState["spine"] {
   } as unknown as DuxState["spine"]
 }
 
+// The two-project spine with its second agent running too, for the tests that
+// need two icons on the rail (the default spine parks s2 in the Inactive tail).
+function makeTwoActiveProjectSpine(): DuxState["spine"] {
+  const spine = makeTwoProjectSpine() as unknown as {
+    sessions: { status: string }[]
+  }
+  spine.sessions[1].status = "active"
+  return spine as unknown as DuxState["spine"]
+}
+
 describe("AppSidebar collapsed icon rail", () => {
   it("refreshes a rail tooltip's changes count from the parent store snapshot", () => {
     const spine = makeTwoProjectSpine()
@@ -1674,9 +1688,9 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(firstTooltip.textContent).toContain("2 files")
   })
 
-  it("renders one agent icon per session across projects instead of project folders", () => {
+  it("renders one agent icon per active session across projects instead of project folders", () => {
     mockState = makeState({
-      spine: makeTwoProjectSpine(),
+      spine: makeTwoActiveProjectSpine(),
       bootstrap: {
         title: "dux",
         dux_version: "v1",
@@ -1747,7 +1761,7 @@ describe("AppSidebar collapsed icon rail", () => {
     const labels = [...rail.querySelectorAll("button")].map((b) =>
       b.getAttribute("aria-label"),
     )
-    expect(labels.length).toBe(3)
+    expect(labels.length).toBe(2)
     // Its label is just the agent's name: there is no project to put in
     // parentheses, and "My Notes ()" would be worse than nothing.
     expect(labels).toContain("My Notes")
@@ -1755,7 +1769,7 @@ describe("AppSidebar collapsed icon rail", () => {
 
   it("clicking an agent icon selects that agent", () => {
     mockState = makeState({
-      spine: makeTwoProjectSpine(),
+      spine: makeTwoActiveProjectSpine(),
       bootstrap: {
         title: "dux",
         dux_version: "v1",
@@ -1777,7 +1791,7 @@ describe("AppSidebar collapsed icon rail", () => {
 
   it("shows the selected agent's icon in the active state", () => {
     mockState = makeState({
-      spine: makeTwoProjectSpine(),
+      spine: makeTwoActiveProjectSpine(),
       selectedTarget: { kind: "agent", sessionId: "s2" },
       bootstrap: {
         title: "dux",
@@ -1814,7 +1828,7 @@ describe("AppSidebar collapsed icon rail", () => {
     )
     try {
       const base = {
-        spine: makeTwoProjectSpine(),
+        spine: makeTwoActiveProjectSpine(),
         bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
         createTabInFlight: [],
       } as Partial<DuxState>
@@ -1866,15 +1880,13 @@ describe("AppSidebar collapsed icon rail", () => {
 
     const rail = screen.getByTestId("collapsed-agent-rail")
     const tooltips = rail.querySelectorAll('[data-testid="tooltip-content"]')
-    expect(tooltips.length).toBe(2)
+    expect(tooltips.length).toBe(1)
     expect(tooltips[0].textContent).toContain("Repo")
     expect(tooltips[0].textContent?.toLowerCase()).toContain("active")
-    expect(tooltips[1].textContent).toContain("Other")
-    expect(tooltips[1].textContent?.toLowerCase()).toContain("detached")
   })
 
   it("carries the working pulse and attention blink classes on the rail icon", () => {
-    const spine = makeTwoProjectSpine() as unknown as {
+    const spine = makeTwoActiveProjectSpine() as unknown as {
       sessions: { working: boolean; needs_attention: boolean }[]
     }
     spine.sessions[0].working = true
@@ -2063,7 +2075,7 @@ describe("AppSidebar expanded agent row vitals tooltip", () => {
     // rows are told apart by their tooltip's project name line ("Repo" for
     // s1/p1, "Other" for s2/p2) rather than the branch/worktree rows.
     mockState = makeState({
-      spine: makeTwoProjectSpine(),
+      spine: makeTwoActiveProjectSpine(),
       bootstrap: {
         title: "dux",
         dux_version: "v1",
@@ -2094,6 +2106,181 @@ describe("AppSidebar expanded agent row vitals tooltip", () => {
     expect(s1Tooltip?.textContent).toContain("Changes")
     expect(s1Tooltip?.textContent).toContain("2 files")
     expect(s2Tooltip?.textContent).not.toContain("Changes")
+  })
+})
+
+describe("AppSidebar collapsed rail lists live work only", () => {
+  const boot = {
+    title: "dux",
+    dux_version: "v1",
+    available_providers: ["claude"],
+  }
+  const tree = () => (
+    <SidebarProvider defaultOpen={false}>
+      <AppSidebar />
+    </SidebarProvider>
+  )
+  const rail = () => screen.getByTestId("collapsed-agent-rail")
+  const labels = () =>
+    [...rail().querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))
+
+  // Two idle terminals, then a running one: under the default "active first"
+  // sort the running one floats to the head of the terminals.
+  function terminals(): unknown[] {
+    return [
+      {
+        id: "t-idle",
+        owner: { kind: "standalone", cwd_label: "~/work" },
+        label: "Terminal 1",
+        has_output: false,
+        working: false,
+        typing: false,
+        foreground_cmd: null,
+        sort_order: 0,
+      },
+      {
+        id: "t-busy",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 2",
+        has_output: true,
+        working: true,
+        typing: false,
+        foreground_cmd: "vim",
+        sort_order: 1,
+      },
+    ]
+  }
+  function stateWith(over: Partial<DuxState> = {}, withTerminals = true) {
+    const spine = makeTwoProjectSpine() as unknown as Record<string, unknown>
+    return makeState({
+      spine: {
+        ...spine,
+        terminals: withTerminals ? terminals() : [],
+      } as unknown as DuxState["spine"],
+      bootstrap: boot,
+      createTabInFlight: [],
+      ...over,
+    } as Partial<DuxState>)
+  }
+
+  it("leaves the Inactive agents off the rail and keeps the active ones", () => {
+    mockState = stateWith({}, false)
+    render(tree())
+    expect(labels()).toEqual(["main (Repo)"])
+  })
+
+  it("lists terminals after the agents in the Terminals section's order", () => {
+    mockState = stateWith()
+    render(tree())
+    expect(labels()).toEqual([
+      "main (Repo)",
+      "vim (main@Repo)",
+      "Terminal (~/work)",
+    ])
+  })
+
+  it("selects a terminal the way its expanded row does", () => {
+    mockState = stateWith()
+    render(tree())
+    fireEvent.click(rail().querySelectorAll("button")[2])
+    expect(selectTerminalMock).toHaveBeenCalledWith("t-idle", {
+      kind: "standalone",
+    })
+  })
+
+  it("highlights only the selected terminal", () => {
+    mockState = stateWith({
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "t-busy",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+    } as Partial<DuxState>)
+    render(tree())
+    const buttons = rail().querySelectorAll("button")
+    expect(buttons[0].hasAttribute("data-active")).toBe(false)
+    expect(buttons[1].hasAttribute("data-active")).toBe(true)
+    expect(buttons[2].hasAttribute("data-active")).toBe(false)
+  })
+
+  it("names a terminal and where it runs in its tooltip", () => {
+    mockState = stateWith()
+    render(tree())
+    const tips = rail().querySelectorAll('[data-testid="tooltip-content"]')
+    expect(tips[2].textContent).toContain("Terminal")
+    expect(tips[2].textContent).toContain("~/work")
+  })
+
+  it("does not show a selected agent that is inactive", () => {
+    mockState = stateWith({
+      selectedTarget: { kind: "agent", sessionId: "s2", tabId: "s2" },
+    } as Partial<DuxState>, false)
+    render(tree())
+    expect(rail().querySelectorAll("[data-active]").length).toBe(0)
+  })
+
+  it("renders no rail when there is no active agent and no terminal", () => {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: { status: string }[]
+    }
+    spine.sessions[0].status = "detached"
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: boot,
+      createTabInFlight: [],
+    })
+    render(tree())
+    expect(screen.queryByTestId("collapsed-agent-rail")).toBeNull()
+  })
+
+  it("bounces a working terminal's icon and lets it finish at rest", () => {
+    mockState = stateWith()
+    const { rerender } = render(tree())
+    const glyph = () =>
+      rail().querySelectorAll("button")[1].querySelector("svg")!
+    const frame = () => glyph().closest("[data-slot='working-glyph']")!
+    expect(frame().getAttribute("class")).toContain(
+      "motion-safe:animate-working-bounce",
+    )
+    expect(glyph().getAttribute("class")).toContain(
+      "motion-safe:animate-working-pulse",
+    )
+    fireAnimationStart(frame(), "working-bounce")
+
+    const stopped = terminals() as { working: boolean }[]
+    stopped[1].working = false
+    const spine = makeTwoProjectSpine() as unknown as Record<string, unknown>
+    mockState = makeState({
+      spine: { ...spine, terminals: stopped } as unknown as DuxState["spine"],
+      bootstrap: boot,
+      createTabInFlight: [],
+    })
+    rerender(tree())
+    // The stop re-sorts the terminals ("active first"), so find the glyph again
+    // by its owner: the session terminal is the first terminal button.
+    const vim = () => rail().querySelector("[aria-label^='vim']")!.querySelector("svg")!
+    const vimFrame = () => vim().closest("[data-slot='working-glyph']")!
+    expect(vimFrame().getAttribute("class")).toContain(
+      "motion-safe:animate-working-bounce",
+    )
+    fireAnimationIteration(vimFrame(), "working-bounce")
+    expect(vimFrame().getAttribute("class")).not.toContain(
+      "motion-safe:animate-working-bounce",
+    )
+  })
+
+  it("renders the rail for terminals alone", () => {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: { status: string }[]
+    }
+    spine.sessions[0].status = "detached"
+    mockState = makeState({
+      spine: { ...spine, terminals: terminals() } as unknown as DuxState["spine"],
+      bootstrap: boot,
+      createTabInFlight: [],
+    })
+    render(tree())
+    expect(labels()).toEqual(["vim (main@Repo)", "Terminal (~/work)"])
   })
 })
 

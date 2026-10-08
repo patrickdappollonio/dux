@@ -11,6 +11,7 @@ import {
 } from "@/lib/terminalOwner"
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
+import { reorderById } from "@/lib/reorder"
 
 // One entry in the flat Terminals section. `siblings` is the set the same owner shares,
 // so `terminalTitle` can disambiguate two terminals running the same app.
@@ -175,4 +176,31 @@ export function sortFlatTerminals(
       break
   }
   return sorted
+}
+
+// The Terminals section's manual order, before the sort and any search: each
+// terminal's own position, with a drag in flight laid over it. The sidebar's list
+// and the collapsed rail both start from it, so the two can never list terminals
+// differently.
+export function overlaidFlatTerminals(input: {
+  terminals: readonly TerminalView[]
+  sessions: readonly SessionView[]
+  projects: readonly ProjectView[]
+  projectName: (id: string) => string
+  pendingOrder: string[] | null
+}): FlatTerminal[] {
+  const base = assembleFlatTerminals(
+    input.terminals,
+    input.sessions,
+    input.projects,
+    input.projectName,
+  )
+    .slice()
+    .sort((left, right) => left.terminal.sort_order - right.terminal.sort_order)
+  return input.pendingOrder
+    ? reorderById(
+        base.map((terminal) => ({ id: terminal.terminal.id, terminal })),
+        input.pendingOrder,
+      ).map((wrapped) => wrapped.terminal)
+    : base
 }
