@@ -375,6 +375,11 @@ pub struct Engine {
     /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
     /// Constructed as `None`.
     pub reload_guard: Option<QuiesceGuard>,
+    /// The writes dux made to `config.toml` itself (a password, a ban, the
+    /// no-password warning's dismissal) that a reload has not read yet, so the
+    /// reload one of them asks for can tell it brought in nothing else and
+    /// stay quiet. Constructed empty.
+    pub own_config_writes: crate::config_write::OwnConfigWrites,
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep

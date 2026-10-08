@@ -322,10 +322,16 @@ pub struct AuthSetup {
     pub console: crate::console::Console,
     pub engine: Option<crate::engine_actor::EngineHandle>,
     /// Asks the running dux to reload its config after dux wrote to it.
-    pub reload: Arc<dyn Fn() + Send + Sync>,
+    pub reload: ReloadAfterWrite,
     /// Test seam: see [`crate::server::RouterParams::socket_opening_hook`].
     pub opening_hook: Option<OpeningHook>,
 }
+
+/// What asks the running dux to reload after dux wrote `config.toml` itself,
+/// told which write that was (`None` when the write left no file identity),
+/// so a reload that reads nothing else can stay quiet.
+pub type ReloadAfterWrite =
+    Arc<dyn Fn(Option<dux_core::config_write::OwnConfigWrite>) + Send + Sync>;
 
 /// A test seam awaited at a socket's opening check.
 pub type OpeningHook =
@@ -352,7 +358,7 @@ pub struct AuthState {
     weak: std::sync::Mutex<Option<String>>,
     proxy_warned: AtomicBool,
     config_path: Option<PathBuf>,
-    reload: Arc<dyn Fn() + Send + Sync>,
+    reload: ReloadAfterWrite,
     pub(crate) speaker: warnings::Speaker,
     /// See [`AuthSetup::opening_hook`].
     pub(crate) opening_hook: Option<OpeningHook>,
@@ -891,10 +897,10 @@ impl AuthState {
                             config.blocked_addresses.push(entry.clone());
                         }
                     },
-                    written,
+                    written.clone(),
                 );
                 self.admission.lift_ban_for_this_run(&ban);
-                (self.reload)();
+                self.reload_after(written);
                 self.speaker
                     .blocked(&ban.entry, failures, &path, warnings::BanKept::InConfig);
             }
@@ -986,8 +992,20 @@ impl AuthState {
         change: impl Fn(&mut ServerAuthConfig) + Send + Sync + 'static,
         written: Option<dux_core::config_write::FileWrite>,
     ) {
-        self.live.update(change, written);
-        (self.reload)();
+        self.live.update(change, written.clone());
+        self.reload_after(written);
+    }
+
+    /// Ask for the reload that follows dux's own write (`written`), naming
+    /// it along with the section the running dux now holds, so a reload that
+    /// reads nothing else says nothing.
+    fn reload_after(&self, written: Option<dux_core::config_write::FileWrite>) {
+        (self.reload)(
+            written.map(|written| dux_core::config_write::OwnConfigWrite {
+                written,
+                auth: self.live.snapshot().config.clone(),
+            }),
+        );
     }
 }
 
@@ -1183,7 +1201,7 @@ mod tests {
             sessions_db: None,
             console: crate::console::Console::noop(),
             engine: None,
-            reload: Arc::new(|| {}),
+            reload: Arc::new(|_| {}),
             opening_hook: None,
         });
         let reason = state
@@ -1381,7 +1399,7 @@ mod tests {
             sessions_db: Some(db.clone()),
             console: crate::console::Console::noop(),
             engine: None,
-            reload: Arc::new(|| {}),
+            reload: Arc::new(|_| {}),
             opening_hook: None,
         });
         state.sessions.ready().await;
@@ -1460,7 +1478,7 @@ mod tests {
                 sessions_db: None,
                 console: crate::console::Console::noop(),
                 engine: None,
-                reload: Arc::new(|| {}),
+                reload: Arc::new(|_| {}),
                 opening_hook: None,
             },
             Arc::new(move || reads.load(Ordering::SeqCst)),

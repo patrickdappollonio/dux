@@ -199,6 +199,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
+        own_config_writes: Default::default(),
         pending_web_checkout_ops: HashMap::new(),
         pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),

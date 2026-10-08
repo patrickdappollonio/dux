@@ -1490,6 +1490,58 @@ pub fn take_last_write() -> Option<FileWrite> {
     LAST_WRITE.with(|slot| slot.borrow_mut().take())
 }
 
+/// A change dux wrote to `config.toml` itself and then asked a reload for: a
+/// password, a ban, the no-password warning's dismissal. Each of those is a
+/// `[server.auth]` change, so `auth` is the section the running dux holds
+/// with this write applied.
+#[derive(Debug)]
+pub struct OwnConfigWrite {
+    pub written: FileWrite,
+    pub auth: crate::config::ServerAuthConfig,
+}
+
+/// The writes dux made to `config.toml` itself that no reload has read yet,
+/// and whether the reload that last finished brought in nothing else.
+#[derive(Debug, Default)]
+pub struct OwnConfigWrites {
+    pending: Vec<OwnConfigWrite>,
+    last_reload_was_own: bool,
+}
+
+impl OwnConfigWrites {
+    /// Remember `write` until a reload reads the file.
+    pub fn note(&mut self, write: OwnConfigWrite) {
+        self.pending.push(write);
+    }
+
+    /// Whether the reload that last finished read nothing but what dux wrote
+    /// itself, so there is nothing to announce.
+    pub fn last_reload_was_own(&self) -> bool {
+        self.last_reload_was_own
+    }
+
+    /// Settle a finished reload. `read` is the [`read_token`] of the text it
+    /// read (`None` when it read none), `running` the config in force before
+    /// it, and `reloaded` what it read, when that is adopted as it is.
+    ///
+    /// Every reload retires the writes noted before it. It was dux's own when
+    /// the text it read is exactly what the last of them left, judged by file
+    /// identity, so an edit made after that write is announced; and when its
+    /// settings are the running ones with that write's `[server.auth]`, so an
+    /// edit made outside dux before the write is announced too.
+    pub fn settle(&mut self, read: Option<&str>, running: &Config, reloaded: Option<&Config>) {
+        let last = std::mem::take(&mut self.pending).pop();
+        self.last_reload_was_own = match (last, read, reloaded) {
+            (Some(last), Some(read), Some(reloaded)) => {
+                let mut expected = running.clone();
+                expected.server.auth = last.auth;
+                last.written.after == read && expected == *reloaded
+            }
+            _ => false,
+        };
+    }
+}
+
 fn mutate_config_file_ruled<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,

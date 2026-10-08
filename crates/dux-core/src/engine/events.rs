@@ -3098,6 +3098,18 @@ impl Engine {
         // warning, the bind-change check), even when a follow-up reload or a
         // deferred command rode along.
         let mut before_reload: Option<Config> = None;
+        // Whether this reload read only what dux wrote itself. A reload that
+        // carries deferred commands along is somebody else's too.
+        let read = result
+            .as_ref()
+            .ok()
+            .and_then(|config| config.source_text.as_str())
+            .map(|text| crate::config_write::read_token(Some(text)));
+        self.own_config_writes.settle(
+            read.as_deref(),
+            &self.config,
+            result.as_ref().ok().filter(|_| !must_preswap),
+        );
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
                 if must_preswap {

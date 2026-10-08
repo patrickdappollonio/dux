@@ -179,7 +179,7 @@ impl Dux {
                         false,
                     )
                     .with_live_exposure(tailnet_exposure())
-                    .with_auth_reload(Arc::new(move || {
+                    .with_auth_reload(Arc::new(move |_| {
                         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     })),
             ),
@@ -3188,7 +3188,7 @@ async fn a_ban_held_in_memory_survives_a_new_serve_in_the_same_dux() {
             Router::<AppState>::new(),
             RouterParams::plain_http()
                 .with_live_exposure(tailnet_exposure())
-                .with_auth_reload(Arc::new(|| {})),
+                .with_auth_reload(Arc::new(|_| {})),
         )
     };
     let first = Dux {
