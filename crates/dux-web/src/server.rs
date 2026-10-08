@@ -447,7 +447,7 @@ pub struct RouterParams {
     pub live_exposure: Option<crate::exposure::ExposureCell>,
     /// What the auth layer calls after dux wrote `config.toml` itself (a password,
     /// a ban), so the running config catches up. `None` asks the engine to reload.
-    pub auth_reload: Option<crate::auth::ReloadAfterWrite>,
+    pub auth_reload: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Test seam: awaited by a PTY or events socket right before it checks its
     /// session for its opening frames, so a test can revoke the session in
     /// exactly that window. `None` everywhere else.
@@ -738,26 +738,20 @@ impl RouterParams {
     }
 
     /// Replace what the auth layer calls after it writes `config.toml`.
-    pub fn with_auth_reload(mut self, reload: crate::auth::ReloadAfterWrite) -> Self {
+    pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.auth_reload = Some(reload);
         self
     }
 }
 
 /// Ask the engine to reload after dux wrote `config.toml` itself, as
-/// `POST /api/v1/config/reload` does, so each serving mode's reload owner handles it.
-pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> crate::auth::ReloadAfterWrite {
-    Arc::new(move |own_write| {
+/// `POST /api/v1/config/reload` does, so each serving mode's reload owner
+/// handles it, but as dux's own reload, which is not announced.
+pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
         let engine = engine.clone();
         let ask = async move {
-            let _ = match own_write {
-                Some(own_write) => engine.reload_after_own_config_write(own_write).await,
-                None => {
-                    engine
-                        .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
-                        .await
-                }
-            };
+            let _ = engine.reload_after_own_config_write().await;
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
@@ -6760,8 +6754,8 @@ mod tests {
     /// After dux writes `config.toml` itself (a password, a ban), the reload
     /// it asks for is the engine's own `ReloadConfig`, the command the reload
     /// route sends, handled by whichever surface owns the reload; it is not a
-    /// signal raised at the process. A reload that reads nothing but the
-    /// write dux named is not announced; one whose write it cannot name is.
+    /// signal raised at the process. It is not announced; the same reload
+    /// asked for through the reload command is.
     #[tokio::test]
     async fn dux_reloads_after_its_own_config_write_by_asking_the_engine() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
@@ -6782,16 +6776,16 @@ mod tests {
             messages
         };
 
-        (reload_through_the_engine(handle.clone()))(None);
+        handle
+            .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
+            .await
+            .expect("the reload is asked for");
         assert_eq!(
             reload_statuses().await,
             vec!["Configuration reloaded. New settings are active now.".to_string()]
         );
 
-        let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
-        dux_core::config_keys::set_plain(&config_path, &key, "true").expect("dux writes");
-        let written = dux_core::config_write::take_last_write().expect("a locked write");
-        (reload_through_the_engine(handle))(Some(written));
+        (reload_through_the_engine(handle))();
         assert_eq!(reload_statuses().await, Vec::<String>::new());
     }
 

@@ -19,6 +19,7 @@ mod lifecycle;
 mod pending_removals;
 mod pr_sync_control;
 mod project_base;
+mod reload_origin;
 pub(crate) mod removal;
 mod resume_fallback;
 mod spawn_worker;
@@ -375,11 +376,9 @@ pub struct Engine {
     /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
     /// Constructed as `None`.
     pub reload_guard: Option<QuiesceGuard>,
-    /// The writes dux made to `config.toml` itself (a password, a ban, the
-    /// no-password warning's dismissal) that a reload has not read yet, so the
-    /// reload one of them asks for can tell it brought in nothing else and
-    /// stay quiet. Constructed empty.
-    pub own_config_writes: crate::config_write::OwnConfigWrites,
+    /// Who asked for the reloads running and deferred, so one dux asked for
+    /// after its own write is not announced.
+    pub reload_origin: reload_origin::ReloadOrigin,
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
@@ -3600,18 +3599,13 @@ impl Engine {
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(status));
     }
 
-    /// Ask, through `ask`, for the reload dux owes after writing `written` to
+    /// Ask, through `ask`, for the reload dux owes after writing
     /// `config.toml` itself, so that reload is told apart from one somebody
-    /// asked for and says nothing when it reads nothing else.
-    pub fn reload_after_own_config_write<R>(
-        &mut self,
-        written: crate::config_write::FileWrite,
-        ask: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        self.own_config_writes.note(written);
-        self.own_config_writes.begin_asking_after_own_write();
+    /// asked for and is not announced.
+    pub fn reload_after_own_config_write<R>(&mut self, ask: impl FnOnce(&mut Self) -> R) -> R {
+        self.reload_origin.begin_asking_after_own_write();
         let answer = ask(self);
-        self.own_config_writes.end_asking_after_own_write();
+        self.reload_origin.end_asking_after_own_write();
         answer
     }
 

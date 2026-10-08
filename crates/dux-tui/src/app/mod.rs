@@ -4363,7 +4363,7 @@ impl App {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
-            own_config_writes: Default::default(),
+            reload_origin: Default::default(),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             launched_drop_paste: Default::default(),

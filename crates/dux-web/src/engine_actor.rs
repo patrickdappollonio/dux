@@ -147,12 +147,8 @@ pub enum EngineRequest {
         Option<Followed>,
     ),
     /// Reload `config.toml` after dux wrote it itself, as `ApplyWire` with
-    /// `ReloadConfig` does, telling the engine which write that was first, so
-    /// a reload that reads nothing else is not announced.
-    ReloadAfterOwnConfigWrite(
-        dux_core::config_write::FileWrite,
-        oneshot::Sender<Result<WireCommandOutcome, WireError>>,
-    ),
+    /// `ReloadConfig` does, but as dux's own reload, which is not announced.
+    ReloadAfterOwnConfigWrite(oneshot::Sender<Result<WireCommandOutcome, WireError>>),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
@@ -1205,14 +1201,11 @@ impl EngineHandle {
         self.apply_wire_scoped(command, StatusScope::All).await
     }
 
-    /// Reload `config.toml` after dux wrote `own_write` to it itself.
-    pub async fn reload_after_own_config_write(
-        &self,
-        own_write: dux_core::config_write::FileWrite,
-    ) -> Result<WireCommandOutcome, String> {
+    /// Reload `config.toml` after dux wrote it itself, without announcing it.
+    pub async fn reload_after_own_config_write(&self) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::ReloadAfterOwnConfigWrite(own_write, tx))
+            .send(EngineRequest::ReloadAfterOwnConfigWrite(tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await
@@ -2912,9 +2905,9 @@ impl EngineService {
         // KEYED on the reload's own key: the drainer posts the apply's answer on
         // that key through the worker lane, so a failed apply replaces this
         // sentence here instead of leaving "reloaded" standing in a browser.
-        // A reload of nothing but dux's own write is nobody's news, and the
+        // A reload dux asked for after its own write is nobody's news, and the
         // drainer answers it with nothing that would replace this.
-        if !engine.own_config_writes.last_reload_was_own() {
+        if !engine.reload_origin.last_reload_was_own() {
             let _ = self.status.send(WireStatus::keyed(
                 dux_core::wire::status_keys::CONFIG_RELOAD,
                 "info",
@@ -2935,8 +2928,8 @@ impl EngineService {
         if let Some(config) = take_apply_reloaded_config(reaction) {
             let before = engine.config.clone();
             let github_was_enabled = engine.github_integration_enabled;
-            // A reload of nothing but dux's own write is nobody's news.
-            let quiet = engine.own_config_writes.last_reload_was_own();
+            // A reload dux asked for after its own write is nobody's news.
+            let quiet = engine.reload_origin.last_reload_was_own();
             let outcome = match engine.apply_reloaded_config(*config) {
                 Ok(()) => {
                     if !quiet {
@@ -4424,8 +4417,8 @@ fn handle_request(
                 config_disk_ahead,
             );
         }
-        EngineRequest::ReloadAfterOwnConfigWrite(own_write, reply) => {
-            engine.reload_after_own_config_write(own_write, |engine| {
+        EngineRequest::ReloadAfterOwnConfigWrite(reply) => {
+            engine.reload_after_own_config_write(|engine| {
                 handle_apply_wire_request(
                     engine,
                     WireCommand::ReloadConfig {},
@@ -5518,25 +5511,27 @@ mod tests {
         );
         assert_eq!(replayed[0].tone, "error");
 
-        // A reload that read nothing but dux's own write announces nothing,
-        // and browsers still refetch.
+        // A reload dux asked for after its own write announces nothing, and
+        // browsers still refetch.
         while statuses.try_recv().is_ok() {}
         while reloads.try_recv().is_ok() {}
-        let read = dux_core::config_write::read_token(Some("what dux wrote"));
-        engine.reload_after_own_config_write(
-            dux_core::config_write::FileWrite {
-                before: dux_core::config_write::read_token(Some("what dux read")),
-                after: read.clone(),
-            },
-            |_| {},
-        );
+        std::fs::write(&paths.config_path, "").unwrap();
         engine
-            .own_config_writes
-            .settle(Some(&read), Some("what dux read"), (0, None), true);
-        svc.announce_config_reload(
-            &engine,
-            &EventReaction::ApplyReloadedConfig(Box::new(engine.config.clone())),
-        );
+            .reload_after_own_config_write(|engine| {
+                engine.apply(dux_core::engine::Command::ReloadConfig)
+            })
+            .expect("the reload starts");
+        let read = loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the reload ends");
+            if matches!(event, dux_core::worker::WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let reaction = engine.process_worker_event(read);
+        svc.announce_config_reload(&engine, &reaction);
         assert!(statuses.try_recv().is_err(), "nothing is announced");
         assert!(reloads.try_recv().is_ok(), "browsers refetch");
     }
