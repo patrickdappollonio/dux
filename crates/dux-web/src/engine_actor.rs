@@ -146,6 +146,9 @@ pub enum EngineRequest {
         /// [`dux_core::engine::Engine::apply_wire_recorded`] with the plain reply.
         Option<Followed>,
     ),
+    /// Reload `config.toml` after dux wrote it itself, as `ApplyWire` with
+    /// `ReloadConfig` does, but as dux's own reload, which is not announced.
+    ReloadAfterOwnConfigWrite(oneshot::Sender<Result<WireCommandOutcome, WireError>>),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
@@ -1196,6 +1199,18 @@ impl EngineHandle {
 
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
         self.apply_wire_scoped(command, StatusScope::All).await
+    }
+
+    /// Reload `config.toml` after dux wrote it itself, without announcing it.
+    pub async fn reload_after_own_config_write(&self) -> Result<WireCommandOutcome, String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::ReloadAfterOwnConfigWrite(tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await
+            .map_err(|_| "engine reply dropped".to_string())?
+            .map_err(|e| e.message)
     }
 
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
@@ -2338,6 +2353,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // `launch_agent`), which flips the session live, and it also spawns a PR
         // check and stamps the viewed/attention state.
         EngineRequest::ApplyWire(..)
+        | EngineRequest::ReloadAfterOwnConfigWrite(..)
         | EngineRequest::SubscribePty(..)
         | EngineRequest::CreateTerminal(..)
         | EngineRequest::CreateProjectTerminal(..)
@@ -2889,11 +2905,15 @@ impl EngineService {
         // KEYED on the reload's own key: the drainer posts the apply's answer on
         // that key through the worker lane, so a failed apply replaces this
         // sentence here instead of leaving "reloaded" standing in a browser.
-        let _ = self.status.send(WireStatus::keyed(
-            dux_core::wire::status_keys::CONFIG_RELOAD,
-            "info",
-            dux_core::config_reload_status::REFRESHING,
-        ));
+        // A reload dux asked for after its own write is nobody's news, and the
+        // drainer answers it with nothing that would replace this.
+        if !engine.reload_origin.last_reload_was_own() {
+            let _ = self.status.send(WireStatus::keyed(
+                dux_core::wire::status_keys::CONFIG_RELOAD,
+                "info",
+                dux_core::config_reload_status::REFRESHING,
+            ));
+        }
         if let Some(warning) = restart_warning {
             let _ = self.status.send(WireStatus::new("warning", warning));
         }
@@ -2908,11 +2928,15 @@ impl EngineService {
         if let Some(config) = take_apply_reloaded_config(reaction) {
             let before = engine.config.clone();
             let github_was_enabled = engine.github_integration_enabled;
+            // A reload dux asked for after its own write is nobody's news.
+            let quiet = engine.reload_origin.last_reload_was_own();
             let outcome = match engine.apply_reloaded_config(*config) {
                 Ok(()) => {
-                    let _ = self.status.send(WireStatus::from_update(
-                        &dux_core::config_reload_status::applied(),
-                    ));
+                    if !quiet {
+                        let _ = self.status.send(WireStatus::from_update(
+                            &dux_core::config_reload_status::applied(),
+                        ));
+                    }
                     let notes = self.config_in_force(engine, &before, github_was_enabled, true);
                     ConfigReloadOutcome::Applied {
                         notes: notes.into_iter().collect(),
@@ -4393,6 +4417,22 @@ fn handle_request(
                 config_disk_ahead,
             );
         }
+        EngineRequest::ReloadAfterOwnConfigWrite(reply) => {
+            engine.reload_after_own_config_write(|engine| {
+                handle_apply_wire_request(
+                    engine,
+                    WireCommand::ReloadConfig {},
+                    reply,
+                    WireOrigin {
+                        scope: StatusScope::All,
+                        operation: None,
+                    },
+                    status_tx,
+                    config_reload_tx,
+                    config_disk_ahead,
+                )
+            });
+        }
         EngineRequest::EmitStatus(status) => {
             let _ = status_tx.send(status);
         }
@@ -5420,9 +5460,10 @@ mod tests {
     #[test]
     fn announcing_a_reload_keys_it_so_the_apply_outcome_replaces_it() {
         let (_tmp, paths) = temp_paths();
-        let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
         let (handle, ends) = build_actor_channels(&engine);
         let mut statuses = handle.subscribe_status();
+        let mut reloads = handle.subscribe_config_reloads();
         let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
 
         svc.announce_config_reload(
@@ -5469,6 +5510,30 @@ mod tests {
             "and it is the outcome, not the announcement it answered"
         );
         assert_eq!(replayed[0].tone, "error");
+
+        // A reload dux asked for after its own write announces nothing, and
+        // browsers still refetch.
+        while statuses.try_recv().is_ok() {}
+        while reloads.try_recv().is_ok() {}
+        std::fs::write(&paths.config_path, "").unwrap();
+        engine
+            .reload_after_own_config_write(|engine| {
+                engine.apply(dux_core::engine::Command::ReloadConfig)
+            })
+            .expect("the reload starts");
+        let read = loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the reload ends");
+            if matches!(event, dux_core::worker::WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let reaction = engine.process_worker_event(read);
+        svc.announce_config_reload(&engine, &reaction);
+        assert!(statuses.try_recv().is_err(), "nothing is announced");
+        assert!(reloads.try_recv().is_ok(), "browsers refetch");
     }
 
     /// And the post-apply half is what moves them, with the section the drainer

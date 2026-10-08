@@ -19,6 +19,7 @@ mod lifecycle;
 mod pending_removals;
 mod pr_sync_control;
 mod project_base;
+mod reload_origin;
 pub(crate) mod removal;
 mod resume_fallback;
 mod spawn_worker;
@@ -375,6 +376,9 @@ pub struct Engine {
     /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
     /// Constructed as `None`.
     pub reload_guard: Option<QuiesceGuard>,
+    /// Who asked for the reloads running and deferred, so one dux asked for
+    /// after its own write is not announced.
+    pub reload_origin: reload_origin::ReloadOrigin,
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
@@ -3593,6 +3597,16 @@ impl Engine {
     /// as an [`EventReaction::Status`] exactly once.
     pub fn post_status(&self, status: StatusUpdate) {
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(status));
+    }
+
+    /// Ask, through `ask`, for the reload dux owes after writing
+    /// `config.toml` itself, so that reload is told apart from one somebody
+    /// asked for and is not announced.
+    pub fn reload_after_own_config_write<R>(&mut self, ask: impl FnOnce(&mut Self) -> R) -> R {
+        self.reload_origin.begin_asking_after_own_write();
+        let answer = ask(self);
+        self.reload_origin.end_asking_after_own_write();
+        answer
     }
 
     /// The sentence a surface owes before it touches an agent's directory, or

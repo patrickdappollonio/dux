@@ -272,7 +272,7 @@ impl ConfigWriteQueue {
 
     /// Test-only: a queue whose writer thread has already exited, so `save_eager`
     /// deterministically hits the dead-writer path.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_dead_writer(config_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<WriteMsg>();
         drop(rx); // receiver gone → the writer is effectively dead

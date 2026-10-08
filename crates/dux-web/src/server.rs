@@ -745,14 +745,13 @@ impl RouterParams {
 }
 
 /// Ask the engine to reload after dux wrote `config.toml` itself, as
-/// `POST /api/v1/config/reload` does, so each serving mode's reload owner handles it.
+/// `POST /api/v1/config/reload` does, so each serving mode's reload owner
+/// handles it, but as dux's own reload, which is not announced.
 pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> Arc<dyn Fn() + Send + Sync> {
     Arc::new(move || {
         let engine = engine.clone();
         let ask = async move {
-            let _ = engine
-                .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
-                .await;
+            let _ = engine.reload_after_own_config_write().await;
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
@@ -6755,24 +6754,39 @@ mod tests {
     /// After dux writes `config.toml` itself (a password, a ban), the reload
     /// it asks for is the engine's own `ReloadConfig`, the command the reload
     /// route sends, handled by whichever surface owns the reload; it is not a
-    /// signal raised at the process.
+    /// signal raised at the process. It is not announced; the same reload
+    /// asked for through the reload command is.
     #[tokio::test]
     async fn dux_reloads_after_its_own_config_write_by_asking_the_engine() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
         let mut reloads = handle.subscribe_config_reloads();
-        std::fs::write(
-            tmp.path().join("config.toml"),
-            "[ui]\nleft_width_pct = 30\n",
-        )
-        .expect("write config.toml");
+        let mut statuses = handle.subscribe_status();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "[ui]\nleft_width_pct = 30\n").expect("write config.toml");
+        let mut reload_statuses = async || {
+            tokio::time::timeout(std::time::Duration::from_secs(5), reloads.recv())
+                .await
+                .expect("the engine reloaded")
+                .expect("config reload broadcast");
+            let mut messages = Vec::new();
+            while let Ok(status) = statuses.try_recv() {
+                messages.push(status.message);
+            }
+            messages
+        };
+
+        handle
+            .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
+            .await
+            .expect("the reload is asked for");
+        assert_eq!(
+            reload_statuses().await,
+            vec!["Configuration reloaded. New settings are active now.".to_string()]
+        );
 
         (reload_through_the_engine(handle))();
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), reloads.recv())
-            .await
-            .expect("the engine reloaded")
-            .expect("config reload broadcast");
+        assert_eq!(reload_statuses().await, Vec::<String>::new());
     }
 
     /// A reload that is refused (here, config.toml does not exist) changes

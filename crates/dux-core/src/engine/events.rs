@@ -3098,6 +3098,7 @@ impl Engine {
         // warning, the bind-change check), even when a follow-up reload or a
         // deferred command rode along.
         let mut before_reload: Option<Config> = None;
+        self.reload_origin.reload_finished();
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
                 if must_preswap {
@@ -3163,7 +3164,14 @@ impl Engine {
             // Judged as whoever asked for it, not as whoever is draining it.
             let asked_by = deferred_policies.next().flatten();
             let previous = std::mem::replace(&mut self.dispatch_policy, asked_by);
+            let resumes_reload = matches!(command, crate::engine::Command::ReloadConfig);
+            if resumes_reload {
+                self.reload_origin.deferred_reload_resumes();
+            }
             let applied = self.apply_deferred_operation(command, operation);
+            if resumes_reload {
+                self.reload_origin.end_asking_after_own_write();
+            }
             self.dispatch_policy = previous;
             match applied {
                 Ok(EventReaction::Nothing) => {}

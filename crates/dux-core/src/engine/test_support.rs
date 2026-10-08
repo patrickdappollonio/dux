@@ -74,6 +74,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
+        reload_origin: Default::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         launched_drop_paste: HashMap::new(),
