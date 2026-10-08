@@ -305,6 +305,21 @@ describe("expanding a folded folder", () => {
     expect(screen.queryByRole("button", { name: /Couldn.t refresh/ })).toBeNull()
   })
 
+  // The toggle stretches to the row's height, and baseline alignment in a
+  // stretched box parks its text at the top while the chevron centres, so the
+  // toggle centres and only the text group keeps the shared baseline.
+  it("centres the expand toggle's items and keeps the name and counts on one baseline inside it", () => {
+    render(<ChangedFiles />)
+    const button = toggle("node_modules/")
+    expect(button.className).toContain("items-center")
+    expect(button.className).not.toContain("items-baseline")
+    const name = within(button).getByText(/node_modules/)
+    const group = name.closest(".items-baseline")
+    expect(group).not.toBeNull()
+    expect(button.contains(group)).toBe(true)
+    expect(group).not.toBe(button)
+  })
+
   // A coarse pointer at desktop width gets the 44px floor on every control the
   // expand adds, like the row's other controls.
   it("gives every expand control the touch floor under a coarse pointer", async () => {

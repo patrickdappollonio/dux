@@ -275,6 +275,7 @@ function ExpandToggle({
   contentsId,
   inTabOrder,
   onToggle,
+  chevron,
   children,
 }: {
   expandable: boolean
@@ -282,6 +283,8 @@ function ExpandToggle({
   contentsId?: string
   inTabOrder: boolean
   onToggle: () => void
+  // The expand chevron, drawn only on a folder that can expand.
+  chevron?: React.ReactNode
   children: React.ReactNode
 }) {
   if (!expandable) {
@@ -303,11 +306,15 @@ function ExpandToggle({
           onToggle()
         }}
         className={cn(
-          "flex min-w-0 flex-1 items-baseline gap-2 self-stretch rounded border border-transparent text-left max-md:min-h-11 pointer-coarse:min-h-11",
+          "flex min-w-0 flex-1 items-center gap-2 self-stretch rounded border border-transparent text-left max-md:min-h-11 pointer-coarse:min-h-11",
           FOCUS_RING,
         )}
       >
-        {children}
+        {chevron}
+        {/* The button stretches to the row's height, where baseline alignment
+          * would park the text at its top, so the button centres and the text
+          * keeps its shared baseline in this group. */}
+        <span className="flex min-w-0 flex-1 items-baseline gap-2">{children}</span>
       </button>
     </div>
   )
@@ -482,16 +489,16 @@ const FileRow = memo(function FileRow({
         contentsId={contentsId}
         inTabOrder={inTabOrder}
         onToggle={() => onToggleExpand?.(file)}
-      >
-        {expandable && (
+        chevron={
           <ChevronRight
             aria-hidden
             className={cn(
-              "size-3.5 shrink-0 self-center text-muted-foreground transition-transform motion-reduce:transition-none",
+              "size-3.5 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none",
               expanded && "rotate-90",
             )}
           />
-        )}
+        }
+      >
         {/* Long paths ellipsize at the start so the filename stays visible. A
           * row inside an expanded folder names only itself: the folder it
           * hangs from is the row above it. */}
