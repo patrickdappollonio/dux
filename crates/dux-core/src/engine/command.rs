@@ -1160,6 +1160,7 @@ impl Engine {
                 // it joins the deferred commands and runs as soon as the
                 // current reload closes its barrier. Any number of them
                 // collapse into one follow-up, which reads the latest file.
+                self.own_config_writes.reload_asked(self.reloading);
                 if self.reloading {
                     if !self
                         .deferred_commands
@@ -1191,7 +1192,9 @@ impl Engine {
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
                     // The reload that was to start never will, so the clients
-                    // waiting on it are told so.
+                    // waiting on it are told so, and no write of dux's own
+                    // waits for it.
+                    self.own_config_writes.reload_not_started();
                     self.operations.fail_reload(
                         "Config writer is busy; please retry.",
                         std::time::Instant::now(),

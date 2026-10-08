@@ -330,8 +330,7 @@ pub struct AuthSetup {
 /// What asks the running dux to reload after dux wrote `config.toml` itself,
 /// told which write that was (`None` when the write left no file identity),
 /// so a reload that reads nothing else can stay quiet.
-pub type ReloadAfterWrite =
-    Arc<dyn Fn(Option<dux_core::config_write::OwnConfigWrite>) + Send + Sync>;
+pub type ReloadAfterWrite = Arc<dyn Fn(Option<dux_core::config_write::FileWrite>) + Send + Sync>;
 
 /// A test seam awaited at a socket's opening check.
 pub type OpeningHook =
@@ -997,15 +996,9 @@ impl AuthState {
     }
 
     /// Ask for the reload that follows dux's own write (`written`), naming
-    /// it along with the section the running dux now holds, so a reload that
-    /// reads nothing else says nothing.
+    /// it, so a reload that reads nothing else says nothing.
     fn reload_after(&self, written: Option<dux_core::config_write::FileWrite>) {
-        (self.reload)(
-            written.map(|written| dux_core::config_write::OwnConfigWrite {
-                written,
-                auth: self.live.snapshot().config.clone(),
-            }),
-        );
+        (self.reload)(written);
     }
 }
 

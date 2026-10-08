@@ -6791,14 +6791,7 @@ mod tests {
         let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
         dux_core::config_keys::set_plain(&config_path, &key, "true").expect("dux writes");
         let written = dux_core::config_write::take_last_write().expect("a locked write");
-        let auth = dux_core::config::ServerAuthConfig {
-            disable_no_auth_warning: true,
-            ..Default::default()
-        };
-        (reload_through_the_engine(handle))(Some(dux_core::config_write::OwnConfigWrite {
-            written,
-            auth,
-        }));
+        (reload_through_the_engine(handle))(Some(written));
         assert_eq!(reload_statuses().await, Vec::<String>::new());
     }
 

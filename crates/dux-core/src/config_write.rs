@@ -1490,28 +1490,39 @@ pub fn take_last_write() -> Option<FileWrite> {
     LAST_WRITE.with(|slot| slot.borrow_mut().take())
 }
 
-/// A change dux wrote to `config.toml` itself and then asked a reload for: a
-/// password, a ban, the no-password warning's dismissal. Each of those is a
-/// `[server.auth]` change, so `auth` is the section the running dux holds
-/// with this write applied.
-#[derive(Debug)]
-pub struct OwnConfigWrite {
-    pub written: FileWrite,
-    pub auth: crate::config::ServerAuthConfig,
-}
-
-/// The writes dux made to `config.toml` itself that no reload has read yet,
-/// and whether the reload that last finished brought in nothing else.
+/// The writes dux made to `config.toml` itself (a password, a ban, the
+/// no-password warning's dismissal) that no reload has read yet, where each
+/// reload came from, and whether the reload that last finished read nothing
+/// but those writes.
 #[derive(Debug, Default)]
 pub struct OwnConfigWrites {
-    pending: Vec<OwnConfigWrite>,
+    pending: Vec<FileWrite>,
+    /// How many writes the config writer had made when the last reload
+    /// settled.
+    writer_writes: u64,
+    /// Set while dux itself asks for the reload a write of its own owes.
+    asking_after_own_write: bool,
+    /// Whether somebody asked for the reload running now, and for the one
+    /// deferred behind it. Such a reload always answers.
+    running_asked_for: bool,
+    deferred_asked_for: bool,
     last_reload_was_own: bool,
 }
 
 impl OwnConfigWrites {
     /// Remember `write` until a reload reads the file.
-    pub fn note(&mut self, write: OwnConfigWrite) {
+    pub fn note(&mut self, write: FileWrite) {
         self.pending.push(write);
+    }
+
+    /// Mark the reload asked for until [`Self::end_asking_after_own_write`]
+    /// as one dux asks for after a write of its own.
+    pub fn begin_asking_after_own_write(&mut self) {
+        self.asking_after_own_write = true;
+    }
+
+    pub fn end_asking_after_own_write(&mut self) {
+        self.asking_after_own_write = false;
     }
 
     /// Whether the reload that last finished read nothing but what dux wrote
@@ -1520,25 +1531,76 @@ impl OwnConfigWrites {
         self.last_reload_was_own
     }
 
+    /// A reload is being asked for, to run now or (`deferred`) after the
+    /// one running: by dux after a write of its own, or else by somebody.
+    pub fn reload_asked(&mut self, deferred: bool) {
+        let asked_for = !self.asking_after_own_write;
+        if deferred {
+            self.deferred_asked_for |= asked_for;
+        } else {
+            self.running_asked_for = asked_for;
+        }
+    }
+
+    /// The deferred reload is about to be asked for again, as whoever asked
+    /// for it first; [`Self::end_asking_after_own_write`] follows.
+    pub fn deferred_reload_resumes(&mut self) {
+        self.asking_after_own_write = !std::mem::take(&mut self.deferred_asked_for);
+    }
+
+    /// The reload just asked for never started, so no write of dux's own
+    /// waits for it.
+    pub fn reload_not_started(&mut self) {
+        self.pending.clear();
+        self.running_asked_for = false;
+    }
+
     /// Settle a finished reload. `read` is the [`read_token`] of the text it
-    /// read (`None` when it read none), `running` the config in force before
-    /// it, and `reloaded` what it read, when that is adopted as it is.
-    ///
-    /// Every reload retires the writes noted before it. It was dux's own when
-    /// the text it read is exactly what the last of them left, judged by file
-    /// identity, so an edit made after that write is announced; and when its
-    /// settings are the running ones with that write's `[server.auth]`, so an
-    /// edit made outside dux before the write is announced too.
-    pub fn settle(&mut self, read: Option<&str>, running: &Config, reloaded: Option<&Config>) {
-        let last = std::mem::take(&mut self.pending).pop();
-        self.last_reload_was_own = match (last, read, reloaded) {
-            (Some(last), Some(read), Some(reloaded)) => {
-                let mut expected = running.clone();
-                expected.server.auth = last.auth;
-                last.written.after == read && expected == *reloaded
-            }
-            _ => false,
+    /// read (`None` when it read none), `running_source` the text the config
+    /// in force was read from (`None` when dux wrote it), `writer` how many
+    /// writes the config writer has made and the identity of its last one,
+    /// and `adoptable` whether what it read is adopted as it is.
+    pub fn settle(
+        &mut self,
+        read: Option<&str>,
+        running_source: Option<&str>,
+        writer: (u64, Option<String>),
+        adoptable: bool,
+    ) {
+        let mut pending = std::mem::take(&mut self.pending);
+        // The file as dux last knew it: what its config writer wrote since
+        // the last reload settled, or else what the config in force was read
+        // from. Each write of its own must start from where the one before
+        // left the file, or somebody else wrote in between.
+        let mut known = if writer.0 > self.writer_writes {
+            writer.1
+        } else {
+            running_source.map(|text| read_token(Some(text)))
         };
+        self.writer_writes = writer.0;
+        let mut chained = 0;
+        for write in &pending {
+            if known.as_deref() != Some(write.before.as_str()) {
+                break;
+            }
+            known = Some(write.after.clone());
+            chained += 1;
+        }
+        // The writes the text read holds are retired; one made after the
+        // read waits for the reload it asked for.
+        let last_read = read.and_then(|read| pending.iter().rposition(|write| write.after == read));
+        let unread = match (last_read, read) {
+            (Some(index), _) => index + 1,
+            (None, Some(read)) => pending
+                .iter()
+                .position(|write| write.before == read)
+                .unwrap_or(pending.len()),
+            (None, None) => pending.len(),
+        };
+        self.last_reload_was_own = !std::mem::take(&mut self.running_asked_for)
+            && adoptable
+            && last_read.is_some_and(|index| index < chained);
+        self.pending = pending.split_off(unread);
     }
 }
 

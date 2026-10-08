@@ -3600,6 +3600,21 @@ impl Engine {
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(status));
     }
 
+    /// Ask, through `ask`, for the reload dux owes after writing `written` to
+    /// `config.toml` itself, so that reload is told apart from one somebody
+    /// asked for and says nothing when it reads nothing else.
+    pub fn reload_after_own_config_write<R>(
+        &mut self,
+        written: crate::config_write::FileWrite,
+        ask: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.own_config_writes.note(written);
+        self.own_config_writes.begin_asking_after_own_write();
+        let answer = ask(self);
+        self.own_config_writes.end_asking_after_own_write();
+        answer
+    }
+
     /// The sentence a surface owes before it touches an agent's directory, or
     /// `None` when the directory is there.
     ///

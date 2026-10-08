@@ -150,7 +150,7 @@ pub enum EngineRequest {
     /// `ReloadConfig` does, telling the engine which write that was first, so
     /// a reload that reads nothing else is not announced.
     ReloadAfterOwnConfigWrite(
-        dux_core::config_write::OwnConfigWrite,
+        dux_core::config_write::FileWrite,
         oneshot::Sender<Result<WireCommandOutcome, WireError>>,
     ),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
@@ -1208,7 +1208,7 @@ impl EngineHandle {
     /// Reload `config.toml` after dux wrote `own_write` to it itself.
     pub async fn reload_after_own_config_write(
         &self,
-        own_write: dux_core::config_write::OwnConfigWrite,
+        own_write: dux_core::config_write::FileWrite,
     ) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
@@ -4425,19 +4425,20 @@ fn handle_request(
             );
         }
         EngineRequest::ReloadAfterOwnConfigWrite(own_write, reply) => {
-            engine.own_config_writes.note(own_write);
-            handle_apply_wire_request(
-                engine,
-                WireCommand::ReloadConfig {},
-                reply,
-                WireOrigin {
-                    scope: StatusScope::All,
-                    operation: None,
-                },
-                status_tx,
-                config_reload_tx,
-                config_disk_ahead,
-            );
+            engine.reload_after_own_config_write(own_write, |engine| {
+                handle_apply_wire_request(
+                    engine,
+                    WireCommand::ReloadConfig {},
+                    reply,
+                    WireOrigin {
+                        scope: StatusScope::All,
+                        operation: None,
+                    },
+                    status_tx,
+                    config_reload_tx,
+                    config_disk_ahead,
+                )
+            });
         }
         EngineRequest::EmitStatus(status) => {
             let _ = status_tx.send(status);
@@ -5521,19 +5522,17 @@ mod tests {
         // and browsers still refetch.
         while statuses.try_recv().is_ok() {}
         while reloads.try_recv().is_ok() {}
+        let read = dux_core::config_write::read_token(Some("what dux wrote"));
+        engine.reload_after_own_config_write(
+            dux_core::config_write::FileWrite {
+                before: dux_core::config_write::read_token(Some("what dux read")),
+                after: read.clone(),
+            },
+            |_| {},
+        );
         engine
             .own_config_writes
-            .note(dux_core::config_write::OwnConfigWrite {
-                written: dux_core::config_write::FileWrite {
-                    before: "before".to_string(),
-                    after: "after".to_string(),
-                },
-                auth: engine.config.server.auth.clone(),
-            });
-        let running = engine.config.clone();
-        engine
-            .own_config_writes
-            .settle(Some("after"), &running, Some(&running));
+            .settle(Some(&read), Some("what dux read"), (0, None), true);
         svc.announce_config_reload(
             &engine,
             &EventReaction::ApplyReloadedConfig(Box::new(engine.config.clone())),

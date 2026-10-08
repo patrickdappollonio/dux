@@ -3098,17 +3098,25 @@ impl Engine {
         // warning, the bind-change check), even when a follow-up reload or a
         // deferred command rode along.
         let mut before_reload: Option<Config> = None;
-        // Whether this reload read only what dux wrote itself. A reload that
-        // carries deferred commands along is somebody else's too.
+        // Whether this reload read only what dux wrote itself. A deferred
+        // command that changes the config makes it somebody else's too; a
+        // follow-up reload is only asked for, by whoever asked.
         let read = result
             .as_ref()
             .ok()
             .and_then(|config| config.source_text.as_str())
             .map(|text| crate::config_write::read_token(Some(text)));
+        let running_source = Some(&self.config.source_text)
+            .filter(|source| !source.is_written())
+            .and_then(|source| source.as_str());
         self.own_config_writes.settle(
             read.as_deref(),
-            &self.config,
-            result.as_ref().ok().filter(|_| !must_preswap),
+            running_source,
+            self.config_writer.last_written_file(),
+            result.is_ok()
+                && deferred
+                    .iter()
+                    .all(|command| matches!(command, crate::engine::Command::ReloadConfig)),
         );
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
@@ -3175,7 +3183,14 @@ impl Engine {
             // Judged as whoever asked for it, not as whoever is draining it.
             let asked_by = deferred_policies.next().flatten();
             let previous = std::mem::replace(&mut self.dispatch_policy, asked_by);
+            let resumes_reload = matches!(command, crate::engine::Command::ReloadConfig);
+            if resumes_reload {
+                self.own_config_writes.deferred_reload_resumes();
+            }
             let applied = self.apply_deferred_operation(command, operation);
+            if resumes_reload {
+                self.own_config_writes.end_asking_after_own_write();
+            }
             self.dispatch_policy = previous;
             match applied {
                 Ok(EventReaction::Nothing) => {}

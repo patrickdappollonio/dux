@@ -950,9 +950,8 @@ impl App {
             Ok(()) => TuiConfigReloadOutcome::Applied,
         };
         // A reload dux asked for after writing the file itself, which read
-        // nothing else, is nobody's news. One asked for here always answers.
+        // nothing else, is nobody's news.
         let quiet = matches!(outcome, TuiConfigReloadOutcome::Applied)
-            && self.pending_config_reload_op.is_none()
             && self.engine.own_config_writes.last_reload_was_own();
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
@@ -2206,30 +2205,41 @@ mod tests {
         assert!(app.engine.worker_rx.try_recv().is_err());
     }
 
-    /// Run one reload of the real file through this surface, as a reload the
-    /// web asks for runs (no op of this surface's own), and answer the
-    /// statuses it posted on the config-reload key.
-    fn reload_and_collect_reload_statuses(app: &mut App) -> Vec<String> {
-        app.engine
-            .apply(dux_core::engine::Command::ReloadConfig)
-            .expect("the reload starts");
-        let mut messages = Vec::new();
-        let mut reloaded = false;
+    /// The next reload's answer, held so a test can act before it lands.
+    fn next_reload_read(app: &App) -> WorkerEvent {
         loop {
-            let event = if reloaded {
-                match app.engine.worker_rx.try_recv() {
-                    Ok(event) => event,
-                    Err(_) => break,
-                }
-            } else {
-                app.engine
+            let event = app
+                .engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the reload ends");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                return event;
+            }
+        }
+    }
+
+    /// Land `read`, and every reload that follows it, on this surface, as
+    /// the run loop drains them, and answer what they posted on the
+    /// config-reload key, the lane both surfaces show.
+    fn land_reloads(app: &mut App, read: WorkerEvent) -> Vec<String> {
+        let mut messages = Vec::new();
+        let mut next = Some(read);
+        loop {
+            let event = match next.take() {
+                Some(event) => event,
+                None if app.engine.reloading => app
+                    .engine
                     .worker_rx
                     .recv_timeout(std::time::Duration::from_secs(30))
-                    .expect("the reload ends")
+                    .expect("the follow-up reload ends"),
+                None => match app.engine.worker_rx.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => return messages,
+                },
             };
             match event {
                 WorkerEvent::ConfigReloadReady(_) => {
-                    reloaded = true;
                     let reaction = app.engine.process_worker_event(event);
                     app.apply_reaction(reaction);
                 }
@@ -2242,62 +2252,144 @@ mod tests {
                 _ => {}
             }
         }
-        messages
     }
+
+    /// A reload somebody asks for (the palette, SIGUSR1, a browser).
+    fn ask_for_a_reload(app: &mut App) {
+        app.engine
+            .apply(dux_core::engine::Command::ReloadConfig)
+            .expect("the reload is asked for");
+    }
+
+    /// dux writes the no-password warning's dismissal (`value`) to the file
+    /// itself, as the route does, and answers that write's identity.
+    fn dux_writes_the_dismissal(app: &App, value: bool) -> dux_core::config_write::FileWrite {
+        let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
+        dux_core::config_keys::set_plain(&app.engine.paths.config_path, &key, &value.to_string())
+            .expect("dux writes the file");
+        dux_core::config_write::take_last_write().expect("a locked write")
+    }
+
+    /// The reload dux owes after its own `written`.
+    fn ask_for_dux_own_reload(app: &mut App, written: dux_core::config_write::FileWrite) {
+        app.engine
+            .reload_after_own_config_write(written, |engine| {
+                engine.apply(dux_core::engine::Command::ReloadConfig)
+            })
+            .expect("the reload is asked for");
+    }
+
+    fn dismiss_and_reload(app: &mut App, value: bool) {
+        let written = dux_writes_the_dismissal(app, value);
+        ask_for_dux_own_reload(app, written);
+    }
+
+    fn edit_by_hand(app: &App, edit: impl FnOnce(&mut String)) {
+        let path = &app.engine.paths.config_path;
+        let mut text = std::fs::read_to_string(path).unwrap();
+        edit(&mut text);
+        std::fs::write(path, text).unwrap();
+    }
+
+    const RELOADED: &str = "Configuration reloaded. New settings are active now.";
 
     /// A reload asked for by dux's own write to config.toml (here the
     /// no-password warning's dismissal) says nothing on either surface: the
     /// user did not edit the file. A reload that also brings in an edit made
-    /// outside dux, before or after that write, is announced as ever.
+    /// outside dux, before or after that write, is announced as ever, and so
+    /// is every reload somebody asks for.
     #[test]
     fn a_reload_of_only_dux_own_write_is_quiet_and_one_with_an_outside_edit_is_announced() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let paths = app.engine.paths.clone();
         crate::config::ensure_config(&paths).expect("a config file");
-        reload_and_collect_reload_statuses(&mut app);
-
-        let dismissal =
-            dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
+        // The first reload writes the project in; the second reads the file
+        // as it stays, which is what dux knows of it from then on.
+        for _ in 0..2 {
+            ask_for_a_reload(&mut app);
+            let read = next_reload_read(&app);
+            assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
+        }
         let width = dux_core::config_keys::lookup("ui.left_width_pct").unwrap();
-        let own_write = |app: &mut App, value: bool| {
-            dux_core::config_keys::set_plain(&paths.config_path, &dismissal, &value.to_string())
-                .expect("dux writes the file");
-            let mut auth = app.engine.config.server.auth.clone();
-            auth.disable_no_auth_warning = value;
-            app.engine
-                .own_config_writes
-                .note(dux_core::config_write::OwnConfigWrite {
-                    written: dux_core::config_write::take_last_write().expect("a locked write"),
-                    auth,
-                });
-        };
 
-        own_write(&mut app, true);
-        assert_eq!(
-            reload_and_collect_reload_statuses(&mut app),
-            Vec::<String>::new()
-        );
+        dismiss_and_reload(&mut app, true);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
+
+        // A preference dux saved since is dux's own writing too.
+        app.engine.config.ui.left_width_pct = 31;
+        app.engine
+            .config_writer
+            .save_eager(app.engine.config.clone())
+            .expect("the preference is saved");
+        dismiss_and_reload(&mut app, false);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
+        assert_eq!(app.engine.config.ui.left_width_pct, 31);
 
         // `dux config set` edited the file before dux wrote it.
         dux_core::config_keys::set_plain(&paths.config_path, &width, "33").unwrap();
-        own_write(&mut app, false);
-        assert_eq!(
-            reload_and_collect_reload_statuses(&mut app),
-            vec!["Configuration reloaded. New settings are active now.".to_string()]
-        );
+        dismiss_and_reload(&mut app, true);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
         assert_eq!(app.engine.config.ui.left_width_pct, 33);
 
         // An editor touched the file after dux wrote it, if only a comment.
-        own_write(&mut app, true);
-        let mut text = std::fs::read_to_string(&paths.config_path).unwrap();
-        text.push_str("# a note of mine\n");
-        std::fs::write(&paths.config_path, text).unwrap();
+        let written = dux_writes_the_dismissal(&app, false);
+        edit_by_hand(&app, |text| text.push_str("# a note of mine\n"));
+        ask_for_dux_own_reload(&mut app, written);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
+
+        // An editor touched the file before dux wrote it, if only a comment.
+        edit_by_hand(&app, |text| text.push_str("# another note\n"));
+        dismiss_and_reload(&mut app, true);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
+
+        // Two writes of dux's own, the second while the first one's reload is
+        // still reading: neither reload is news.
+        dismiss_and_reload(&mut app, false);
+        let read = next_reload_read(&app);
+        dismiss_and_reload(&mut app, true);
+        assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
+        assert!(app.engine.config.server.auth.disable_no_auth_warning);
+
+        // A reload somebody asks for while dux's own is reading answers,
+        // even though the file holds nothing but dux's write.
+        dismiss_and_reload(&mut app, false);
+        let read = next_reload_read(&app);
+        ask_for_a_reload(&mut app);
+        assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
+        assert!(!app.engine.config.server.auth.disable_no_auth_warning);
+
+        // Somebody's reload is reading when dux writes, and somebody asks
+        // again: the follow-up reads only dux's write, and still answers.
+        ask_for_a_reload(&mut app);
+        let read = next_reload_read(&app);
+        dismiss_and_reload(&mut app, true);
+        ask_for_a_reload(&mut app);
         assert_eq!(
-            reload_and_collect_reload_statuses(&mut app),
-            vec!["Configuration reloaded. New settings are active now.".to_string()]
+            land_reloads(&mut app, read),
+            vec![RELOADED.to_string(), RELOADED.to_string()]
         );
+        assert!(app.engine.config.server.auth.disable_no_auth_warning);
+
+        // dux's own reload never starts (the config writer will not pause),
+        // and a reload somebody asks for later, with the file unchanged since,
+        // answers.
+        let writer = std::mem::replace(
+            &mut app.engine.config_writer,
+            dux_core::config_queue::ConfigWriteQueue::with_dead_writer(paths.config_path.clone()),
+        );
+        dismiss_and_reload(&mut app, false);
+        assert!(!app.engine.reloading, "the reload never started");
+        app.engine.config_writer = writer;
+        ask_for_a_reload(&mut app);
+        let read = next_reload_read(&app);
+        assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
     }
 
     fn test_session(worktree: &Path) -> AgentSession {

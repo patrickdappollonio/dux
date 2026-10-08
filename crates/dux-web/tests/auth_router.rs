@@ -76,6 +76,7 @@ struct Dux {
     app: Router,
     tmp: dux_core::test_scratch::ScratchDir,
     reloads: Arc<std::sync::atomic::AtomicUsize>,
+    handle: dux_web::engine_actor::EngineHandle,
 }
 
 /// An engine surface that judges a file the terminal UI's way, as the flip's
@@ -170,7 +171,7 @@ impl Dux {
         )
         .unwrap();
         let app = build_app(
-            handle,
+            handle.clone(),
             Router::<AppState>::new(),
             tune(
                 RouterParams::plain_http()
@@ -184,7 +185,12 @@ impl Dux {
                     })),
             ),
         );
-        Self { app, tmp, reloads }
+        Self {
+            app,
+            tmp,
+            reloads,
+            handle,
+        }
     }
 
     fn with_password(extra: &str) -> Self {
@@ -1291,9 +1297,16 @@ async fn a_weak_password_signs_in_and_the_status_says_so_to_the_signed_in_only()
     );
 }
 
+/// Through the reload dux really asks for after its own write, which reads
+/// nothing else, so neither a "reloaded" nor a "refreshing" sentence is said.
 #[tokio::test]
 async fn dismissing_the_warning_writes_the_setting_and_keeps_the_comments() {
-    let dux = Dux::start("");
+    let dux = Dux::start_tuned("", |mut params| {
+        params.auth_reload = None;
+        params
+    });
+    let mut reloads = dux.handle.subscribe_config_reloads();
+    let mut statuses = dux.handle.subscribe_status();
     assert_eq!(
         dux.status(NETWORK, None).await["no_auth_warning"],
         json!(true)
@@ -1315,6 +1328,16 @@ async fn dismissing_the_warning_writes_the_setting_and_keeps_the_comments() {
         dux.status(NETWORK, None).await["no_auth_warning"],
         json!(false)
     );
+    // Browsers are told to refetch once the engine has adopted the file.
+    tokio::time::timeout(Duration::from_secs(10), reloads.recv())
+        .await
+        .expect("the engine reloaded")
+        .expect("config reload broadcast");
+    let mut said = Vec::new();
+    while let Ok(status) = statuses.try_recv() {
+        said.push(status.message);
+    }
+    assert_eq!(said, Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -3195,6 +3218,7 @@ async fn a_ban_held_in_memory_survives_a_new_serve_in_the_same_dux() {
         app: serve(handle.clone()),
         tmp,
         reloads: Arc::default(),
+        handle: handle.clone(),
     };
     for _ in 0..2 {
         first.login(NETWORK, "not the password at all").await;

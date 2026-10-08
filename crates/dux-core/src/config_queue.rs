@@ -44,8 +44,16 @@ pub struct ConfigWriteQueue {
 
 /// The writer's base after its most recent SUCCESSFUL write (the config it
 /// wrote and the text it has seen), with a count of writes, so a caller can
-/// tell whether a write happened since it last looked.
-type LastWritten = Arc<std::sync::Mutex<(u64, Option<crate::config::SourceText>)>>;
+/// tell whether a write happened since it last looked, and the file identity
+/// ([`crate::config_write::read_token`]) of the text that write left.
+type LastWritten = Arc<std::sync::Mutex<Written>>;
+
+#[derive(Clone, Default)]
+struct Written {
+    count: u64,
+    source: Option<crate::config::SourceText>,
+    file: Option<String>,
+}
 
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
 /// guard lives; dropping it resumes the writer. Owns a `Sender<WriteMsg>` clone
@@ -152,7 +160,16 @@ impl ConfigWriteQueue {
     pub fn last_written(&self) -> (u64, Option<crate::config::SourceText>) {
         self.last_written
             .lock()
-            .map(|guard| guard.clone())
+            .map(|guard| (guard.count, guard.source.clone()))
+            .unwrap_or((0, None))
+    }
+
+    /// How many writes this writer has made, and the file identity of the
+    /// text the latest one that succeeded left.
+    pub fn last_written_file(&self) -> (u64, Option<String>) {
+        self.last_written
+            .lock()
+            .map(|guard| (guard.count, guard.file.clone()))
             .unwrap_or((0, None))
     }
 
@@ -272,7 +289,7 @@ impl ConfigWriteQueue {
 
     /// Test-only: a queue whose writer thread has already exited, so `save_eager`
     /// deterministically hits the dead-writer path.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_dead_writer(config_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<WriteMsg>();
         drop(rx); // receiver gone → the writer is effectively dead
@@ -572,13 +589,14 @@ impl WriterState {
     fn record_write(&mut self, config: Config, written: &str) {
         let base = written_base(&self.base, config, written);
         if let Ok(mut last) = self.last_written.lock() {
-            *last = (
-                last.0 + 1,
-                Some(crate::config::SourceText::written(
+            *last = Written {
+                count: last.count + 1,
+                source: Some(crate::config::SourceText::written(
                     &base.seen,
                     base.config.clone(),
                 )),
-            );
+                file: Some(crate::config_write::read_token(Some(written))),
+            };
         }
         self.base = Some(base);
     }
