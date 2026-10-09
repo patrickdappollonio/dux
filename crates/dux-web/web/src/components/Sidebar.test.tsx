@@ -1767,26 +1767,40 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(labels).toContain("My Notes")
   })
 
-  it("clicking an agent icon selects that agent", () => {
-    mockState = makeState({
-      spine: makeTwoActiveProjectSpine(),
-      bootstrap: {
-        title: "dux",
-        dux_version: "v1",
-        available_providers: ["claude"],
-      },
-      createTabInFlight: [],
-    })
-    render(
-      <SidebarProvider defaultOpen={false}>
-        <AppSidebar />
-      </SidebarProvider>,
-    )
+  it("a tap on an agent icon selects that agent and floats no sidebar", () => {
+    vi.useFakeTimers()
+    try {
+      mockState = makeState({
+        spine: makeTwoActiveProjectSpine(),
+        bootstrap: {
+          title: "dux",
+          dux_version: "v1",
+          available_providers: ["claude"],
+        },
+        createTabInFlight: [],
+      })
+      const { container } = render(
+        <SidebarProvider defaultOpen={false}>
+          <AppSidebar />
+        </SidebarProvider>,
+      )
 
-    const rail = screen.getByTestId("collapsed-agent-rail")
-    const buttons = rail.querySelectorAll("button")
-    fireEvent.click(buttons[1])
-    expect(selectSessionMock).toHaveBeenCalledWith("s2")
+      const rail = screen.getByTestId("collapsed-agent-rail")
+      const buttons = rail.querySelectorAll("button")
+      // A tap's own pointer, and the mouse events the browser synthesizes after it.
+      fireEvent.pointerEnter(buttons[1], { pointerType: "touch" })
+      fireEvent.mouseEnter(buttons[1])
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      const sidebar = container.querySelector('[data-slot="sidebar"]')!
+      expect(sidebar.getAttribute("data-collapsible")).toBe("icon")
+      fireEvent.click(buttons[1])
+      expect(selectSessionMock).toHaveBeenCalledWith("s2")
+      expect(sidebar.getAttribute("data-collapsible")).toBe("icon")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("shows the selected agent's icon in the active state", () => {

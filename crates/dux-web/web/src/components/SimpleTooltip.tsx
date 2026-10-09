@@ -19,6 +19,7 @@ export function SimpleTooltip({
   delay = 300,
   open,
   onOpenChange,
+  openOnHover = true,
 }: {
   content: React.ReactNode
   children: React.ReactElement
@@ -28,13 +29,25 @@ export function SimpleTooltip({
    * shown only while its text is clipped, or while an ancestor has focus). */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** False keeps the card for keyboard focus alone, for a trigger whose mouse
+   * hover already reveals something bigger. */
+  openOnHover?: boolean
 }) {
   if (content === null || content === undefined || content === "") {
     return children
   }
   return (
     <TooltipProvider delay={delay}>
-      <Tooltip open={open} onOpenChange={onOpenChange}>
+      <Tooltip
+        open={open}
+        onOpenChange={(next, details) => {
+          if (next && !openOnHover && details.reason === "trigger-hover") {
+            details.cancel()
+            return
+          }
+          onOpenChange?.(next)
+        }}
+      >
         <TooltipTrigger render={children} />
         <TooltipContent side={side}>{content}</TooltipContent>
       </Tooltip>
