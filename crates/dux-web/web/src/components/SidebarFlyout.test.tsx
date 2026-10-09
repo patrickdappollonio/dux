@@ -143,7 +143,12 @@ const listRow = (key: string) =>
     (el) => !el.closest('[data-testid="collapsed-agent-rail"]'),
   ) as HTMLElement
 
+// pointerenter does not bubble: a real pointer reaching an element inside the
+// panel has entered the panel too, so the panel gets its own event first.
 function hover(el: HTMLElement) {
+  if (container().contains(el) && el !== container()) {
+    fireEvent.pointerEnter(container(), { pointerType: "mouse" })
+  }
   fireEvent.pointerEnter(el, { pointerType: "mouse" })
   fireEvent.mouseEnter(el)
   fireEvent.pointerMove(el, { pointerType: "mouse" })
@@ -213,11 +218,62 @@ describe("AppSidebar floating sidebar from the collapsed rail", () => {
     advance(1)
     expect(floating()).toBe(false)
 
+    // A typing surface outside the panel keeps focus throughout, the way the
+    // terminal does; an Escape that closes the panel must never reach it.
+    const terminal = document.createElement("textarea")
+    document.body.appendChild(terminal)
+    const seen: string[] = []
+    terminal.addEventListener("keydown", (event) => seen.push(event.key))
+    terminal.focus()
+
     hover(railIcon("live-work (Repo)"))
     advance(150)
     expect(floating()).toBe(true)
-    fireEvent.keyDown(document, { key: "Escape" })
+    fireEvent.keyDown(terminal, { key: "Escape" })
     expect(floating()).toBe(false)
+    expect(seen).toEqual([])
+
+    // Escape while the opening is still pending cancels it, and the pointer
+    // resting where it is does not bring it back.
+    fireEvent.pointerLeave(container(), { pointerType: "mouse" })
+    hover(railIcon("live-work (Repo)"))
+    advance(80)
+    fireEvent.keyDown(terminal, { key: "Escape" })
+    advance(1000)
+    expect(floating()).toBe(false)
+    expect(seen).toEqual([])
+
+    // Leaving and coming back opens it again.
+    fireEvent.pointerLeave(container(), { pointerType: "mouse" })
+    hover(railIcon("live-work (Repo)"))
+    advance(150)
+    expect(floating()).toBe(true)
+    terminal.remove()
+  })
+
+  it("stays open while a row's menu opened from it is open, also with the pointer in the menu", () => {
+    render(tree())
+    hover(railIcon("live-work (Repo)"))
+    advance(150)
+    expect(floating()).toBe(true)
+
+    const trigger = listRow("agent:s1").querySelector(
+      'button[aria-label="Session actions"]',
+    ) as HTMLElement
+    fireEvent.click(trigger)
+    advance(50)
+    const item = screen.getByRole("menuitem", { name: /Force recreate agent/ })
+    expect(container().contains(item)).toBe(false)
+
+    // Into the menu, which is outside the panel, and a while there.
+    fireEvent.pointerLeave(container(), { pointerType: "mouse" })
+    hover(item)
+    advance(1000)
+    expect(floating()).toBe(true)
+
+    // A press on the item is not a press outside the panel.
+    fireEvent.pointerDown(item, { pointerType: "mouse" })
+    expect(floating()).toBe(true)
   })
 
   it("shows no tooltip card on a mouse hover, and a keyboard focus opens no panel", () => {
