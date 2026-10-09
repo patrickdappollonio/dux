@@ -190,9 +190,10 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
 
     // serve_with_engine runs the engine loop on THIS thread, so it must run on a
     // dedicated thread (the engine is `!Send`, hence we build it here too). The
-    // thread reports back only `Send` values: the exit reason plus a flag for
-    // whether the live terminal survived the round-trip.
-    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, String)>();
+    // thread reports back only `Send` values: the exit reason, a flag for
+    // whether the live terminal survived the round-trip, the answer to the
+    // request sent after it, and the socket's inode once the engine is back.
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, String, u64)>();
     let socket_for_thread = socket.clone();
     let serve_thread = std::thread::spawn(move || {
         let (returned_engine, exit) = serve_with_engine(
@@ -240,7 +241,11 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
             .unwrap()
             .unwrap_or_else(|e| format!("unanswered: {e}"));
         let _ = core.hand_over(&mut engine);
-        result_tx.send((exit, survived, answer)).unwrap();
+        // Read here, while this engine still holds the socket: its lock removes
+        // the socket file when this thread drops it, so the test thread could
+        // otherwise look after it is gone.
+        let inode = socket_inode(&socket_for_thread);
+        result_tx.send((exit, survived, answer, inode)).unwrap();
     });
 
     let answer = before_the_flip
@@ -304,7 +309,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     );
 
     // The serve thread should return promptly with the engine intact.
-    let (exit, survived, after_the_flip) = result_rx
+    let (exit, survived, after_the_flip, inode) = result_rx
         .recv_timeout(Duration::from_secs(30))
         .expect("serve thread reported a result");
     assert!(
@@ -312,7 +317,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
         "a request sent after the flip returned is answered by the terminal UI's core: \
          {after_the_flip}"
     );
-    assert_eq!(socket_inode(&socket), bound, "the same bound socket");
+    assert_eq!(inode, bound, "the same bound socket");
     assert!(
         matches!(exit, ServerExit::ReturnToTui),
         "expected ReturnToTui exit"
