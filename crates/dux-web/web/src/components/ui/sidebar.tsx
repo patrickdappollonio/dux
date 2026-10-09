@@ -156,6 +156,7 @@ function Sidebar({
   side = "left",
   variant = "sidebar",
   collapsible = "offcanvas",
+  floatOpen = false,
   className,
   children,
   dir,
@@ -164,8 +165,13 @@ function Sidebar({
   side?: "left" | "right"
   variant?: "sidebar" | "floating" | "inset"
   collapsible?: "offcanvas" | "icon" | "none"
+  /** dux: while collapsed, show the expanded sidebar floating over the page. The
+   * gap keeps its collapsed width, so the layout and the collapsed state stay
+   * exactly as they are; only the fixed container widens, above the page. */
+  floatOpen?: boolean
 }) {
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
+  const floating = floatOpen && state === "collapsed"
 
   if (collapsible === "none") {
     return (
@@ -212,7 +218,8 @@ function Sidebar({
     <div
       className="group peer hidden text-sidebar-foreground md:block"
       data-state={state}
-      data-collapsible={state === "collapsed" ? collapsible : ""}
+      data-collapsible={state === "collapsed" && !floating ? collapsible : ""}
+      data-floating={floating ? "" : undefined}
       data-variant={variant}
       data-side={side}
       data-slot="sidebar"
@@ -228,8 +235,8 @@ function Sidebar({
           "group-data-[collapsible=offcanvas]:w-0",
           "group-data-[side=right]:rotate-180",
           variant === "floating" || variant === "inset"
-            ? "group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4)))]"
-            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon)"
+            ? "group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4)))] group-data-floating:w-[calc(var(--sidebar-width-icon)+(--spacing(4)))]"
+            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-floating:w-(--sidebar-width-icon)"
         )}
       />
       <div
@@ -238,6 +245,10 @@ function Sidebar({
         className={cn(
           "fixed top-[var(--dux-app-top,0px)] bottom-0 z-10 hidden w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           SIDEBAR_RESIZING_NO_TRANSITION,
+          // Floating over the page: above its content and its dividers (z-30),
+          // below menus, dialogs and toasts (z-50), and lifted by a shadow. The
+          // widening is the collapse toggle's own slide, cut under reduced motion.
+          "group-data-floating:z-40 group-data-floating:shadow-xl group-data-floating:motion-reduce:transition-none",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"

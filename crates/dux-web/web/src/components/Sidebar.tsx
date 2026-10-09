@@ -66,6 +66,7 @@ import {
 } from "@/lib/store"
 import type { ChangesSlice, SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
+import { useSidebarFloat } from "@/hooks/use-sidebar-float"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
@@ -81,16 +82,23 @@ import {
 // first, in project-then-agent order, then the live terminals in the Terminals
 // section's order, all with the same cues and selection. The Inactive tail stays
 // off the rail, so a selected inactive agent has no icon here.
+//
+// A mouse resting on an icon floats the whole sidebar over the page instead of a
+// card, so the icons' cards open for keyboard focus alone.
+type RailIconHover = ReturnType<typeof useSidebarFloat>["iconHover"]
+
 function CollapsedAgentIcon({
   session,
   projectName,
   changesCount,
   selected,
+  hover,
 }: {
   session: SessionView
   projectName: string
   changesCount: number | null
   selected: boolean
+  hover: RailIconHover
 }) {
   const label = sessionLabel(session)
   const { working, dimmed, attention, typing } = agentRowVisual(
@@ -110,8 +118,10 @@ function CollapsedAgentIcon({
           />
         }
         side="right"
+        openOnHover={false}
       >
         <SidebarMenuButton
+          {...hover}
           isActive={selected}
           aria-label={projectName ? `${label} (${projectName})` : label}
           onClick={() => selectSession(session.id)}
@@ -151,9 +161,11 @@ function CollapsedAgentIcon({
 function CollapsedTerminalIcon({
   entry,
   selected,
+  hover,
 }: {
   entry: FlatTerminal
   selected: boolean
+  hover: RailIconHover
 }) {
   const { terminal, owner, ownerLabel, siblings } = entry
   // The expanded row's title: a plain "Terminal" while the shell is idle, the
@@ -174,8 +186,10 @@ function CollapsedTerminalIcon({
           </div>
         }
         side="right"
+        openOnHover={false}
       >
         <SidebarMenuButton
+          {...hover}
           isActive={selected}
           aria-label={`${title} (${ownerLabel})`}
           onClick={() => selectTerminal(terminal.id, owner)}
@@ -211,6 +225,7 @@ function CollapsedAgentRail({
   changes,
   selectedTarget,
   terminals,
+  iconHover,
 }: {
   projectIds: string[]
   grouped: Map<string, SessionView[]>
@@ -222,6 +237,7 @@ function CollapsedAgentRail({
   selectedTarget: SelectedTarget | null
   /** The live terminals, already in the Terminals section's order. */
   terminals: FlatTerminal[]
+  iconHover: RailIconHover
 }) {
   // The rail scrolls on its own, so it reveals a newly selected agent too.
   const railRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
@@ -259,6 +275,7 @@ function CollapsedAgentRail({
               session={session}
               projectName={projectLabel}
               changesCount={changesCountFor(changes, session.id)}
+              hover={iconHover}
               selected={
                 selectedTarget?.kind === "agent" &&
                 selectedTarget.sessionId === session.id
@@ -269,6 +286,7 @@ function CollapsedAgentRail({
             <CollapsedTerminalIcon
               key={entry.terminal.id}
               entry={entry}
+              hover={iconHover}
               selected={
                 selectedTarget?.kind === "terminal" &&
                 selectedTarget.terminalId === entry.terminal.id
@@ -537,11 +555,28 @@ export function AppSidebar() {
 
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
+  // The rail's floating sidebar is this same sidebar, widened over the page by
+  // the primitive while the collapsed state and the layout stay put, so every
+  // section is the expanded one and nothing is rendered twice.
+  const { state, isMobile } = useSidebar()
+  const { open: floatOpen, attachPanel, iconHover, close: closeFloat } =
+    useSidebarFloat(state === "collapsed" && !isMobile)
+  const onSelectSession = (sessionId: string | null) => {
+    selectSession(sessionId)
+    closeFloat()
+  }
+  const onSelectTerminal: typeof selectTerminal = (terminalId, owner) => {
+    selectTerminal(terminalId, owner)
+    closeFloat()
+  }
+
   return (
     // The drag edge paints this sidebar's right border, so the container must not
     // draw a second one; the same variant lets tailwind-merge drop the primitive's.
     <Sidebar
+      ref={attachPanel}
       collapsible="icon"
+      floatOpen={floatOpen}
       className="group-data-[side=left]:border-r-0"
     >
       <SidebarHeader>
@@ -594,10 +629,7 @@ export function AppSidebar() {
         {/* The flat agent list: hidden at icon width, where the rail takes over. */}
         <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
           <FlatAgentList
-            handlers={{
-              onSelectSession: selectSession,
-              onSelectTerminal: selectTerminal,
-            }}
+            handlers={{ onSelectSession, onSelectTerminal }}
           />
         </div>
 
@@ -610,6 +642,7 @@ export function AppSidebar() {
           changes={changes}
           selectedTarget={selectedTarget}
           terminals={railTerminals}
+          iconHover={iconHover}
         />
       </SidebarContent>
 

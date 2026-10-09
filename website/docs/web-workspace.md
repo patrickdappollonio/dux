@@ -44,8 +44,11 @@ side away. The sidebar's arrows move it one step of `1rem` at a time, small enou
 single press cannot fold the whole thing away. Drag the sidebar narrow enough and it
 snaps to its icon rail, which you reopen by clicking the same edge. The rail is for
 what is alive: your active agents, then your terminals, one icon each, while agents in
-the Inactive tail sit it out until you wake them. Drag the Changes split shut and the
-pane hides.
+the Inactive tail sit it out until you wake them. Rest your mouse on a rail icon and the
+whole sidebar slides out over the page for a peek, Inactive tail and all, without
+nudging your terminal an inch; pick something and it tucks itself away again. On a
+touchscreen a tap still just picks the icon. Drag the Changes split shut and the pane
+hides.
 
 Either divider lights up while you hold it, so a finger can tell it has the split and not
 the pane beside it. Only a real drag counts: tapping near a divider, or starting a drag
