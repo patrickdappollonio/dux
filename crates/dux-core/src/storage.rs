@@ -1841,6 +1841,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Forget that a session's branch is the one dux minted under a new name:
+    /// the agent is on some other branch now.
+    pub fn delete_minted_branch_rename(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "delete from session_minted_branch_renames where session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     /// Every `(session_id, branch_name)` an explicit rename moved a minted
     /// branch to.
     pub fn load_minted_branch_renames(&self) -> Result<Vec<(String, String)>> {

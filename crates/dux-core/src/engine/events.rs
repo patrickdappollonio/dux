@@ -3366,6 +3366,14 @@ impl Engine {
                         session.branch_name(),
                     ));
                 }
+                // A drift onto another branch ends any claim that the agent is on
+                // the branch dux minted under a new name.
+                if let Err(err) = self.session_store.delete_minted_branch_rename(&session.id) {
+                    logger::error(&format!(
+                        "failed to forget the minted branch rename for {}: {err}",
+                        session.id,
+                    ));
+                }
                 moved.push(session.id.clone());
             }
         }
@@ -3454,13 +3462,17 @@ impl Engine {
                     .find(|s| s.id == session_id)
                     .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
                     .is_some();
-                if was_minted
-                    && let Err(err) = self
-                        .session_store
+                // A rename of any other branch is not the minted one moving, and
+                // a marker left from an earlier rename must not carry over to it.
+                let recorded = if was_minted {
+                    self.session_store
                         .set_minted_branch_rename(&session_id, &new_branch)
-                {
+                } else {
+                    self.session_store.delete_minted_branch_rename(&session_id)
+                };
+                if let Err(err) = recorded {
                     logger::error(&format!(
-                        "failed to record that {session_id} renamed the branch dux minted to {new_branch}: {err}"
+                        "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
                     ));
                 }
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
@@ -6319,6 +6331,27 @@ mod tests {
         )]));
         let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
         assert_eq!(minted, None);
+        // And renaming that other branch to the name the minted one once had
+        // does not make it the minted one: the drift ended the marker.
+        engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "new-branch".into(),
+            previous_title: None,
+            result: Ok(()),
+            status: crate::engine::ResolvedFinal::new(
+                "rename:s1",
+                crate::engine::Final::info("renamed"),
+            ),
+        });
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, None);
+        assert!(
+            engine
+                .session_store
+                .load_minted_branch_renames()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
