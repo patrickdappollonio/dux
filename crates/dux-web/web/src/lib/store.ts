@@ -2114,8 +2114,8 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   if (!stillExists) {
     // A terminal that exited has no "next terminal" worth guessing at, so the
     // destination is one level up: the owning agent, or home when there is
-    // none. Like the deep-link path, this rewrites the current entry rather
-    // than stepping history.
+    // none. A fallback: it rewrites the current entry, or steps back onto the
+    // entry behind when that entry is the destination.
     //
     // The lossy `ownerSessionId` suffices because "is there an agent above this
     // terminal" is the whole decision.
@@ -2124,15 +2124,16 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
       ownerSession !== null && spine.sessions.some((s) => s.id === ownerSession)
         ? ownerSession
         : null
-    selectSessionRoute(fallback, "replace")
+    fallBackTo(() => selectSessionRoute(fallback, "replace"))
   }
 }
 
 // The destination when the focused agent vanishes under the user: the hub on a
 // phone, and on a computer the next active agent in the order already on screen
-// (`nextActiveSessionId`), or home when every remaining agent is dormant. The
-// URL is rewritten rather than pushed, so one Back can land on the screen the
-// user is already on. Accepted: it beats being thrown out of the app.
+// (`nextActiveSessionId`), or home when every remaining agent is dormant. A
+// fallback (`fallBackTo`): the entry is rewritten rather than pushed, or, when
+// the entry behind is already the destination, the app steps back onto it so
+// the next Back still moves.
 function navigateAfterVanish(
   spine: Spine,
   previous: SessionView[],
@@ -2146,7 +2147,7 @@ function navigateAfterVanish(
   // A rewrite either way: the entry pushed on the way in names an agent that no
   // longer exists, so pushing over it leaves Back on a not-found screen.
   if (isMobileViewport()) {
-    selectSessionRoute(null, "replace")
+    fallBackTo(() => selectSessionRoute(null, "replace"))
     return
   }
   // The overlay first, exactly as `FlatAgentList` does before it partitions and
@@ -2160,7 +2161,7 @@ function navigateAfterVanish(
     goneSessionId,
     agentSortValue(state),
   )
-  selectSessionRoute(next, "replace")
+  fallBackTo(() => selectSessionRoute(next, "replace"))
 }
 
 // How long an armed create-focus token stays live. Above the longest
@@ -2511,8 +2512,11 @@ if (hasBrowser) {
 // already moved its own cursor by the time this fires, so the only job here is
 // to read the URL it landed on and make the app match it. Nothing is derived
 // from `event.state`, and nothing is counted: the hash alone says where we are.
+// A traversal also ends a fallback's step back (`stepBackOnto`): this is where
+// it lands.
 if (hasBrowser) {
   window.addEventListener("popstate", () => {
+    endStepBack()
     applyUrlRoute()
   })
   // Fragment navigation the page itself initiates (`openStandaloneEditorInThisTab`
@@ -2522,6 +2526,7 @@ if (hasBrowser) {
   // to both: `applyUrlRoute` is idempotent and by contract never writes the
   // URL back, so a double delivery settles on the same state.
   window.addEventListener("hashchange", () => {
+    endStepBack()
     applyUrlRoute()
   })
 }
@@ -2556,9 +2561,11 @@ export function useDuxSelector<T>(select: (state: DuxState) => T): T {
 // hash naming an absent session resolves to `routeNotFound`, never home.
 //
 // A screen change pushes, in both directions; a move within one screen
-// replaces. The app never steps history relatively (`history.go` appears
-// nowhere). The only screen changes that replace are a restore and a
-// correction, both of which name a position the browser is already parked on.
+// replaces. The only screen changes that replace are a restore, a correction
+// and a fallback. The app steps history relatively in exactly one case: a
+// fallback whose destination is the entry right behind, when this page wrote
+// that entry, steps back onto it rather than writing a duplicate over the
+// current one (`stepBackOnto`). `history.go` appears nowhere.
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 // The three shapes are mutually exclusive, so the first one that MATCHES
@@ -2939,6 +2946,8 @@ function currentRoute(): Route {
 // Bring the URL in line with the app's current position: pushes on a screen
 // change, replaces within one screen. `mode: "replace"` forces a replace for a
 // move the user did not ask for (a restore, or leaving the not-found screen).
+// A replace made inside `fallBackTo` may instead step back one entry (see
+// `stepBackOnto`).
 //
 // Best-effort and never throws at its caller: browsers rate-limit history calls
 // and every call site runs after the screen has already moved, so a refusal
@@ -2948,6 +2957,10 @@ function syncUrl(mode?: "replace" | "push"): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return
   }
+  // A fallback's step back is in flight: the browser is about to land on the
+  // entry behind this one and the router will render what it names. Anything
+  // written now would land on the entry being left.
+  if (stepBack !== null) return
   const next = routeHash(currentRoute())
   const current = currentHash()
   // Belt and braces: when the address is already what we would write, the
@@ -2957,15 +2970,151 @@ function syncUrl(mode?: "replace" | "push"): void {
   if (current === next) return
   const url = historyUrlFor(next)
   const movedScreen = movesScreen(mode, next, current)
+  const key = positionKey(parseRoute(next))
   try {
     if (mode !== "replace" && movedScreen && typeof history.pushState === "function") {
-      history.pushState({ duxRoute: next }, "", url)
+      const behind = labelCurrentEntry(current)
+      const label = { session: PAGE_SESSION, id: nextEntryId++, key, prev: behind }
+      history.pushState(entryState(null, next, label), "", url)
+      labelledEntryKeys.set(label.id, key)
       return
     }
-    history.replaceState(history.state, "", url)
+    if (fallbackWrite && stepBackOnto(key)) return
+    // A rewrite keeps the entry's identity and what is behind it, and records
+    // its new position.
+    const own = ownLabel(history.state)
+    const label = {
+      session: PAGE_SESSION,
+      id: own?.id ?? nextEntryId++,
+      key,
+      prev: own?.prev ?? null,
+    }
+    history.replaceState(entryState(history.state, next, label), "", url)
+    labelledEntryKeys.set(label.id, key)
   } catch (err) {
     console.warn("[dux] history write refused", err)
   }
+}
+
+// --- History entry labels ---------------------------------------------------
+//
+// Every entry dux writes carries a label in `history.state`: this page load's
+// token, an id, the position the entry holds, and the label of the entry
+// immediately behind it. It exists for ONE decision, `stepBackOnto`.
+
+// This page load's token. A label written by an earlier load of the page, or
+// by another browser tab, carries a different one and is never trusted. Not a
+// secret, only a disambiguator, so no secure-context API is needed (dux is
+// routinely served over plain HTTP).
+const PAGE_SESSION = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+
+interface EntryLabel {
+  session: string
+  id: number
+  // `positionKey` of the address the entry was written with.
+  key: string
+  // The entry immediately behind, as it was when this one was pushed. Null
+  // when nothing behind is known (the entry was not pushed by this page).
+  prev: { id: number; key: string } | null
+}
+
+let nextEntryId = 1
+
+// The position every entry this page labelled holds NOW, by id. A label's
+// `prev.key` is what that entry held at push time, but the entry can be
+// rewritten afterwards (a correction, a fallback), and only this record sees
+// that.
+const labelledEntryKeys = new Map<number, string>()
+
+// What counts as "the same place" for the step: the position Back moves by
+// (`routePushKey`), plus theater, which pushes an entry of its own.
+function positionKey(route: Route): string {
+  return `${routePushKey(route)}${route.theater ? "+theater" : ""}`
+}
+
+function ownLabel(entryState: unknown): EntryLabel | null {
+  if (typeof entryState !== "object" || entryState === null) return null
+  const label = (entryState as { duxEntry?: EntryLabel }).duxEntry
+  return label?.session === PAGE_SESSION ? label : null
+}
+
+function entryState(previous: unknown, route: string, label: EntryLabel): object {
+  const base = typeof previous === "object" && previous !== null ? previous : {}
+  return { ...base, duxRoute: route, duxEntry: label }
+}
+
+// The label of the entry the page is on, for the entry about to be pushed over
+// it. An entry this page did not write (the one the page loaded on, or a
+// fragment navigation) is labelled first, with nothing known behind it: it is
+// this page's own entry from now on.
+function labelCurrentEntry(current: string): { id: number; key: string } {
+  const own = ownLabel(history.state)
+  if (own) return { id: own.id, key: labelledEntryKeys.get(own.id) ?? own.key }
+  const label = {
+    session: PAGE_SESSION,
+    id: nextEntryId++,
+    key: positionKey(parseRoute(current)),
+    prev: null,
+  }
+  history.replaceState(entryState(history.state, current, label), "", historyUrlFor(current))
+  labelledEntryKeys.set(label.id, label.key)
+  return { id: label.id, key: label.key }
+}
+
+// Set while a fallback runs (`fallBackTo`): its replace may become a step back.
+let fallbackWrite = false
+
+// The step back in flight, cleared by the traversal it causes. The timer is
+// the bound for a traversal that never arrives: the screen already shows the
+// destination, so the address is then rewritten to match it, as before.
+let stepBack: { timer: ReturnType<typeof setTimeout> } | null = null
+const STEP_BACK_TIMEOUT_MS = 1_000
+
+// Run a navigation that falls back from something that disappeared. Such a
+// navigation replaces the current entry, unless the entry right behind it is
+// the destination, in which case it steps back onto that entry: a replace
+// there would leave two identical entries in a row and a Back that changes
+// nothing on screen.
+function fallBackTo(navigate: () => void): void {
+  const outer = fallbackWrite
+  fallbackWrite = true
+  try {
+    navigate()
+  } finally {
+    fallbackWrite = outer
+  }
+}
+
+// The one relative step the app takes, and only ever one entry: onto the
+// entry immediately behind, when this page labelled it and it holds `key`.
+// The popstate it causes lands on that entry, and the router renders what it
+// names. Returns false, so the caller replaces, in every other case.
+function stepBackOnto(key: string): boolean {
+  const behind = ownLabel(history.state)?.prev
+  if (!behind || labelledEntryKeys.get(behind.id) !== key) return false
+  if (typeof history.back !== "function") return false
+  // The router's own writes while it lands are not fallbacks of their own.
+  fallbackWrite = false
+  stepBack = { timer: setTimeout(abandonStepBack, STEP_BACK_TIMEOUT_MS) }
+  try {
+    history.back()
+  } catch (err) {
+    endStepBack()
+    console.warn("[dux] history step refused", err)
+    return false
+  }
+  return true
+}
+
+function endStepBack(): void {
+  if (stepBack === null) return
+  clearTimeout(stepBack.timer)
+  stepBack = null
+}
+
+function abandonStepBack(): void {
+  stepBack = null
+  syncUrl("replace")
 }
 
 // The hash the browser is parked on, or "" where there is no browser to ask:
@@ -3128,8 +3277,9 @@ export function discardVanishedEditor(): void {
   // selection named the vanished root itself. Landing on home is the one URL
   // write in the pass, and it is a replace, because the address behind it
   // names a target that no longer exists and must not be re-enterable by
-  // Back. Both surfaces take this same exit.
-  selectSessionRoute(null, "replace")
+  // Back. A fallback, so when home is already the entry behind, the app steps
+  // back onto it instead. Both surfaces take this same exit.
+  fallBackTo(() => selectSessionRoute(null, "replace"))
 }
 
 // Keep it open: the text stays on screen to be copied out, and nothing asks
@@ -6597,7 +6747,8 @@ export function openChangedFiles(): void {
 }
 
 // Navigate to the parent route rather than stepping browser history. Real route
-// changes push; correcting a not-found URL replaces so Back cannot reopen it.
+// changes push; leaving a not-found URL is a fallback, which replaces so Back
+// cannot reopen it, or steps back when home is the entry right behind.
 export function navigateUp(): void {
   const urlMode = state.routeNotFound ? ("replace" as const) : undefined
   // Belt and braces for the standalone shell: with no editor state left there
@@ -6622,7 +6773,8 @@ export function navigateUp(): void {
     syncUrl(urlMode)
     return
   }
-  selectSessionRoute(null, urlMode)
+  if (urlMode === "replace") fallBackTo(() => selectSessionRoute(null, urlMode))
+  else selectSessionRoute(null)
 }
 
 /// Drop every draft whose target is no longer in the spine. Returns the SAME

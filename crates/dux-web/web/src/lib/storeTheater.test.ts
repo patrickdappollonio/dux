@@ -113,12 +113,23 @@ beforeEach(() => {
   holdSpine = false
   spineBody = makeSpine([])
   store = new Map<string, string>()
-  replaceStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+  // Both writers keep the state they were handed, as the entry a browser
+  // parks on does, so the router reads back the label it wrote.
+  const fakeHistory = {
+    pushState: null as unknown,
+    replaceState: null as unknown,
+    state: null as unknown,
+  }
+  replaceStateMock = vi.fn((s: unknown, _t: string, url: string) => {
     loc.hash = url.startsWith("#") ? url : ""
+    fakeHistory.state = s
   })
-  pushStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+  pushStateMock = vi.fn((s: unknown, _t: string, url: string) => {
     loc.hash = url.startsWith("#") ? url : ""
+    fakeHistory.state = s
   })
+  fakeHistory.pushState = pushStateMock
+  fakeHistory.replaceState = replaceStateMock
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, String(v)),
@@ -131,11 +142,7 @@ beforeEach(() => {
       windowListeners.set(type, fn)
     },
   })
-  vi.stubGlobal("history", {
-    pushState: pushStateMock,
-    replaceState: replaceStateMock,
-    state: null,
-  })
+  vi.stubGlobal("history", fakeHistory)
   vi.stubGlobal("WebSocket", FakeWebSocket)
   vi.stubGlobal("fetch", fetchMock)
   vi.resetModules()
