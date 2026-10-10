@@ -2515,8 +2515,8 @@ if (hasBrowser) {
   window.addEventListener("popstate", () => {
     applyUrlRoute()
   })
-  // Fragment navigation the page itself initiates (the standalone header's
-  // plain-anchor "Open in dux" link is the one shipping case) is delivered
+  // Fragment navigation the page itself initiates (`openStandaloneEditorInThisTab`
+  // assigning the hash, or a plain in-page hash anchor) is delivered
   // as `hashchange`, and whether a `popstate` accompanies it varies by
   // environment (jsdom fires only `hashchange`; browsers fire both). Listen
   // to both: `applyUrlRoute` is idempotent and by contract never writes the
@@ -2990,8 +2990,9 @@ function historyUrlFor(hash: string): string {
 // `routePushKey`, not `routeScreen`: the editor-open bit must push and pop like
 // a screen without being one. `mode: "push"` is for a move the key cannot
 // describe: entering theater is a position Back must come out of, while still
-// being the terminal screen. Leaving replaces, so Back never re-enters a mode
-// just dismissed.
+// being the terminal screen. Leaving theater and closing the editor push as
+// well, deliberately, so Back after leaving re-enters the mode just dismissed
+// rather than being a dead press.
 function movesScreen(
   mode: "replace" | "push" | undefined,
   next: string,
