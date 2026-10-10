@@ -3440,6 +3440,25 @@ impl Engine {
     ) -> EventReaction {
         match &result {
             Ok(()) => {
+                // A rename moves a branch rather than switching to another one, so
+                // the branch dux minted is still the one dux minted under its new
+                // name, and the pull-request age guard must keep holding for it.
+                let renamed_from = self.minted_branch_rename(&session_id);
+                let was_minted = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
+                    .is_some();
+                if was_minted
+                    && let Err(err) = self
+                        .session_store
+                        .set_minted_branch_rename(&session_id, &new_branch)
+                {
+                    logger::error(&format!(
+                        "failed to record that {session_id} renamed the branch dux minted to {new_branch}: {err}"
+                    ));
+                }
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                     let label = session.display_label();
                     if let Some(managed) = session.workspace.as_managed_mut() {
@@ -6242,6 +6261,23 @@ mod tests {
             .map(|entry| entry.branch_name.clone())
             .collect();
         assert_eq!(planned, vec!["new-branch".to_string()]);
+        // Renaming the branch dux minted keeps it the branch dux minted, then,
+        // so a pull request older than the agent is still refused for it, and
+        // that survives a restart.
+        let created_at = engine.sessions[0].created_at;
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, Some(created_at));
+        assert_eq!(
+            engine.session_store.load_minted_branch_renames().unwrap(),
+            vec![("s1".to_string(), "new-branch".to_string())]
+        );
+        // A later switch to some other branch is drift, and drops it.
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "develop".to_string(),
+        )]));
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, None);
     }
 
     #[test]

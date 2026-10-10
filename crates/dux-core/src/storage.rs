@@ -449,6 +449,20 @@ impl SessionStore {
             );
             "#,
         )?;
+        // The name the branch dux minted for an agent has now, recorded when an
+        // explicit rename moves it. An agent whose branch differs from the one it
+        // was born on has either renamed its own branch or drifted onto another
+        // one, and only this row tells the two apart after a restart. Deleted
+        // explicitly with the session, like the tables above.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists session_minted_branch_renames (
+                session_id text primary key
+                    references agent_sessions(id) on delete cascade,
+                branch_name text not null
+            );
+            "#,
+        )?;
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
         // chokepoint that hands out a strictly-increasing `rev` per session,
@@ -1576,6 +1590,11 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
+        tx.execute(
+            "delete from session_minted_branch_renames where session_id in \
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
+            params![project_id],
+        )?;
         // Drop the per-session changed-files rev counters BEFORE the sessions
         // themselves (the subquery resolves the ids while the rows still exist),
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
@@ -1787,6 +1806,33 @@ impl SessionStore {
             .conn
             .prepare("select session_id from session_pr_suppressions")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Record that an explicit rename moved the branch dux minted for a session
+    /// to `branch_name`.
+    pub fn set_minted_branch_rename(&self, session_id: &str, branch_name: &str) -> Result<()> {
+        self.conn.execute(
+            "insert into session_minted_branch_renames (session_id, branch_name) values (?1, ?2) \
+             on conflict(session_id) do update set branch_name = excluded.branch_name",
+            params![session_id, branch_name],
+        )?;
+        Ok(())
+    }
+
+    /// Every `(session_id, branch_name)` an explicit rename moved a minted
+    /// branch to.
+    pub fn load_minted_branch_renames(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("select session_id, branch_name from session_minted_branch_renames")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2269,6 +2315,10 @@ impl SessionStore {
         )?;
         tx.execute(
             "delete from session_pr_suppressions where session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "delete from session_minted_branch_renames where session_id = ?1",
             params![id],
         )?;
         // Drop the per-session changed-files revision counter too, so a deleted

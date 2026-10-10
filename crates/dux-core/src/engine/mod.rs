@@ -4359,6 +4359,17 @@ impl Engine {
         }
     }
 
+    /// The name an explicit rename gave the branch dux minted for this agent,
+    /// if one did. See [`crate::model::AgentSession::branch_minted_at`].
+    pub(crate) fn minted_branch_rename(&self, session_id: &str) -> Option<String> {
+        self.session_store
+            .load_minted_branch_renames()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(id, _)| id == session_id)
+            .map(|(_, branch)| branch)
+    }
+
     /// Trigger a single-session pull-request check for a deliberate event (a
     /// refs change, an agent exit, the user asking), unless it was checked more
     /// recently than `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`];
@@ -4467,7 +4478,8 @@ impl Engine {
             // the flag the blind poll narrows on has nothing to say here; it is
             // recorded truthfully all the same.
             inactive: crate::flat_list::is_inactive(session),
-            branch_minted_at: session.branch_minted_at(),
+            branch_minted_at: session
+                .branch_minted_at(self.minted_branch_rename(session_id).as_deref()),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -4859,6 +4871,12 @@ impl Engine {
             .into_iter()
             .map(|pr| (pr.session_id.clone(), pr))
             .collect();
+        let minted_renames: HashMap<String, String> = self
+            .session_store
+            .load_minted_branch_renames()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
             *guard = self
@@ -4891,7 +4909,8 @@ impl Engine {
                         agent_exited: !self.providers.contains_key(s.slot_tab_id()),
                         pinned: pinned_row.map(pinned_pr_from_stored),
                         inactive: crate::flat_list::is_inactive(s),
-                        branch_minted_at: s.branch_minted_at(),
+                        branch_minted_at: s
+                            .branch_minted_at(minted_renames.get(&s.id).map(String::as_str)),
                     })
                 })
                 .collect();

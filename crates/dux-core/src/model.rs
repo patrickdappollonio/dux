@@ -692,11 +692,13 @@ impl AgentSession {
     }
 
     /// When the branch this agent is on was born, if dux minted it: the
-    /// agent's creation, for an agent still on the branch dux created for it.
+    /// agent's creation, for an agent still on the branch dux created for it,
+    /// whether under the name it was born with or, when an explicit rename
+    /// moved it, under `renamed_to`, the name that rename gave it.
     /// `None` for a branch that existed before the agent (whatever its history
     /// before then is, it is not dux's to bound), for a branch the agent has
-    /// since moved to, and for a standalone agent, which has no branch.
-    pub fn branch_minted_at(&self) -> Option<DateTime<Utc>> {
+    /// since drifted onto, and for a standalone agent, which has no branch.
+    pub fn branch_minted_at(&self, renamed_to: Option<&str>) -> Option<DateTime<Utc>> {
         let managed = self.workspace.as_managed()?;
         let minted_here = match managed.branch_provenance {
             BranchProvenance::CreatedByDux => true,
@@ -704,7 +706,9 @@ impl AgentSession {
             | BranchProvenance::Adopted
             | BranchProvenance::Unknown => false,
         };
-        (minted_here && managed.branch_name == managed.initial_branch).then_some(self.created_at)
+        let still_on_it = managed.branch_name == managed.initial_branch
+            || renamed_to == Some(managed.branch_name.as_str());
+        (minted_here && still_on_it).then_some(self.created_at)
     }
 
     /// The name to show for this agent: its durable title when it has one, the
