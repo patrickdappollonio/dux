@@ -19,7 +19,6 @@ mod lifecycle;
 mod pending_removals;
 mod pr_sync_control;
 mod project_base;
-mod refs_watch;
 mod reload_origin;
 pub(crate) mod removal;
 mod resume_fallback;
@@ -112,7 +111,6 @@ pub(crate) use pending_removals::{
     stored_occupant,
 };
 pub use pr_sync_control::PrSyncControl;
-pub use refs_watch::{RefsWatcher, ResolvedRefsWatch};
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
     removal_waiting_message,
@@ -489,7 +487,7 @@ pub struct Engine {
     pub pr_sync: Arc<PrSyncControl>,
     /// Seconds between blind PR-sync safety polls, shared with the loop thread so
     /// a config reload can retune it live. `0` disables the blind poll (updates
-    /// then come only from the refs watcher and foreground focus). Seeded from
+    /// then come only from one-shot checks and foreground focus). Seeded from
     /// `config.ui.pr_poll_interval_seconds` at spawn and in `apply_reloaded_config`.
     pub pr_poll_interval_secs: Arc<AtomicU64>,
     /// Seconds between blind PR-sync polls for the agents in the list's Inactive
@@ -536,12 +534,6 @@ pub struct Engine {
     /// for a healthy github.com. Shared so both the loop and the one-shot checks
     /// read and update it.
     pub pr_backoff: Arc<Mutex<crate::gh::BackoffSnapshot>>,
-    /// File-system watcher for the refs the pull-request plan's agents move
-    /// when they commit or push. `None` until GitHub is available, and if the
-    /// watcher could not be created (graceful fallback to poll-only).
-    pub refs_watcher: Option<refs_watch::RefsWatcher>,
-    /// Every ref file the watcher reports, mapped to the agents it is about.
-    pub refs_watch_paths: HashMap<PathBuf, Vec<String>>,
     /// Session IDs spawned with resume args and the wall-clock time the resume
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
@@ -1879,7 +1871,7 @@ pub const STANDALONE_ADD_AS_PROJECT_REMEDY: &str =
     "Add its folder as a project if you want dux to manage branches and worktrees for it.";
 
 /// Minimum spacing between per-session PR checks for the background triggers
-/// (refs watcher, agent exit). Guards against a burst of triggers spawning
+/// (agent create, agent exit, a branch rename or drift). Guards against a burst of triggers spawning
 /// concurrent `gh` calls for the same session.
 pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -4419,7 +4411,7 @@ impl Engine {
         }
         // A standalone agent has no branch, so there is no pull request to
         // check for. Refused HERE rather than only in the batched enumerator
-        // because the refs-watcher event routes straight into this one-shot,
+        // because several triggers route straight into this one-shot,
         // and refused BEFORE the debounce stamp below so a skipped agent never
         // records a check that did not happen.
         if !self
@@ -4813,9 +4805,6 @@ impl Engine {
     /// exactly the moment its user starts reading that badge again.
     pub fn update_pr_sync_sessions(&mut self) {
         let returned = self.rebuild_pr_sync_plan();
-        // The refs watcher covers exactly the plan's agents, so whatever moved
-        // an agent into or out of it, or changed its branch, re-aims the watch.
-        self.request_refs_watch_plan();
         // Owed from a previous rebuild, whose check was refused. Retried once
         // each and then let go whatever happens, so this can never become a
         // queue nobody drains.
@@ -7308,37 +7297,8 @@ mod tests {
         );
     }
 
-    /// The refs watcher watches the refs of each agent's branch. A standalone
-    /// agent must not be watched even when its folder IS a repository (the
-    /// watch exists to notice the AGENT's branch moving, and there is no agent
-    /// branch here).
-    #[test]
-    fn the_refs_watcher_never_watches_a_standalone_agents_folder() {
-        let (mut engine, _tmp, folder) = engine_with_a_standalone_agent();
-        init_plain_repo(folder.path());
-        engine.update_pr_sync_sessions();
-        engine.spawn_refs_watcher();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            assert!(Instant::now() < deadline, "the watch plan never arrived");
-            let Ok(event) = engine.worker_rx.recv_timeout(Duration::from_millis(100)) else {
-                continue;
-            };
-            let resolved = matches!(event, WorkerEvent::RefsWatchResolved { .. });
-            engine.process_worker_event(event);
-            if resolved {
-                break;
-            }
-        }
-        let watched = engine.refs_watched_sessions();
-        assert!(
-            !watched.contains("sa1"),
-            "a standalone agent has no agent branch for a refs watch to be about, got {watched:?}"
-        );
-    }
-
-    /// The one-shot pull-request check is reachable directly (the refs-watcher
-    /// event routes into it), so it refuses a standalone id itself rather than
+    /// The one-shot pull-request check is reachable directly (several triggers
+    /// route into it), so it refuses a standalone id itself rather than
     /// relying on the batched enumerator having skipped it.
     #[test]
     fn a_one_shot_pull_request_check_refuses_a_standalone_agent() {

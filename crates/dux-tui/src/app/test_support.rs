@@ -188,8 +188,6 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         branch_sync_wait: Arc::new(Default::default()),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        refs_watcher: None,
-        refs_watch_paths: std::collections::HashMap::new(),
         resume_fallback_candidates: std::collections::HashMap::new(),
         resumed_tab_runs: std::collections::HashSet::new(),
         pending_deletions: std::collections::HashSet::new(),

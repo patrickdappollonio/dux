@@ -1785,65 +1785,6 @@ pub fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str)
         .is_ok_and(|status| status.code() == Some(0))
 }
 
-/// The files on disk that change when a branch is committed to or pushed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BranchRefFiles {
-    /// The repository's common git directory, canonical. Every worktree of a
-    /// repository shares it, and it is where branches and remote-tracking refs
-    /// live: in a linked worktree `.git` is a file pointing elsewhere.
-    pub common_dir: PathBuf,
-    /// `refs/heads/<branch>`, which a commit moves.
-    pub local_ref: PathBuf,
-    /// `refs/remotes/<remote>/<branch>`, which a push moves. The remote is
-    /// the branch's upstream remote, or `origin` when it has none yet.
-    pub remote_ref: PathBuf,
-    /// `packed-refs`, which holds a ref once git has packed it.
-    pub packed_refs: PathBuf,
-}
-
-/// Where the refs of `branch`, checked out in `worktree`, live on disk.
-///
-/// It shells out to git, so callers run it in a background worker. The common
-/// directory is asked of git rather than assumed to be `<worktree>/.git`, which
-/// is a file in a linked worktree. `for-each-ref` is plumbing, and its pattern
-/// is fully qualified and follows `--`, so a dash-leading name is a ref.
-pub fn branch_ref_files(worktree: &Path, branch: &str) -> Result<BranchRefFiles> {
-    let common_dir = run_git_capture(
-        worktree,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        "find the repository's git directory",
-    )?;
-    let common_dir = std::fs::canonicalize(&common_dir)
-        .with_context(|| format!("failed to resolve git directory {common_dir}"))?;
-    let local = format!("refs/heads/{branch}");
-    let remote = run_git_capture(
-        worktree,
-        &[
-            "for-each-ref",
-            "--count=1",
-            "--format=%(upstream:remotename)",
-            "--",
-            &local,
-        ],
-        &format!("read the upstream of \"{branch}\""),
-    )?;
-    let remote = if remote.is_empty() {
-        "origin".to_string()
-    } else {
-        remote
-    };
-    Ok(BranchRefFiles {
-        local_ref: common_dir.join(&local),
-        remote_ref: common_dir
-            .join("refs")
-            .join("remotes")
-            .join(remote)
-            .join(branch),
-        packed_refs: common_dir.join("packed-refs"),
-        common_dir,
-    })
-}
-
 /// Whether any local or `origin` remote-tracking branch lives BELOW `name`,
 /// such as `<name>/x`. Git stores refs as paths, so a branch `<name>` cannot
 /// be created while one of those exists, even though no branch is called

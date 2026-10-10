@@ -3544,7 +3544,6 @@ impl Engine {
             ));
             self.seed_pr_statuses_from_store();
             self.update_pr_sync_sessions();
-            self.spawn_refs_watcher();
             self.spawn_pr_sync_worker();
             self.spawn_initial_pr_refresh();
         } else {
@@ -4521,18 +4520,6 @@ impl Engine {
                 status_op_id,
                 purpose,
             } => self.process_pull_request_resolved(result, purpose, status_op_id),
-            WorkerEvent::RefsChanged(session_id) => {
-                logger::debug(&format!(
-                    "[gh-integration] refs watcher: triggering PR check for session {}",
-                    session_id,
-                ));
-                self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
-                EventReaction::Nothing
-            }
-            WorkerEvent::RefsWatchResolved {
-                generation,
-                resolved,
-            } => self.process_refs_watch_resolved(generation, resolved),
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
                 EventReaction::BrowserEntriesArrived { dir, entries }
             }

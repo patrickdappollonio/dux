@@ -424,15 +424,15 @@ branch, is refused with the place it is checked out, so you can pick another.
 
 ### How PR status stays fresh
 
-With `github_integration` on, dux shows a PR status pill on each agent branch. Updates
-are event-driven: pushing to a branch refreshes that agent's PR, and bringing an agent to
-the foreground refreshes it too. A slow background poll is the fallback, for changes made
-on GitHub itself:
+With `github_integration` on, dux shows a PR status pill on each agent branch. Bringing an
+agent to the foreground refreshes its PR, and so do creating an agent, renaming its branch
+and the agent exiting. A background poll notices the rest, a push included, along with
+changes made on GitHub itself:
 
 ```toml
 [ui]
-# Seconds between blind PR-status safety polls. Most updates come from events,
-# so this is just the backstop. Set to 0 to rely on events alone.
+# Seconds between PR-status polls. This is what notices a push or a change made
+# on GitHub. Set to 0 to rely on the events above alone.
 pr_poll_interval_seconds = 180
 
 # Seconds between those polls for agents under "Inactive" in the agent list:

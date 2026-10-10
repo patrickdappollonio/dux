@@ -200,7 +200,7 @@ pub enum SyncTrigger {
     OneShot,
 }
 
-/// Single-session PR check (foreground / refs-watcher / exit triggers). Shares
+/// Single-session PR check (foreground / create / exit triggers). Shares
 /// the batched machinery with a one-element batch; returns the PR plus the
 /// per-host signal so the one-shot caller can arm/clear the shared backoff too.
 pub fn check_pr_for_entry(
