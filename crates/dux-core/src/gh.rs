@@ -213,8 +213,9 @@ pub enum SyncTrigger {
     /// tabbing down a sidebar fires one per agent passed through, so it buys
     /// nothing for a dormant agent whose pull request is already terminal.
     Focus,
-    /// A deliberate event: boot, a refs change, an agent exit, or the user
-    /// asking. Rare, and each one is a reason to believe something moved, so it
+    /// A deliberate event: boot, an agent being created, its branch being
+    /// renamed or drifting, an agent exit, or the user asking (a resume or an
+    /// attach). Rare, and each one is a reason to believe something moved, so it
     /// is the only trigger that spends a call on a terminal row.
     OneShot,
 }
@@ -298,8 +299,8 @@ fn stored_pr_is_merged(known: Option<&StoredPr>) -> bool {
 ///
 /// It is not paid on every focus either, because focusing an agent is a
 /// navigation keystroke and a sidebar of finished agents would spawn one `gh`
-/// process per agent tabbed past. Boot, a refs change, an agent exit and an
-/// explicit ask are rare and each means something plausibly moved, so those pay.
+/// process per agent tabbed past. Boot, an agent being created, a branch rename
+/// or drift, an agent exit and an explicit ask are rare and each means something plausibly moved, so those pay.
 ///
 /// A terminal row on a running agent refreshes under every trigger.
 fn exited_entry_needs_no_network(known: Option<&StoredPr>, trigger: SyncTrigger) -> bool {
@@ -3989,7 +3990,7 @@ mod tests {
             );
             assert!(
                 !exited_entry_needs_no_network(Some(&known), SyncTrigger::OneShot),
-                "boot, a refs change or an exit spends one discovery call on {state}, \
+                "a deliberate one-shot trigger spends one discovery call on {state}, \
                  so a reused branch heals"
             );
         }

@@ -1890,7 +1890,7 @@ pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Tighter debounce for foreground-focus PR checks (switching to / activating an
 /// agent in the TUI, opening its PTY on the web) so a freshly-focused agent shows
-/// current data even if no branch-change event fired recently, without letting
+/// current data even if no other trigger checked it recently, without letting
 /// focus-thrash hammer `gh`.
 pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
 
@@ -4441,8 +4441,9 @@ impl Engine {
             .map(|(_, branch)| branch)
     }
 
-    /// Trigger a single-session pull-request check for a deliberate event (a
-    /// refs change, an agent exit, the user asking), unless it was checked more
+    /// Trigger a single-session pull-request check for a deliberate event (an
+    /// agent being created, its branch being renamed or drifting, an agent
+    /// exit, the user asking), unless it was checked more
     /// recently than `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`];
     /// foreground focus goes through [`Self::spawn_foreground_pr_check`], which
     /// carries the tighter [`PR_FOREGROUND_DEBOUNCE`] and its own sync trigger.
@@ -10986,7 +10987,7 @@ mod tests {
         );
     }
 
-    /// The one-shot paths (focus, refs change, agent exit) must respect the
+    /// The one-shot paths (focus, create, a branch move, agent exit) must respect the
     /// detach too, or focusing a detached agent would re-detect its PR.
     #[test]
     fn a_suppressed_session_gets_no_one_shot_pr_check() {
