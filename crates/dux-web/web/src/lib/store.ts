@@ -2905,7 +2905,7 @@ export function standaloneEditorHash(
 // surface, so Back lands exactly where the user came from.
 export function openStandaloneEditorInThisTab(
   root: EditorRoot,
-  editor: { mode: EditorViewMode; path: string },
+  editor: { mode: EditorViewMode; path: string | null },
 ): void {
   if (typeof location === "undefined") return
   location.hash = standaloneEditorHash(root, editor)
@@ -4344,6 +4344,14 @@ export function openEditor(
   // is the open choke point; `editorOpenFile` coerces too, and the render
   // keeps the image arm above the diff arm as defense in depth.
   const effectiveMode: EditorViewMode = editorMode(root, mode, initialPath)
+  // The overlay does not render on a phone, so its address would be one the
+  // screen cannot show (and would outrank the changes screen in the hash).
+  // The phone's editor is the standalone surface in this same tab, the road
+  // the Changes list takes, so an opener that reaches here goes there too.
+  if (isMobileViewport()) {
+    openStandaloneEditorInThisTab(root, { mode: effectiveMode, path: initialPath })
+    return
+  }
   const editorPatch: Partial<DuxState> & { theater: boolean } = {
     editorTarget: { root, initialPath, initialMode: effectiveMode },
     editorRoute: { root, mode: effectiveMode, path: initialPath },

@@ -85,7 +85,7 @@ describe("a plain hash anchor drives the router", () => {
     vi.unstubAllGlobals()
   })
 
-  it("swaps between the standalone surface and the workspace on a same-tab fragment move, and Back undoes it", async () => {
+  it("swaps between the standalone surface and the workspace on a same-tab fragment move, and Back undoes it, the phone's overlay opener included", async () => {
     window.location.hash = "#/editor/agent/s1"
     const mod = await import("./store")
     await vi.waitFor(() => {
@@ -133,5 +133,25 @@ describe("a plain hash anchor drives the router", () => {
     expect(mod.getSnapshot().mobileScreen).toBe("changes")
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(mod.getSnapshot().editorRoute).toBeNull()
+
+    // The in-page overlay does not render on a phone, so the overlay's own
+    // opener takes the same same-tab road there rather than writing an
+    // address the phone cannot show.
+    const wide = window.innerWidth
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 })
+    try {
+      mod.openEditor({ kind: "agent", sessionId: "s1" }, "a.ts", "diff")
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().standaloneEditor).toBe(true)
+      })
+      expect(window.location.hash).toBe("#/editor/agent/s1/diff/a.ts")
+      history.back()
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().standaloneEditor).toBe(false)
+      })
+      expect(window.location.hash).toBe("#/agent/s1/changes")
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: wide })
+    }
   })
 })
