@@ -476,8 +476,14 @@ function AgentTerminalScreen({
   target: SelectedTarget
 }) {
   const duxState = useDux()
-  const { spine, bootstrap, terminalEpoch, startedDormantTabs, pendingSlotTab } =
-    duxState
+  const {
+    spine,
+    bootstrap,
+    terminalEpoch,
+    startedDormantTabs,
+    pendingSlotTab,
+    endedInViewTab,
+  } = duxState
 
   const targetId =
     selectedTarget.kind === "terminal"
@@ -551,6 +557,7 @@ function AgentTerminalScreen({
             focusedTab,
             startedDormantTabs,
             slotTabId,
+            endedInViewTab,
           )}
           paneKey={paneKey}
           targetId={targetId}

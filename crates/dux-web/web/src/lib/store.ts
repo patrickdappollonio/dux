@@ -460,6 +460,12 @@ export interface DuxState {
   // process, so the card does not sit in front of a launch already on its way.
   // See `markTabStarted`; every other launch needs no entry here.
   startedDormantTabs: string[]
+  // The first tab whose run ended cleanly while this client was looking at it.
+  // It rests on the idle screen instead of relaunching under the user who just
+  // quit it, until a press starts it or the selection moves to another tab
+  // (`setState` drops it then), after which selecting the agent starts it as
+  // usual. See `settleSlotTabExit`.
+  endedInViewTab: string | null
   // The unstaged file pending discard confirmation, or null. The TUI confirms
   // every discard (it's destructive); the web mirrors that.
   discardTarget: DiscardTarget | null
@@ -1049,6 +1055,7 @@ let state: DuxState = {
   forceStopAgentTarget: null,
   createTabInFlight: [],
   startedDormantTabs: [],
+  endedInViewTab: null,
   discardTarget: null,
   globalEnvOpen: false,
   globalEnvVersion: null,
@@ -1172,6 +1179,13 @@ function setState(patch: Partial<DuxState>): void {
       next.mobileScreen = patch.selectedTarget ? "terminal" : "home"
     }
     if (!("routeNotFound" in patch)) next.routeNotFound = null
+    const target = patch.selectedTarget
+    if (
+      !("endedInViewTab" in patch) &&
+      (target?.kind !== "agent" || target.tabId !== state.endedInViewTab)
+    ) {
+      next.endedInViewTab = null
+    }
   }
   state = next
   emit()
@@ -3789,6 +3803,36 @@ export function ejectSelectionForReconnect(): void {
   // agent they were on.
   selectSessionRoute(null, "replace")
   lastClearWasReconnectEject = true
+}
+
+// The center pane saw its agent's first tab end cleanly (`slotTabEndedInView`).
+// The agent is still there, so its address is still true: the user stays on
+// it, with no history write, and the tab rests on the idle screen rather than
+// relaunching under someone who just quit it.
+//
+// The one exception is a reconnect still settling for this agent: there the
+// stop is the transient one an events-socket drop reports, and the eject the
+// reconnect restore knows how to undo is kept exactly as it was.
+export function settleSlotTabExit(sessionId: string, tabId: string): void {
+  if (reconnectArmedFor(sessionId)) {
+    ejectSelectionForReconnect()
+    return
+  }
+  const target = state.selectedTarget
+  if (target?.kind !== "agent" || target.tabId !== tabId) return
+  setState({ endedInViewTab: tabId })
+}
+
+// Whether a reconnect deep-link intent is live and names this agent, or a
+// terminal it owns.
+function reconnectArmedFor(sessionId: string): boolean {
+  const armed = reconnectDeepLink
+  if (!armed) return false
+  if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) return false
+  const target = armed.target
+  const armedSession =
+    target.kind === "agent" ? target.sessionId : ownerSessionId(target.owner)
+  return armedSession === sessionId
 }
 
 // Focus a specific provider tab of a session. Naming the session-slot tab is

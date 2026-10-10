@@ -75,6 +75,9 @@ export function slotTabIdOf(
 //   dormant slot tab whose      card, as the diagnosis surface: it would
 //     last run ENDED BADLY      otherwise relaunch every time the user looks
 //     (`last_run_failed`)       at it, with no way out
+//   dormant slot tab whose      card (the idle screen): the user just quit it,
+//     run ended while on        so staying on the agent is not asking for it
+//     screen (`endedInViewTabId`) again
 //   started by this client      no card: the press is sent and the spine has not
 //     (`startedDormantTabs`)    caught up (see `startDormantTab`)
 //   no session                  card: defensive only, since callers derive
@@ -89,21 +92,24 @@ export function dormantTabNeedsCard(
   focusedTab: AgentTabView | undefined,
   startedDormantTabs: string[],
   slotTabId?: string,
+  endedInViewTabId?: string | null,
 ): boolean {
   if (!target || target.kind !== "agent") return false
   if (!focusedTab || focusedTab.has_live_process) return false
   if (startedDormantTabs.includes(focusedTab.id)) return false
+  if (focusedTab.id === endedInViewTabId) return true
   const slot = slotTabId ?? session?.slot_tab_id
   if (!session || focusedTab.id !== slot) return true
   return focusedTab.last_run_failed === true
 }
 
-// Whether an exited agent should drop the user back to the welcome screen. A
-// run that ended badly does not eject: that tab's dormant card is the diagnosis
-// surface and the welcome screen would replace it. Gated on `everReady` so a
-// pane that never came up cannot eject on a status it never saw change, and on
-// slot-ness because an extra tab's exit only turns that tab dormant.
-export function exitEjectsToWelcome(
+// Whether the slot tab's run just ended cleanly under this pane, which is what
+// the pane reports to the store (`settleSlotTabExit`). A run that ended badly is
+// not reported: that tab's dormant card is already the diagnosis surface. Gated
+// on `everReady` so a pane that never came up cannot report a status it never
+// saw change, and on slot-ness because an extra tab's clean exit closes its row
+// and the selection follows the promotion on its own.
+export function slotTabEndedInView(
   isSessionSlotTab: boolean,
   everReady: boolean,
   sessionStatus: string | undefined,

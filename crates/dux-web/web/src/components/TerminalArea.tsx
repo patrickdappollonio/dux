@@ -152,6 +152,7 @@ export function TerminalArea() {
     terminalEpoch,
     startedDormantTabs,
     pendingSlotTab,
+    endedInViewTab,
     routeNotFound,
   } = useDux()
 
@@ -187,6 +188,7 @@ export function TerminalArea() {
     terminalEpoch,
     startedDormantTabs,
     pendingSlotTab,
+    endedInViewTab,
   })
 
   // The Suspense fallback is null because TerminalPane shows its own readiness

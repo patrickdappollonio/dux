@@ -41,7 +41,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { exitEjectsToWelcome, isFirstTab } from "@/lib/agentTabs"
+import { isFirstTab, slotTabEndedInView } from "@/lib/agentTabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
@@ -49,9 +49,9 @@ import { useFilePicker } from "@/hooks/use-file-picker"
 import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
 import { ESC, TAB } from "@/lib/termkeys"
 import {
-  ejectSelectionForReconnect,
   mobileAccessoryBarVisible,
   noteTheaterOwnershipLost,
+  settleSlotTabExit,
   useDux,
 } from "@/lib/store"
 import type { DuxState, TerminalOwnerRef } from "@/lib/store"
@@ -513,16 +513,19 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }, [id, isOwner, topSurfaceSwitch, topKeysToggle])
 
-  // Eject to the welcome screen only when the slot tab stops and the whole agent
-  // leaves `active`; a badly ended run stays put as its diagnosis surface.
+  // Report the slot tab stopping cleanly with the whole agent leaving `active`:
+  // the user stays on the agent and the tab rests on its idle screen. A badly
+  // ended run is not reported, since its card is the diagnosis surface.
   const sessionStatus = session?.status
+  const agentSessionId = props.kind === "agent" ? props.sessionId : null
   useEffect(() => {
-    if (exitEjectsToWelcome(isSessionSlotTab, everReady, sessionStatus, lastRunFailed)) {
-      // Marked as OUR eject so a re-armed reconnect deep-link can tell it from a
-      // deliberate home nav and restore the route.
-      ejectSelectionForReconnect()
+    if (
+      agentSessionId !== null &&
+      slotTabEndedInView(isSessionSlotTab, everReady, sessionStatus, lastRunFailed)
+    ) {
+      settleSlotTabExit(agentSessionId, id)
     }
-  }, [isSessionSlotTab, everReady, sessionStatus, lastRunFailed])
+  }, [agentSessionId, id, isSessionSlotTab, everReady, sessionStatus, lastRunFailed])
 
   // There is one periodic client frame and one timer behind it (`lib/heartbeat.ts`);
   // gaining ownership retimes that timer rather than adding a second sender.
