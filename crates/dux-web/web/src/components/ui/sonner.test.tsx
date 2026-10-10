@@ -135,7 +135,7 @@ describe("Toaster severity styling", () => {
 // list of skipped paths once ran to 2,500 characters), so the toast caps its
 // own height and scrolls its text inside rather than covering the screen.
 describe("Toaster height cap", () => {
-  it("caps the text's height and scrolls it inside the toast", async () => {
+  it("caps the text's height and scrolls it inside the toast, leaving a finger's drag to the swipe", async () => {
     render(<Toaster />)
     act(() => {
       toast.warning("a very long message")
@@ -145,6 +145,11 @@ describe("Toaster height cap", () => {
     expect(title).toBeTruthy()
     expect(title.className).toContain("overflow-y-auto")
     expect(title.className).toMatch(/max-h-/)
+    // A scroll container hands every touch pan to the browser, which cancels
+    // the pointer stream sonner's swipe reads, whatever the toast itself says
+    // (measured in Chromium). jsdom computes no touch-action, so the class that
+    // turns the panning back off is what can be checked here.
+    expect(title.className.split(/\s+/)).toContain("touch-none")
   })
 })
 
