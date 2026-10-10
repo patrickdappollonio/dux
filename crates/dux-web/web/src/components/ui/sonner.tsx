@@ -6,8 +6,8 @@ import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon
 // Which drags dismiss a toast. Named explicitly because sonner infers its defaults
 // by splitting the position string, and "center" is not a direction, so a sideways
 // swipe would do nothing. Only the direction that pushes a toast off its own edge
-// is listed. The swipe is the only dismissal a busy toast has, since sonner draws
-// it no close button.
+// is listed. A busy toast has neither exit: sonner draws it no close button and
+// ignores a swipe on it, so `lib/notify.ts` retires it.
 export const TOAST_SWIPE_DIRECTIONS: ToasterProps["swipeDirections"] = [
   "bottom",
   "left",
@@ -73,6 +73,16 @@ export const VISIBLE_TOASTS_DESKTOP = 5
 /// over the terminal, which is the thing the user is reading.
 export const VISIBLE_TOASTS_MOBILE = 3
 
+/// How tall a toast's text may grow before it scrolls inside the toast. A phone
+/// lets the WHOLE toast reach 75% of the visible screen (`dvh`, so the soft
+/// keyboard and the browser's own bars are taken off): the text gets that less
+/// the toast's own 16px padding and 1px border on each side, since the icon and
+/// any button sit beside the text rather than above it. A computer keeps the
+/// short cap, where a wheel scrolls the rest.
+function toastTextCap(isMobile: boolean): string {
+  return isMobile ? "max-h-[calc(75dvh-34px)]" : "max-h-[min(12rem,40vh)]"
+}
+
 const Toaster = ({ ...props }: ToasterProps) => {
   const isMobile = useIsMobile()
   // Read live, so a rotation across the shell breakpoint moves the stack with the
@@ -120,10 +130,14 @@ const Toaster = ({ ...props }: ToasterProps) => {
           // paths once ran to 2,500 characters), so the text caps its own
           // height and scrolls inside the toast rather than covering the
           // screen. `overscroll-contain` keeps a wheel at the end of the text
-          // from scrolling the page underneath. Untested on a touch screen:
-          // sonner reads a drag on the toast as a swipe to dismiss, so a finger
-          // scrolling this text may dismiss the toast instead of scrolling it.
-          title: "max-h-[min(12rem,40vh)] overflow-y-auto overscroll-contain",
+          // from scrolling the page underneath. `touch-none` is load-bearing:
+          // a scroll container hands every finger pan back to the browser
+          // (even with nothing to scroll, sonner's own `touch-action: none` on
+          // the toast notwithstanding), which cancels the pointer stream and
+          // left a touch swipe on the text unable to dismiss the toast. The
+          // cost is that a finger cannot scroll an overflowing text, so the
+          // phone's cap is tall enough that a long toast rarely needs to.
+          title: `${toastTextCap(isMobile)} overflow-y-auto overscroll-contain touch-none`,
         },
       }}
       {...props}

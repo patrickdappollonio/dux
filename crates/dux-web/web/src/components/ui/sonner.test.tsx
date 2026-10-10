@@ -135,7 +135,20 @@ describe("Toaster severity styling", () => {
 // list of skipped paths once ran to 2,500 characters), so the toast caps its
 // own height and scrolls its text inside rather than covering the screen.
 describe("Toaster height cap", () => {
-  it("caps the text's height and scrolls it inside the toast", async () => {
+  const originalWidth = window.innerWidth
+
+  afterEach(() => {
+    window.innerWidth = originalWidth
+  })
+
+  // A phone lets the text run to 75% of the visible screen less the toast's own
+  // padding and border (16px + 1px on each side), so the whole toast stays
+  // within 75%. A computer keeps the short cap.
+  it.each([
+    { shell: "a phone", width: 390, cap: "max-h-[calc(75dvh-34px)]", not: "max-h-[min(12rem,40vh)]" },
+    { shell: "a computer", width: 1280, cap: "max-h-[min(12rem,40vh)]", not: "max-h-[calc(75dvh-34px)]" },
+  ])("caps the text's height on $shell and scrolls it inside the toast, leaving a finger's drag to the swipe", async ({ width, cap, not }) => {
+    window.innerWidth = width
     render(<Toaster />)
     act(() => {
       toast.warning("a very long message")
@@ -144,7 +157,14 @@ describe("Toaster height cap", () => {
     const title = text.closest("[data-title]") as HTMLElement
     expect(title).toBeTruthy()
     expect(title.className).toContain("overflow-y-auto")
-    expect(title.className).toMatch(/max-h-/)
+    const classes = title.className.split(/\s+/)
+    expect(classes).toContain(cap)
+    expect(classes).not.toContain(not)
+    // A scroll container hands every touch pan to the browser, which cancels
+    // the pointer stream sonner's swipe reads, whatever the toast itself says
+    // (measured in Chromium). jsdom computes no touch-action, so the class that
+    // turns the panning back off is what can be checked here.
+    expect(title.className.split(/\s+/)).toContain("touch-none")
   })
 })
 
