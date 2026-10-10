@@ -7,7 +7,9 @@ import { agentRoot } from "@/lib/editorRoot"
 // Routing: the URL is the source of truth for where the app is. The screen is
 // DERIVED from the hash (no target = home, a target = terminal, a `/changes`
 // suffix = changes), moving in PUSHES a hash entry, and Back is the browser's
-// own Back. Nothing counts entries and nothing steps history relatively.
+// own Back. Nothing counts entries, and the one relative step is a fallback's
+// single step back onto the entry dux labelled behind it (see the suite
+// "a fallback onto the entry behind it steps back").
 //
 // These tests drive a fake history that models the real thing: entry 0 is the
 // page the browser showed BEFORE dux (a new-tab page), entry 1 is dux itself.
@@ -18,6 +20,10 @@ const OUTSIDE_ENTRY = "about:newtab"
 const DUX_ENTRY_INDEX = 1
 
 let entries: string[]
+// What each entry's `history.state` holds, kept beside `entries` so a
+// traversal hands back the state that entry was written with, as a browser
+// does.
+let entryStates: unknown[]
 let index: number
 let leftApp: boolean
 // Armed to make the next history WRITE fail, the way Safari does when a page
@@ -40,34 +46,75 @@ function applyCurrentEntry(): void {
   loc.hash = url.startsWith("#") ? url : ""
 }
 
+// Every traversal, the browser's own Back included, is QUEUED and resolved
+// when it runs, not when it was asked for: a Back queued behind another one
+// lands one entry further back. Armed, the queue holds until the test releases
+// it, the way a real browser runs a traversal as a task after the call that
+// asked for it has returned.
+let deferTraversal = false
+let traversals: (() => void)[] = []
+
+function queueTraversal(run: () => void): void {
+  if (deferTraversal) traversals.push(run)
+  else run()
+}
+
+// Run every held traversal, oldest first.
+function releaseTraversals(): void {
+  deferTraversal = false
+  const held = traversals
+  traversals = []
+  for (const run of held) run()
+}
+
+// Each entry's Navigation API key: one per slot, kept by a replace and new on
+// a push, as the API defines it.
+let entryKeys: string[]
+let nextKey = 0
+function mintKey(): string {
+  nextKey += 1
+  return `k${nextKey}`
+}
+
+function landOn(target: number): void {
+  index = target
+  applyCurrentEntry()
+  for (const listener of popstateListeners) listener()
+}
+
 const fakeHistory = {
-  state: null as unknown,
+  get state(): unknown {
+    return entryStates[index] ?? null
+  },
   pushState(state: unknown, _title: string, url: string) {
     if (historyWriteError) throw historyWriteError
     entries = entries.slice(0, index + 1)
+    entryStates = entryStates.slice(0, index + 1)
+    entryKeys = entryKeys.slice(0, index + 1)
     entries.push(String(url))
+    entryStates.push(state)
+    entryKeys.push(mintKey())
     index = entries.length - 1
-    fakeHistory.state = state
     applyCurrentEntry()
   },
   replaceState(state: unknown, _title: string, url: string) {
     if (historyWriteError) throw historyWriteError
     entries[index] = String(url)
-    fakeHistory.state = state
+    entryStates[index] = state
     applyCurrentEntry()
   },
   go(delta: number) {
-    const target = index + delta
-    if (target < DUX_ENTRY_INDEX) {
-      // The browser would happily leave dux for whatever preceded it.
-      leftApp = true
-      return
-    }
-    // A real browser ignores a Forward past the newest entry.
-    if (target >= entries.length) return
-    index = target
-    applyCurrentEntry()
-    for (const listener of popstateListeners) listener()
+    queueTraversal(() => {
+      const target = index + delta
+      if (target < DUX_ENTRY_INDEX) {
+        // The browser would happily leave dux for whatever preceded it.
+        leftApp = true
+        return
+      }
+      // A real browser ignores a Forward past the newest entry.
+      if (target >= entries.length) return
+      landOn(target)
+    })
   },
   back() {
     fakeHistory.go(-1)
@@ -76,6 +123,41 @@ const fakeHistory = {
     fakeHistory.go(1)
   },
 }
+
+// The Navigation API, as far as the store uses it. `traverseTo` goes to the
+// entry holding that key when it runs, wherever the cursor is by then, and
+// fails when no entry holds it any more.
+const fakeNavigation = {
+  transition: null as unknown,
+  get currentEntry() {
+    return { key: entryKeys[index], index }
+  },
+  entries() {
+    return entryKeys.map((key, i) => ({ key, index: i }))
+  },
+  traverseTo(key: string) {
+    const calls = { resolve: () => {}, reject: (_err: unknown) => {} }
+    const committed = new Promise<void>((resolve, reject) => {
+      calls.resolve = resolve
+      calls.reject = reject
+    })
+    committed.catch(() => {})
+    queueTraversal(() => {
+      const target = entryKeys.indexOf(key)
+      if (target < 0) {
+        calls.reject(new Error("InvalidStateError"))
+        return
+      }
+      if (target < DUX_ENTRY_INDEX) leftApp = true
+      else if (target !== index) landOn(target)
+      calls.resolve()
+    })
+    return { committed, finished: committed }
+  },
+}
+// Whether the stubbed window offers the Navigation API. Every test has it
+// until it says otherwise.
+let navigationApi = true
 
 // WHICH SHELL IS ON SCREEN, as a width a test can set. The store asks the real
 // `isMobileViewport`, so the stubbed window below answers with this; every test
@@ -235,6 +317,10 @@ beforeEach(() => {
   releaseSpine = () => {}
   leftApp = false
   historyWriteError = null
+  deferTraversal = false
+  traversals = []
+  navigationApi = true
+  fakeNavigation.transition = null
   popstateListeners = []
   hashchangeListeners = []
   vi.stubGlobal("localStorage", {
@@ -246,6 +332,9 @@ beforeEach(() => {
   vi.stubGlobal("window", {
     get innerWidth() {
       return viewportWidth
+    },
+    get navigation() {
+      return navigationApi ? fakeNavigation : undefined
     },
     addEventListener: (type: string, handler: () => void) => {
       if (type === "popstate") popstateListeners.push(handler)
@@ -272,6 +361,8 @@ async function loadStore(
   standaloneTerminals: string[] = [],
 ) {
   entries = [OUTSIDE_ENTRY, hash === "" ? "/" : hash]
+  entryStates = [null, null]
+  entryKeys = [mintKey(), mintKey()]
   index = DUX_ENTRY_INDEX
   loc = {
     protocol: "http:",
@@ -294,6 +385,8 @@ async function loadStore(
 // popstate can land in that window.
 async function loadStoreWithHeldSpine(hash: string, sessions: SessionSpec[]) {
   entries = [OUTSIDE_ENTRY, hash === "" ? "/" : hash]
+  entryStates = [null, null]
+  entryKeys = [mintKey(), mintKey()]
   index = DUX_ENTRY_INDEX
   loc = {
     protocol: "http:",
@@ -320,7 +413,11 @@ async function loadStoreWithHeldSpine(hash: string, sessions: SessionSpec[]) {
 // `history.pushState`, because a push is the app's own write and fires nothing.
 function popstateTo(url: string): void {
   entries = entries.slice(0, index + 1)
+  entryStates = entryStates.slice(0, index + 1)
+  entryKeys = entryKeys.slice(0, index + 1)
   entries.push(url)
+  entryStates.push(null)
+  entryKeys.push(mintKey())
   index = entries.length - 1
   applyCurrentEntry()
   for (const listener of popstateListeners) listener()
@@ -893,6 +990,261 @@ describe("a URL naming a missing agent renders not-found", () => {
     expect(loc.hash).toBe("")
     expect(index).toBe(DUX_ENTRY_INDEX)
     expect(entries[index]).toBe("/")
+  })
+})
+
+// When the thing on screen disappears, the fallback lands on a position. When
+// the entry right behind the current one IS that position, rewriting the
+// current entry would leave two identical entries in a row, and the next Back
+// would change nothing on screen. So the fallback goes to that exact entry
+// instead, and only when dux itself wrote it during this page load and the
+// browser can name it (the Navigation API).
+describe("a fallback onto the entry behind it steps back", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("goes back to the agent when its terminal closes, keeping a tab clicked on the way", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1/terminal/t1"])
+    // A browser runs the traversal later, as a task.
+    deferTraversal = true
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    expect(traversals.length).toBe(1)
+    // While the traversal is pending nothing writes the address: not a second
+    // spine running the prune again, and not a click.
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", tabs: ["t2"] }])
+    mod.selectTab("s1", "t2")
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1/terminal/t1"])
+    expect(index).toBe(3)
+    releaseTraversals()
+    // Landed on the agent's own entry, and the click made while it was
+    // pending wins over what that entry named, rewriting it since it is the
+    // same agent.
+    expect(index).toBe(2)
+    expect(loc.hash).toBe("#/agent/s1/tab/t2")
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t2",
+    })
+    history.back()
+    expect(loc.hash).toBe("")
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(leftApp).toBe(false)
+  })
+
+  it("keeps another agent clicked while the traversal was pending", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    deferTraversal = true
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    releaseTraversals()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s2"])
+    expect(index).toBe(3)
+    history.back()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+  })
+
+  it("falls back again when the entry it was going to vanishes while pending", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    deferTraversal = true
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    releaseTraversals()
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    // The landed entry named the deleted agent, so it is rewritten rather
+    // than left underneath for Back to reopen.
+    expect(index).toBe(2)
+    expect(entries.slice(0, 3)).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s2"])
+  })
+
+  it("never leaves dux when the user's own Back is already queued", async () => {
+    // The agent was loaded straight after an outside page, so one entry
+    // further back than it is not dux at all.
+    const mod = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1/terminal/t1"])
+    deferTraversal = true
+    history.back()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    releaseTraversals()
+    expect(leftApp).toBe(false)
+    expect(index).toBe(1)
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+  })
+
+  it("rewrites the entry when the entry it would go to is gone by the time it runs", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    deferTraversal = true
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    // The browser no longer holds an entry under that key.
+    entryKeys[2] = "replaced-elsewhere"
+    releaseTraversals()
+    await vi.waitFor(() => {
+      expect(entries[3]).toBe("#/agent/s1")
+    })
+    expect(index).toBe(3)
+    mod.openChangesScreen()
+    expect(loc.hash).toBe("#/agent/s1/changes")
+  })
+
+  it("rewrites the entry where the browser has no Navigation API", async () => {
+    navigationApi = false
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    const back = vi.spyOn(fakeHistory, "back")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    expect(back).not.toHaveBeenCalled()
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1"])
+    expect(index).toBe(3)
+  })
+
+  it("rewrites the entry while the browser is already traversing", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    fakeNavigation.transition = { navigationType: "traverse" }
+    const traverse = vi.spyOn(fakeNavigation, "traverseTo")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    expect(traverse).not.toHaveBeenCalled()
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1"])
+    expect(index).toBe(3)
+  })
+
+  it("steps back to the agent the user came from when the one on screen is deleted", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.selectSession("s2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(index).toBe(2)
+    expect(loc.hash).toBe("#/agent/s1")
+    history.back()
+    expect(loc.hash).toBe("")
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+  })
+
+  it("steps back to home on a phone when the agent opened from the hub is deleted", async () => {
+    viewportWidth = 390
+    const mod = await loadStore("#/agent/s2", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.navigateUp()
+    mod.selectSession("s1")
+    expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s2", "/", "#/agent/s1"])
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(index).toBe(2)
+    history.back()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+  })
+
+  it("steps back to home when not-found's way out names the home the user came from", async () => {
+    const mod = await loadStore("#/agent/s3", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+      { id: "s3", project_id: "p1" },
+    ])
+    mod.navigateUp()
+    mod.selectSession("s1")
+    mod.selectSession("s2")
+    await pushSpine(mod, [
+      { id: "s2", project_id: "p1" },
+      { id: "s3", project_id: "p1" },
+    ])
+    history.back()
+    expect(mod.getSnapshot().routeNotFound).toEqual({ kind: "agent", sessionId: "s1" })
+    mod.navigateUp()
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(index).toBe(2)
+    expect(loc.hash).toBe("")
+    history.back()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s3")
+  })
+
+  it("steps back to home when a vanished editor's unsaved text is discarded", async () => {
+    const mod = await loadStore("#/agent/s2", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.navigateUp()
+    mod.openEditor(agentRoot("s1"), "a.ts")
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    expect(mod.getSnapshot().editorTargetGone).toEqual(root)
+    mod.discardVanishedEditor()
+    expect(index).toBe(2)
+    expect(loc.hash).toBe("")
+    history.back()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+  })
+
+  it("rewrites the entry when the entry behind it is from an earlier page load", async () => {
+    const first = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    first.selectSession("s1")
+    first.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    // A reload: the history and its entries stay, and a new page loads on the
+    // terminal's address.
+    popstateListeners = []
+    hashchangeListeners = []
+    vi.resetModules()
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget?.kind).toBe("terminal")
+    })
+    const traverse = vi.spyOn(fakeNavigation, "traverseTo")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    expect(traverse).not.toHaveBeenCalled()
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1"])
+    expect(index).toBe(3)
+  })
+
+  it("rewrites the entry when the entry behind it is somewhere else", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    const traverse = vi.spyOn(fakeNavigation, "traverseTo")
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    expect(traverse).not.toHaveBeenCalled()
+    expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s2", "#/agent/s1"])
+    expect(index).toBe(3)
   })
 })
 

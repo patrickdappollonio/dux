@@ -161,7 +161,11 @@ describe("selectSession restores the remembered tab", () => {
       sessionId: "s1",
       tabId: "t2",
     })
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1/tab/t2")
+    expect(replaceStateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ duxRoute: "#/agent/s1/tab/t2" }),
+      "",
+      "#/agent/s1/tab/t2",
+    )
   })
 
   it("falls back to the session-slot tab when the remembered tab was closed", async () => {
@@ -182,7 +186,11 @@ describe("selectSession restores the remembered tab", () => {
       sessionId: "s1",
       tabId: "s1",
     })
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
+    expect(replaceStateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ duxRoute: "#/agent/s1" }),
+      "",
+      "#/agent/s1",
+    )
   })
 
   it("lands on the session-slot tab when there is no remembered tab", async () => {

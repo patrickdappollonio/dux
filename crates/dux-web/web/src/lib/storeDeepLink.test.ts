@@ -117,24 +117,30 @@ beforeEach(() => {
   spineBody = makeSpine([])
   // Both writers mirror the new URL back into the fake `location`, the way a
   // browser does, so the router's next push-or-replace decision reads the hash
-  // it actually just wrote rather than a frozen boot value.
-  replaceStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+  // it actually just wrote rather than a frozen boot value. They keep the state
+  // they were handed too, as the entry a browser parks on does.
+  const fakeHistory = {
+    pushState: null as unknown,
+    replaceState: null as unknown,
+    state: null as unknown,
+  }
+  replaceStateMock = vi.fn((s: unknown, _t: string, url: string) => {
     loc.hash = url.startsWith("#") ? url : ""
+    fakeHistory.state = s
   })
-  pushStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+  pushStateMock = vi.fn((s: unknown, _t: string, url: string) => {
     loc.hash = url.startsWith("#") ? url : ""
+    fakeHistory.state = s
   })
+  fakeHistory.pushState = pushStateMock
+  fakeHistory.replaceState = replaceStateMock
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
     removeItem: () => {},
   })
   vi.stubGlobal("window", { addEventListener: () => {} })
-  vi.stubGlobal("history", {
-    pushState: pushStateMock,
-    replaceState: replaceStateMock,
-    state: null,
-  })
+  vi.stubGlobal("history", fakeHistory)
   vi.stubGlobal("WebSocket", FakeWebSocket)
   vi.stubGlobal("fetch", fetchMock)
   vi.resetModules()
@@ -345,7 +351,7 @@ describe("selection writes the hash", () => {
     pushStateMock.mockClear()
     mod.selectSession("s1")
     expect(pushStateMock).toHaveBeenCalledWith(
-      { duxRoute: "#/agent/s1" },
+      expect.objectContaining({ duxRoute: "#/agent/s1" }),
       "",
       "#/agent/s1",
     )
@@ -362,7 +368,7 @@ describe("selection writes the hash", () => {
     mod.selectSession("s2")
     expect(replaceStateMock).not.toHaveBeenCalled()
     expect(pushStateMock).toHaveBeenCalledWith(
-      { duxRoute: "#/agent/s2" },
+      expect.objectContaining({ duxRoute: "#/agent/s2" }),
       "",
       "#/agent/s2",
     )
@@ -375,7 +381,7 @@ describe("selection writes the hash", () => {
     pushStateMock.mockClear()
     mod.selectTab("s1", "t2")
     expect(pushStateMock).toHaveBeenCalledWith(
-      { duxRoute: "#/agent/s1/tab/t2" },
+      expect.objectContaining({ duxRoute: "#/agent/s1/tab/t2" }),
       "",
       "#/agent/s1/tab/t2",
     )
@@ -383,7 +389,11 @@ describe("selection writes the hash", () => {
     // Focusing the first tab collapses back to the bare form (here spelled with
     // the placeholder id), and stays on the same agent, so it replaces.
     mod.selectTab("s1", "s1")
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
+    expect(replaceStateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ duxRoute: "#/agent/s1" }),
+      "",
+      "#/agent/s1",
+    )
   })
 
   it("selecting a terminal writes the terminal form", async () => {
@@ -393,7 +403,7 @@ describe("selection writes the hash", () => {
     pushStateMock.mockClear()
     mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
     expect(pushStateMock).toHaveBeenCalledWith(
-      { duxRoute: "#/agent/s1/terminal/t1" },
+      expect.objectContaining({ duxRoute: "#/agent/s1/terminal/t1" }),
       "",
       "#/agent/s1/terminal/t1",
     )
@@ -404,7 +414,7 @@ describe("selection writes the hash", () => {
     pushStateMock.mockClear()
     mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
     expect(pushStateMock).toHaveBeenCalledWith(
-      { duxRoute: "#/project/p1/terminal/pt1" },
+      expect.objectContaining({ duxRoute: "#/project/p1/terminal/pt1" }),
       "",
       "#/project/p1/terminal/pt1",
     )
@@ -414,6 +424,10 @@ describe("selection writes the hash", () => {
     const mod = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1" }])
     pushStateMock.mockClear()
     mod.selectSession(null)
-    expect(pushStateMock).toHaveBeenCalledWith({ duxRoute: "" }, "", "/")
+    expect(pushStateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ duxRoute: "" }),
+      "",
+      "/",
+    )
   })
 })
