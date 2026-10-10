@@ -2114,7 +2114,7 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   if (!stillExists) {
     // A terminal that exited has no "next terminal" worth guessing at, so the
     // destination is one level up: the owning agent, or home when there is
-    // none. A fallback: it rewrites the current entry, or steps back onto the
+    // none. A fallback: it rewrites the current entry, or goes back to the
     // entry behind when that entry is the destination.
     //
     // The lossy `ownerSessionId` suffices because "is there an agent above this
@@ -2132,8 +2132,8 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
 // phone, and on a computer the next active agent in the order already on screen
 // (`nextActiveSessionId`), or home when every remaining agent is dormant. A
 // fallback (`fallBackTo`): the entry is rewritten rather than pushed, or, when
-// the entry behind is already the destination, the app steps back onto it so
-// the next Back still moves.
+// the entry behind is already the destination, the app goes back to it so the
+// next Back still moves.
 function navigateAfterVanish(
   spine: Spine,
   previous: SessionView[],
@@ -2512,12 +2512,11 @@ if (hasBrowser) {
 // already moved its own cursor by the time this fires, so the only job here is
 // to read the URL it landed on and make the app match it. Nothing is derived
 // from `event.state`, and nothing is counted: the hash alone says where we are.
-// A traversal also ends a fallback's step back (`stepBackOnto`): this is where
-// it lands.
+// A traversal while a fallback's own is pending lands that one instead
+// (`landTraversal`).
 if (hasBrowser) {
   window.addEventListener("popstate", () => {
-    endStepBack()
-    applyUrlRoute()
+    onTraversal()
   })
   // Fragment navigation the page itself initiates (`openStandaloneEditorInThisTab`
   // assigning the hash, or a plain in-page hash anchor) is delivered
@@ -2526,8 +2525,7 @@ if (hasBrowser) {
   // to both: `applyUrlRoute` is idempotent and by contract never writes the
   // URL back, so a double delivery settles on the same state.
   window.addEventListener("hashchange", () => {
-    endStepBack()
-    applyUrlRoute()
+    onTraversal()
   })
 }
 
@@ -2562,10 +2560,11 @@ export function useDuxSelector<T>(select: (state: DuxState) => T): T {
 //
 // A screen change pushes, in both directions; a move within one screen
 // replaces. The only screen changes that replace are a restore, a correction
-// and a fallback. The app steps history relatively in exactly one case: a
-// fallback whose destination is the entry right behind, when this page wrote
-// that entry, steps back onto it rather than writing a duplicate over the
-// current one (`stepBackOnto`). `history.go` appears nowhere.
+// and a fallback. The app never steps history relatively (it never calls
+// `history.go` or `history.back`). Its one traversal is a fallback whose
+// destination is the entry right behind, when this page wrote that entry: it
+// goes to that exact entry by its Navigation API key rather than writing a
+// duplicate over the current one (`traverseOnto`).
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 // The three shapes are mutually exclusive, so the first one that MATCHES
@@ -2946,8 +2945,8 @@ function currentRoute(): Route {
 // Bring the URL in line with the app's current position: pushes on a screen
 // change, replaces within one screen. `mode: "replace"` forces a replace for a
 // move the user did not ask for (a restore, or leaving the not-found screen).
-// A replace made inside `fallBackTo` may instead step back one entry (see
-// `stepBackOnto`).
+// A replace made inside `fallBackTo` may instead go back to the exact entry
+// behind (see `traverseOnto`).
 //
 // Best-effort and never throws at its caller: browsers rate-limit history calls
 // and every call site runs after the screen has already moved, so a refusal
@@ -2957,10 +2956,13 @@ function syncUrl(mode?: "replace" | "push"): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return
   }
-  // A fallback's step back is in flight: the browser is about to land on the
-  // entry behind this one and the router will render what it names. Anything
-  // written now would land on the entry being left.
-  if (stepBack !== null) return
+  // A fallback's traversal is pending: anything written now would land on the
+  // entry being left. The newer position is kept in state instead, and the
+  // landing writes it (`landTraversal`).
+  if (pendingTraversal !== null) {
+    pendingTraversal.newerIntent = true
+    return
+  }
   const next = routeHash(currentRoute())
   const current = currentHash()
   // Belt and braces: when the address is already what we would write, the
@@ -2979,7 +2981,7 @@ function syncUrl(mode?: "replace" | "push"): void {
       labelledEntryKeys.set(label.id, key)
       return
     }
-    if (fallbackWrite && stepBackOnto(key)) return
+    if (fallbackWrite && traverseOnto(key)) return
     // A rewrite keeps the entry's identity and what is behind it, and records
     // its new position.
     const own = ownLabel(history.state)
@@ -2999,8 +3001,8 @@ function syncUrl(mode?: "replace" | "push"): void {
 // --- History entry labels ---------------------------------------------------
 //
 // Every entry dux writes carries a label in `history.state`: this page load's
-// token, an id, the position the entry holds, and the label of the entry
-// immediately behind it. It exists for ONE decision, `stepBackOnto`.
+// token, an id, the position the entry holds, and the entry immediately behind
+// it. It exists for ONE decision, `traverseOnto`.
 
 // This page load's token. A label written by an earlier load of the page, or
 // by another browser tab, carries a different one and is never trusted. Not a
@@ -3013,9 +3015,11 @@ interface EntryLabel {
   id: number
   // `positionKey` of the address the entry was written with.
   key: string
-  // The entry immediately behind, as it was when this one was pushed. Null
-  // when nothing behind is known (the entry was not pushed by this page).
-  prev: { id: number; key: string } | null
+  // The entry immediately behind, as it was when this one was pushed: its
+  // label, its position then, and the Navigation API key of its slot (absent
+  // where the browser has no Navigation API). Null when nothing behind is
+  // known (the entry was not pushed by this page).
+  prev: { id: number; key: string; navKey?: string } | null
 }
 
 let nextEntryId = 1
@@ -3026,7 +3030,7 @@ let nextEntryId = 1
 // that.
 const labelledEntryKeys = new Map<number, string>()
 
-// What counts as "the same place" for the step: the position Back moves by
+// What counts as "the same place" for the fallback: the position Back moves by
 // (`routePushKey`), plus theater, which pushes an entry of its own.
 function positionKey(route: Route): string {
   return `${routePushKey(route)}${route.theater ? "+theater" : ""}`
@@ -3043,13 +3047,27 @@ function entryState(previous: unknown, route: string, label: EntryLabel): object
   return { ...base, duxRoute: route, duxEntry: label }
 }
 
-// The label of the entry the page is on, for the entry about to be pushed over
-// it. An entry this page did not write (the one the page loaded on, or a
-// fragment navigation) is labelled first, with nothing known behind it: it is
-// this page's own entry from now on.
-function labelCurrentEntry(current: string): { id: number; key: string } {
+// The browser's Navigation API, or null where it has none. It is what lets the
+// fallback name an exact entry: `history.back()` is relative, and a relative
+// step queued behind a Back the user already pressed lands one entry further,
+// possibly outside dux.
+function navigationApi(): Navigation | null {
+  if (typeof window === "undefined") return null
+  const nav = (window as { navigation?: Navigation }).navigation
+  if (!nav || typeof nav.traverseTo !== "function" || typeof nav.entries !== "function") {
+    return null
+  }
+  return nav
+}
+
+// The entry the page is on, for the entry about to be pushed over it. An entry
+// this page did not write (the one the page loaded on, or a fragment
+// navigation) is labelled first, with nothing known behind it: it is this
+// page's own entry from now on.
+function labelCurrentEntry(current: string): EntryLabel["prev"] {
+  const navKey = navigationApi()?.currentEntry?.key || undefined
   const own = ownLabel(history.state)
-  if (own) return { id: own.id, key: labelledEntryKeys.get(own.id) ?? own.key }
+  if (own) return { id: own.id, key: labelledEntryKeys.get(own.id) ?? own.key, navKey }
   const label = {
     session: PAGE_SESSION,
     id: nextEntryId++,
@@ -3058,23 +3076,23 @@ function labelCurrentEntry(current: string): { id: number; key: string } {
   }
   history.replaceState(entryState(history.state, current, label), "", historyUrlFor(current))
   labelledEntryKeys.set(label.id, label.key)
-  return { id: label.id, key: label.key }
+  return { id: label.id, key: label.key, navKey }
 }
 
-// Set while a fallback runs (`fallBackTo`): its replace may become a step back.
+// Set while a fallback runs (`fallBackTo`): its replace may become a traversal.
 let fallbackWrite = false
 
-// The step back in flight, cleared by the traversal it causes. The timer is
-// the bound for a traversal that never arrives: the screen already shows the
-// destination, so the address is then rewritten to match it, as before.
-let stepBack: { timer: ReturnType<typeof setTimeout> } | null = null
-const STEP_BACK_TIMEOUT_MS = 1_000
+// The fallback's traversal while it is pending. `newerIntent` records that
+// something asked for a URL write meanwhile: a click, or another fallback.
+// That position is held in state, and the landing writes it rather than
+// letting the landed entry's older address overwrite it.
+let pendingTraversal: { newerIntent: boolean } | null = null
 
 // Run a navigation that falls back from something that disappeared. Such a
 // navigation replaces the current entry, unless the entry right behind it is
-// the destination, in which case it steps back onto that entry: a replace
-// there would leave two identical entries in a row and a Back that changes
-// nothing on screen.
+// the destination, in which case it goes back to that entry: a replace there
+// would leave two identical entries in a row and a Back that changes nothing
+// on screen.
 function fallBackTo(navigate: () => void): void {
   const outer = fallbackWrite
   fallbackWrite = true
@@ -3085,36 +3103,86 @@ function fallBackTo(navigate: () => void): void {
   }
 }
 
-// The one relative step the app takes, and only ever one entry: onto the
-// entry immediately behind, when this page labelled it and it holds `key`.
-// The popstate it causes lands on that entry, and the router renders what it
-// names. Returns false, so the caller replaces, in every other case.
-function stepBackOnto(key: string): boolean {
+// The one history move the app makes that is not a write: going back to the
+// entry immediately behind, when this page labelled it and it holds `key`. It
+// is never relative. It names that entry's own slot through the Navigation
+// API, which lands there or fails, so a Back the user already queued cannot
+// turn it into a step out of dux. Where the browser has no Navigation API, or
+// is already traversing, it does nothing and returns false, and the caller
+// replaces.
+function traverseOnto(key: string): boolean {
+  const nav = navigationApi()
+  if (nav === null || nav.transition) return false
   const behind = ownLabel(history.state)?.prev
-  if (!behind || labelledEntryKeys.get(behind.id) !== key) return false
-  if (typeof history.back !== "function") return false
+  if (!behind?.navKey || labelledEntryKeys.get(behind.id) !== key) return false
+  const here = nav.currentEntry
+  const target = nav.entries().find((entry) => entry.key === behind.navKey)
+  if (!here || !target || target.index !== here.index - 1) return false
   // The router's own writes while it lands are not fallbacks of their own.
   fallbackWrite = false
-  stepBack = { timer: setTimeout(abandonStepBack, STEP_BACK_TIMEOUT_MS) }
+  const pending = { newerIntent: false }
+  pendingTraversal = pending
+  let committed: Promise<unknown> | undefined
   try {
-    history.back()
+    committed = nav.traverseTo(behind.navKey).committed
   } catch (err) {
-    endStepBack()
-    console.warn("[dux] history step refused", err)
+    console.warn("[dux] history traversal refused", err)
+  }
+  if (committed === undefined) {
+    pendingTraversal = null
     return false
   }
+  // A traversal onto the entry the page is already on (the user's own Back got
+  // there first) fires no popstate, so the promise lands it too. A failed one
+  // leaves the page where it was: rewrite that entry, as before.
+  committed.then(
+    () => {
+      if (pendingTraversal === pending) landTraversal()
+    },
+    () => {
+      if (pendingTraversal !== pending) return
+      pendingTraversal = null
+      syncUrl("replace")
+    },
+  )
   return true
 }
 
-function endStepBack(): void {
-  if (stepBack === null) return
-  clearTimeout(stepBack.timer)
-  stepBack = null
+// The browser has traversed while a fallback's traversal was pending. With
+// nothing newer asked for, the app renders the entry it landed on. Otherwise
+// the newer position, which state still holds, is written: over the landed
+// entry when that names the same position or something that has since
+// vanished, as a new entry when it is a different position.
+function landTraversal(): void {
+  const pending = pendingTraversal
+  pendingTraversal = null
+  if (!pending?.newerIntent) {
+    applyUrlRoute()
+    return
+  }
+  const landed = parseRoute(currentHash())
+  const spine = state.spine
+  if (spine !== null && !routeTargetLive(spine, landed)) {
+    syncUrl("replace")
+    return
+  }
+  syncUrl(positionKey(landed) === positionKey(currentRoute()) ? "replace" : "push")
 }
 
-function abandonStepBack(): void {
-  stepBack = null
-  syncUrl("replace")
+function routeTargetLive(spine: Spine, route: Route): boolean {
+  const target = route.target
+  if (target === null) return true
+  if (target.kind === "agent") {
+    return spine.sessions.some((session) => session.id === target.sessionId)
+  }
+  return ownerHasTerminal(spine.terminals, target.owner, target.terminalId)
+}
+
+// What a popstate or hashchange does: land a pending fallback traversal, or
+// otherwise follow the URL.
+function onTraversal(): void {
+  if (pendingTraversal !== null) landTraversal()
+  else applyUrlRoute()
 }
 
 // The hash the browser is parked on, or "" where there is no browser to ask:
@@ -3277,8 +3345,8 @@ export function discardVanishedEditor(): void {
   // selection named the vanished root itself. Landing on home is the one URL
   // write in the pass, and it is a replace, because the address behind it
   // names a target that no longer exists and must not be re-enterable by
-  // Back. A fallback, so when home is already the entry behind, the app steps
-  // back onto it instead. Both surfaces take this same exit.
+  // Back. A fallback, so when home is already the entry behind, the app goes
+  // back to it instead. Both surfaces take this same exit.
   fallBackTo(() => selectSessionRoute(null, "replace"))
 }
 
@@ -6748,7 +6816,7 @@ export function openChangedFiles(): void {
 
 // Navigate to the parent route rather than stepping browser history. Real route
 // changes push; leaving a not-found URL is a fallback, which replaces so Back
-// cannot reopen it, or steps back when home is the entry right behind.
+// cannot reopen it, or goes back when home is the entry right behind.
 export function navigateUp(): void {
   const urlMode = state.routeNotFound ? ("replace" as const) : undefined
   // Belt and braces for the standalone shell: with no editor state left there
