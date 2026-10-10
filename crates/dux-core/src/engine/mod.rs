@@ -19,6 +19,7 @@ mod lifecycle;
 mod pending_removals;
 mod pr_sync_control;
 mod project_base;
+mod refs_watch;
 mod reload_origin;
 pub(crate) mod removal;
 mod resume_fallback;
@@ -111,6 +112,7 @@ pub(crate) use pending_removals::{
     stored_occupant,
 };
 pub use pr_sync_control::PrSyncControl;
+pub use refs_watch::{RefsWatcher, ResolvedRefsWatch};
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
     removal_waiting_message,
@@ -534,12 +536,12 @@ pub struct Engine {
     /// for a healthy github.com. Shared so both the loop and the one-shot checks
     /// read and update it.
     pub pr_backoff: Arc<Mutex<crate::gh::BackoffSnapshot>>,
-    /// File-system watcher for `.git/refs/heads/` directories. `None` if the
+    /// File-system watcher for the refs the pull-request plan's agents move
+    /// when they commit or push. `None` until GitHub is available, and if the
     /// watcher could not be created (graceful fallback to poll-only).
-    pub refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
-    /// Maps watched worktree paths back to session IDs so the refs watcher
-    /// can route change events.
-    pub refs_watch_paths: HashMap<PathBuf, String>,
+    pub refs_watcher: Option<refs_watch::RefsWatcher>,
+    /// Every ref file the watcher reports, mapped to the agents it is about.
+    pub refs_watch_paths: HashMap<PathBuf, Vec<String>>,
     /// Session IDs spawned with resume args and the wall-clock time the resume
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
@@ -3167,141 +3169,6 @@ fn report_missing_directory(
 }
 
 impl Engine {
-    pub fn spawn_refs_watcher(&mut self) {
-        use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-
-        let tx = self.worker_tx.clone();
-        // Build a reverse map of watched paths for event routing.
-        let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let path_map = Arc::clone(&path_to_session);
-        let debounce_map: Arc<Mutex<HashMap<String, Instant>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let debounce = Arc::clone(&debounce_map);
-
-        let watcher_result = RecommendedWatcher::new(
-            move |res: Result<notify::Event, notify::Error>| {
-                let Ok(event) = res else { return };
-                // We only care about data modifications (ref file updates).
-                if !event.kind.is_modify() && !event.kind.is_create() {
-                    return;
-                }
-                let map = match path_map.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                let mut debounce_guard = match debounce.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                for event_path in &event.paths {
-                    // Walk up from the event path to find a watched parent dir.
-                    for (watched, session_id) in map.iter() {
-                        if event_path.starts_with(watched) {
-                            // Debounce: skip if we already sent an event within the last 5s.
-                            let now = Instant::now();
-                            if let Some(last) = debounce_guard.get(session_id)
-                                && now.duration_since(*last) < Duration::from_secs(5)
-                            {
-                                continue;
-                            }
-                            debounce_guard.insert(session_id.clone(), now);
-                            crate::logger::debug(&format!(
-                                "[gh-integration] refs watcher: detected change at {}, debouncing for session {}",
-                                event_path.display(),
-                                session_id,
-                            ));
-                            let _ = tx.send(WorkerEvent::RefsChanged(session_id.clone()));
-                        }
-                    }
-                }
-            },
-            NotifyConfig::default(),
-        );
-
-        match watcher_result {
-            Ok(watcher) => {
-                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
-                self.refs_watch_paths.clear();
-                // Populate the path map and start watching existing sessions.
-                let mut paths = HashMap::new();
-                // Collected rather than posted in the loop: `post_status` is a
-                // read of the engine and the loop already holds one, and an
-                // agent that cannot be watched is worth one sentence each.
-                let mut lost_agents: Vec<String> = Vec::new();
-                for session in &self.sessions {
-                    // The watch exists to notice the AGENT's branch moving, and
-                    // a standalone agent has no agent branch. Skipped even when
-                    // its folder happens to be a repository: watching it would
-                    // fire pull-request checks for a branch that is not dux's.
-                    let Some(managed) = session.workspace.as_managed() else {
-                        continue;
-                    };
-                    let refs_dir = PathBuf::from(&managed.worktree_path)
-                        .join(".git")
-                        .join("refs")
-                        .join("heads");
-                    if refs_dir.is_dir()
-                        && let Some(ref watcher_arc) = self.refs_watcher
-                    {
-                        match watcher_arc.lock() {
-                            Ok(mut w) => match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
-                                Ok(()) => {
-                                    crate::logger::debug(&format!(
-                                        "[gh-integration] refs watcher: watching {} for session {}",
-                                        refs_dir.display(),
-                                        session.id,
-                                    ));
-                                    paths.insert(refs_dir.clone(), session.id.clone());
-                                }
-                                Err(e) => {
-                                    crate::logger::debug(&format!(
-                                        "[gh-integration] refs watcher: failed to watch {}: {}",
-                                        refs_dir.display(),
-                                        e,
-                                    ));
-                                }
-                            },
-                            Err(poison) => {
-                                crate::logger::error(&format!(
-                                    "[gh-integration] refs watcher mutex poisoned, will not watch {} for session {} \u{2014} PR updates for this session will not arrive until dux restarts: {}",
-                                    refs_dir.display(),
-                                    session.id,
-                                    poison,
-                                ));
-                                lost_agents.push(session.display_label().to_string());
-                            }
-                        }
-                    }
-                }
-                for agent_label in lost_agents {
-                    self.post_status(crate::poller_status::refs_watcher_lost_agent(&agent_label));
-                }
-                self.refs_watch_paths = paths.clone();
-                // Populate the closure's path map so events can route to sessions.
-                if let Ok(mut map) = path_to_session.lock() {
-                    *map = paths;
-                }
-                crate::logger::info(&format!(
-                    "[gh-integration] refs watcher: initialized, watching {}",
-                    crate::text::count_of(self.refs_watch_paths.len(), "session"),
-                ));
-            }
-            Err(e) => {
-                crate::logger::warn(&format!(
-                    "[gh-integration] refs watcher: failed to create watcher (falling back to poll-only): {}",
-                    e,
-                ));
-                // The fallback is silent otherwise, and a user watching pull
-                // request status arrive a poll interval late has no way to tell
-                // that from dux being broken.
-                self.post_status(crate::poller_status::refs_watcher_unavailable(
-                    &e.to_string(),
-                ));
-            }
-        }
-    }
-
     /// Whether the new-agent-from-PR flow is available: GitHub integration is
     /// enabled in config AND the `gh` CLI is installed and authenticated. Mirrors
     /// the TUI's `github_pr_agent_command_available`. Surfaced on the ViewModel
@@ -4946,6 +4813,9 @@ impl Engine {
     /// exactly the moment its user starts reading that badge again.
     pub fn update_pr_sync_sessions(&mut self) {
         let returned = self.rebuild_pr_sync_plan();
+        // The refs watcher covers exactly the plan's agents, so whatever moved
+        // an agent into or out of it, or changed its branch, re-aims the watch.
+        self.request_refs_watch_plan();
         // Owed from a previous rebuild, whose check was refused. Retried once
         // each and then let go whatever happens, so this can never become a
         // queue nobody drains.
@@ -7438,19 +7308,31 @@ mod tests {
         );
     }
 
-    /// The refs watcher puts an inotify watch on `.git/refs/heads` per session.
-    /// A standalone agent must not get one even when its folder IS a repository
-    /// (the watch exists to notice the AGENT's branch moving, and there is no
-    /// agent branch here).
+    /// The refs watcher watches the refs of each agent's branch. A standalone
+    /// agent must not be watched even when its folder IS a repository (the
+    /// watch exists to notice the AGENT's branch moving, and there is no agent
+    /// branch here).
     #[test]
     fn the_refs_watcher_never_watches_a_standalone_agents_folder() {
         let (mut engine, _tmp, folder) = engine_with_a_standalone_agent();
         init_plain_repo(folder.path());
-        std::fs::create_dir_all(folder.path().join(".git").join("refs").join("heads")).unwrap();
+        engine.update_pr_sync_sessions();
         engine.spawn_refs_watcher();
-        let watched: Vec<String> = engine.refs_watch_paths.values().cloned().collect();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "the watch plan never arrived");
+            let Ok(event) = engine.worker_rx.recv_timeout(Duration::from_millis(100)) else {
+                continue;
+            };
+            let resolved = matches!(event, WorkerEvent::RefsWatchResolved { .. });
+            engine.process_worker_event(event);
+            if resolved {
+                break;
+            }
+        }
+        let watched = engine.refs_watched_sessions();
         assert!(
-            !watched.contains(&"sa1".to_string()),
+            !watched.contains("sa1"),
             "a standalone agent has no agent branch for a refs watch to be about, got {watched:?}"
         );
     }

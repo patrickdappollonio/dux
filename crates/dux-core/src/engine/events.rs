@@ -4529,6 +4529,10 @@ impl Engine {
                 self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
                 EventReaction::Nothing
             }
+            WorkerEvent::RefsWatchResolved {
+                generation,
+                resolved,
+            } => self.process_refs_watch_resolved(generation, resolved),
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
                 EventReaction::BrowserEntriesArrived { dir, entries }
             }

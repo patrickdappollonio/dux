@@ -611,6 +611,13 @@ pub enum WorkerEvent {
         status_op_id: Option<String>,
     },
     RefsChanged(String),
+    /// Where the refs of the pull-request plan's agents live, resolved for the
+    /// refs watcher. `generation` names the request it answers, so an answer
+    /// overtaken by a newer request is dropped.
+    RefsWatchResolved {
+        generation: u64,
+        resolved: Vec<crate::engine::ResolvedRefsWatch>,
+    },
     /// Background `git worktree remove` for a session-initiated delete has
     /// finished. On `Ok`, the result says what happened to each branch the
     /// removal targeted (used for the status message). On `Err`, the message is
