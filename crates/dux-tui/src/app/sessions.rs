@@ -11215,17 +11215,17 @@ mod tests {
         assert_back_on_the_action_list(&app, "Escape on the startup logs");
     }
 
-    /// Three running agents of project-1 in manual order, the middle one under
-    /// the cursor.
-    fn three_running_agents_cursor_on_the_middle(orphaned_middle: bool) -> App {
+    /// Three running agents in manual order, the middle one in `middle_project`
+    /// and under the cursor, the other two in project-1.
+    fn three_running_agents_cursor_on_the_middle(middle_project: &str) -> App {
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
             s.workspace
                 .as_managed_mut()
                 .expect("managed test session")
-                .project_id = if orphaned_middle && id == "s2" {
-                "gone-project".to_string()
+                .project_id = if id == "s2" {
+                middle_project.to_string()
             } else {
                 "project-1".to_string()
             };
@@ -11234,7 +11234,10 @@ mod tests {
         }
         let mut app = test_app_with_sessions(
             sessions,
-            vec![make_project_at("project-1", "codex", "/tmp/project")],
+            vec![
+                make_project_at("project-1", "codex", "/tmp/project"),
+                make_project_at("project-2", "codex", "/tmp/project-2"),
+            ],
         );
         app.engine.config.ui.agent_sort = "manual".to_string();
         for session in app.engine.sessions.clone() {
@@ -11257,7 +11260,7 @@ mod tests {
     /// as this surface's own changes always have.
     #[test]
     fn detaching_the_selected_agent_here_moves_the_cursor_to_its_neighbour() {
-        let mut app = three_running_agents_cursor_on_the_middle(false);
+        let mut app = three_running_agents_cursor_on_the_middle("project-1");
 
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);
@@ -11271,10 +11274,62 @@ mod tests {
     /// deletes do.
     #[test]
     fn removing_a_project_here_moves_the_cursor_to_its_neighbour() {
-        let mut app = three_running_agents_cursor_on_the_middle(true);
+        let mut app = three_running_agents_cursor_on_the_middle("gone-project");
 
         app.run_remove_orphaned_project("gone-project".to_string(), "gone".to_string())
             .expect("remove the orphaned group");
+
+        assert!(
+            app.engine.sessions.iter().all(|s| s.id != "s2"),
+            "{}",
+            app.status.text()
+        );
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+    }
+
+    /// Stopping the only running tab of the agent under the cursor, from here,
+    /// sends it to the collapsed Inactive tail, and the cursor moves on to the
+    /// row that took its place.
+    #[test]
+    fn stopping_the_selected_agents_tab_here_moves_the_cursor_to_its_neighbour() {
+        let mut app = three_running_agents_cursor_on_the_middle("project-1");
+
+        app.stop_focused_tab_prompt();
+        assert!(matches!(app.prompt, PromptState::ConfirmStopTab { .. }));
+        app.resolve_confirm_stop_tab(true);
+
+        assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+    }
+
+    /// Killing the agent under the cursor from the running-processes list sends
+    /// it to the collapsed Inactive tail, and the cursor moves on to the row
+    /// that took its place.
+    #[test]
+    fn killing_the_selected_agent_here_moves_the_cursor_to_its_neighbour() {
+        let mut app = three_running_agents_cursor_on_the_middle("project-1");
+
+        let (agents, _) = app.kill_runtime_targets(&[RuntimeTargetId::Agent("s2".to_string())]);
+
+        assert_eq!(agents, 1);
+        assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+    }
+
+    /// Deleting the project the cursor's agent is in, from here, moves the
+    /// cursor on to the row that took its place.
+    #[test]
+    fn deleting_a_project_here_moves_the_cursor_to_its_neighbour() {
+        let mut app = three_running_agents_cursor_on_the_middle("project-2");
+        let project = app
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == "project-2")
+            .cloned()
+            .expect("project-2");
+
+        app.run_delete_project(project).expect("delete project-2");
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s2"),
