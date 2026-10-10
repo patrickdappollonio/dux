@@ -3324,7 +3324,7 @@ impl Engine {
     }
 
     fn process_branch_sync_ready(&mut self, updates: Vec<(String, String)>) -> EventReaction {
-        let mut changed = false;
+        let mut moved: Vec<String> = Vec::new();
         for (session_id, actual_branch) in updates {
             // Rename completion owns the authoritative branch mutation while a rename is active.
             if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
@@ -3366,16 +3366,20 @@ impl Engine {
                         session.branch_name(),
                     ));
                 }
-                changed = true;
+                moved.push(session.id.clone());
             }
         }
-        if !changed {
+        if moved.is_empty() {
             return EventReaction::Nothing;
         }
         self.update_branch_sync_sessions();
         // The pull-request plan names the branch too, and would otherwise keep
-        // asking GitHub about the one the agent has left.
+        // asking GitHub about the one the agent has left. The branch it moved
+        // to may already have a pull request, so it is asked about once now.
         self.update_pr_sync_sessions();
+        for session_id in moved {
+            self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
+        }
         EventReaction::RebuildLeftItems
     }
 
@@ -3482,8 +3486,10 @@ impl Engine {
                     }
                 }
                 self.update_branch_sync_sessions();
-                // So does the pull-request plan, which asks GitHub by branch.
+                // So does the pull-request plan, which asks GitHub by branch, and
+                // the renamed branch is asked about once now.
                 self.update_pr_sync_sessions();
+                self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
             }
             Err(err) => {
                 logger::warn(&format!(
@@ -5916,6 +5922,8 @@ mod tests {
     #[test]
     fn branch_sync_ready_changed_branch_returns_rebuild() {
         let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
         engine.sessions.push(sample_session("s1", "p1", "old"));
         let before_updated_at = engine.sessions[0].updated_at;
 
@@ -5943,6 +5951,10 @@ mod tests {
             .map(|entry| entry.branch_name.clone())
             .collect();
         assert_eq!(planned, vec!["new".to_string()]);
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "the branch it moved to is asked about at once"
+        );
     }
 
     #[test]
@@ -6246,6 +6258,8 @@ mod tests {
     #[test]
     fn branch_rename_completed_success_updates_branch_and_clears_guards() {
         let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
         let session = sample_session("s1", "p1", "old-branch");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
@@ -6284,6 +6298,10 @@ mod tests {
             .map(|entry| entry.branch_name.clone())
             .collect();
         assert_eq!(planned, vec!["new-branch".to_string()]);
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "the renamed branch is asked about at once"
+        );
         // Renaming the branch dux minted keeps it the branch dux minted, then,
         // so a pull request older than the agent is still refused for it, and
         // that survives a restart.
