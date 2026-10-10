@@ -137,6 +137,9 @@ impl App {
     /// Lend the engine to the companion for one reaction, before this surface
     /// consumes it, so the companion sees reactions in the order they were drained.
     pub(crate) fn notify_companion(&mut self, reaction: &EventReaction) {
+        if self.companion_has_core() {
+            self.anchor_cursors();
+        }
         if let Some(companion) = self.companion.as_mut()
             && companion.has_core()
         {
@@ -187,6 +190,9 @@ impl App {
         // nothing here has rebuilt: fold it in and clear it whether or not
         // anything is serving, so the flag never survives into a later iteration.
         let followup_ran = std::mem::take(&mut self.companion_followup_ran);
+        if self.companion_has_core() {
+            self.anchor_cursors();
+        }
         let outcome = match self.companion.as_mut() {
             Some(companion) if companion.has_core() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
@@ -202,6 +208,9 @@ impl App {
             self.mark_frame_dirty();
             self.refresh_after_companion_mutation();
         }
+        // Whatever the companion changed has been rebuilt by now; the next lend
+        // anchors afresh.
+        self.cursor_anchor = None;
         // Statuses a command-line change raised through the serve: no browser
         // stands in for this line.
         for status in outcome.statuses {
@@ -220,6 +229,41 @@ impl App {
                 StatusTone::Warning,
                 message,
             );
+        }
+    }
+
+    /// Remember what the cursors are on before a change made elsewhere (the
+    /// companion lent the engine, or a reloaded config) lands. An anchor not
+    /// yet followed is kept: the list it was read from is the last one that
+    /// matched the engine.
+    pub(crate) fn anchor_cursors(&mut self) {
+        if self.cursor_anchor.is_some() {
+            return;
+        }
+        self.cursor_anchor = Some(CursorAnchor {
+            left_index: self.selected_left,
+            session: self.selected_session().map(|session| session.id.clone()),
+            terminal_index: self.selected_terminal_index,
+            terminal: self
+                .terminal_items()
+                .get(self.selected_terminal_index)
+                .map(|(id, _)| (*id).clone()),
+        });
+    }
+
+    /// Put each cursor back on the row it was on when `anchor` was taken, unless
+    /// this surface moved it since or that row is gone, which leaves the index
+    /// to be clamped onto a neighbour.
+    pub(crate) fn follow_cursor_anchor(&mut self, anchor: CursorAnchor) {
+        if self.selected_left == anchor.left_index
+            && let Some(session_id) = anchor.session
+        {
+            self.reselect_left_session(&session_id);
+        }
+        if self.selected_terminal_index == anchor.terminal_index
+            && let Some(terminal_id) = anchor.terminal
+        {
+            self.reselect_left_terminal(&terminal_id);
         }
     }
 
@@ -1083,9 +1127,12 @@ pub(crate) mod tests {
         mutated_next: bool,
         /// How many times `service` was called.
         serviced: usize,
-        /// A session to remove from the engine the next time `service` runs, so a
-        /// test can stand in for a browser deleting an agent.
-        remove_session: Option<String>,
+        /// A change to make to the engine the next time `service` runs, so a
+        /// test can stand in for a browser deleting or reordering an agent.
+        change_in_service: Option<EngineChange>,
+        /// The same, made the next time a reaction is handed over, standing in
+        /// for a follow-up the fanout runs (a browser's delete finishing).
+        change_in_fanout: Option<EngineChange>,
         /// Turn `ui.show_changes_pane` off in the engine's config the next time
         /// `service` runs, standing in for a browser saving that preference.
         hide_changes_pane: bool,
@@ -1125,6 +1172,9 @@ pub(crate) mod tests {
         /// real serve holds.
         pub(crate) server_log_path: Option<std::path::PathBuf>,
     }
+
+    /// A change another surface makes to the shared engine.
+    pub(crate) type EngineChange = Box<dyn FnOnce(&mut Engine) + Send>;
 
     /// A companion that records instead of serving. Serving is a real socket and a
     /// real runtime; none of that is what these tests are about.
@@ -1172,6 +1222,9 @@ pub(crate) mod tests {
         fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction) {
             let mut recorded = self.recorded.lock().expect("not poisoned");
             recorded.reactions.push(reaction_kind(reaction).to_string());
+            if let Some(change) = recorded.change_in_fanout.take() {
+                change(engine);
+            }
             if !recorded.fanout_consumes_ops {
                 return;
             }
@@ -1208,8 +1261,8 @@ pub(crate) mod tests {
         fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
             let mut recorded = self.recorded.lock().expect("not poisoned");
             recorded.serviced += 1;
-            if let Some(id) = recorded.remove_session.take() {
-                engine.sessions.retain(|s| s.id != id);
+            if let Some(change) = recorded.change_in_service.take() {
+                change(engine);
             }
             if std::mem::take(&mut recorded.hide_changes_pane) {
                 engine.config.ui.show_changes_pane = false;
@@ -1663,49 +1716,169 @@ pub(crate) mod tests {
         );
     }
 
-    /// A rename made in a browser has to rebuild this surface's sidebar. Nothing
+    /// A change made in a browser has to rebuild this surface's sidebar. Nothing
     /// on this surface has any other reason to: the change did not arrive through
-    /// its own event stream.
+    /// its own event stream. The rebuilt list keeps the cursor on the agent and
+    /// the terminal it was on, found by id, so a delete or a reorder above it
+    /// does not slide this surface onto another agent and draw that one; only
+    /// when its own agent is the one gone does the cursor clamp to a neighbour.
     #[test]
-    fn a_mutating_service_iteration_rebuilds_the_sidebar() {
-        let mut app = test_app(default_bindings());
-        let (companion, recorded) = FakeCompanion::serving();
-        app.companion = Some(companion);
-        let session_id = app
-            .engine
-            .sessions
-            .first()
-            .map(|s| s.id.clone())
-            .expect("the test app has a session");
-        app.rebuild_left_items();
-        let before = app.left_items_cache.len();
-        app.selected_left = before.saturating_sub(1);
-        {
-            let mut recorded = recorded.lock().expect("not poisoned");
-            recorded.mutated_next = true;
-            recorded.remove_session = Some(session_id.clone());
+    fn a_change_made_elsewhere_rebuilds_the_sidebar_and_the_cursor_keeps_its_agent() {
+        enum Lend {
+            Service,
+            Fanout,
         }
+        let delete = |id: &'static str| -> EngineChange {
+            Box::new(move |engine: &mut Engine| engine.sessions.retain(|s| s.id != id))
+        };
+        let cases: Vec<(&str, Lend, EngineChange, &str, &[&str])> = vec![
+            (
+                "a delete above",
+                Lend::Service,
+                delete("agent-a"),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
+                "a reorder",
+                Lend::Service,
+                Box::new(|engine: &mut Engine| engine.sessions.rotate_right(1)),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
+                "a sort change",
+                Lend::Service,
+                Box::new(|engine: &mut Engine| {
+                    engine.config.ui.agent_sort = "name_desc".to_string();
+                }),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
+                "a delete the fanout finishes",
+                Lend::Fanout,
+                delete("agent-a"),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
+                "a terminal closed above",
+                Lend::Service,
+                Box::new(|engine: &mut Engine| {
+                    let first = engine
+                        .companion_terminals
+                        .iter()
+                        .min_by_key(|(_, terminal)| terminal.sort_order)
+                        .map(|(id, _)| id.clone())
+                        .expect("a terminal");
+                    engine.companion_terminals.remove(&first);
+                }),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
+                "its own agent deleted",
+                Lend::Service,
+                delete("agent-c"),
+                "agent-b",
+                &[],
+            ),
+        ];
+        for (name, lend, change, selected, drawn) in cases {
+            let mut app = test_app(default_bindings());
+            let (companion, recorded) = FakeCompanion::serving();
+            app.companion = Some(companion);
+            app.engine.config.ui.agent_sort = "manual".to_string();
+            app.engine.config.terminal.command = "cat".to_string();
+            app.engine.config.terminal.args = vec![];
+            let base = app.engine.sessions[0].clone();
+            app.engine.sessions.clear();
+            for id in ["agent-a", "agent-c", "agent-b"] {
+                let mut session = base.clone();
+                session.id = id.to_string();
+                session.slot_tab_id = format!("{id}-slot");
+                session.title = Some(id.to_string());
+                session.status = crate::model::SessionStatus::Active;
+                app.engine.sessions.push(session);
+            }
+            for _ in 0..3 {
+                app.engine
+                    .create_standalone_terminal(24, 80)
+                    .expect("standalone terminal");
+            }
+            let client = crate::pty::PtyClient::spawn(
+                "/bin/sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                std::path::Path::new("."),
+                24,
+                80,
+                1_000,
+            )
+            .expect("spawn pty");
+            app.engine
+                .providers
+                .insert(TabId::new("agent-c-slot".to_string()), client);
+            app.rebuild_left_items();
+            app.reselect_left_session("agent-c");
+            app.selected_terminal_index = 1;
+            let terminal = app.terminal_items()[1].0.clone();
+            let before = app.left_items_cache.len();
+            {
+                let mut recorded = recorded.lock().expect("not poisoned");
+                recorded.mutated_next = true;
+                match lend {
+                    Lend::Service => recorded.change_in_service = Some(change),
+                    Lend::Fanout => recorded.change_in_fanout = Some(change),
+                }
+            }
 
-        app.service_companion();
+            if matches!(lend, Lend::Fanout) {
+                let routing = app.companion_routing();
+                app.notify_companion(&EventReaction::RebuildLeftItems);
+                app.apply_routed_reaction(EventReaction::RebuildLeftItems, &routing);
+            }
+            app.service_companion();
+            let mut screen = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("terminal");
+            screen.draw(|frame| app.render(frame)).expect("render");
 
-        assert!(
-            !app.engine.sessions.iter().any(|s| s.id == session_id),
-            "the fake stands in for a browser deleting the agent"
-        );
-        assert!(
-            app.left_items_cache.len() < before,
-            "the sidebar must rebuild without the deleted agent ({before} rows before, {} after)",
-            app.left_items_cache.len()
-        );
-        assert!(
-            app.selected_left < app.left_items_cache.len().max(1),
-            "the cursor must be clamped back inside the shorter list"
-        );
-        assert_eq!(
-            recorded.lock().expect("not poisoned").serviced,
-            1,
-            "the seam is serviced once per iteration"
-        );
+            assert!(
+                app.left_items_cache.len() <= before,
+                "{name}: the sidebar rebuilt"
+            );
+            assert_eq!(
+                app.selected_session().map(|s| s.id.as_str()),
+                Some(selected),
+                "{name}: the cursor's agent"
+            );
+            if app.engine.companion_terminals.contains_key(&terminal) {
+                assert_eq!(
+                    app.terminal_items()
+                        .get(app.selected_terminal_index)
+                        .map(|(id, _)| id.as_str()),
+                    Some(terminal.as_str()),
+                    "{name}: the terminal cursor's terminal"
+                );
+            }
+            let attached: Vec<String> = app
+                .engine
+                .attachments
+                .connections(std::time::Instant::now())
+                .into_iter()
+                .filter(|connection| {
+                    connection.surface == dux_core::attachments::Surface::TerminalUi
+                })
+                .flat_map(|connection| connection.attachments)
+                .map(|attachment| attachment.target.id)
+                .collect();
+            assert_eq!(attached, drawn, "{name}: what this surface draws");
+            assert_eq!(
+                recorded.lock().expect("not poisoned").serviced,
+                1,
+                "{name}: the seam is serviced once per iteration"
+            );
+        }
     }
 
     /// Under one engine, a browser's Preferences save writes `engine.config`

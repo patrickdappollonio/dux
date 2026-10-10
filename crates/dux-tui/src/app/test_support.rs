@@ -372,6 +372,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         background_server_preflight_pending: false,
         background_server_wanted: false,
         companion_followup_ran: false,
+        cursor_anchor: None,
         pending_background_server_start: None,
         pending_tailscale_mode_op: None,
         reload_listener_changes: Default::default(),

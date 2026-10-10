@@ -5169,6 +5169,7 @@ mod tests {
             background_server_preflight_pending: false,
             background_server_wanted: false,
             companion_followup_ran: false,
+            cursor_anchor: None,
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
@@ -6909,6 +6910,17 @@ mod tests {
             app.selected_session().map(|s| s.id.as_str()),
             Some("s3"),
             "the same agent must stay selected across a config reload",
+        );
+
+        // A `dux config set` that re-sorts the list moves the agent's row, and
+        // the cursor goes with it.
+        let mut config = app.engine.config.clone();
+        config.ui.agent_sort = "name_desc".to_string();
+        app.apply_reloaded_config(config).expect("reload config");
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s3"),
+            "a reload that re-sorts the list keeps the cursor on its agent",
         );
     }
 

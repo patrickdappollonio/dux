@@ -671,6 +671,11 @@ pub struct App {
     /// here would otherwise rebuild. Folded into the per-iteration mutated answer
     /// and cleared there.
     pub(crate) companion_followup_ran: bool,
+    /// What the cursors were on before a change made elsewhere landed: the
+    /// engine lent to the companion (a browser's or the command line's change)
+    /// or a reloaded config. The next list rebuild follows it by id, since the
+    /// cursors are row indexes and a row above them may have gone or moved.
+    pub(crate) cursor_anchor: Option<CursorAnchor>,
     /// The background-server start in flight, held from the moment the pre-flight
     /// is dispatched until its result lands. `Option` rather than a map because
     /// the pre-flight is in-flight-guarded, so there is only ever one.
@@ -4005,6 +4010,17 @@ pub(crate) enum LeftSection {
     Terminals,
 }
 
+/// The agent row and the terminal row the cursors were on, by id, with each
+/// cursor's index at the time so a move this surface made itself since is not
+/// undone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CursorAnchor {
+    pub(crate) left_index: usize,
+    pub(crate) session: Option<String>,
+    pub(crate) terminal_index: usize,
+    pub(crate) terminal: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LeftItem {
     /// An agent row (index into `engine.sessions`). The flat model shows the
@@ -4608,6 +4624,7 @@ impl App {
             background_server_preflight_pending: false,
             background_server_wanted: false,
             companion_followup_ran: false,
+            cursor_anchor: None,
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
@@ -6065,6 +6082,8 @@ impl App {
     /// that failed but adopted the config anyway, so neither claims a
     /// setting that is not in force.
     pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
+        // A reloaded sort mode or filter reorders the list under the cursor.
+        self.anchor_cursors();
         self.engine.probe_gh_after_reload(github_was_enabled);
         self.sync_view_state_from_config();
 
@@ -6225,6 +6244,9 @@ impl App {
             &|i| hot[i],
             &|i| visible[i],
         );
+        if let Some(anchor) = self.cursor_anchor.take() {
+            self.follow_cursor_anchor(anchor);
+        }
         self.ensure_selectable_left_item();
         // The same query prunes the terminal list (`terminal_items`), so the
         // terminal cursor is repaired in the same breath as the agent one: this
