@@ -1264,7 +1264,7 @@ impl App {
     pub(crate) fn move_left_cursor_down(&mut self) {
         if self.left_section == LeftSection::Terminals {
             if self.selected_terminal_index + 1 < self.terminal_items().len() {
-                self.selected_terminal_index += 1;
+                self.select_terminal_row(self.selected_terminal_index + 1);
             } else if let Some(first) = self.first_selectable_left_item() {
                 // Wrap: down from the last terminal loops back to the first
                 // agent at the top of the list.
@@ -1273,7 +1273,7 @@ impl App {
             } else {
                 // Nothing above to wrap onto (a query matching terminals only),
                 // so the wrap stays inside the terminals.
-                self.selected_terminal_index = 0;
+                self.select_terminal_row(0);
             }
             return;
         }
@@ -1282,7 +1282,7 @@ impl App {
         } else if self.has_terminal_items() {
             // Jump to terminals section.
             self.left_section = LeftSection::Terminals;
-            self.selected_terminal_index = 0;
+            self.select_terminal_row(0);
             self.close_diff_view();
         } else if let Some(first) = self.first_selectable_left_item() {
             // Wrap: past the last agent (no terminals below) loops
@@ -1296,14 +1296,14 @@ impl App {
     pub(crate) fn move_left_cursor_up(&mut self) {
         if self.left_section == LeftSection::Terminals {
             if self.selected_terminal_index > 0 {
-                self.selected_terminal_index -= 1;
+                self.select_terminal_row(self.selected_terminal_index - 1);
             } else if let Some(last) = self.last_selectable_left_item() {
                 // Jump back to projects section, onto the last agent.
                 self.left_section = LeftSection::Projects;
                 self.select_left_agent_item(last);
             } else {
                 // No agent row to land on, so wrap within the terminals.
-                self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+                self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
             }
             return;
         }
@@ -1312,7 +1312,7 @@ impl App {
         } else if self.has_terminal_items() {
             // Wrap: up from the first agent lands on the last terminal.
             self.left_section = LeftSection::Terminals;
-            self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+            self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
             self.close_diff_view();
         } else if let Some(last) = self.last_selectable_left_item() {
             // Wrap: up from the first agent (no terminals) loops to the
@@ -1478,7 +1478,7 @@ impl App {
             .iter()
             .position(|(id, _)| id.as_str() == terminal_id)
         {
-            self.selected_terminal_index = index;
+            self.select_terminal_row(index);
         }
     }
 
@@ -11131,7 +11131,7 @@ impl App {
                     self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
                 self.focus = FocusPane::Left;
                 self.left_section = LeftSection::Terminals;
-                self.selected_terminal_index = index;
+                self.select_terminal_row(index);
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 if double_click {
@@ -30039,6 +30039,8 @@ cyan = "#00ffff"
         app.engine
             .resume_fallback_candidates
             .insert(TabId::new(slot_tab.clone()), std::time::Instant::now());
+        // The resumed launch was started here, so its fallback is this surface's.
+        app.tui_fallback_tabs.insert(slot_tab.clone());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 

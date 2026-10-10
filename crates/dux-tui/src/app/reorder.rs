@@ -276,7 +276,7 @@ impl App {
             .iter()
             .position(|(id, _)| id.as_str() == follow)
         {
-            self.selected_terminal_index = pos;
+            self.select_terminal_row(pos);
         }
         self.set_info("Reordered terminals. Sorting is now manual.");
     }

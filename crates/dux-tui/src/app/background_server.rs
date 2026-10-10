@@ -137,9 +137,6 @@ impl App {
     /// Lend the engine to the companion for one reaction, before this surface
     /// consumes it, so the companion sees reactions in the order they were drained.
     pub(crate) fn notify_companion(&mut self, reaction: &EventReaction) {
-        if self.companion_has_core() {
-            self.anchor_cursors();
-        }
         if let Some(companion) = self.companion.as_mut()
             && companion.has_core()
         {
@@ -190,9 +187,6 @@ impl App {
         // nothing here has rebuilt: fold it in and clear it whether or not
         // anything is serving, so the flag never survives into a later iteration.
         let followup_ran = std::mem::take(&mut self.companion_followup_ran);
-        if self.companion_has_core() {
-            self.anchor_cursors();
-        }
         let outcome = match self.companion.as_mut() {
             Some(companion) if companion.has_core() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
@@ -208,9 +202,6 @@ impl App {
             self.mark_frame_dirty();
             self.refresh_after_companion_mutation();
         }
-        // Whatever the companion changed has been rebuilt by now; the next lend
-        // anchors afresh.
-        self.cursor_anchor = None;
         // Statuses a command-line change raised through the serve: no browser
         // stands in for this line.
         for status in outcome.statuses {
@@ -232,41 +223,6 @@ impl App {
         }
     }
 
-    /// Remember what the cursors are on before a change made elsewhere (the
-    /// companion lent the engine, or a reloaded config) lands. An anchor not
-    /// yet followed is kept: the list it was read from is the last one that
-    /// matched the engine.
-    pub(crate) fn anchor_cursors(&mut self) {
-        if self.cursor_anchor.is_some() {
-            return;
-        }
-        self.cursor_anchor = Some(CursorAnchor {
-            left_index: self.selected_left,
-            session: self.selected_session().map(|session| session.id.clone()),
-            terminal_index: self.selected_terminal_index,
-            terminal: self
-                .terminal_items()
-                .get(self.selected_terminal_index)
-                .map(|(id, _)| (*id).clone()),
-        });
-    }
-
-    /// Put each cursor back on the row it was on when `anchor` was taken, unless
-    /// this surface moved it since or that row is gone, which leaves the index
-    /// to be clamped onto a neighbour.
-    pub(crate) fn follow_cursor_anchor(&mut self, anchor: CursorAnchor) {
-        if self.selected_left == anchor.left_index
-            && let Some(session_id) = anchor.session
-        {
-            self.reselect_left_session(&session_id);
-        }
-        if self.selected_terminal_index == anchor.terminal_index
-            && let Some(terminal_id) = anchor.terminal
-        {
-            self.reselect_left_terminal(&terminal_id);
-        }
-    }
-
     /// Re-derive this surface's view state after the companion changed shared
     /// state: an agent renamed, reordered or deleted from a browser, a project
     /// added, a terminal closed.
@@ -276,11 +232,8 @@ impl App {
     /// through this surface's own event stream.
     fn refresh_after_companion_mutation(&mut self) {
         self.sync_view_state_from_config();
+        // The rebuild keeps both cursors on what they were on, by id.
         self.rebuild_left_items();
-        if self.selected_left >= self.left_items_cache.len() {
-            self.selected_left = self.left_items_cache.len().saturating_sub(1);
-        }
-        self.clamp_terminal_cursor();
         self.clamp_files_cursor();
         // The entity under the cursor may be gone. Leaving interactive input
         // pointed at a vanished agent swallows every escape key until the next
@@ -1727,6 +1680,9 @@ pub(crate) mod tests {
         enum Lend {
             Service,
             Fanout,
+            /// A terminal's process ends, which the drain prunes before the
+            /// companion is serviced.
+            Drain,
         }
         let delete = |id: &'static str| -> EngineChange {
             Box::new(move |engine: &mut Engine| engine.sessions.retain(|s| s.id != id))
@@ -1778,6 +1734,20 @@ pub(crate) mod tests {
                 &["agent-c-slot"],
             ),
             (
+                "a terminal above exited from a browser",
+                Lend::Drain,
+                Box::new(|engine: &mut Engine| {
+                    let first = engine
+                        .companion_terminals
+                        .values()
+                        .min_by_key(|terminal| terminal.sort_order)
+                        .expect("a terminal");
+                    first.client.write_bytes(b"\x04").expect("end its input");
+                }),
+                "agent-c",
+                &["agent-c-slot"],
+            ),
+            (
                 "its own agent deleted",
                 Lend::Service,
                 delete("agent-c"),
@@ -1821,15 +1791,31 @@ pub(crate) mod tests {
                 .insert(TabId::new("agent-c-slot".to_string()), client);
             app.rebuild_left_items();
             app.reselect_left_session("agent-c");
-            app.selected_terminal_index = 1;
+            let first_terminal = app.terminal_items()[0].0.clone();
             let terminal = app.terminal_items()[1].0.clone();
+            app.reselect_left_terminal(&terminal);
             let before = app.left_items_cache.len();
-            {
-                let mut recorded = recorded.lock().expect("not poisoned");
-                recorded.mutated_next = true;
-                match lend {
-                    Lend::Service => recorded.change_in_service = Some(change),
-                    Lend::Fanout => recorded.change_in_fanout = Some(change),
+            recorded.lock().expect("not poisoned").mutated_next = true;
+            match lend {
+                Lend::Service => {
+                    recorded.lock().expect("not poisoned").change_in_service = Some(change);
+                }
+                Lend::Fanout => {
+                    recorded.lock().expect("not poisoned").change_in_fanout = Some(change);
+                }
+                Lend::Drain => {
+                    change(&mut app.engine);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                    while !app
+                        .engine
+                        .companion_terminals
+                        .get_mut(&first_terminal)
+                        .is_some_and(|t| t.client.is_exited() && t.client.try_wait().is_some())
+                    {
+                        assert!(std::time::Instant::now() < deadline, "{name}: never exited");
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    app.drain_events();
                 }
             }
 

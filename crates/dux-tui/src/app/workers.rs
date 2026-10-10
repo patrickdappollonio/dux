@@ -1652,12 +1652,26 @@ impl App {
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
         ) && std::mem::take(&mut self.create_agent_started_here);
-        let started_here = armed || created_here;
-        // The agent this surface was on before the launch landed. A launch a
-        // browser started leaves it there: moving the cursor would draw the
-        // browser's agent here, and a drawn pane is an attachment that refuses
-        // that browser's own delete in this surface's name.
-        let shown = self.selected_session().map(|session| session.id.clone());
+        // A fallback is the engine relaunching a tab whose resume failed, so it
+        // was started here only when the launch it falls back from was.
+        let fell_back_from_here =
+            matches!(&outcome.view, AgentLaunchReadyView::ResumeFallback { .. })
+                && self.tui_fallback_tabs.remove(&outcome.tab_id);
+        let started_here = armed || created_here || fell_back_from_here;
+        if started_here
+            && self
+                .engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new(&outcome.tab_id))
+        {
+            self.tui_fallback_tabs.insert(outcome.tab_id.clone());
+        } else {
+            self.tui_fallback_tabs.remove(&outcome.tab_id);
+        }
+        // A launch a browser started moves nothing here: the cursor stays on the
+        // row it was on (the rebuild finds that row by id), because drawing the
+        // browser's agent here would be an attachment that refuses that
+        // browser's own delete in this surface's name.
         if started_here
             && self
                 .engine
@@ -1676,7 +1690,7 @@ impl App {
                 // `Multi`, so there is no status to set here.
             }
             AgentLaunchReadyView::CreateCommitted { .. } if !started_here => {
-                self.keep_showing(shown.as_deref());
+                self.rebuild_left_items();
             }
             AgentLaunchReadyView::CreateCommitted {
                 status_message: _,
@@ -1748,22 +1762,24 @@ impl App {
                 );
                 // The engine flipped the session Active while launching it, so the
                 // flat list must re-partition: a just-reconnected agent leaves the
-                // Inactive tail and rejoins the active section. Re-follow it by id
-                // so the cursor stays on the agent as its row moves, or on the
-                // one it was on when the launch was not this surface's.
+                // Inactive tail and rejoins the active section. A launch started
+                // here puts the cursor on the agent it launched.
+                self.rebuild_left_items();
                 if started_here {
-                    self.rebuild_left_items();
                     self.reselect_left_session(&outcome.session.id);
-                } else {
-                    self.keep_showing(shown.as_deref());
                 }
             }
             AgentLaunchReadyView::ResumeFallback {
                 session_id,
                 status_message,
             } => {
-                let landed_here = self.selected_session().map(|selected| selected.id.as_str())
-                    == Some(session_id.as_str());
+                // Lands only where this surface started the launch AND is showing
+                // that agent's pane, not merely remembering its row behind a
+                // terminal.
+                let landed_here = started_here
+                    && self.session_surface == SessionSurface::Agent
+                    && self.selected_session().map(|selected| selected.id.as_str())
+                        == Some(session_id.as_str());
                 let status_message = if landed_here {
                     self.show_agent_surface();
                     // The fallback relaunch is engine-initiated
@@ -1788,22 +1804,9 @@ impl App {
                     },
                 );
                 // Same re-partition as Reconnect: the resumed agent is Active now.
-                self.keep_showing(shown.as_deref());
+                self.rebuild_left_items();
             }
             AgentLaunchReadyView::StartupAutoReopen => {}
-        }
-    }
-
-    /// Re-partition the agent list after a launch changed it, keeping the
-    /// cursor on `shown`, the agent it was on before.
-    fn keep_showing(&mut self, shown: Option<&str>) {
-        self.rebuild_left_items();
-        match shown {
-            Some(session_id) => self.reselect_left_session(session_id),
-            None if self.selected_left >= self.left_items_cache.len() => {
-                self.selected_left = self.left_items_cache.len().saturating_sub(1);
-            }
-            None => {}
         }
     }
 
@@ -3170,13 +3173,29 @@ mod tests {
     }
 
     /// The engine-initiated resume-fallback relaunch is never
-    /// fullscreen-seeking; when its ready arrives for the selected session it
-    /// lands minimized too.
+    /// fullscreen-seeking; when its ready arrives for the selected session,
+    /// falling back from a launch started here, it lands minimized too.
     #[test]
     fn resume_fallback_ready_lands_minimized_for_the_selected_session() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
+        // A resuming launch started here lands first; its fallback follows.
+        app.tui_launched_ptys.insert(session.id.clone());
+        app.engine
+            .resume_fallback_candidates
+            .insert(TabId::new(session.id.clone()), std::time::Instant::now());
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Resumed.".to_string().into(),
+            },
+        });
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
