@@ -565,7 +565,7 @@ pub enum WorkerEvent {
         generation: u64,
         outcome: crate::gh::GhProbe,
     },
-    PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    PrStatusReady(Vec<PrStatusResult>),
     /// A one-shot PR check worker panicked; carries the session id so its
     /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.
     PrCheckAborted(String),
@@ -814,6 +814,16 @@ pub struct PinnedPr {
     pub host: String,
     pub owner_repo: String,
     pub number: u64,
+}
+
+/// One agent's pull-request answer, with the branch it was asked about, so
+/// an answer that lands after the agent moved to another branch is dropped
+/// instead of being saved against the new one.
+#[derive(Clone, Debug)]
+pub struct PrStatusResult {
+    pub session_id: String,
+    pub branch: String,
+    pub pr: Option<crate::model::PrInfo>,
 }
 
 /// Snapshot of session data shared with the PR-sync background worker.

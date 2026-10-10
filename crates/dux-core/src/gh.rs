@@ -15,7 +15,8 @@ use crate::logger;
 use crate::model::{PrInfo, PrState, Project};
 use crate::storage::StoredPr;
 use crate::worker::{
-    PrLookupPurpose, PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent,
+    PrLookupPurpose, PrStatusResult, PrSyncEntry, PullRequestLookup, ResolvedPullRequest,
+    WorkerEvent,
 };
 
 /// Live GraphQL rate-limit snapshot parsed from a batched query's top-level
@@ -50,6 +51,9 @@ pub struct HostSignal {
 /// One batched-sync outcome: the per-session PR results plus a per-host signal
 /// for every host actually queried this cycle.
 type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
+
+/// [`PrSyncOutcome`] with each result naming the branch it was asked about.
+pub type PrSyncReport = (Vec<PrStatusResult>, Vec<HostSignal>);
 
 /// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
 /// whether the whole call hard-failed, and whether that failure looked like
@@ -119,15 +123,15 @@ const GH_READER_DRAIN: Duration = Duration::from_secs(2);
 /// Batched PR sync over the shared session snapshot. Issues one or more
 /// `gh api graphql` requests per GitHub host (sessions chunked to at most
 /// `MAX_ALIASES_PER_QUERY` aliases each), aliasing every session's lookup into a
-/// single query per chunk, and returns one `(session_id, Option<PrInfo>)` per
-/// session plus a per-host signal for the backoff. Hosts already backed off in
+/// single query per chunk, and returns one [`PrStatusResult`] per session,
+/// naming the branch it was asked about, plus a per-host signal for the backoff. Hosts already backed off in
 /// `backoff` are skipped (their sessions keep last-known PRs) with no `gh` call.
 pub fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
-) -> PrSyncOutcome {
+) -> PrSyncReport {
     run_pr_sync_scoped(sessions, backoff, policy, trigger, SyncScope::Everything)
 }
 
@@ -152,13 +156,29 @@ pub fn run_pr_sync_scoped(
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
     scope: SyncScope,
-) -> PrSyncOutcome {
+) -> PrSyncReport {
     let snapshot = match sessions.lock() {
         Ok(guard) => guard.clone(),
         Err(_) => return (Vec::new(), Vec::new()),
     };
     let entries = entries_for_scope(snapshot, scope);
-    run_entries(&entries, backoff, policy, trigger)
+    let (results, signals) = run_entries(&entries, backoff, policy, trigger);
+    let results = results
+        .into_iter()
+        .filter_map(|(session_id, pr)| {
+            let branch = entries
+                .iter()
+                .find(|entry| entry.session_id == session_id)?
+                .branch_name
+                .clone();
+            Some(PrStatusResult {
+                session_id,
+                branch,
+                pr,
+            })
+        })
+        .collect();
+    (results, signals)
 }
 
 /// The entries a cycle of the given [`SyncScope`] asks GitHub about. Pure, so

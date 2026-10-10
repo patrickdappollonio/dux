@@ -3744,6 +3744,7 @@ impl Engine {
     fn pr_status_result_is_current(
         &mut self,
         session_id: &str,
+        branch: &str,
         maybe_pr: &Option<crate::model::PrInfo>,
         checked_at: Instant,
     ) -> bool {
@@ -3751,6 +3752,23 @@ impl Engine {
         if !self.sessions.iter().any(|session| session.id == session_id) {
             logger::debug(&format!(
                 "[gh-integration] dropping PR result for deleted session {session_id}",
+            ));
+            return false;
+        }
+        // An answer about the branch the agent was on when the check started
+        // is not an answer about the one it is on now (a rename or a drift
+        // landed in between). Dropped before the debounce is stamped, so the
+        // check the move itself asks for is not refused as too recent. A pin
+        // is about its pull request, not the branch, so it is exempt.
+        let current_branch = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.branch_name());
+        if !self.pr_overrides.contains_key(session_id) && current_branch != Some(branch) {
+            logger::debug(&format!(
+                "[gh-integration] dropping PR result for session {session_id}: it was asked about \
+                 branch {branch}, which the agent has since left",
             ));
             return false;
         }
@@ -3850,12 +3868,17 @@ impl Engine {
 
     fn process_pr_status_ready(
         &mut self,
-        results: Vec<(String, Option<crate::model::PrInfo>)>,
+        results: Vec<crate::worker::PrStatusResult>,
     ) -> EventReaction {
         let checked_at = Instant::now();
         let mut changed = false;
-        for (session_id, maybe_pr) in results {
-            if self.pr_status_result_is_current(&session_id, &maybe_pr, checked_at) {
+        for crate::worker::PrStatusResult {
+            session_id,
+            branch,
+            pr: maybe_pr,
+        } in results
+        {
+            if self.pr_status_result_is_current(&session_id, &branch, &maybe_pr, checked_at) {
                 changed |= self.apply_pr_status_result(session_id, maybe_pr);
             }
         }
@@ -6540,6 +6563,27 @@ mod tests {
 
     // ── PrStatusReady ────────────────────────────────────────────────────
 
+    /// A `PrStatusReady` whose results name each agent's current branch, as a
+    /// check that raced nothing would.
+    fn pr_status_ready(engine: &Engine, results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
+        WorkerEvent::PrStatusReady(
+            results
+                .into_iter()
+                .map(|(session_id, pr)| crate::worker::PrStatusResult {
+                    branch: engine
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == session_id)
+                        .and_then(|s| s.branch_name())
+                        .unwrap_or_default()
+                        .to_string(),
+                    session_id,
+                    pr,
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn pr_status_ready_batch_applies_live_results_and_drops_deleted_ones() {
         let (mut engine, _tmp) = test_engine();
@@ -6555,10 +6599,13 @@ mod tests {
             url: "https://github.com/o/r/pull/17".into(),
         };
 
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            ("deleted".into(), Some(pr.clone())),
-            ("live".into(), Some(pr)),
-        ]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![
+                ("deleted".into(), Some(pr.clone())),
+                ("live".into(), Some(pr)),
+            ],
+        ));
 
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         assert!(!engine.pr_statuses.contains_key("deleted"));
@@ -7318,10 +7365,10 @@ mod tests {
             owner_repo: "octo/repo".to_string(),
             url: "https://github.com/octo/repo/pull/42".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(pr.clone()),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(pr.clone()))],
+        ));
 
         // changed -> RebuildLeftItems (engine writes the timestamp directly).
         assert!(
@@ -7344,7 +7391,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_ready_skips_results_for_deleted_sessions() {
+    fn pr_status_ready_skips_results_for_deleted_sessions_and_previous_branches() {
         // The PR check is async: its result can land AFTER the session was
         // deleted. Applying it anyway would (a) attempt an sqlite upsert that
         // fails the sessions FOREIGN KEY, logging a scary ERROR on every
@@ -7363,10 +7410,10 @@ mod tests {
         // "ghost" is not a session the engine knows (deleted before the
         // result arrived). The result must be dropped whole: no status, no
         // timestamp, no store row, and no changed-flag rebuild.
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "ghost".to_string(),
-            Some(pr),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("ghost".to_string(), Some(pr))],
+        ));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -7380,6 +7427,44 @@ mod tests {
             .load_all_latest_prs()
             .expect("load prs");
         assert!(stored.iter().all(|p| p.session_id != "ghost"));
+
+        // A check that asked about branch A lands after the agent moved to B:
+        // A's answer is not B's, so it is dropped before anything is saved
+        // or the debounce is stamped.
+        let session = sample_session("s1", "p1", "feat/a");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.sessions[0]
+            .workspace
+            .as_managed_mut()
+            .unwrap()
+            .branch_name = "feat/b".into();
+        let late = PrInfo {
+            number: 8,
+            state: PrState::Merged,
+            title: "for feat/a".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://example".into(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".into(),
+                branch: "feat/a".into(),
+                pr: Some(late),
+            },
+        ]));
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert!(!engine.pr_statuses.contains_key("s1"));
+        assert!(!engine.pr_last_checked.contains_key("s1"));
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .iter()
+                .all(|p| p.session_id != "s1")
+        );
     }
 
     #[test]
@@ -7717,10 +7802,10 @@ mod tests {
         };
         engine.pr_statuses.insert("s1".to_string(), pr);
 
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            ("s1".to_string(), None),
-            ("s2".to_string(), None),
-        ]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), None), ("s2".to_string(), None)],
+        ));
 
         // s1 was removed -> changed -> RebuildLeftItems.
         assert!(
@@ -7743,7 +7828,7 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // No pre-seeded pr_statuses; sending None for s1 leaves changed=false.
         let reaction =
-            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -7791,10 +7876,10 @@ mod tests {
             owner_repo: "octocat/Hello-World".to_string(),
             url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(other),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(other))],
+        ));
         assert!(
             matches!(reaction, EventReaction::Nothing),
             "a non-pin result changes nothing, got {}",
@@ -7816,7 +7901,7 @@ mod tests {
 
         // Direction 2: a None (e.g. discovery finding nothing) cannot clear it.
         let reaction =
-            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
         assert!(matches!(reaction, EventReaction::Nothing));
         assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
 
@@ -7830,10 +7915,10 @@ mod tests {
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(refreshed),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(refreshed))],
+        ));
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         assert_eq!(
             engine.pr_statuses.get("s1").map(|p| p.state.clone()),
@@ -7898,10 +7983,10 @@ mod tests {
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
         };
-        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(refreshed),
-        )]));
+        engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(refreshed))],
+        ));
 
         engine.clear_pull_request_override("s1").expect("detach");
 
@@ -7956,10 +8041,10 @@ mod tests {
             owner_repo: "o/r".to_string(),
             url: "https://github.com/o/r/pull/12".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(late),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(late))],
+        ));
 
         assert!(
             !engine.pr_statuses.contains_key("s1"),

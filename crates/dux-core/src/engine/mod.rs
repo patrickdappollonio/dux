@@ -4504,7 +4504,13 @@ impl Engine {
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.
                 Self::apply_pr_backoff(&backoff, &signals, &tx);
-                let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
+                let _ = tx.send(WorkerEvent::PrStatusReady(vec![
+                    crate::worker::PrStatusResult {
+                        session_id: entry.session_id,
+                        branch: entry.branch_name,
+                        pr: result,
+                    },
+                ]));
             },
         );
         true
