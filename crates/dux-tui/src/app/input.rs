@@ -8302,7 +8302,7 @@ impl App {
                     dux_core::statusline::StatusTone::Busy,
                     busy,
                 );
-                self.rebuild_left_items();
+                self.rebuild_left_items_after_own_change();
             }
         }
         false
@@ -8558,7 +8558,7 @@ impl App {
         }) {
             Ok(outcome) => {
                 self.engine.sync_has_active_processes();
-                self.rebuild_left_items();
+                self.rebuild_left_items_after_own_change();
                 if let Some(status) = outcome.status {
                     self.set_info(status.message);
                 }

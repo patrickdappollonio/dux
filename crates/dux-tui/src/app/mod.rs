@@ -6500,11 +6500,11 @@ impl App {
     /// Put the agent cursor back on `was_on` in the list just rebuilt.
     ///
     /// Only this surface moves the cursor onto a row, so a row that is gone
-    /// does not hand it to whatever took its place: an agent deleted (from
-    /// anywhere but here, whose own deletes see to their cursor) or a non-agent
-    /// row that went away leaves the cursor on no row, and so does an empty
-    /// list that agents then appear in. An agent still there but hidden (a
-    /// filter, a collapsed tail) leaves the index for the clamp, as before.
+    /// does not hand it to whatever took its place: an agent deleted, or one
+    /// gone dormant into the collapsed Inactive tail, or a non-agent row that
+    /// went away, leaves the cursor on no row, and so does an empty list that
+    /// agents then appear in. This surface's own changes go through
+    /// [`Self::rebuild_left_items_after_own_change`], which moves it on instead.
     fn put_left_cursor_back(&mut self, was_on: LeftCursorOn) {
         match was_on {
             LeftCursorOn::Row(row) => {
@@ -6514,10 +6514,6 @@ impl App {
                     .position(|candidate| *candidate == row)
                 {
                     self.selected_left = pos;
-                    self.left_cursor_parked = false;
-                } else if matches!(&row, LeftRow::Agent(id)
-                    if self.engine.sessions.iter().any(|session| session.id == *id))
-                {
                     self.left_cursor_parked = false;
                 } else {
                     self.park_left_cursor();
@@ -6543,7 +6539,12 @@ impl App {
     /// and a cursor on no row lands on one, as this surface's own deletes and
     /// filters always have.
     pub(crate) fn rebuild_left_items_after_own_change(&mut self) {
-        let row = self.selected_left;
+        self.rebuild_left_items_after_own_change_from(self.selected_left);
+    }
+
+    /// The same, for a change that rebuilt the list already on its way here:
+    /// `row` is where the cursor was before the change began.
+    pub(crate) fn rebuild_left_items_after_own_change_from(&mut self, row: usize) {
         self.rebuild_left_items();
         if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
             self.left_cursor_parked = false;

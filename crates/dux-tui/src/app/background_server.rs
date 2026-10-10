@@ -1756,6 +1756,19 @@ pub(crate) mod tests {
                 &["agent-c-slot"],
             ),
             (
+                "its own agent stopped into the collapsed tail",
+                Lend::Service,
+                Box::new(|engine: &mut Engine| {
+                    engine
+                        .providers
+                        .remove(TabIdRef::new("agent-c-slot"))
+                        .expect("agent-c was running");
+                    engine.mark_session_status("agent-c", crate::model::SessionStatus::Detached);
+                }),
+                None,
+                &[],
+            ),
+            (
                 "its own agent deleted",
                 Lend::Service,
                 delete("agent-c"),
