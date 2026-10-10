@@ -52,7 +52,7 @@ pub struct HostSignal {
 /// for every host actually queried this cycle.
 type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
 
-/// [`PrSyncOutcome`] with each result naming the branch it was asked about.
+/// [`PrSyncOutcome`] with each result naming the branch generation it was asked under.
 pub type PrSyncReport = (Vec<PrStatusResult>, Vec<HostSignal>);
 
 /// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
@@ -124,7 +124,7 @@ const GH_READER_DRAIN: Duration = Duration::from_secs(2);
 /// `gh api graphql` requests per GitHub host (sessions chunked to at most
 /// `MAX_ALIASES_PER_QUERY` aliases each), aliasing every session's lookup into a
 /// single query per chunk, and returns one [`PrStatusResult`] per session,
-/// naming the branch it was asked about, plus a per-host signal for the backoff. Hosts already backed off in
+/// naming the branch generation it was asked under, plus a per-host signal for the backoff. Hosts already backed off in
 /// `backoff` are skipped (their sessions keep last-known PRs) with no `gh` call.
 pub fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
@@ -166,14 +166,13 @@ pub fn run_pr_sync_scoped(
     let results = results
         .into_iter()
         .filter_map(|(session_id, pr)| {
-            let branch = entries
+            let branch_generation = entries
                 .iter()
                 .find(|entry| entry.session_id == session_id)?
-                .branch_name
-                .clone();
+                .branch_generation;
             Some(PrStatusResult {
                 session_id,
-                branch,
+                branch_generation,
                 pr,
             })
         })
@@ -4226,6 +4225,7 @@ mod tests {
             pinned: None,
             inactive: false,
             branch_minted_at: None,
+            branch_generation: 0,
         };
         let trigger = SyncTrigger::BlindPoll;
         let (results, signals) = run_entries(
@@ -4303,6 +4303,7 @@ mod tests {
             pinned: None,
             inactive: false,
             branch_minted_at: None,
+            branch_generation: 0,
         };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
@@ -4965,6 +4966,7 @@ mod tests {
             pinned: None,
             inactive: false,
             branch_minted_at: None,
+            branch_generation: 0,
         }
     }
 

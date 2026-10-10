@@ -517,6 +517,14 @@ pub struct Engine {
     /// looking after it, and a set that retried forever would be a queue nobody
     /// drains.
     pub pr_return_checks_owed: std::collections::HashSet<String>,
+    /// Which branch, as GitHub sees it, each agent's pull-request checks are
+    /// about: bumped when the agent drifts onto another branch, and kept by an
+    /// explicit rename, which only renames the local branch while the remote
+    /// branch and its pull request keep the old name. A check's result carries
+    /// the generation it was asked under and is dropped when it no longer
+    /// matches. Runtime only: a restart starts every agent at zero, and no
+    /// check survives a restart to be compared.
+    pub pr_branch_generations: HashMap<String, u64>,
     /// Seconds between branch-sync sweeps, shared with the loop thread so a
     /// config reload can retune it live. `0` reaching the loop means "nap and
     /// look again", never "exit": the thread stays live so
@@ -4359,6 +4367,14 @@ impl Engine {
         }
     }
 
+    /// The agent's current branch generation. See [`Self::pr_branch_generations`].
+    pub(crate) fn pr_branch_generation(&self, session_id: &str) -> u64 {
+        self.pr_branch_generations
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// The name an explicit rename gave the branch dux minted for this agent,
     /// if one did. See [`crate::model::AgentSession::branch_minted_at`].
     pub(crate) fn minted_branch_rename(&self, session_id: &str) -> Option<String> {
@@ -4480,6 +4496,7 @@ impl Engine {
             inactive: crate::flat_list::is_inactive(session),
             branch_minted_at: session
                 .branch_minted_at(self.minted_branch_rename(session_id).as_deref()),
+            branch_generation: self.pr_branch_generation(session_id),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -4507,7 +4524,7 @@ impl Engine {
                 let _ = tx.send(WorkerEvent::PrStatusReady(vec![
                     crate::worker::PrStatusResult {
                         session_id: entry.session_id,
-                        branch: entry.branch_name,
+                        branch_generation: entry.branch_generation,
                         pr: result,
                     },
                 ]));
@@ -4917,6 +4934,7 @@ impl Engine {
                         inactive: crate::flat_list::is_inactive(s),
                         branch_minted_at: s
                             .branch_minted_at(minted_renames.get(&s.id).map(String::as_str)),
+                        branch_generation: self.pr_branch_generation(&s.id),
                     })
                 })
                 .collect();

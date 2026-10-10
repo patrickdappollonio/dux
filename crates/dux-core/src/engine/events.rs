@@ -2340,6 +2340,7 @@ impl Engine {
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_suppressions.remove(&session.id);
+        self.pr_branch_generations.remove(&session.id);
         // Re-derive the PR-sync plan from the surviving sessions. The periodic
         // poller snapshots this list every cycle, so leaving the deleted
         // agent's entry in it means dux keeps asking GitHub about a pull
@@ -3366,6 +3367,11 @@ impl Engine {
                         session.branch_name(),
                     ));
                 }
+                // Checks still in flight asked about the branch the agent left.
+                *self
+                    .pr_branch_generations
+                    .entry(session.id.clone())
+                    .or_default() += 1;
                 // A drift onto another branch ends any claim that the agent is on
                 // the branch dux minted under a new name.
                 if let Err(err) = self.session_store.delete_minted_branch_rename(&session.id) {
@@ -3762,7 +3768,7 @@ impl Engine {
     fn pr_status_result_is_current(
         &mut self,
         session_id: &str,
-        branch: &str,
+        branch_generation: u64,
         maybe_pr: &Option<crate::model::PrInfo>,
         checked_at: Instant,
     ) -> bool {
@@ -3773,20 +3779,19 @@ impl Engine {
             ));
             return false;
         }
-        // An answer about the branch the agent was on when the check started
-        // is not an answer about the one it is on now (a rename or a drift
-        // landed in between). Dropped before the debounce is stamped, so the
-        // check the move itself asks for is not refused as too recent. A pin
-        // is about its pull request, not the branch, so it is exempt.
-        let current_branch = self
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .and_then(|session| session.branch_name());
-        if !self.pr_overrides.contains_key(session_id) && current_branch != Some(branch) {
+        // An answer asked under an earlier branch generation is about a branch
+        // the agent has since drifted off, not the one it is on now. An
+        // explicit rename keeps the generation: it renames only the local
+        // branch, so GitHub's branch and its pull request still carry the name
+        // the check asked about. Dropped before the debounce is stamped, so
+        // the check the drift itself asks for is not refused as too recent. A
+        // pin is about its pull request, not the branch, so it is exempt.
+        let current = self.pr_branch_generation(session_id);
+        if !self.pr_overrides.contains_key(session_id) && branch_generation != current {
             logger::debug(&format!(
-                "[gh-integration] dropping PR result for session {session_id}: it was asked about \
-                 branch {branch}, which the agent has since left",
+                "[gh-integration] dropping PR result for session {session_id}: it was asked \
+                 under branch generation {branch_generation}, and the agent has since moved \
+                 to generation {current}",
             ));
             return false;
         }
@@ -3892,11 +3897,16 @@ impl Engine {
         let mut changed = false;
         for crate::worker::PrStatusResult {
             session_id,
-            branch,
+            branch_generation,
             pr: maybe_pr,
         } in results
         {
-            if self.pr_status_result_is_current(&session_id, &branch, &maybe_pr, checked_at) {
+            if self.pr_status_result_is_current(
+                &session_id,
+                branch_generation,
+                &maybe_pr,
+                checked_at,
+            ) {
                 changed |= self.apply_pr_status_result(session_id, maybe_pr);
             }
         }
@@ -6614,20 +6624,14 @@ mod tests {
 
     // ── PrStatusReady ────────────────────────────────────────────────────
 
-    /// A `PrStatusReady` whose results name each agent's current branch, as a
-    /// check that raced nothing would.
+    /// A `PrStatusReady` whose results carry each agent's current branch
+    /// generation, as a check that raced nothing would.
     fn pr_status_ready(engine: &Engine, results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
         WorkerEvent::PrStatusReady(
             results
                 .into_iter()
                 .map(|(session_id, pr)| crate::worker::PrStatusResult {
-                    branch: engine
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == session_id)
-                        .and_then(|s| s.branch_name())
-                        .unwrap_or_default()
-                        .to_string(),
+                    branch_generation: engine.pr_branch_generation(&session_id),
                     session_id,
                     pr,
                 })
@@ -7479,42 +7483,54 @@ mod tests {
             .expect("load prs");
         assert!(stored.iter().all(|p| p.session_id != "ghost"));
 
-        // A check that asked about branch A lands after the agent moved to B:
-        // A's answer is not B's, so it is dropped before anything is saved
-        // or the debounce is stamped.
+        // A check in flight while the agent's local branch is renamed asked
+        // GitHub about the same branch (a rename never touches the remote, so
+        // the pull request still names the old one), and its answer stands.
         let session = sample_session("s1", "p1", "feat/a");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        engine.sessions[0]
-            .workspace
-            .as_managed_mut()
-            .unwrap()
-            .branch_name = "feat/b".into();
-        let late = PrInfo {
-            number: 8,
-            state: PrState::Merged,
-            title: "for feat/a".into(),
+        let pr = |number: u64| PrInfo {
+            number,
+            state: PrState::Open,
+            title: format!("PR {number}"),
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://example".into(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            crate::worker::PrStatusResult {
-                session_id: "s1".into(),
-                branch: "feat/a".into(),
-                pr: Some(late),
-            },
-        ]));
+        let asked_before_rename = pr_status_ready(&engine, vec![("s1".into(), Some(pr(12)))]);
+        engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "feat/b".into(),
+            previous_title: None,
+            result: Ok(()),
+            status: crate::engine::ResolvedFinal::new(
+                "rename:s1",
+                crate::engine::Final::info("renamed"),
+            ),
+        });
+        engine.process_worker_event(asked_before_rename);
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+
+        // One in flight while the agent drifts onto another branch asked about
+        // a branch the agent has left: dropped before anything is saved or
+        // the debounce is stamped.
+        let asked_before_drift = pr_status_ready(&engine, vec![("s1".into(), Some(pr(13)))]);
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "develop".to_string(),
+        )]));
+        let stamped = engine.pr_last_checked.get("s1").copied();
+        let reaction = engine.process_worker_event(asked_before_drift);
         assert!(matches!(reaction, EventReaction::Nothing));
-        assert!(!engine.pr_statuses.contains_key("s1"));
-        assert!(!engine.pr_last_checked.contains_key("s1"));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.pr_last_checked.get("s1").copied(), stamped);
         assert!(
             engine
                 .session_store
                 .load_all_latest_prs()
                 .unwrap()
                 .iter()
-                .all(|p| p.session_id != "s1")
+                .all(|p| p.pr_number != 13)
         );
     }
 

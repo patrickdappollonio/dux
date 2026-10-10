@@ -816,13 +816,14 @@ pub struct PinnedPr {
     pub number: u64,
 }
 
-/// One agent's pull-request answer, with the branch it was asked about, so
-/// an answer that lands after the agent moved to another branch is dropped
-/// instead of being saved against the new one.
+/// One agent's pull-request answer, with the branch generation it was asked
+/// under (see `Engine::pr_branch_generations`), so an answer that lands after
+/// the agent drifted onto another branch is dropped instead of being saved
+/// against the new one, while one that lands after an explicit rename stands.
 #[derive(Clone, Debug)]
 pub struct PrStatusResult {
     pub session_id: String,
-    pub branch: String,
+    pub branch_generation: u64,
     pub pr: Option<crate::model::PrInfo>,
 }
 
@@ -863,6 +864,9 @@ pub struct PrSyncEntry {
     /// older than this, which is what tells it apart from an earlier branch
     /// that used the same name when a pull request is found by head name.
     pub branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The agent's branch generation when this entry was planned, carried
+    /// into the result (see [`PrStatusResult`]).
+    pub branch_generation: u64,
 }
 
 #[derive(Clone, Debug)]
