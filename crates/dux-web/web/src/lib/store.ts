@@ -6572,6 +6572,21 @@ export function openChangesScreen(): void {
   syncUrl()
 }
 
+// What the theater pill's changed-file count does. On a phone that is the
+// changes screen. On a computer there is no such screen (the address would
+// look like the plain layout and Back would seem to do nothing): the Changes
+// pane is the place the files are, and theater is what hides it, so the count
+// leaves the mode the way the toggle does and shows the pane if the user had
+// hidden it.
+export function openChangedFiles(): void {
+  if (isMobileViewport()) {
+    openChangesScreen()
+    return
+  }
+  exitTheater()
+  if (changesPaneEffectivelyHidden(state)) showChangesPane()
+}
+
 // Navigate to the parent route rather than stepping browser history. Real route
 // changes push; correcting a not-found URL replaces so Back cannot reopen it.
 export function navigateUp(): void {

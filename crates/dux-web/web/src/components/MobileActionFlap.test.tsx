@@ -15,14 +15,14 @@ import type { AgentTabView, SessionView } from "@/lib/types"
 
 let mockState: DuxState
 const toggleTheaterMock = vi.fn()
-const openChangesScreenMock = vi.fn()
+const openChangedFilesMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
     toggleTheater: (...a: unknown[]) => toggleTheaterMock(...a),
-    openChangesScreen: (...a: unknown[]) => openChangesScreenMock(...a),
+    openChangedFiles: (...a: unknown[]) => openChangedFilesMock(...a),
   }
 })
 
@@ -121,7 +121,7 @@ function stubBox(width: number, height: number) {
 beforeEach(() => {
   installBootStubs()
   toggleTheaterMock.mockReset()
-  openChangesScreenMock.mockReset()
+  openChangedFilesMock.mockReset()
   mockState = makeState()
 })
 
@@ -163,7 +163,7 @@ describe("the docked action flap", () => {
   it("opens the changes screen from the count", () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     fireEvent.click(screen.getByTestId("pane-changes-count"))
-    expect(openChangesScreenMock).toHaveBeenCalled()
+    expect(openChangedFilesMock).toHaveBeenCalled()
   })
 
   it("asks the store for theater rather than toggling anything itself", () => {
