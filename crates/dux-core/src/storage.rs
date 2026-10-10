@@ -567,6 +567,7 @@ impl SessionStore {
         // workspace whose first tabs are unaddressable is worse than a startup
         // that says why it stopped.
         self.sweep_orphan_agent_tabs()?;
+        self.sweep_orphan_minted_branch_renames()?;
         self.backfill_slot_tabs()?;
         self.heal_slot_tab_pointers()?;
         Ok(())
@@ -585,6 +586,22 @@ impl SessionStore {
                 [],
             )
             .context("failed to sweep tab rows whose agent no longer exists")?;
+        Ok(())
+    }
+
+    /// Drop any minted-branch rename row whose session is gone.
+    ///
+    /// A binary older than the table deletes sessions without knowing it is
+    /// there, so a row it leaves behind would hand a later session reusing the
+    /// id an age guard that was never its own. Swept once per open.
+    fn sweep_orphan_minted_branch_renames(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from session_minted_branch_renames \
+                 where session_id not in (select id from agent_sessions)",
+                [],
+            )
+            .context("failed to sweep branch rename rows whose agent no longer exists")?;
         Ok(())
     }
 
@@ -2912,6 +2929,7 @@ mod tests {
         store
             .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
             .unwrap();
+        store.set_minted_branch_rename("sa1", "kept").unwrap();
 
         store.remove_project_records("").unwrap();
 
@@ -2919,6 +2937,10 @@ mod tests {
         assert!(
             loaded.iter().any(|s| s.id == "sa1"),
             "the kind column, not the project id, is what says who owns a row"
+        );
+        assert_eq!(
+            store.load_minted_branch_renames().unwrap(),
+            vec![("sa1".to_string(), "kept".to_string())]
         );
     }
 
@@ -3099,6 +3121,35 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(loaded, vec!["slot-1".to_string(), "t1".to_string()]);
+    }
+
+    /// A binary older than the minted-rename table deletes a session with
+    /// foreign keys off: the session goes and its rename row stays. The next
+    /// open of a binary that knows the table sweeps it, so a later session
+    /// reusing the id cannot inherit an age guard that was never its own.
+    #[test]
+    fn reopening_after_a_downgrade_sweeps_minted_renames_with_no_session() {
+        let (dir, store) = temp_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_session(&test_session("s2", now, now)).unwrap();
+        store.set_minted_branch_rename("s1", "gone").unwrap();
+        store.set_minted_branch_rename("s2", "kept").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "pragma foreign_keys = off; delete from agent_sessions where id = 's1'; \
+                 pragma foreign_keys = on;",
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = SessionStore::open(&dir.path().join("sessions.sqlite3")).unwrap();
+
+        assert_eq!(
+            reopened.load_minted_branch_renames().unwrap(),
+            vec![("s2".to_string(), "kept".to_string())]
+        );
     }
 
     #[test]
@@ -3873,6 +3924,7 @@ mod tests {
         let now = Utc::now();
         store.upsert_session(&test_session("s1", now, now)).unwrap();
         store.set_pr_suppressed("s1").unwrap();
+        store.set_minted_branch_rename("s1", "renamed").unwrap();
 
         store.delete_session("s1").unwrap();
 
@@ -3880,6 +3932,7 @@ mod tests {
         // the explicit delete is what keeps a later session reusing the id from
         // inheriting a detach it never asked for.
         assert!(store.load_pr_suppressions().unwrap().is_empty());
+        assert!(store.load_minted_branch_renames().unwrap().is_empty());
     }
 
     #[test]
@@ -3941,6 +3994,8 @@ mod tests {
         // exactly its own project's suppression rows.
         store.set_pr_suppressed("b").unwrap();
         store.set_pr_suppressed("c").unwrap();
+        store.set_minted_branch_rename("b", "renamed-b").unwrap();
+        store.set_minted_branch_rename("c", "renamed-c").unwrap();
         // Advance a changed-files rev for one of p1's sessions so there is a
         // `changes_rev` row to prove the bulk removal drops it too.
         assert_eq!(store.next_changes_rev("a").unwrap(), 1);
@@ -3964,6 +4019,10 @@ mod tests {
         assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
         // Same for the suppression rows: p1's went, p2's stayed.
         assert_eq!(store.load_pr_suppressions().unwrap(), vec!["c".to_string()]);
+        assert_eq!(
+            store.load_minted_branch_renames().unwrap(),
+            vec![("c".to_string(), "renamed-c".to_string())]
+        );
         // The project row itself is deleted in the same transaction: only p2
         // remains, so a removal cannot leave a row that reappears on restart.
         let project_ids: Vec<String> = store
