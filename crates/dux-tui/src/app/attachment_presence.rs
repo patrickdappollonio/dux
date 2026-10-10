@@ -397,4 +397,282 @@ mod tests {
                 .is_ok()
         );
     }
+
+    fn spawn_sleeper() -> PtyClient {
+        PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn pty")
+    }
+
+    /// The ids of what this surface is attached to.
+    fn attached_here(app: &App) -> Vec<String> {
+        app.engine
+            .attachments
+            .connections(std::time::Instant::now())
+            .into_iter()
+            .filter(|connection| connection.surface == Surface::TerminalUi)
+            .flat_map(|connection| connection.attachments)
+            .map(|attachment| attachment.target.id)
+            .collect()
+    }
+
+    /// A browser's create of `session` finishing: the launch's worker event,
+    /// processed by the engine and drained here as the run loop would.
+    fn land_a_browsers_create(app: &mut App, session: AgentSession) {
+        let request = app.agent_launch_request(
+            session,
+            false,
+            dux_core::worker::AgentLaunchKind::Create {
+                status_message: "Created agent.".to_string().into(),
+                status_warns: false,
+                status_notes: None,
+                pull_request_pin: None,
+                repo_path: app.engine.projects[0].path.clone(),
+                owns_worktree: false,
+                startup_result: None,
+                status_op_id: String::new(),
+            },
+        );
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::AgentLaunchReady(Box::new(
+                crate::app::AgentLaunchReadyData {
+                    request,
+                    client: spawn_sleeper(),
+                    spawn_ticket: None,
+                },
+            )))
+            .expect("send the launch");
+        app.drain_events();
+    }
+
+    /// With no agent at all, the first one a browser creates is the browser's:
+    /// this surface stays on nothing rather than drawing it.
+    #[test]
+    fn a_browsers_first_agent_is_not_drawn_here() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = crate::app::background_server::tests::FakeCompanion::serving();
+        app.companion = Some(companion);
+        let folder = tempfile::tempdir().expect("tempdir");
+        let mut browsers = app.engine.sessions[0].clone();
+        browsers.id = "from-the-browser".to_string();
+        browsers.slot_tab_id = "from-the-browser-slot".to_string();
+        browsers.status = crate::model::SessionStatus::Active;
+        if let dux_core::model::AgentWorkspace::Managed(managed) = &mut browsers.workspace {
+            managed.worktree_path = folder.path().to_string_lossy().to_string();
+        }
+        app.engine.sessions.clear();
+        app.rebuild_left_items();
+        render(&mut app);
+
+        land_a_browsers_create(&mut app, browsers);
+        render(&mut app);
+
+        assert_eq!(
+            app.engine.sessions.first().map(|s| s.id.as_str()),
+            Some("from-the-browser")
+        );
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), None);
+        assert!(attached_here(&app).is_empty(), "{:?}", attached_here(&app));
+    }
+
+    /// A ready view a browser's launch of `session` produced.
+    fn browser_ready(
+        session: AgentSession,
+        view: dux_core::engine::AgentLaunchReadyView,
+    ) -> dux_core::engine::AgentLaunchReadyOutcome {
+        dux_core::engine::AgentLaunchReadyOutcome {
+            tab_id: session.slot_tab_id().to_string(),
+            session,
+            pty_size: (24, 80),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+            view,
+        }
+    }
+
+    /// An agent a browser creates or starts lands on the browser, not here:
+    /// this surface keeps drawing the agent it was on, so deleting the
+    /// browser's agent from anywhere is not refused in this surface's name,
+    /// while the pane this surface really draws still is. The create goes
+    /// through the worker event the engine really processes, which puts the
+    /// new agent at the head of the session list before anything here runs.
+    #[test]
+    fn an_agent_a_browser_launches_is_not_drawn_or_guarded_here() {
+        use dux_core::engine::AgentLaunchReadyView;
+
+        enum Launch {
+            Create,
+            Ready(AgentLaunchReadyView),
+        }
+        let launches = [
+            Launch::Create,
+            Launch::Ready(AgentLaunchReadyView::Reconnect {
+                status_message: "Launched agent.".to_string().into(),
+            }),
+            Launch::Ready(AgentLaunchReadyView::ResumeFallback {
+                session_id: "from-the-browser".to_string(),
+                status_message: "Started fresh.".to_string().into(),
+            }),
+        ];
+        for launch in launches {
+            let mut app = test_app(default_bindings());
+            let (companion, _recorded) =
+                crate::app::background_server::tests::FakeCompanion::serving();
+            app.companion = Some(companion);
+            let shown = app.engine.sessions[0].id.clone();
+            app.engine
+                .mark_session_status(&shown, crate::model::SessionStatus::Active);
+            app.engine
+                .providers
+                .insert(TabId::new("session-1-slot".to_string()), spawn_sleeper());
+            let folder = tempfile::tempdir().expect("tempdir");
+            let mut browsers = app.engine.sessions[0].clone();
+            browsers.id = "from-the-browser".to_string();
+            browsers.slot_tab_id = "from-the-browser-slot".to_string();
+            if let dux_core::model::AgentWorkspace::Managed(managed) = &mut browsers.workspace {
+                managed.worktree_path = folder.path().to_string_lossy().to_string();
+            }
+            if matches!(launch, Launch::Ready(_)) {
+                browsers.status = crate::model::SessionStatus::Detached;
+                app.engine.sessions.push(browsers.clone());
+            }
+            app.rebuild_left_items();
+            render(&mut app);
+
+            match launch {
+                Launch::Create => {
+                    land_a_browsers_create(&mut app, browsers);
+                    assert_eq!(
+                        app.engine.sessions[0].id, "from-the-browser",
+                        "the engine puts a new agent at the head of the list"
+                    );
+                }
+                Launch::Ready(view) => {
+                    app.engine.providers.insert(
+                        TabId::new("from-the-browser-slot".to_string()),
+                        spawn_sleeper(),
+                    );
+                    app.engine.mark_session_status(
+                        "from-the-browser",
+                        crate::model::SessionStatus::Active,
+                    );
+                    app.apply_agent_launch_ready_view(browser_ready(browsers, view));
+                }
+            }
+            render(&mut app);
+
+            assert_eq!(
+                app.selected_session().map(|s| s.id.as_str()),
+                Some("session-1"),
+                "a browser's launch must not move this surface's selection"
+            );
+            assert_eq!(attached_here(&app), vec!["session-1-slot".to_string()]);
+            app.engine.dispatch_policy = Some(Policy::default());
+            assert!(
+                app.engine
+                    .reserve_destruction(app.engine.agent_scope("from-the-browser"))
+                    .is_ok(),
+                "deleting the browser's agent is not refused for this surface"
+            );
+            let refused = match app
+                .engine
+                .reserve_destruction(app.engine.agent_scope("session-1"))
+            {
+                Ok(_) => panic!("the pane drawn here did not block its delete"),
+                Err(refused) => refused,
+            };
+            assert_eq!(refused.blockers.len(), 1);
+            assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);
+            assert_eq!(refused.blockers[0].target.id, "session-1-slot");
+        }
+    }
+
+    /// A browser resuming the agent this surface's cursor still remembers
+    /// leaves the terminal this surface shows where it is: the fallback launch
+    /// is the browser's, so nothing here lands on it.
+    #[test]
+    fn a_browsers_resume_fallback_leaves_the_terminal_shown_here() {
+        use dux_core::engine::AgentLaunchReadyView;
+
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.rebuild_left_items();
+        app.reselect_left_session("session-1");
+        let (terminal, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+        app.open_terminal_from_terminal_list()
+            .expect("open the terminal");
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        render(&mut app);
+        assert_eq!(attached_here(&app), vec![terminal.clone()]);
+
+        let resumed = app.engine.sessions[0].clone();
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot".to_string()), spawn_sleeper());
+        app.engine
+            .mark_session_status("session-1", crate::model::SessionStatus::Active);
+        app.apply_agent_launch_ready_view(browser_ready(
+            resumed,
+            AgentLaunchReadyView::ResumeFallback {
+                session_id: "session-1".to_string(),
+                status_message: "Started fresh.".to_string().into(),
+            },
+        ));
+        render(&mut app);
+
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.active_terminal_id.as_deref(), Some(terminal.as_str()));
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        assert_eq!(attached_here(&app), vec![terminal]);
+    }
+
+    /// A cursor on no agent stays on no agent when a browser starts the agent
+    /// whose dormant tail it was resting on: the row it was on is gone, and the
+    /// agent that took its place is not one it was on.
+    #[test]
+    fn a_cursor_on_the_inactive_toggle_does_not_land_on_an_agent_a_browser_starts() {
+        use dux_core::engine::AgentLaunchReadyView;
+
+        let mut app = test_app(default_bindings());
+        app.rebuild_left_items();
+        let toggle = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::InactiveToggle))
+            .expect("a dormant agent sits under the Inactive toggle");
+        app.selected_left = toggle;
+        render(&mut app);
+        assert!(attached_here(&app).is_empty());
+
+        let started = app.engine.sessions[0].clone();
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot".to_string()), spawn_sleeper());
+        app.engine
+            .mark_session_status("session-1", crate::model::SessionStatus::Active);
+        app.apply_agent_launch_ready_view(browser_ready(
+            started,
+            AgentLaunchReadyView::Reconnect {
+                status_message: "Launched agent.".to_string().into(),
+            },
+        ));
+        render(&mut app);
+
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), None);
+        assert!(attached_here(&app).is_empty(), "{:?}", attached_here(&app));
+    }
 }

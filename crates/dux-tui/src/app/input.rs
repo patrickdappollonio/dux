@@ -1207,6 +1207,7 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.follow_terminal_cursor();
         if self.server_log_viewer.is_some() {
             self.handle_server_log_key(key);
             return Ok(false);
@@ -1264,7 +1265,7 @@ impl App {
     pub(crate) fn move_left_cursor_down(&mut self) {
         if self.left_section == LeftSection::Terminals {
             if self.selected_terminal_index + 1 < self.terminal_items().len() {
-                self.selected_terminal_index += 1;
+                self.select_terminal_row(self.selected_terminal_index + 1);
             } else if let Some(first) = self.first_selectable_left_item() {
                 // Wrap: down from the last terminal loops back to the first
                 // agent at the top of the list.
@@ -1273,7 +1274,7 @@ impl App {
             } else {
                 // Nothing above to wrap onto (a query matching terminals only),
                 // so the wrap stays inside the terminals.
-                self.selected_terminal_index = 0;
+                self.select_terminal_row(0);
             }
             return;
         }
@@ -1282,7 +1283,7 @@ impl App {
         } else if self.has_terminal_items() {
             // Jump to terminals section.
             self.left_section = LeftSection::Terminals;
-            self.selected_terminal_index = 0;
+            self.select_terminal_row(0);
             self.close_diff_view();
         } else if let Some(first) = self.first_selectable_left_item() {
             // Wrap: past the last agent (no terminals below) loops
@@ -1296,14 +1297,14 @@ impl App {
     pub(crate) fn move_left_cursor_up(&mut self) {
         if self.left_section == LeftSection::Terminals {
             if self.selected_terminal_index > 0 {
-                self.selected_terminal_index -= 1;
+                self.select_terminal_row(self.selected_terminal_index - 1);
             } else if let Some(last) = self.last_selectable_left_item() {
                 // Jump back to projects section, onto the last agent.
                 self.left_section = LeftSection::Projects;
                 self.select_left_agent_item(last);
             } else {
                 // No agent row to land on, so wrap within the terminals.
-                self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+                self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
             }
             return;
         }
@@ -1312,7 +1313,7 @@ impl App {
         } else if self.has_terminal_items() {
             // Wrap: up from the first agent lands on the last terminal.
             self.left_section = LeftSection::Terminals;
-            self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+            self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
             self.close_diff_view();
         } else if let Some(last) = self.last_selectable_left_item() {
             // Wrap: up from the first agent (no terminals) loops to the
@@ -1448,7 +1449,7 @@ impl App {
                 if let Some(input) = self.agent_filter.as_mut()
                     && input.handle_key(key)
                 {
-                    self.rebuild_left_items();
+                    self.rebuild_left_items_after_own_change();
                     return Ok(true);
                 }
                 Ok(false)
@@ -1478,7 +1479,7 @@ impl App {
             .iter()
             .position(|(id, _)| id.as_str() == terminal_id)
         {
-            self.selected_terminal_index = index;
+            self.select_terminal_row(index);
         }
     }
 
@@ -8301,7 +8302,7 @@ impl App {
                     dux_core::statusline::StatusTone::Busy,
                     busy,
                 );
-                self.rebuild_left_items();
+                self.rebuild_left_items_after_own_change();
             }
         }
         false
@@ -8557,7 +8558,7 @@ impl App {
         }) {
             Ok(outcome) => {
                 self.engine.sync_has_active_processes();
-                self.rebuild_left_items();
+                self.rebuild_left_items_after_own_change();
                 if let Some(status) = outcome.status {
                     self.set_info(status.message);
                 }
@@ -11131,7 +11132,7 @@ impl App {
                     self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
                 self.focus = FocusPane::Left;
                 self.left_section = LeftSection::Terminals;
-                self.selected_terminal_index = index;
+                self.select_terminal_row(index);
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 if double_click {
@@ -30039,6 +30040,8 @@ cyan = "#00ffff"
         app.engine
             .resume_fallback_candidates
             .insert(TabId::new(slot_tab.clone()), std::time::Instant::now());
+        // The resumed launch was started here, so its fallback is this surface's.
+        app.tui_fallback_tabs.insert(slot_tab.clone());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -39016,5 +39019,57 @@ cyan = "#00ffff"
             "Killed 1 terminal. In-progress CLI work was stopped, but the worktree files are \
              still available for review or relaunch."
         );
+    }
+
+    /// The terminal list sorted by activity reorders itself as output arrives,
+    /// and the terminal cursor stays on the terminal it was on: the row drawn as
+    /// selected and the one Enter opens are that terminal, not whichever slid
+    /// into its row.
+    #[test]
+    fn a_terminal_that_moves_above_the_cursor_does_not_take_its_enter() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.engine.config.ui.agent_sort = "updated".to_string();
+        let (first, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("first terminal");
+        let (second, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("second terminal");
+        let produce_output = |app: &mut App, id: &str| {
+            app.engine.companion_terminals[id]
+                .client
+                .write_bytes(b"x\n")
+                .expect("type into the terminal");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let before = app.engine.pty_activity.get(id).copied();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                app.engine.poll_pty_activity();
+                if app.engine.pty_activity.get(id).copied() != before {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "{id} never echoed");
+            }
+        };
+        produce_output(&mut app, &first);
+        app.rebuild_left_items();
+        assert_eq!(app.terminal_items()[0].0, &first);
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        app.select_terminal_row(0);
+
+        produce_output(&mut app, &second);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        assert_eq!(app.terminal_items()[0].0, &second, "the list re-sorted");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("Enter");
+
+        assert_eq!(app.active_terminal_id.as_deref(), Some(first.as_str()));
     }
 }

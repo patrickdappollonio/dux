@@ -671,6 +671,28 @@ pub struct App {
     /// here would otherwise rebuild. Folded into the per-iteration mutated answer
     /// and cleared there.
     pub(crate) companion_followup_ran: bool,
+    /// What each row of `left_items_cache` is, by identity, built with it. The
+    /// cursor is an index into the list as this surface last built it, so the
+    /// row it names here is what this surface is on, whatever a browser, the
+    /// command line or a reloaded config has since done to the sessions the
+    /// cached indexes point into. Every rebuild finds that row again by id.
+    pub(crate) left_rows: Vec<LeftRow>,
+    /// Whether the list has been built at least once: before that, the cursor
+    /// takes the first row as it always has, and after it an empty list is a
+    /// cursor on nothing.
+    pub(crate) left_rows_built: bool,
+    /// The cursor is on no row: the row it was on was deleted or went away, or
+    /// the list was empty, and only this surface moves it onto a row. Held as
+    /// an index one past the end; this surface's next move puts it on a row.
+    pub(crate) left_cursor_parked: bool,
+    /// The terminal row the terminal cursor is on, by id, with the index it was
+    /// on when this surface put it there. A rebuild follows the id; an index
+    /// set by hand since (it no longer matches) is taken as it is.
+    pub(crate) terminal_cursor: Option<(usize, String)>,
+    /// Tabs whose last launch this surface started and that may still fall
+    /// back to a fresh start: the engine re-launches such a tab itself, so the
+    /// fallback carries this surface's claim to it only through this set.
+    pub(crate) tui_fallback_tabs: std::collections::HashSet<String>,
     /// The background-server start in flight, held from the moment the pre-flight
     /// is dispatched until its result lands. `Option` rather than a map because
     /// the pre-flight is in-flight-guarded, so there is only ever one.
@@ -4005,6 +4027,23 @@ pub(crate) enum LeftSection {
     Terminals,
 }
 
+/// What a row of the agent list is, by identity rather than by position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LeftRow {
+    Agent(String),
+    InactiveToggle,
+}
+
+/// What the agent cursor was on before a rebuild.
+enum LeftCursorOn {
+    Row(LeftRow),
+    /// No row: parked, or an empty list.
+    Nothing,
+    /// Not known: the list was never built, or the index is past a list that
+    /// has rows, which the clamp repairs.
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LeftItem {
     /// An agent row (index into `engine.sessions`). The flat model shows the
@@ -4608,6 +4647,11 @@ impl App {
             background_server_preflight_pending: false,
             background_server_wanted: false,
             companion_followup_ran: false,
+            left_rows: Vec::new(),
+            left_rows_built: false,
+            left_cursor_parked: false,
+            terminal_cursor: None,
+            tui_fallback_tabs: Default::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
@@ -6072,11 +6116,9 @@ impl App {
         // No project-count clamp here: the flat list indexes agent rows, not
         // projects, so clamping `selected_left` against `projects.len()` was
         // meaningless and reset the cursor to the top. `rebuild_left_items`
-        // (below) plus the length check re-clamp against the real list length.
+        // (below) keeps the cursor on its row, which a reloaded sort mode or
+        // filter may have moved.
         self.rebuild_left_items();
-        if self.selected_left >= self.left_items_cache.len() {
-            self.selected_left = self.left_items_cache.len().saturating_sub(1);
-        }
         self.engine.update_branch_sync_sessions();
         self.engine.retune_pr_sync_after_reload(github_was_enabled);
         self.reload_changed_files();
@@ -6218,6 +6260,7 @@ impl App {
         // (mirroring the hot mask above, and avoiding a second `self.engine` borrow).
         // An absent or whitespace-only query makes everything visible.
         let visible: Vec<bool> = self.agent_visibility_mask();
+        let was_on = self.left_cursor_row();
         self.left_items_cache = build_left_items(
             &self.engine.sessions,
             effective_collapsed,
@@ -6225,6 +6268,22 @@ impl App {
             &|i| hot[i],
             &|i| visible[i],
         );
+        self.left_rows = self
+            .left_items_cache
+            .iter()
+            .map(|item| match item {
+                LeftItem::Session(index) => LeftRow::Agent(
+                    self.engine
+                        .sessions
+                        .get(*index)
+                        .map(|session| session.id.clone())
+                        .unwrap_or_default(),
+                ),
+                LeftItem::InactiveToggle => LeftRow::InactiveToggle,
+            })
+            .collect();
+        self.put_left_cursor_back(was_on);
+        self.left_rows_built = true;
         self.ensure_selectable_left_item();
         // The same query prunes the terminal list (`terminal_items`), so the
         // terminal cursor is repaired in the same breath as the agent one: this
@@ -6344,14 +6403,14 @@ impl App {
 
     pub(crate) fn open_agent_filter(&mut self) {
         self.agent_filter = Some(TextInput::new());
-        self.rebuild_left_items();
+        self.rebuild_left_items_after_own_change();
     }
 
     /// Leave agent-list filter mode: clear the query and restore the full list,
     /// keeping a sensible (selectable) selection via `rebuild_left_items`.
     pub(crate) fn close_agent_filter(&mut self) {
         self.agent_filter = None;
-        self.rebuild_left_items();
+        self.rebuild_left_items_after_own_change();
     }
 
     pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
@@ -6422,9 +6481,84 @@ impl App {
             .find_map(|(idx, item)| item.is_selectable().then_some(idx))
     }
 
+    /// What the agent cursor is on, read from the list as this surface last
+    /// built it.
+    fn left_cursor_row(&self) -> LeftCursorOn {
+        if !self.left_rows_built {
+            return LeftCursorOn::Unknown;
+        }
+        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
+            return LeftCursorOn::Nothing;
+        }
+        match self.left_rows.get(self.selected_left) {
+            Some(row) => LeftCursorOn::Row(row.clone()),
+            None if self.left_rows.is_empty() => LeftCursorOn::Nothing,
+            None => LeftCursorOn::Unknown,
+        }
+    }
+
+    /// Put the agent cursor back on `was_on` in the list just rebuilt.
+    ///
+    /// Only this surface moves the cursor onto a row, so a row that is gone
+    /// does not hand it to whatever took its place: an agent deleted, or one
+    /// gone dormant into the collapsed Inactive tail, or a non-agent row that
+    /// went away, leaves the cursor on no row, and so does an empty list that
+    /// agents then appear in. This surface's own changes go through
+    /// [`Self::rebuild_left_items_after_own_change`], which moves it on instead.
+    fn put_left_cursor_back(&mut self, was_on: LeftCursorOn) {
+        match was_on {
+            LeftCursorOn::Row(row) => {
+                if let Some(pos) = self
+                    .left_rows
+                    .iter()
+                    .position(|candidate| *candidate == row)
+                {
+                    self.selected_left = pos;
+                    self.left_cursor_parked = false;
+                } else {
+                    self.park_left_cursor();
+                }
+            }
+            LeftCursorOn::Nothing => self.park_left_cursor(),
+            LeftCursorOn::Unknown => {}
+        }
+    }
+
+    /// The agent cursor's row, or `None` when it rests on no row.
+    pub(crate) fn left_cursor_on_a_row(&self) -> Option<usize> {
+        (self.selected_left < self.left_items_cache.len()).then_some(self.selected_left)
+    }
+
+    fn park_left_cursor(&mut self) {
+        self.selected_left = self.left_rows.len();
+        self.left_cursor_parked = true;
+    }
+
+    /// Rebuild the agent list after a change this surface made itself: a row
+    /// it was on that went away hands the cursor to the row that took its place,
+    /// and a cursor on no row lands on one, as this surface's own deletes and
+    /// filters always have.
+    pub(crate) fn rebuild_left_items_after_own_change(&mut self) {
+        self.rebuild_left_items_after_own_change_from(self.selected_left);
+    }
+
+    /// The same, for a change that rebuilt the list already on its way here:
+    /// `row` is where the cursor was before the change began.
+    pub(crate) fn rebuild_left_items_after_own_change_from(&mut self, row: usize) {
+        self.rebuild_left_items();
+        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
+            self.left_cursor_parked = false;
+            self.selected_left = row;
+            self.ensure_selectable_left_item();
+        }
+    }
+
     pub(crate) fn ensure_selectable_left_item(&mut self) {
         if self.left_items_cache.is_empty() {
             self.selected_left = 0;
+            return;
+        }
+        if self.left_cursor_parked && self.selected_left >= self.left_items_cache.len() {
             return;
         }
         if self.selected_left >= self.left_items_cache.len() {
@@ -6505,10 +6639,20 @@ impl App {
         }
     }
 
+    /// The agent under the cursor. Found by the id its row was built with, since
+    /// the cached index points into a session list a change made elsewhere may
+    /// have reordered since.
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {
-        match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Session(index)) => self.engine.sessions.get(*index),
-            _ => None,
+        let Some(LeftItem::Session(index)) = self.left_items().get(self.selected_left) else {
+            return None;
+        };
+        match self.left_rows.get(self.selected_left) {
+            Some(LeftRow::Agent(id)) if self.left_rows.len() == self.left_items_cache.len() => self
+                .engine
+                .sessions
+                .iter()
+                .find(|session| session.id == *id),
+            _ => self.engine.sessions.get(*index),
         }
     }
 
@@ -7385,7 +7529,7 @@ impl App {
             .iter()
             .position(|(id, _)| id.as_str() == active)
         {
-            self.selected_terminal_index = pos;
+            self.select_terminal_row(pos);
         }
     }
 
@@ -7395,6 +7539,43 @@ impl App {
     /// under the cursor has to move the cursor, and a filter that empties the
     /// section sends focus back to the agents).
     pub(crate) fn clamp_terminal_cursor(&mut self) {
+        self.follow_terminal_cursor();
+        self.clamp_terminal_index();
+        self.note_terminal_cursor();
+    }
+
+    /// Put the terminal cursor back on the terminal it was on, wherever the
+    /// list's order (which a sort by activity changes as output arrives) has
+    /// put it now, unless the index was set by hand since. Run wherever the
+    /// order is read: a rebuild, a frame, and a key or mouse event.
+    pub(crate) fn follow_terminal_cursor(&mut self) {
+        if let Some((at, id)) = self.terminal_cursor.clone()
+            && at == self.selected_terminal_index
+            && let Some(pos) = self
+                .terminal_items()
+                .iter()
+                .position(|(candidate, _)| **candidate == id)
+        {
+            self.selected_terminal_index = pos;
+            self.terminal_cursor = Some((pos, id));
+        }
+    }
+
+    /// Put the terminal cursor on row `index` of the visible terminal list.
+    pub(crate) fn select_terminal_row(&mut self, index: usize) {
+        self.selected_terminal_index = index;
+        self.note_terminal_cursor();
+    }
+
+    /// Remember which terminal the terminal cursor is on.
+    fn note_terminal_cursor(&mut self) {
+        self.terminal_cursor = self
+            .terminal_items()
+            .get(self.selected_terminal_index)
+            .map(|(id, _)| (self.selected_terminal_index, (*id).clone()));
+    }
+
+    fn clamp_terminal_index(&mut self) {
         let count = self.terminal_items().len();
         if count == 0 {
             self.selected_terminal_index = 0;
