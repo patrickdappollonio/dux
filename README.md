@@ -236,7 +236,7 @@ The right pane is a full git staging area. Stage and unstage files, view syntax-
 
 A folder with nothing tracked inside it, like a fresh `node_modules`, is one row with its file count rather than one row per file, the way `git status` shows it; staged whole, it stays one row. Stage or unstage the whole folder from that row, or delete its untracked files (ignored files and repositories of their own inside it are kept). Staging a folder leaves out the repositories inside it, nested clones and worktrees alike, so none is recorded as a link, and its staged row says how many it left out. Expand it to see what is inside, a level at a time: click its name in the browser, or press the diff key in the terminal UI.
 
-**PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface. A push, or selecting an agent, refreshes that agent's pull request there and then, and a slow background check picks up anything else, so the pills stay current without burning through your GitHub API quota.
+**PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface. Selecting or creating an agent refreshes its pull request there and then, and a background check every few minutes picks up pushes and anything else, so the pills stay current without burning through your GitHub API quota.
 
 ### Companion Terminals
 

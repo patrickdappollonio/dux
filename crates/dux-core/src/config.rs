@@ -449,8 +449,8 @@ pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
 pub const DEFAULT_REMOVAL_WAIT_SECONDS: u16 = 120;
 
 /// Default seconds between blind GitHub PR-status safety polls. Deliberately
-/// slow: most PR updates arrive via events (a branch push, or focusing an
-/// agent), so this backstop only needs to catch changes made on GitHub itself.
+/// slow: some PR checks run on events (focusing, creating or an agent exiting),
+/// and this poll is what notices a push or a change made on GitHub itself.
 pub const DEFAULT_PR_POLL_INTERVAL_SECONDS: u16 = 180;
 
 /// Hard ceiling on the PR poll interval (6 hours). Already far slower than any
@@ -1691,9 +1691,9 @@ pub struct UiConfig {
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
     pub github_integration: bool,
-    /// Seconds between blind GitHub PR-status safety polls. Most updates are
-    /// event-driven (a branch push, or focusing an agent), so this is only the
-    /// backstop for changes made on GitHub itself. `0` disables the blind poll
+    /// Seconds between blind GitHub PR-status safety polls. Some checks run on
+    /// events (focusing, creating or an agent exiting); this poll is what
+    /// notices a push or a change made on GitHub itself. `0` disables the blind poll
     /// entirely (updates then come only from those events). Clamped to
     /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
     pub pr_poll_interval_seconds: u16,

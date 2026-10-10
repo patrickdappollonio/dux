@@ -487,7 +487,7 @@ pub struct Engine {
     pub pr_sync: Arc<PrSyncControl>,
     /// Seconds between blind PR-sync safety polls, shared with the loop thread so
     /// a config reload can retune it live. `0` disables the blind poll (updates
-    /// then come only from the refs watcher and foreground focus). Seeded from
+    /// then come only from one-shot checks and foreground focus). Seeded from
     /// `config.ui.pr_poll_interval_seconds` at spawn and in `apply_reloaded_config`.
     pub pr_poll_interval_secs: Arc<AtomicU64>,
     /// Seconds between blind PR-sync polls for the agents in the list's Inactive
@@ -517,6 +517,19 @@ pub struct Engine {
     /// looking after it, and a set that retried forever would be a queue nobody
     /// drains.
     pub pr_return_checks_owed: std::collections::HashSet<String>,
+    /// Which branch, as GitHub sees it, each agent's pull-request checks are
+    /// about: bumped when the agent drifts onto another branch, and kept by an
+    /// explicit rename, which only renames the local branch while the remote
+    /// branch and its pull request keep the old name. A check's result carries
+    /// the generation it was asked under and is dropped when it no longer
+    /// matches. Runtime only: a restart starts every agent at zero, and no
+    /// check survives a restart to be compared.
+    pub pr_branch_generations: HashMap<String, u64>,
+    /// Agents whose branch moved while their pull-request check could not run
+    /// (one for the old branch was still in flight, or inside its debounce).
+    /// Each is owed exactly one check for the branch it is on, dispatched when
+    /// the running check finishes or the debounce window passes.
+    pub pr_branch_checks_owed: std::collections::HashSet<String>,
     /// Seconds between branch-sync sweeps, shared with the loop thread so a
     /// config reload can retune it live. `0` reaching the loop means "nap and
     /// look again", never "exit": the thread stays live so
@@ -534,12 +547,6 @@ pub struct Engine {
     /// for a healthy github.com. Shared so both the loop and the one-shot checks
     /// read and update it.
     pub pr_backoff: Arc<Mutex<crate::gh::BackoffSnapshot>>,
-    /// File-system watcher for `.git/refs/heads/` directories. `None` if the
-    /// watcher could not be created (graceful fallback to poll-only).
-    pub refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
-    /// Maps watched worktree paths back to session IDs so the refs watcher
-    /// can route change events.
-    pub refs_watch_paths: HashMap<PathBuf, String>,
     /// Session IDs spawned with resume args and the wall-clock time the resume
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
@@ -1877,13 +1884,13 @@ pub const STANDALONE_ADD_AS_PROJECT_REMEDY: &str =
     "Add its folder as a project if you want dux to manage branches and worktrees for it.";
 
 /// Minimum spacing between per-session PR checks for the background triggers
-/// (refs watcher, agent exit). Guards against a burst of triggers spawning
+/// (agent create, agent exit, a branch rename or drift). Guards against a burst of triggers spawning
 /// concurrent `gh` calls for the same session.
 pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Tighter debounce for foreground-focus PR checks (switching to / activating an
 /// agent in the TUI, opening its PTY on the web) so a freshly-focused agent shows
-/// current data even if no branch-change event fired recently, without letting
+/// current data even if no other trigger checked it recently, without letting
 /// focus-thrash hammer `gh`.
 pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
 
@@ -3167,141 +3174,6 @@ fn report_missing_directory(
 }
 
 impl Engine {
-    pub fn spawn_refs_watcher(&mut self) {
-        use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-
-        let tx = self.worker_tx.clone();
-        // Build a reverse map of watched paths for event routing.
-        let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let path_map = Arc::clone(&path_to_session);
-        let debounce_map: Arc<Mutex<HashMap<String, Instant>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let debounce = Arc::clone(&debounce_map);
-
-        let watcher_result = RecommendedWatcher::new(
-            move |res: Result<notify::Event, notify::Error>| {
-                let Ok(event) = res else { return };
-                // We only care about data modifications (ref file updates).
-                if !event.kind.is_modify() && !event.kind.is_create() {
-                    return;
-                }
-                let map = match path_map.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                let mut debounce_guard = match debounce.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                for event_path in &event.paths {
-                    // Walk up from the event path to find a watched parent dir.
-                    for (watched, session_id) in map.iter() {
-                        if event_path.starts_with(watched) {
-                            // Debounce: skip if we already sent an event within the last 5s.
-                            let now = Instant::now();
-                            if let Some(last) = debounce_guard.get(session_id)
-                                && now.duration_since(*last) < Duration::from_secs(5)
-                            {
-                                continue;
-                            }
-                            debounce_guard.insert(session_id.clone(), now);
-                            crate::logger::debug(&format!(
-                                "[gh-integration] refs watcher: detected change at {}, debouncing for session {}",
-                                event_path.display(),
-                                session_id,
-                            ));
-                            let _ = tx.send(WorkerEvent::RefsChanged(session_id.clone()));
-                        }
-                    }
-                }
-            },
-            NotifyConfig::default(),
-        );
-
-        match watcher_result {
-            Ok(watcher) => {
-                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
-                self.refs_watch_paths.clear();
-                // Populate the path map and start watching existing sessions.
-                let mut paths = HashMap::new();
-                // Collected rather than posted in the loop: `post_status` is a
-                // read of the engine and the loop already holds one, and an
-                // agent that cannot be watched is worth one sentence each.
-                let mut lost_agents: Vec<String> = Vec::new();
-                for session in &self.sessions {
-                    // The watch exists to notice the AGENT's branch moving, and
-                    // a standalone agent has no agent branch. Skipped even when
-                    // its folder happens to be a repository: watching it would
-                    // fire pull-request checks for a branch that is not dux's.
-                    let Some(managed) = session.workspace.as_managed() else {
-                        continue;
-                    };
-                    let refs_dir = PathBuf::from(&managed.worktree_path)
-                        .join(".git")
-                        .join("refs")
-                        .join("heads");
-                    if refs_dir.is_dir()
-                        && let Some(ref watcher_arc) = self.refs_watcher
-                    {
-                        match watcher_arc.lock() {
-                            Ok(mut w) => match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
-                                Ok(()) => {
-                                    crate::logger::debug(&format!(
-                                        "[gh-integration] refs watcher: watching {} for session {}",
-                                        refs_dir.display(),
-                                        session.id,
-                                    ));
-                                    paths.insert(refs_dir.clone(), session.id.clone());
-                                }
-                                Err(e) => {
-                                    crate::logger::debug(&format!(
-                                        "[gh-integration] refs watcher: failed to watch {}: {}",
-                                        refs_dir.display(),
-                                        e,
-                                    ));
-                                }
-                            },
-                            Err(poison) => {
-                                crate::logger::error(&format!(
-                                    "[gh-integration] refs watcher mutex poisoned, will not watch {} for session {} \u{2014} PR updates for this session will not arrive until dux restarts: {}",
-                                    refs_dir.display(),
-                                    session.id,
-                                    poison,
-                                ));
-                                lost_agents.push(session.display_label().to_string());
-                            }
-                        }
-                    }
-                }
-                for agent_label in lost_agents {
-                    self.post_status(crate::poller_status::refs_watcher_lost_agent(&agent_label));
-                }
-                self.refs_watch_paths = paths.clone();
-                // Populate the closure's path map so events can route to sessions.
-                if let Ok(mut map) = path_to_session.lock() {
-                    *map = paths;
-                }
-                crate::logger::info(&format!(
-                    "[gh-integration] refs watcher: initialized, watching {}",
-                    crate::text::count_of(self.refs_watch_paths.len(), "session"),
-                ));
-            }
-            Err(e) => {
-                crate::logger::warn(&format!(
-                    "[gh-integration] refs watcher: failed to create watcher (falling back to poll-only): {}",
-                    e,
-                ));
-                // The fallback is silent otherwise, and a user watching pull
-                // request status arrive a poll interval late has no way to tell
-                // that from dux being broken.
-                self.post_status(crate::poller_status::refs_watcher_unavailable(
-                    &e.to_string(),
-                ));
-            }
-        }
-    }
-
     /// Whether the new-agent-from-PR flow is available: GitHub integration is
     /// enabled in config AND the `gh` CLI is installed and authenticated. Mirrors
     /// the TUI's `github_pr_agent_command_available`. Surfaced on the ViewModel
@@ -4500,8 +4372,78 @@ impl Engine {
         }
     }
 
-    /// Trigger a single-session pull-request check for a deliberate event (a
-    /// refs change, an agent exit, the user asking), unless it was checked more
+    /// Check an agent's pull request for the branch it is on now, because that
+    /// branch just changed (a rename or a drift). When a check that is still
+    /// running, or the debounce it started, refuses this one, the agent is owed
+    /// it: [`Self::retry_owed_branch_check`] dispatches it once the running
+    /// check finishes, and a timer when the debounce window passes. A refusal
+    /// for a lasting reason (GitHub unavailable, a detach, a standalone agent,
+    /// a missing working copy) owes nothing.
+    pub(crate) fn request_branch_pr_check(&mut self, session_id: &str) {
+        if self.spawn_pr_check_for_session(session_id, PR_CHECK_MIN_INTERVAL) {
+            self.pr_branch_checks_owed.remove(session_id);
+            return;
+        }
+        let in_flight = self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string()));
+        let debounce_left = self
+            .pr_last_checked
+            .get(session_id)
+            .map(|last| PR_CHECK_MIN_INTERVAL.saturating_sub(last.elapsed()))
+            .filter(|left| !left.is_zero());
+        if !in_flight && debounce_left.is_none() {
+            self.pr_branch_checks_owed.remove(session_id);
+            return;
+        }
+        self.pr_branch_checks_owed.insert(session_id.to_string());
+        // A running check is answered by its own completion; only a debounce
+        // needs a clock.
+        if let (false, Some(left)) = (in_flight, debounce_left) {
+            let due = session_id.to_string();
+            self.spawn_background_worker(
+                BackgroundWorkerSpec {
+                    label: format!("pr-check-owed:{session_id}"),
+                    in_flight_key: None,
+                    // A lost timer leaves the agent to the poll, as before.
+                    panic_event: None,
+                },
+                move |tx| {
+                    thread::sleep(left);
+                    let _ = tx.send(WorkerEvent::PrCheckOwedDue(due));
+                },
+            );
+        }
+    }
+
+    /// Dispatch the check an agent is owed, if it is still owed one. Called
+    /// when its running check finishes and when its debounce timer fires.
+    pub(crate) fn retry_owed_branch_check(&mut self, session_id: &str) {
+        if self.pr_branch_checks_owed.contains(session_id) {
+            self.request_branch_pr_check(session_id);
+        }
+    }
+
+    /// The agent's current branch generation. See [`Self::pr_branch_generations`].
+    pub(crate) fn pr_branch_generation(&self, session_id: &str) -> u64 {
+        self.pr_branch_generations
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The name an explicit rename gave the branch dux minted for this agent,
+    /// if one did. See [`crate::model::AgentSession::branch_minted_at`].
+    pub(crate) fn minted_branch_rename(&self, session_id: &str) -> Option<String> {
+        self.session_store
+            .load_minted_branch_renames()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(id, _)| id == session_id)
+            .map(|(_, branch)| branch)
+    }
+
+    /// Trigger a single-session pull-request check for a deliberate event (an
+    /// agent being created, its branch being renamed or drifting, an agent
+    /// exit, the user asking), unless it was checked more
     /// recently than `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`];
     /// foreground focus goes through [`Self::spawn_foreground_pr_check`], which
     /// carries the tighter [`PR_FOREGROUND_DEBOUNCE`] and its own sync trigger.
@@ -4552,7 +4494,7 @@ impl Engine {
         }
         // A standalone agent has no branch, so there is no pull request to
         // check for. Refused HERE rather than only in the batched enumerator
-        // because the refs-watcher event routes straight into this one-shot,
+        // because several triggers route straight into this one-shot,
         // and refused BEFORE the debounce stamp below so a skipped agent never
         // records a check that did not happen.
         if !self
@@ -4608,6 +4550,9 @@ impl Engine {
             // the flag the blind poll narrows on has nothing to say here; it is
             // recorded truthfully all the same.
             inactive: crate::flat_list::is_inactive(session),
+            branch_minted_at: session
+                .branch_minted_at(self.minted_branch_rename(session_id).as_deref()),
+            branch_generation: self.pr_branch_generation(session_id),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -4632,7 +4577,13 @@ impl Engine {
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.
                 Self::apply_pr_backoff(&backoff, &signals, &tx);
-                let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
+                let _ = tx.send(WorkerEvent::PrStatusReady(vec![
+                    crate::worker::PrStatusResult {
+                        session_id: entry.session_id,
+                        branch_generation: entry.branch_generation,
+                        pr: result,
+                    },
+                ]));
             },
         );
         true
@@ -4999,6 +4950,12 @@ impl Engine {
             .into_iter()
             .map(|pr| (pr.session_id.clone(), pr))
             .collect();
+        let minted_renames: HashMap<String, String> = self
+            .session_store
+            .load_minted_branch_renames()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
             *guard = self
@@ -5031,6 +4988,9 @@ impl Engine {
                         agent_exited: !self.providers.contains_key(s.slot_tab_id()),
                         pinned: pinned_row.map(pinned_pr_from_stored),
                         inactive: crate::flat_list::is_inactive(s),
+                        branch_minted_at: s
+                            .branch_minted_at(minted_renames.get(&s.id).map(String::as_str)),
+                        branch_generation: self.pr_branch_generation(&s.id),
                     })
                 })
                 .collect();
@@ -7378,25 +7338,66 @@ mod tests {
         );
     }
 
-    /// The refs watcher puts an inotify watch on `.git/refs/heads` per session.
-    /// A standalone agent must not get one even when its folder IS a repository
-    /// (the watch exists to notice the AGENT's branch moving, and there is no
-    /// agent branch here).
+    /// A created agent joins the pull-request plan the moment its row is
+    /// written, rather than whenever something unrelated next rebuilds it: an
+    /// agent can push, open and merge its pull request well inside the time an
+    /// idle workspace goes without a rebuild.
     #[test]
-    fn the_refs_watcher_never_watches_a_standalone_agents_folder() {
-        let (mut engine, _tmp, folder) = engine_with_a_standalone_agent();
-        init_plain_repo(folder.path());
-        std::fs::create_dir_all(folder.path().join(".git").join("refs").join("heads")).unwrap();
-        engine.spawn_refs_watcher();
-        let watched: Vec<String> = engine.refs_watch_paths.values().cloned().collect();
+    fn a_created_agent_joins_the_pull_request_plan_at_once() {
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.update_pr_sync_sessions();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let session = sample_session("s2", "p1", "feat/new");
+        let client =
+            crate::pty::PtyClient::spawn_with_env("cat", &[], worktree.path(), 24, 80, 100, &[])
+                .unwrap();
+        let _ = engine.process_agent_launch_ready(crate::worker::AgentLaunchReadyData {
+            spawn_ticket: None,
+            request: crate::worker::AgentLaunchRequest {
+                tab_id: session.slot_tab_id().to_owned(),
+                provider: session.provider.clone(),
+                session,
+                provider_config: Default::default(),
+                env: Vec::new(),
+                identity: Default::default(),
+                resume: false,
+                pty_size: (24, 80),
+                scrollback_lines: 100,
+                kind: crate::worker::AgentLaunchKind::Create {
+                    status_message: Default::default(),
+                    status_warns: false,
+                    status_notes: None,
+                    pull_request_pin: None,
+                    repo_path: "/tmp/p1".into(),
+                    owns_worktree: true,
+                    startup_result: None,
+                    status_op_id: "op-create".into(),
+                },
+                wants_fullscreen: false,
+                status_quiet: crate::statusline::QuietSurfaces::LOUD,
+            },
+            client,
+        });
+
+        let mut enrolled: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        enrolled.sort();
+        assert_eq!(enrolled, vec!["s1".to_string(), "s2".to_string()]);
         assert!(
-            !watched.contains(&"sa1".to_string()),
-            "a standalone agent has no agent branch for a refs watch to be about, got {watched:?}"
+            engine.pr_last_checked.contains_key("s2"),
+            "a branch that already existed may already have a pull request, so it is asked about once"
         );
     }
 
-    /// The one-shot pull-request check is reachable directly (the refs-watcher
-    /// event routes into it), so it refuses a standalone id itself rather than
+    /// The one-shot pull-request check is reachable directly (several triggers
+    /// route into it), so it refuses a standalone id itself rather than
     /// relying on the batched enumerator having skipped it.
     #[test]
     fn a_one_shot_pull_request_check_refuses_a_standalone_agent() {
@@ -10986,7 +10987,7 @@ mod tests {
         );
     }
 
-    /// The one-shot paths (focus, refs change, agent exit) must respect the
+    /// The one-shot paths (focus, create, a branch move, agent exit) must respect the
     /// detach too, or focusing a detached agent would re-detect its PR.
     #[test]
     fn a_suppressed_session_gets_no_one_shot_pr_check() {

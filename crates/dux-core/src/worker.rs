@@ -565,7 +565,9 @@ pub enum WorkerEvent {
         generation: u64,
         outcome: crate::gh::GhProbe,
     },
-    PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    PrStatusReady(Vec<PrStatusResult>),
+    /// The debounce that refused an agent's owed branch check has passed.
+    PrCheckOwedDue(String),
     /// A one-shot PR check worker panicked; carries the session id so its
     /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.
     PrCheckAborted(String),
@@ -610,7 +612,6 @@ pub enum WorkerEvent {
         /// for the TUI, which keeps its prompt-after-resolution flow.
         status_op_id: Option<String>,
     },
-    RefsChanged(String),
     /// Background `git worktree remove` for a session-initiated delete has
     /// finished. On `Ok`, the result says what happened to each branch the
     /// removal targeted (used for the status message). On `Err`, the message is
@@ -817,6 +818,17 @@ pub struct PinnedPr {
     pub number: u64,
 }
 
+/// One agent's pull-request answer, with the branch generation it was asked
+/// under (see `Engine::pr_branch_generations`), so an answer that lands after
+/// the agent drifted onto another branch is dropped instead of being saved
+/// against the new one, while one that lands after an explicit rename stands.
+#[derive(Clone, Debug)]
+pub struct PrStatusResult {
+    pub session_id: String,
+    pub branch_generation: u64,
+    pub pr: Option<crate::model::PrInfo>,
+}
+
 /// Snapshot of session data shared with the PR-sync background worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
@@ -848,6 +860,15 @@ pub struct PrSyncEntry {
     /// session's own status, and which the alias planner reads for a different
     /// question (whether a terminal pull request is worth a call at all).
     pub inactive: bool,
+    /// When dux minted the branch, for an agent still on a branch dux created
+    /// for it; `None` for a branch that existed before the agent, or one the
+    /// agent has since moved off. No pull request from a minted branch can be
+    /// older than this, which is what tells it apart from an earlier branch
+    /// that used the same name when a pull request is found by head name.
+    pub branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The agent's branch generation when this entry was planned, carried
+    /// into the result (see [`PrStatusResult`]).
+    pub branch_generation: u64,
 }
 
 #[derive(Clone, Debug)]

@@ -78,41 +78,6 @@ pub fn spawn_failed(label: &str, feature: &str, error: &str, remedy: &str) -> St
     )
 }
 
-/// The label the refs watcher's health is reported under.
-pub const REFS_WATCHER_LABEL: &str = "refs-watcher";
-
-/// dux could not build the refs watcher at all, so pull request status falls
-/// back to the timer.
-///
-/// An INFO, not a warning: nothing is lost and nothing has to be done, the
-/// updates simply arrive on the poll interval instead of the moment a branch
-/// moves. Saying it anyway is what stops the slower cadence reading as a bug.
-pub fn refs_watcher_unavailable(error: &str) -> StatusUpdate {
-    StatusUpdate::keyed(
-        key(REFS_WATCHER_LABEL),
-        StatusTone::Info,
-        format!(
-            "dux could not watch this repository's branches for changes: {error}. Pull request \
-             status still updates, on the poll interval rather than the moment a branch moves."
-        ),
-    )
-}
-
-/// One agent's branch could not be watched, and no retry will fix it, so that
-/// agent's pull request status is stuck until dux restarts.
-pub fn refs_watcher_lost_agent(agent_label: &str) -> StatusUpdate {
-    StatusUpdate::keyed(
-        key(&format!("{REFS_WATCHER_LABEL}:{agent_label}")),
-        StatusTone::Warning,
-        crate::status_text![
-            "dux cannot watch agent ",
-            q(agent_label),
-            " for branch changes, so its pull request \
-             status stops updating until you restart dux. Every other agent is unaffected."
-        ],
-    )
-}
-
 /// A pull request status was fetched but could not be written to SQLite.
 ///
 /// The badge on screen is right, so this is about what survives a restart
@@ -255,23 +220,6 @@ mod tests {
             pr_status_not_saved("s2", "feat-login", "x").key,
             "one agent's failure is not another's"
         );
-    }
-
-    #[test]
-    fn a_refs_watcher_that_never_built_says_what_the_user_still_gets() {
-        let status = refs_watcher_unavailable("inotify limit reached");
-        assert_eq!(status.tone, StatusTone::Info);
-        assert!(status.message.contains("inotify limit reached"));
-        assert!(status.message.contains("Pull request status still updates"));
-    }
-
-    #[test]
-    fn one_lost_agent_is_keyed_apart_from_the_watcher_itself() {
-        let lost = refs_watcher_lost_agent("feat-login");
-        assert_eq!(lost.tone, StatusTone::Warning);
-        assert!(lost.message.contains("feat-login"));
-        assert_ne!(lost.key, refs_watcher_unavailable("x").key);
-        assert_ne!(lost.key, refs_watcher_lost_agent("other").key);
     }
 
     #[test]

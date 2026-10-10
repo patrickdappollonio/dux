@@ -1793,6 +1793,12 @@ impl Engine {
                 self.note_resume_launch(&tab_id);
             }
             self.update_branch_sync_sessions();
+            // The new agent joins the pull-request plan now. Nothing else is
+            // owed a rebuild by a create (its status is born Active, so the
+            // launch's status-change rebuild never fires for it), and an agent
+            // can push, open and merge a pull request long before an unrelated
+            // rebuild would have enrolled it.
+            self.update_pr_sync_sessions();
 
             // Extract Create-kind payload for the view outcome.
             let AgentLaunchKind::Create {
@@ -1854,6 +1860,12 @@ impl Engine {
                     Some(notes) => crate::status_text![*notes, " ", told],
                     None => told,
                 }));
+            } else {
+                // An agent created on a branch that already existed may already
+                // have a pull request, so it is asked about once now rather
+                // than at the next poll. A pinned copy was resolved moments
+                // ago and needs no second look.
+                self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
             }
             let startup_result_error = startup_result.and_then(|r| r.status.err());
 
@@ -2328,6 +2340,8 @@ impl Engine {
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_suppressions.remove(&session.id);
+        self.pr_branch_generations.remove(&session.id);
+        self.pr_branch_checks_owed.remove(&session.id);
         // Re-derive the PR-sync plan from the surviving sessions. The periodic
         // poller snapshots this list every cycle, so leaving the deleted
         // agent's entry in it means dux keeps asking GitHub about a pull
@@ -3312,7 +3326,7 @@ impl Engine {
     }
 
     fn process_branch_sync_ready(&mut self, updates: Vec<(String, String)>) -> EventReaction {
-        let mut changed = false;
+        let mut moved: Vec<String> = Vec::new();
         for (session_id, actual_branch) in updates {
             // Rename completion owns the authoritative branch mutation while a rename is active.
             if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
@@ -3354,13 +3368,33 @@ impl Engine {
                         session.branch_name(),
                     ));
                 }
-                changed = true;
+                // Checks still in flight asked about the branch the agent left.
+                *self
+                    .pr_branch_generations
+                    .entry(session.id.clone())
+                    .or_default() += 1;
+                // A drift onto another branch ends any claim that the agent is on
+                // the branch dux minted under a new name.
+                if let Err(err) = self.session_store.delete_minted_branch_rename(&session.id) {
+                    logger::error(&format!(
+                        "failed to forget the minted branch rename for {}: {err}",
+                        session.id,
+                    ));
+                }
+                moved.push(session.id.clone());
             }
         }
-        if !changed {
+        if moved.is_empty() {
             return EventReaction::Nothing;
         }
         self.update_branch_sync_sessions();
+        // The pull-request plan names the branch too, and would otherwise keep
+        // asking GitHub about the one the agent has left. The branch it moved
+        // to may already have a pull request, so it is asked about once now.
+        self.update_pr_sync_sessions();
+        for session_id in moved {
+            self.request_branch_pr_check(&session_id);
+        }
         EventReaction::RebuildLeftItems
     }
 
@@ -3425,6 +3459,29 @@ impl Engine {
     ) -> EventReaction {
         match &result {
             Ok(()) => {
+                // A rename moves a branch rather than switching to another one, so
+                // the branch dux minted is still the one dux minted under its new
+                // name, and the pull-request age guard must keep holding for it.
+                let renamed_from = self.minted_branch_rename(&session_id);
+                let was_minted = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
+                    .is_some();
+                // A rename of any other branch is not the minted one moving, and
+                // a marker left from an earlier rename must not carry over to it.
+                let recorded = if was_minted {
+                    self.session_store
+                        .set_minted_branch_rename(&session_id, &new_branch)
+                } else {
+                    self.session_store.delete_minted_branch_rename(&session_id)
+                };
+                if let Err(err) = recorded {
+                    logger::error(&format!(
+                        "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
+                    ));
+                }
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                     let label = session.display_label();
                     if let Some(managed) = session.workspace.as_managed_mut() {
@@ -3448,6 +3505,10 @@ impl Engine {
                     }
                 }
                 self.update_branch_sync_sessions();
+                // So does the pull-request plan, which asks GitHub by branch, and
+                // the renamed branch is asked about once now.
+                self.update_pr_sync_sessions();
+                self.request_branch_pr_check(&session_id);
             }
             Err(err) => {
                 logger::warn(&format!(
@@ -3527,7 +3588,6 @@ impl Engine {
             ));
             self.seed_pr_statuses_from_store();
             self.update_pr_sync_sessions();
-            self.spawn_refs_watcher();
             self.spawn_pr_sync_worker();
             self.spawn_initial_pr_refresh();
         } else {
@@ -3709,6 +3769,7 @@ impl Engine {
     fn pr_status_result_is_current(
         &mut self,
         session_id: &str,
+        branch_generation: u64,
         maybe_pr: &Option<crate::model::PrInfo>,
         checked_at: Instant,
     ) -> bool {
@@ -3716,6 +3777,22 @@ impl Engine {
         if !self.sessions.iter().any(|session| session.id == session_id) {
             logger::debug(&format!(
                 "[gh-integration] dropping PR result for deleted session {session_id}",
+            ));
+            return false;
+        }
+        // An answer asked under an earlier branch generation is about a branch
+        // the agent has since drifted off, not the one it is on now. An
+        // explicit rename keeps the generation: it renames only the local
+        // branch, so GitHub's branch and its pull request still carry the name
+        // the check asked about. Dropped before the debounce is stamped, so
+        // the check the drift itself asks for is not refused as too recent. A
+        // pin is about its pull request, not the branch, so it is exempt.
+        let current = self.pr_branch_generation(session_id);
+        if !self.pr_overrides.contains_key(session_id) && branch_generation != current {
+            logger::debug(&format!(
+                "[gh-integration] dropping PR result for session {session_id}: it was asked \
+                 under branch generation {branch_generation}, and the agent has since moved \
+                 to generation {current}",
             ));
             return false;
         }
@@ -3815,14 +3892,31 @@ impl Engine {
 
     fn process_pr_status_ready(
         &mut self,
-        results: Vec<(String, Option<crate::model::PrInfo>)>,
+        results: Vec<crate::worker::PrStatusResult>,
     ) -> EventReaction {
         let checked_at = Instant::now();
         let mut changed = false;
-        for (session_id, maybe_pr) in results {
-            if self.pr_status_result_is_current(&session_id, &maybe_pr, checked_at) {
+        let mut finished: Vec<String> = Vec::new();
+        for crate::worker::PrStatusResult {
+            session_id,
+            branch_generation,
+            pr: maybe_pr,
+        } in results
+        {
+            finished.push(session_id.clone());
+            if self.pr_status_result_is_current(
+                &session_id,
+                branch_generation,
+                &maybe_pr,
+                checked_at,
+            ) {
                 changed |= self.apply_pr_status_result(session_id, maybe_pr);
             }
+        }
+        // Each finished check may have been holding up the one an agent is
+        // owed for the branch it moved to.
+        for session_id in finished {
+            self.retry_owed_branch_check(&session_id);
         }
         if !changed {
             return EventReaction::Nothing;
@@ -4488,10 +4582,15 @@ impl Engine {
                 outcome,
             } => self.process_gh_status_checked(generation, outcome),
             WorkerEvent::PrStatusReady(results) => self.process_pr_status_ready(results),
+            WorkerEvent::PrCheckOwedDue(session_id) => {
+                self.retry_owed_branch_check(&session_id);
+                EventReaction::Nothing
+            }
             WorkerEvent::PrCheckAborted(session_id) => {
                 // The one-shot check worker panicked; clear its guard so the next
                 // trigger can retry. The badge is left untouched.
-                self.clear_in_flight(&InFlightKey::PrCheck(session_id));
+                self.clear_in_flight(&InFlightKey::PrCheck(session_id.clone()));
+                self.retry_owed_branch_check(&session_id);
                 EventReaction::Nothing
             }
             WorkerEvent::PullRequestReferenceResolved { .. } => {
@@ -4504,14 +4603,6 @@ impl Engine {
                 status_op_id,
                 purpose,
             } => self.process_pull_request_resolved(result, purpose, status_op_id),
-            WorkerEvent::RefsChanged(session_id) => {
-                logger::debug(&format!(
-                    "[gh-integration] refs watcher: triggering PR check for session {}",
-                    session_id,
-                ));
-                self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
-                EventReaction::Nothing
-            }
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
                 EventReaction::BrowserEntriesArrived { dir, entries }
             }
@@ -5866,6 +5957,8 @@ mod tests {
     #[test]
     fn branch_sync_ready_changed_branch_returns_rebuild() {
         let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
         engine.sessions.push(sample_session("s1", "p1", "old"));
         let before_updated_at = engine.sessions[0].updated_at;
 
@@ -5883,6 +5976,62 @@ mod tests {
         let loaded = engine.session_store.load_sessions().expect("load");
         let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
         assert_eq!(stored.branch_name(), Some("new"));
+
+        // The pull-request plan asks about the branch the agent is on now.
+        let planned: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.branch_name.clone())
+            .collect();
+        assert_eq!(planned, vec!["new".to_string()]);
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "the branch it moved to is asked about at once"
+        );
+    }
+
+    /// A move that lands while a check for the old branch is still running,
+    /// and inside the debounce that check started, is not lost: the new
+    /// branch's check runs once the old one has finished and the window has
+    /// passed, with the blind poll switched off.
+    #[test]
+    fn a_branch_check_refused_by_a_running_check_runs_once_it_can() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.sessions.push(sample_session("s1", "p1", "feat/a"));
+        // A check for feat/a is running, dispatched 9.5 seconds ago.
+        engine.mark_in_flight(InFlightKey::PrCheck("s1".to_string()));
+        let dispatched = Instant::now() - std::time::Duration::from_millis(9_500);
+        engine.pr_last_checked.insert("s1".to_string(), dispatched);
+        let asked_for_a = pr_status_ready(&engine, vec![("s1".to_string(), None)]);
+
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "feat/b".to_string(),
+        )]));
+        assert_eq!(
+            engine.pr_last_checked.get("s1"),
+            Some(&dispatched),
+            "refused while the feat/a check runs"
+        );
+        engine.process_worker_event(asked_for_a);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while engine.pr_last_checked.get("s1") == Some(&dispatched) {
+            assert!(
+                Instant::now() < deadline,
+                "feat/b was never checked after the feat/a check finished"
+            );
+            if let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+            {
+                engine.process_worker_event(event);
+            }
+        }
     }
 
     #[test]
@@ -6186,6 +6335,8 @@ mod tests {
     #[test]
     fn branch_rename_completed_success_updates_branch_and_clears_guards() {
         let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
         let session = sample_session("s1", "p1", "old-branch");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
@@ -6215,6 +6366,57 @@ mod tests {
         assert_eq!(engine.sessions[0].branch_name(), Some("new-branch"));
         let stored = engine.session_store.load_sessions().unwrap();
         assert_eq!(stored[0].branch_name(), Some("new-branch"));
+        // The pull-request plan asks about the renamed branch from now on.
+        let planned: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.branch_name.clone())
+            .collect();
+        assert_eq!(planned, vec!["new-branch".to_string()]);
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "the renamed branch is asked about at once"
+        );
+        // Renaming the branch dux minted keeps it the branch dux minted, then,
+        // so a pull request older than the agent is still refused for it, and
+        // that survives a restart.
+        let created_at = engine.sessions[0].created_at;
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, Some(created_at));
+        assert_eq!(
+            engine.session_store.load_minted_branch_renames().unwrap(),
+            vec![("s1".to_string(), "new-branch".to_string())]
+        );
+        // A later switch to some other branch is drift, and drops it.
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "develop".to_string(),
+        )]));
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, None);
+        // And renaming that other branch to the name the minted one once had
+        // does not make it the minted one: the drift ended the marker.
+        engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "new-branch".into(),
+            previous_title: None,
+            result: Ok(()),
+            status: crate::engine::ResolvedFinal::new(
+                "rename:s1",
+                crate::engine::Final::info("renamed"),
+            ),
+        });
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        assert_eq!(minted, None);
+        assert!(
+            engine
+                .session_store
+                .load_minted_branch_renames()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6477,6 +6679,21 @@ mod tests {
 
     // ── PrStatusReady ────────────────────────────────────────────────────
 
+    /// A `PrStatusReady` whose results carry each agent's current branch
+    /// generation, as a check that raced nothing would.
+    fn pr_status_ready(engine: &Engine, results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
+        WorkerEvent::PrStatusReady(
+            results
+                .into_iter()
+                .map(|(session_id, pr)| crate::worker::PrStatusResult {
+                    branch_generation: engine.pr_branch_generation(&session_id),
+                    session_id,
+                    pr,
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn pr_status_ready_batch_applies_live_results_and_drops_deleted_ones() {
         let (mut engine, _tmp) = test_engine();
@@ -6492,10 +6709,13 @@ mod tests {
             url: "https://github.com/o/r/pull/17".into(),
         };
 
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            ("deleted".into(), Some(pr.clone())),
-            ("live".into(), Some(pr)),
-        ]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![
+                ("deleted".into(), Some(pr.clone())),
+                ("live".into(), Some(pr)),
+            ],
+        ));
 
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         assert!(!engine.pr_statuses.contains_key("deleted"));
@@ -7255,10 +7475,10 @@ mod tests {
             owner_repo: "octo/repo".to_string(),
             url: "https://github.com/octo/repo/pull/42".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(pr.clone()),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(pr.clone()))],
+        ));
 
         // changed -> RebuildLeftItems (engine writes the timestamp directly).
         assert!(
@@ -7281,7 +7501,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_ready_skips_results_for_deleted_sessions() {
+    fn pr_status_ready_skips_results_for_deleted_sessions_and_previous_branches() {
         // The PR check is async: its result can land AFTER the session was
         // deleted. Applying it anyway would (a) attempt an sqlite upsert that
         // fails the sessions FOREIGN KEY, logging a scary ERROR on every
@@ -7300,10 +7520,10 @@ mod tests {
         // "ghost" is not a session the engine knows (deleted before the
         // result arrived). The result must be dropped whole: no status, no
         // timestamp, no store row, and no changed-flag rebuild.
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "ghost".to_string(),
-            Some(pr),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("ghost".to_string(), Some(pr))],
+        ));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -7317,6 +7537,56 @@ mod tests {
             .load_all_latest_prs()
             .expect("load prs");
         assert!(stored.iter().all(|p| p.session_id != "ghost"));
+
+        // A check in flight while the agent's local branch is renamed asked
+        // GitHub about the same branch (a rename never touches the remote, so
+        // the pull request still names the old one), and its answer stands.
+        let session = sample_session("s1", "p1", "feat/a");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let pr = |number: u64| PrInfo {
+            number,
+            state: PrState::Open,
+            title: format!("PR {number}"),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://example".into(),
+        };
+        let asked_before_rename = pr_status_ready(&engine, vec![("s1".into(), Some(pr(12)))]);
+        engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "feat/b".into(),
+            previous_title: None,
+            result: Ok(()),
+            status: crate::engine::ResolvedFinal::new(
+                "rename:s1",
+                crate::engine::Final::info("renamed"),
+            ),
+        });
+        engine.process_worker_event(asked_before_rename);
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+
+        // One in flight while the agent drifts onto another branch asked about
+        // a branch the agent has left: dropped before anything is saved or
+        // the debounce is stamped.
+        let asked_before_drift = pr_status_ready(&engine, vec![("s1".into(), Some(pr(13)))]);
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "develop".to_string(),
+        )]));
+        let stamped = engine.pr_last_checked.get("s1").copied();
+        let reaction = engine.process_worker_event(asked_before_drift);
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.pr_last_checked.get("s1").copied(), stamped);
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .iter()
+                .all(|p| p.pr_number != 13)
+        );
     }
 
     #[test]
@@ -7369,17 +7639,24 @@ mod tests {
     }
 
     #[test]
-    fn the_pr_sync_plan_marks_the_sidebar_s_inactive_agents() {
+    fn the_pr_sync_plan_marks_inactive_agents_and_branches_dux_minted() {
         // The poller's slow clock and the sidebar's Inactive tail must mean the
         // same thing, so the plan carries the sidebar's own verdict.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let mut live = sample_session("live", "p1", "feat/a");
         live.status = crate::model::SessionStatus::Active;
+        let live_created_at = live.created_at;
         let mut detached = sample_session("detached", "p1", "feat/b");
         detached.status = crate::model::SessionStatus::Detached;
+        detached
+            .workspace
+            .as_managed_mut()
+            .unwrap()
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
         let mut exited = sample_session("exited", "p1", "feat/c");
         exited.status = crate::model::SessionStatus::Exited;
+        exited.workspace.as_managed_mut().unwrap().branch_name = "elsewhere".into();
         engine.sessions.extend([live, detached, exited]);
 
         engine.update_pr_sync_sessions();
@@ -7389,6 +7666,25 @@ mod tests {
         assert_eq!(flag("live"), Some(false));
         assert_eq!(flag("detached"), Some(true));
         assert_eq!(flag("exited"), Some(true));
+
+        // A pull request found by head name is bounded by when dux minted the
+        // branch, which only an agent still on its own minted branch has.
+        let minted = |id: &str| {
+            plan.iter()
+                .find(|e| e.session_id == id)
+                .map(|e| e.branch_minted_at)
+        };
+        assert_eq!(minted("live"), Some(Some(live_created_at)));
+        assert_eq!(
+            minted("detached"),
+            Some(None),
+            "a branch that predates the agent"
+        );
+        assert_eq!(
+            minted("exited"),
+            Some(None),
+            "the agent has moved off its own branch"
+        );
     }
 
     #[test]
@@ -7628,10 +7924,10 @@ mod tests {
         };
         engine.pr_statuses.insert("s1".to_string(), pr);
 
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            ("s1".to_string(), None),
-            ("s2".to_string(), None),
-        ]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), None), ("s2".to_string(), None)],
+        ));
 
         // s1 was removed -> changed -> RebuildLeftItems.
         assert!(
@@ -7654,7 +7950,7 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // No pre-seeded pr_statuses; sending None for s1 leaves changed=false.
         let reaction =
-            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -7702,10 +7998,10 @@ mod tests {
             owner_repo: "octocat/Hello-World".to_string(),
             url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(other),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(other))],
+        ));
         assert!(
             matches!(reaction, EventReaction::Nothing),
             "a non-pin result changes nothing, got {}",
@@ -7727,7 +8023,7 @@ mod tests {
 
         // Direction 2: a None (e.g. discovery finding nothing) cannot clear it.
         let reaction =
-            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
         assert!(matches!(reaction, EventReaction::Nothing));
         assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
 
@@ -7741,10 +8037,10 @@ mod tests {
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(refreshed),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(refreshed))],
+        ));
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         assert_eq!(
             engine.pr_statuses.get("s1").map(|p| p.state.clone()),
@@ -7809,10 +8105,10 @@ mod tests {
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
         };
-        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(refreshed),
-        )]));
+        engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(refreshed))],
+        ));
 
         engine.clear_pull_request_override("s1").expect("detach");
 
@@ -7867,10 +8163,10 @@ mod tests {
             owner_repo: "o/r".to_string(),
             url: "https://github.com/o/r/pull/12".to_string(),
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
-            "s1".to_string(),
-            Some(late),
-        )]));
+        let reaction = engine.process_worker_event(pr_status_ready(
+            &engine,
+            vec![("s1".to_string(), Some(late))],
+        ));
 
         assert!(
             !engine.pr_statuses.contains_key("s1"),
