@@ -373,6 +373,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         background_server_wanted: false,
         companion_followup_ran: false,
         left_rows: Vec::new(),
+        left_rows_built: false,
         left_cursor_parked: false,
         terminal_cursor: None,
         tui_fallback_tabs: Default::default(),

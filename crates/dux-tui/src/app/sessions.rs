@@ -2425,11 +2425,9 @@ impl App {
         self.clear_focused_tab_for_session(session_id);
 
         // The deleted session is already gone from `engine.sessions`, so the row
-        // that slid into the freed slot sits at the same display index: keep the
-        // cursor where it is and let `rebuild_left_items` re-clamp it to a
-        // selectable row.
-        self.rebuild_left_items();
-        self.ensure_selectable_left_item();
+        // that slid into the freed slot sits at the same display index. This
+        // arm runs for this surface's own deletes, which put the cursor there.
+        self.rebuild_left_items_after_own_change();
         self.reload_changed_files();
 
         if update_status {
@@ -5170,6 +5168,7 @@ mod tests {
             background_server_wanted: false,
             companion_followup_ran: false,
             left_rows: Vec::new(),
+            left_rows_built: false,
             left_cursor_parked: false,
             terminal_cursor: None,
             tui_fallback_tabs: Default::default(),

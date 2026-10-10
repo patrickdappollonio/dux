@@ -1583,6 +1583,7 @@ impl App {
         // The panes this frame draws are the terminals this surface is
         // attached to (see `attachment_presence`).
         self.drawn_ptys.clear();
+        self.follow_terminal_cursor();
         self.render_frame(frame);
         self.publish_drawn_attachments();
     }
@@ -2408,7 +2409,7 @@ impl App {
                 ))),
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(self.selected_left));
+        let mut state = ListState::default().with_selected(self.left_cursor_on_a_row());
         StatefulWidget::render(
             List::new(items)
                 .block(self.themed_block("", focused))
@@ -2625,7 +2626,7 @@ impl App {
         }
         let mut state =
             ListState::default().with_selected(if self.left_section == LeftSection::Projects {
-                Some(self.selected_left)
+                self.left_cursor_on_a_row()
             } else {
                 None
             });

@@ -422,6 +422,66 @@ mod tests {
             .collect()
     }
 
+    /// A browser's create of `session` finishing: the launch's worker event,
+    /// processed by the engine and drained here as the run loop would.
+    fn land_a_browsers_create(app: &mut App, session: AgentSession) {
+        let request = app.agent_launch_request(
+            session,
+            false,
+            dux_core::worker::AgentLaunchKind::Create {
+                status_message: "Created agent.".to_string().into(),
+                status_warns: false,
+                status_notes: None,
+                pull_request_pin: None,
+                repo_path: app.engine.projects[0].path.clone(),
+                owns_worktree: false,
+                startup_result: None,
+                status_op_id: String::new(),
+            },
+        );
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::AgentLaunchReady(Box::new(
+                crate::app::AgentLaunchReadyData {
+                    request,
+                    client: spawn_sleeper(),
+                    spawn_ticket: None,
+                },
+            )))
+            .expect("send the launch");
+        app.drain_events();
+    }
+
+    /// With no agent at all, the first one a browser creates is the browser's:
+    /// this surface stays on nothing rather than drawing it.
+    #[test]
+    fn a_browsers_first_agent_is_not_drawn_here() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = crate::app::background_server::tests::FakeCompanion::serving();
+        app.companion = Some(companion);
+        let folder = tempfile::tempdir().expect("tempdir");
+        let mut browsers = app.engine.sessions[0].clone();
+        browsers.id = "from-the-browser".to_string();
+        browsers.slot_tab_id = "from-the-browser-slot".to_string();
+        browsers.status = crate::model::SessionStatus::Active;
+        if let dux_core::model::AgentWorkspace::Managed(managed) = &mut browsers.workspace {
+            managed.worktree_path = folder.path().to_string_lossy().to_string();
+        }
+        app.engine.sessions.clear();
+        app.rebuild_left_items();
+        render(&mut app);
+
+        land_a_browsers_create(&mut app, browsers);
+        render(&mut app);
+
+        assert_eq!(
+            app.engine.sessions.first().map(|s| s.id.as_str()),
+            Some("from-the-browser")
+        );
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), None);
+        assert!(attached_here(&app).is_empty(), "{:?}", attached_here(&app));
+    }
+
     /// A ready view a browser's launch of `session` produced.
     fn browser_ready(
         session: AgentSession,
@@ -489,31 +549,7 @@ mod tests {
 
             match launch {
                 Launch::Create => {
-                    let request = app.agent_launch_request(
-                        browsers,
-                        false,
-                        dux_core::worker::AgentLaunchKind::Create {
-                            status_message: "Created agent.".to_string().into(),
-                            status_warns: false,
-                            status_notes: None,
-                            pull_request_pin: None,
-                            repo_path: app.engine.projects[0].path.clone(),
-                            owns_worktree: false,
-                            startup_result: None,
-                            status_op_id: String::new(),
-                        },
-                    );
-                    app.engine
-                        .worker_tx
-                        .send(WorkerEvent::AgentLaunchReady(Box::new(
-                            crate::app::AgentLaunchReadyData {
-                                request,
-                                client: spawn_sleeper(),
-                                spawn_ticket: None,
-                            },
-                        )))
-                        .expect("send the launch");
-                    app.drain_events();
+                    land_a_browsers_create(&mut app, browsers);
                     assert_eq!(
                         app.engine.sessions[0].id, "from-the-browser",
                         "the engine puts a new agent at the head of the list"

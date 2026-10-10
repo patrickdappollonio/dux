@@ -125,6 +125,7 @@ impl App {
         self.apply_reaped_terminations();
         let maintenance = self.apply_pruned_pty_events();
         self.note_companion_maintenance(&maintenance);
+        self.retire_spent_fallback_claims();
         self.refresh_resource_monitor_if_due();
         self.engine.sync_has_active_processes();
     }
@@ -1773,13 +1774,11 @@ impl App {
                 session_id,
                 status_message,
             } => {
-                // Lands only where this surface started the launch AND is showing
-                // that agent's pane, not merely remembering its row behind a
-                // terminal.
-                let landed_here = started_here
-                    && self.session_surface == SessionSurface::Agent
-                    && self.selected_session().map(|selected| selected.id.as_str())
-                        == Some(session_id.as_str());
+                // Lands only where this surface started the launch AND that very
+                // tab's pane is the one on screen: not an agent row remembered
+                // behind a terminal or a diff, and not another tab of the agent.
+                let landed_here =
+                    started_here && self.shows_agent_tab(&session_id, &outcome.tab_id);
                 let status_message = if landed_here {
                     self.show_agent_surface();
                     // The fallback relaunch is engine-initiated
@@ -1808,6 +1807,33 @@ impl App {
             }
             AgentLaunchReadyView::StartupAutoReopen => {}
         }
+    }
+
+    /// Whether the centre pane on screen is tab `tab_id` of agent `session_id`.
+    fn shows_agent_tab(&self, session_id: &str, tab_id: &str) -> bool {
+        self.session_surface == SessionSurface::Agent
+            && matches!(self.center_mode, CenterMode::Agent)
+            && matches!(
+                self.fullscreen_overlay,
+                FullscreenOverlay::None | FullscreenOverlay::Agent
+            )
+            && self.selected_session().map(|selected| selected.id.as_str()) == Some(session_id)
+            && self.focused_tab_id(session_id) == tab_id
+    }
+
+    /// Drop the claims on fallbacks that can no longer come: a tab whose resume
+    /// is no longer eligible and that has no fallback launch in flight (it
+    /// ended normally, failed, was pruned, or its agent was deleted).
+    fn retire_spent_fallback_claims(&mut self) {
+        let engine = &self.engine;
+        self.tui_fallback_tabs.retain(|tab_id| {
+            engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new(tab_id))
+                || engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    tab_id.clone(),
+                )))
+        });
     }
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
@@ -3179,38 +3205,15 @@ mod tests {
     fn resume_fallback_ready_lands_minimized_for_the_selected_session() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        let session = app.engine.sessions[0].clone();
-        // A resuming launch started here lands first; its fallback follows.
-        app.tui_launched_ptys.insert(session.id.clone());
-        app.engine
-            .resume_fallback_candidates
-            .insert(TabId::new(session.id.clone()), std::time::Instant::now());
-        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
-            tab_id: session.id.clone(),
-            session: session.clone(),
-            pty_size: (80, 24),
-            detached_session_id: None,
-            wants_fullscreen: false,
-            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
-            view: AgentLaunchReadyView::Reconnect {
-                status_message: "Resumed.".to_string().into(),
-            },
-        });
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        // A resuming launch of the first tab started here lands first; its
+        // fallback follows.
+        land_a_resume_started_here(&mut app, &slot);
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
-            tab_id: session.id.clone(),
-            session: session.clone(),
-            pty_size: (80, 24),
-            detached_session_id: None,
-            wants_fullscreen: false,
-            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
-            view: AgentLaunchReadyView::ResumeFallback {
-                session_id: session.id.clone(),
-                status_message: "Fresh restart.".to_string().into(),
-            },
-        });
+        let outcome = fallback_ready(&app, &slot);
+        app.apply_agent_launch_ready_view(outcome);
 
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -4185,6 +4188,120 @@ mod tests {
             app.status.text().contains("detached"),
             "the one sentence is the detach's own: {}",
             app.status.text()
+        );
+    }
+
+    /// A resuming launch of `tab_id` this surface started, landed: what makes a
+    /// later fallback for that tab this surface's.
+    fn land_a_resume_started_here(app: &mut App, tab_id: &str) {
+        let session = app.engine.sessions[0].clone();
+        app.tui_launched_ptys.insert(tab_id.to_string());
+        app.engine
+            .resume_fallback_candidates
+            .insert(TabId::new(tab_id.to_string()), std::time::Instant::now());
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: tab_id.to_string(),
+            session,
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Resumed.".to_string().into(),
+            },
+        });
+    }
+
+    fn fallback_ready(app: &App, tab_id: &str) -> AgentLaunchReadyOutcome {
+        let session = app.engine.sessions[0].clone();
+        AgentLaunchReadyOutcome {
+            tab_id: tab_id.to_string(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+            view: AgentLaunchReadyView::ResumeFallback {
+                session_id: session.id.clone(),
+                status_message: "Fresh restart.".to_string().into(),
+            },
+        }
+    }
+
+    /// A fallback lands only on the pane actually on screen: not over a diff
+    /// opened since the resume started, and not on another tab of the same
+    /// agent that has focus.
+    #[test]
+    fn a_resume_fallback_lands_only_on_the_pane_that_is_on_screen() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        land_a_resume_started_here(&mut app, &slot);
+        app.center_mode = CenterMode::Diff {
+            lines: std::sync::Arc::new(Vec::new()),
+            scroll: 0,
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: "a.rs".to_string(),
+        };
+        let outcome = fallback_ready(&app, &slot);
+        app.apply_agent_launch_ready_view(outcome);
+        assert!(
+            matches!(app.center_mode, CenterMode::Diff { .. }),
+            "the diff opened since the resume stays on screen"
+        );
+
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        land_a_resume_started_here(&mut app, "tab-x");
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        app.set_focused_tab(&session_id, &slot);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let outcome = fallback_ready(&app, "tab-x");
+        app.apply_agent_launch_ready_view(outcome);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    /// The claim on a tab's fallback lives only while that tab can still fall
+    /// back: a resume that ended normally, followed by the agent's delete,
+    /// leaves no claim behind.
+    #[test]
+    fn a_fallback_claim_is_retired_once_the_tab_can_no_longer_fall_back() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        let client = crate::pty::PtyClient::spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "echo resumed the conversation; exit 0".to_string(),
+            ],
+            Path::new("."),
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn pty");
+        app.engine
+            .providers
+            .insert(TabId::new(slot.clone()), client);
+        app.engine
+            .mark_session_status("session-1", crate::model::SessionStatus::Active);
+        land_a_resume_started_here(&mut app, &slot);
+        assert!(app.tui_fallback_tabs.contains(&slot));
+
+        crate::app::test_support::wait_for_pty_eof(&mut app, &slot);
+        app.drain_events();
+        app.do_delete_session("session-1", false, None)
+            .expect("delete the agent");
+
+        assert!(
+            app.tui_fallback_tabs.is_empty(),
+            "{:?}",
+            app.tui_fallback_tabs
         );
     }
 }

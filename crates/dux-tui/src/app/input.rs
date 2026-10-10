@@ -1207,6 +1207,7 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.follow_terminal_cursor();
         if self.server_log_viewer.is_some() {
             self.handle_server_log_key(key);
             return Ok(false);
@@ -1448,7 +1449,7 @@ impl App {
                 if let Some(input) = self.agent_filter.as_mut()
                     && input.handle_key(key)
                 {
-                    self.rebuild_left_items();
+                    self.rebuild_left_items_after_own_change();
                     return Ok(true);
                 }
                 Ok(false)
@@ -39018,5 +39019,57 @@ cyan = "#00ffff"
             "Killed 1 terminal. In-progress CLI work was stopped, but the worktree files are \
              still available for review or relaunch."
         );
+    }
+
+    /// The terminal list sorted by activity reorders itself as output arrives,
+    /// and the terminal cursor stays on the terminal it was on: the row drawn as
+    /// selected and the one Enter opens are that terminal, not whichever slid
+    /// into its row.
+    #[test]
+    fn a_terminal_that_moves_above_the_cursor_does_not_take_its_enter() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        app.engine.config.ui.agent_sort = "updated".to_string();
+        let (first, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("first terminal");
+        let (second, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("second terminal");
+        let produce_output = |app: &mut App, id: &str| {
+            app.engine.companion_terminals[id]
+                .client
+                .write_bytes(b"x\n")
+                .expect("type into the terminal");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let before = app.engine.pty_activity.get(id).copied();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                app.engine.poll_pty_activity();
+                if app.engine.pty_activity.get(id).copied() != before {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "{id} never echoed");
+            }
+        };
+        produce_output(&mut app, &first);
+        app.rebuild_left_items();
+        assert_eq!(app.terminal_items()[0].0, &first);
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        app.select_terminal_row(0);
+
+        produce_output(&mut app, &second);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        assert_eq!(app.terminal_items()[0].0, &second, "the list re-sorted");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("Enter");
+
+        assert_eq!(app.active_terminal_id.as_deref(), Some(first.as_str()));
     }
 }

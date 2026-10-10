@@ -1673,8 +1673,9 @@ pub(crate) mod tests {
     /// on this surface has any other reason to: the change did not arrive through
     /// its own event stream. The rebuilt list keeps the cursor on the agent and
     /// the terminal it was on, found by id, so a delete or a reorder above it
-    /// does not slide this surface onto another agent and draw that one; only
-    /// when its own agent is the one gone does the cursor clamp to a neighbour.
+    /// does not slide this surface onto another agent and draw that one. When
+    /// its own agent is the one deleted, the cursor rests on no row rather than
+    /// on a neighbour it was never on.
     #[test]
     fn a_change_made_elsewhere_rebuilds_the_sidebar_and_the_cursor_keeps_its_agent() {
         enum Lend {
@@ -1687,19 +1688,26 @@ pub(crate) mod tests {
         let delete = |id: &'static str| -> EngineChange {
             Box::new(move |engine: &mut Engine| engine.sessions.retain(|s| s.id != id))
         };
-        let cases: Vec<(&str, Lend, EngineChange, &str, &[&str])> = vec![
+        type Case = (
+            &'static str,
+            Lend,
+            EngineChange,
+            Option<&'static str>,
+            &'static [&'static str],
+        );
+        let cases: Vec<Case> = vec![
             (
                 "a delete above",
                 Lend::Service,
                 delete("agent-a"),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
                 "a reorder",
                 Lend::Service,
                 Box::new(|engine: &mut Engine| engine.sessions.rotate_right(1)),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
@@ -1708,14 +1716,14 @@ pub(crate) mod tests {
                 Box::new(|engine: &mut Engine| {
                     engine.config.ui.agent_sort = "name_desc".to_string();
                 }),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
                 "a delete the fanout finishes",
                 Lend::Fanout,
                 delete("agent-a"),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
@@ -1730,7 +1738,7 @@ pub(crate) mod tests {
                         .expect("a terminal");
                     engine.companion_terminals.remove(&first);
                 }),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
@@ -1744,14 +1752,14 @@ pub(crate) mod tests {
                         .expect("a terminal");
                     first.client.write_bytes(b"\x04").expect("end its input");
                 }),
-                "agent-c",
+                Some("agent-c"),
                 &["agent-c-slot"],
             ),
             (
                 "its own agent deleted",
                 Lend::Service,
                 delete("agent-c"),
-                "agent-b",
+                None,
                 &[],
             ),
         ];
@@ -1835,7 +1843,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 app.selected_session().map(|s| s.id.as_str()),
-                Some(selected),
+                selected,
                 "{name}: the cursor's agent"
             );
             if app.engine.companion_terminals.contains_key(&terminal) {

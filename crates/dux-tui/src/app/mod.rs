@@ -677,9 +677,13 @@ pub struct App {
     /// command line or a reloaded config has since done to the sessions the
     /// cached indexes point into. Every rebuild finds that row again by id.
     pub(crate) left_rows: Vec<LeftRow>,
-    /// The cursor is on no row: the non-agent row it was on went away and the
-    /// row that took its place is an agent it was never on. Held as an index
-    /// one past the end; this surface's next move puts it back on a row.
+    /// Whether the list has been built at least once: before that, the cursor
+    /// takes the first row as it always has, and after it an empty list is a
+    /// cursor on nothing.
+    pub(crate) left_rows_built: bool,
+    /// The cursor is on no row: the row it was on was deleted or went away, or
+    /// the list was empty, and only this surface moves it onto a row. Held as
+    /// an index one past the end; this surface's next move puts it on a row.
     pub(crate) left_cursor_parked: bool,
     /// The terminal row the terminal cursor is on, by id, with the index it was
     /// on when this surface put it there. A rebuild follows the id; an index
@@ -4033,9 +4037,10 @@ pub(crate) enum LeftRow {
 /// What the agent cursor was on before a rebuild.
 enum LeftCursorOn {
     Row(LeftRow),
-    /// Parked off every row.
+    /// No row: parked, or an empty list.
     Nothing,
-    /// An index on no row (an empty list), which the clamp repairs.
+    /// Not known: the list was never built, or the index is past a list that
+    /// has rows, which the clamp repairs.
     Unknown,
 }
 
@@ -4643,6 +4648,7 @@ impl App {
             background_server_wanted: false,
             companion_followup_ran: false,
             left_rows: Vec::new(),
+            left_rows_built: false,
             left_cursor_parked: false,
             terminal_cursor: None,
             tui_fallback_tabs: Default::default(),
@@ -6277,6 +6283,7 @@ impl App {
             })
             .collect();
         self.put_left_cursor_back(was_on);
+        self.left_rows_built = true;
         self.ensure_selectable_left_item();
         // The same query prunes the terminal list (`terminal_items`), so the
         // terminal cursor is repaired in the same breath as the agent one: this
@@ -6396,14 +6403,14 @@ impl App {
 
     pub(crate) fn open_agent_filter(&mut self) {
         self.agent_filter = Some(TextInput::new());
-        self.rebuild_left_items();
+        self.rebuild_left_items_after_own_change();
     }
 
     /// Leave agent-list filter mode: clear the query and restore the full list,
     /// keeping a sensible (selectable) selection via `rebuild_left_items`.
     pub(crate) fn close_agent_filter(&mut self) {
         self.agent_filter = None;
-        self.rebuild_left_items();
+        self.rebuild_left_items_after_own_change();
     }
 
     pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
@@ -6477,20 +6484,27 @@ impl App {
     /// What the agent cursor is on, read from the list as this surface last
     /// built it.
     fn left_cursor_row(&self) -> LeftCursorOn {
+        if !self.left_rows_built {
+            return LeftCursorOn::Unknown;
+        }
         if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
             return LeftCursorOn::Nothing;
         }
         match self.left_rows.get(self.selected_left) {
             Some(row) => LeftCursorOn::Row(row.clone()),
+            None if self.left_rows.is_empty() => LeftCursorOn::Nothing,
             None => LeftCursorOn::Unknown,
         }
     }
 
-    /// Put the agent cursor back on `was_on` in the list just rebuilt. A row
-    /// that is gone leaves it where it was, for the clamp to move onto a
-    /// neighbour, when that row was an agent (the way a delete moves it on);
-    /// when it was not, the cursor goes onto no row rather than onto an agent it
-    /// was never on.
+    /// Put the agent cursor back on `was_on` in the list just rebuilt.
+    ///
+    /// Only this surface moves the cursor onto a row, so a row that is gone
+    /// does not hand it to whatever took its place: an agent deleted (from
+    /// anywhere but here, whose own deletes see to their cursor) or a non-agent
+    /// row that went away leaves the cursor on no row, and so does an empty
+    /// list that agents then appear in. An agent still there but hidden (a
+    /// filter, a collapsed tail) leaves the index for the clamp, as before.
     fn put_left_cursor_back(&mut self, was_on: LeftCursorOn) {
         match was_on {
             LeftCursorOn::Row(row) => {
@@ -6501,7 +6515,9 @@ impl App {
                 {
                     self.selected_left = pos;
                     self.left_cursor_parked = false;
-                } else if matches!(row, LeftRow::Agent(_)) {
+                } else if matches!(&row, LeftRow::Agent(id)
+                    if self.engine.sessions.iter().any(|session| session.id == *id))
+                {
                     self.left_cursor_parked = false;
                 } else {
                     self.park_left_cursor();
@@ -6512,11 +6528,27 @@ impl App {
         }
     }
 
+    /// The agent cursor's row, or `None` when it rests on no row.
+    pub(crate) fn left_cursor_on_a_row(&self) -> Option<usize> {
+        (self.selected_left < self.left_items_cache.len()).then_some(self.selected_left)
+    }
+
     fn park_left_cursor(&mut self) {
         self.selected_left = self.left_rows.len();
-        self.left_cursor_parked = !self.left_rows.is_empty();
-        if !self.left_cursor_parked {
-            self.selected_left = 0;
+        self.left_cursor_parked = true;
+    }
+
+    /// Rebuild the agent list after a change this surface made itself: a row
+    /// it was on that went away hands the cursor to the row that took its place,
+    /// and a cursor on no row lands on one, as this surface's own deletes and
+    /// filters always have.
+    pub(crate) fn rebuild_left_items_after_own_change(&mut self) {
+        let row = self.selected_left;
+        self.rebuild_left_items();
+        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
+            self.left_cursor_parked = false;
+            self.selected_left = row;
+            self.ensure_selectable_left_item();
         }
     }
 
@@ -7506,8 +7538,16 @@ impl App {
     /// under the cursor has to move the cursor, and a filter that empties the
     /// section sends focus back to the agents).
     pub(crate) fn clamp_terminal_cursor(&mut self) {
-        // Back onto the terminal it was on, wherever that terminal is now, unless
-        // the index was set by hand since.
+        self.follow_terminal_cursor();
+        self.clamp_terminal_index();
+        self.note_terminal_cursor();
+    }
+
+    /// Put the terminal cursor back on the terminal it was on, wherever the
+    /// list's order (which a sort by activity changes as output arrives) has
+    /// put it now, unless the index was set by hand since. Run wherever the
+    /// order is read: a rebuild, a frame, and a key or mouse event.
+    pub(crate) fn follow_terminal_cursor(&mut self) {
         if let Some((at, id)) = self.terminal_cursor.clone()
             && at == self.selected_terminal_index
             && let Some(pos) = self
@@ -7516,9 +7556,8 @@ impl App {
                 .position(|(candidate, _)| **candidate == id)
         {
             self.selected_terminal_index = pos;
+            self.terminal_cursor = Some((pos, id));
         }
-        self.clamp_terminal_index();
-        self.note_terminal_cursor();
     }
 
     /// Put the terminal cursor on row `index` of the visible terminal list.
