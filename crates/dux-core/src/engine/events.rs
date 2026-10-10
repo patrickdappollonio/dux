@@ -1793,6 +1793,12 @@ impl Engine {
                 self.note_resume_launch(&tab_id);
             }
             self.update_branch_sync_sessions();
+            // The new agent joins the pull-request plan now. Nothing else is
+            // owed a rebuild by a create (its status is born Active, so the
+            // launch's status-change rebuild never fires for it), and an agent
+            // can push, open and merge a pull request long before an unrelated
+            // rebuild would have enrolled it.
+            self.update_pr_sync_sessions();
 
             // Extract Create-kind payload for the view outcome.
             let AgentLaunchKind::Create {
@@ -1854,6 +1860,12 @@ impl Engine {
                     Some(notes) => crate::status_text![*notes, " ", told],
                     None => told,
                 }));
+            } else {
+                // An agent created on a branch that already existed may already
+                // have a pull request, so it is asked about once now rather
+                // than at the next poll. A pinned copy was resolved moments
+                // ago and needs no second look.
+                self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
             }
             let startup_result_error = startup_result.and_then(|r| r.status.err());
 
@@ -3361,6 +3373,9 @@ impl Engine {
             return EventReaction::Nothing;
         }
         self.update_branch_sync_sessions();
+        // The pull-request plan names the branch too, and would otherwise keep
+        // asking GitHub about the one the agent has left.
+        self.update_pr_sync_sessions();
         EventReaction::RebuildLeftItems
     }
 
@@ -3448,6 +3463,8 @@ impl Engine {
                     }
                 }
                 self.update_branch_sync_sessions();
+                // So does the pull-request plan, which asks GitHub by branch.
+                self.update_pr_sync_sessions();
             }
             Err(err) => {
                 logger::warn(&format!(
@@ -5883,6 +5900,16 @@ mod tests {
         let loaded = engine.session_store.load_sessions().expect("load");
         let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
         assert_eq!(stored.branch_name(), Some("new"));
+
+        // The pull-request plan asks about the branch the agent is on now.
+        let planned: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.branch_name.clone())
+            .collect();
+        assert_eq!(planned, vec!["new".to_string()]);
     }
 
     #[test]
@@ -6215,6 +6242,15 @@ mod tests {
         assert_eq!(engine.sessions[0].branch_name(), Some("new-branch"));
         let stored = engine.session_store.load_sessions().unwrap();
         assert_eq!(stored[0].branch_name(), Some("new-branch"));
+        // The pull-request plan asks about the renamed branch from now on.
+        let planned: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.branch_name.clone())
+            .collect();
+        assert_eq!(planned, vec!["new-branch".to_string()]);
     }
 
     #[test]

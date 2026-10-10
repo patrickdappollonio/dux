@@ -7378,6 +7378,64 @@ mod tests {
         );
     }
 
+    /// A created agent joins the pull-request plan the moment its row is
+    /// written, rather than whenever something unrelated next rebuilds it: an
+    /// agent can push, open and merge its pull request well inside the time an
+    /// idle workspace goes without a rebuild.
+    #[test]
+    fn a_created_agent_joins_the_pull_request_plan_at_once() {
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.update_pr_sync_sessions();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let session = sample_session("s2", "p1", "feat/new");
+        let client =
+            crate::pty::PtyClient::spawn_with_env("cat", &[], worktree.path(), 24, 80, 100, &[])
+                .unwrap();
+        let _ = engine.process_agent_launch_ready(crate::worker::AgentLaunchReadyData {
+            spawn_ticket: None,
+            request: crate::worker::AgentLaunchRequest {
+                tab_id: session.slot_tab_id().to_owned(),
+                provider: session.provider.clone(),
+                session,
+                provider_config: Default::default(),
+                env: Vec::new(),
+                identity: Default::default(),
+                resume: false,
+                pty_size: (24, 80),
+                scrollback_lines: 100,
+                kind: crate::worker::AgentLaunchKind::Create {
+                    status_message: Default::default(),
+                    status_warns: false,
+                    status_notes: None,
+                    pull_request_pin: None,
+                    repo_path: "/tmp/p1".into(),
+                    owns_worktree: true,
+                    startup_result: None,
+                    status_op_id: "op-create".into(),
+                },
+                wants_fullscreen: false,
+                status_quiet: crate::statusline::QuietSurfaces::LOUD,
+            },
+            client,
+        });
+
+        let mut enrolled: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        enrolled.sort();
+        assert_eq!(enrolled, vec!["s1".to_string(), "s2".to_string()]);
+        assert!(
+            engine.pr_last_checked.contains_key("s2"),
+            "a branch that already existed may already have a pull request, so it is asked about once"
+        );
+    }
+
     /// The refs watcher puts an inotify watch on `.git/refs/heads` per session.
     /// A standalone agent must not get one even when its folder IS a repository
     /// (the watch exists to notice the AGENT's branch moving, and there is no
