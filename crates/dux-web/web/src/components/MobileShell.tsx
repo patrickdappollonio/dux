@@ -571,7 +571,8 @@ function AgentTerminalScreen({
 }
 
 // The changes spoke: a slim back bar over the full-screen shared changed-files
-// pane (diffs open in the full-screen Monaco editor, not a sheet).
+// pane. A tapped file opens in the standalone editor page in this same browser
+// tab, and Back comes back here.
 function ChangesScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">

@@ -2884,6 +2884,19 @@ export function standaloneEditorHash(
   })
 }
 
+// Move THIS tab to the standalone editor at a file, for the phone, where the
+// in-page overlay does not render. It is a plain fragment navigation, the same
+// one an anchor to that address makes: the browser pushes an entry from the
+// address the user is on, and the router follows the URL into the standalone
+// surface, so Back lands exactly where the user came from.
+export function openStandaloneEditorInThisTab(
+  root: EditorRoot,
+  editor: { mode: EditorViewMode; path: string },
+): void {
+  if (typeof location === "undefined") return
+  location.hash = standaloneEditorHash(root, editor)
+}
+
 // The route the app currently holds in state.
 function currentRoute(): Route {
   const target = state.selectedTarget

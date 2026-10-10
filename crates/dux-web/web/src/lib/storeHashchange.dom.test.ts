@@ -85,7 +85,7 @@ describe("a plain hash anchor drives the router", () => {
     vi.unstubAllGlobals()
   })
 
-  it("leaves the standalone surface when its open-in-dux anchor is clicked", async () => {
+  it("swaps between the standalone surface and the workspace on a same-tab fragment move, and Back undoes it", async () => {
     window.location.hash = "#/editor/agent/s1"
     const mod = await import("./store")
     await vi.waitFor(() => {
@@ -107,5 +107,31 @@ describe("a plain hash anchor drives the router", () => {
     expect(mod.getSnapshot().editorRoute).toBeNull()
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(window.location.hash).toBe("#/agent/s1")
+
+    // The phone's Changes screen opens a file in the standalone editor in
+    // this same tab, and the browser's Back lands on the Changes screen again.
+    mod.openChangesScreen()
+    expect(window.location.hash).toBe("#/agent/s1/changes")
+    mod.openStandaloneEditorInThisTab(
+      { kind: "agent", sessionId: "s1" },
+      { mode: "diff", path: "a.ts" },
+    )
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    })
+    expect(window.location.hash).toBe("#/editor/agent/s1/diff/a.ts")
+    expect(mod.getSnapshot().editorRoute).toMatchObject({
+      mode: "diff",
+      path: "a.ts",
+    })
+
+    history.back()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    })
+    expect(window.location.hash).toBe("#/agent/s1/changes")
+    expect(mod.getSnapshot().mobileScreen).toBe("changes")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().editorRoute).toBeNull()
   })
 })
