@@ -691,6 +691,22 @@ impl AgentSession {
         self.workspace.supports_branch_git()
     }
 
+    /// When the branch this agent is on was born, if dux minted it: the
+    /// agent's creation, for an agent still on the branch dux created for it.
+    /// `None` for a branch that existed before the agent (whatever its history
+    /// before then is, it is not dux's to bound), for a branch the agent has
+    /// since moved to, and for a standalone agent, which has no branch.
+    pub fn branch_minted_at(&self) -> Option<DateTime<Utc>> {
+        let managed = self.workspace.as_managed()?;
+        let minted_here = match managed.branch_provenance {
+            BranchProvenance::CreatedByDux => true,
+            BranchProvenance::AttachedExisting
+            | BranchProvenance::Adopted
+            | BranchProvenance::Unknown => false,
+        };
+        (minted_here && managed.branch_name == managed.initial_branch).then_some(self.created_at)
+    }
+
     /// The name to show for this agent: its durable title when it has one, the
     /// branch it tracks otherwise.
     ///

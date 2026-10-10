@@ -1757,6 +1757,34 @@ pub fn branch_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) ->
     }
 }
 
+/// Whether the commit named by the object id `commit` is in the history of
+/// the local branch `branch` (the tip itself counts).
+///
+/// Answers only yes or no, and every doubt is a no: a `commit` that is not a
+/// full hexadecimal object id, a commit this clone does not have, a branch that
+/// does not exist, and git failing to run are all refusals, because the caller
+/// adopts something on a yes. It shells out to git, so callers run it in a
+/// background worker. The branch is passed fully qualified as
+/// `refs/heads/<name>`, which cannot begin with a dash, the object id is hex
+/// and cannot either, and the trailing `--` pins the pathspec boundary.
+pub fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str) -> bool {
+    let is_object_id =
+        matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_object_id {
+        return false;
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", commit, &branch_ref, "--"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.code() == Some(0))
+}
+
 /// Whether any local or `origin` remote-tracking branch lives BELOW `name`,
 /// such as `<name>/x`. Git stores refs as paths, so a branch `<name>` cannot
 /// be created while one of those exists, even though no branch is called
@@ -9522,6 +9550,58 @@ mod tests {
         commit_on_branch(repo.path(), "--all", "one");
         assert!(branch_is_ancestor(repo.path(), "base", "--all").unwrap());
         assert!(!branch_is_ancestor(repo.path(), "--all", "base").unwrap());
+    }
+
+    // ── commit_is_in_branch_history ──────────────────────────
+
+    fn rev_parse(repo: &Path, rev: &str) -> String {
+        let out = test_support::git_command()
+            .args(["rev-parse", "--verify", rev])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn commit_is_in_branch_history_accepts_only_commits_the_branch_contains() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        let older = rev_parse(repo.path(), "refs/heads/feature");
+        commit_on_branch(repo.path(), "feature", "two");
+        let tip = rev_parse(repo.path(), "refs/heads/feature");
+        run_git(repo.path(), &["reset", "--hard", &older]);
+        commit_on_branch(repo.path(), "other", "elsewhere");
+        let elsewhere = rev_parse(repo.path(), "refs/heads/other");
+
+        assert!(commit_is_in_branch_history(repo.path(), &tip, "feature"));
+        assert!(commit_is_in_branch_history(repo.path(), &older, "feature"));
+        assert!(
+            !commit_is_in_branch_history(repo.path(), &elsewhere, "feature"),
+            "a commit on a diverged line is not the branch's"
+        );
+        assert!(
+            !commit_is_in_branch_history(
+                repo.path(),
+                "0123456789abcdef0123456789abcdef01234567",
+                "feature"
+            ),
+            "a commit this clone does not have is never accepted"
+        );
+        assert!(
+            !commit_is_in_branch_history(repo.path(), "HEAD", "feature"),
+            "only an object id is a head commit"
+        );
+        assert!(!commit_is_in_branch_history(repo.path(), &tip, "missing"));
+    }
+
+    #[test]
+    fn commit_is_in_branch_history_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "--all", "one");
+        let tip = rev_parse(repo.path(), "refs/heads/--all");
+        assert!(commit_is_in_branch_history(repo.path(), &tip, "--all"));
     }
 
     // ── refs_exist_below ─────────────────────────────────────

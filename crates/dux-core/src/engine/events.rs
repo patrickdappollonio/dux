@@ -7405,17 +7405,24 @@ mod tests {
     }
 
     #[test]
-    fn the_pr_sync_plan_marks_the_sidebar_s_inactive_agents() {
+    fn the_pr_sync_plan_marks_inactive_agents_and_branches_dux_minted() {
         // The poller's slow clock and the sidebar's Inactive tail must mean the
         // same thing, so the plan carries the sidebar's own verdict.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let mut live = sample_session("live", "p1", "feat/a");
         live.status = crate::model::SessionStatus::Active;
+        let live_created_at = live.created_at;
         let mut detached = sample_session("detached", "p1", "feat/b");
         detached.status = crate::model::SessionStatus::Detached;
+        detached
+            .workspace
+            .as_managed_mut()
+            .unwrap()
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
         let mut exited = sample_session("exited", "p1", "feat/c");
         exited.status = crate::model::SessionStatus::Exited;
+        exited.workspace.as_managed_mut().unwrap().branch_name = "elsewhere".into();
         engine.sessions.extend([live, detached, exited]);
 
         engine.update_pr_sync_sessions();
@@ -7425,6 +7432,25 @@ mod tests {
         assert_eq!(flag("live"), Some(false));
         assert_eq!(flag("detached"), Some(true));
         assert_eq!(flag("exited"), Some(true));
+
+        // A pull request found by head name is bounded by when dux minted the
+        // branch, which only an agent still on its own minted branch has.
+        let minted = |id: &str| {
+            plan.iter()
+                .find(|e| e.session_id == id)
+                .map(|e| e.branch_minted_at)
+        };
+        assert_eq!(minted("live"), Some(Some(live_created_at)));
+        assert_eq!(
+            minted("detached"),
+            Some(None),
+            "a branch that predates the agent"
+        );
+        assert_eq!(
+            minted("exited"),
+            Some(None),
+            "the agent has moved off its own branch"
+        );
     }
 
     #[test]

@@ -92,6 +92,19 @@ const MAX_ALIASES_PER_QUERY: usize = 100;
 /// pull requests, worth roughly 5% of the call's wall time. Most refs have one.
 const DISCOVERY_WINDOW: usize = 20;
 
+/// How many of the most recently created pull requests with a given head name
+/// the head-name lookup asks for. It runs only for an agent with no known pull
+/// request, and every candidate still has to pass the checks in
+/// [`select_head_name_match`], so a handful covers a name reused a few times.
+const HEAD_NAME_WINDOW: usize = 5;
+
+/// How much earlier than the branch's minting a head-name match may claim to
+/// have been opened and still be accepted. GitHub stamps `createdAt` with its
+/// own clock and dux stamps the agent with this machine's, so an exact
+/// comparison would refuse the agent's own pull request on a machine whose
+/// clock runs a little fast.
+const HEAD_NAME_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+
 /// Hard wall-clock cap on a single `gh` invocation. A hung `gh` (stalled TCP,
 /// DNS hang, credential-helper prompt) must not park a worker thread: we bail
 /// fast and let the next cycle retry rather than block for long.
@@ -211,14 +224,24 @@ struct Planned {
     known: Option<StoredPr>,
     is_terminal: bool,
     /// Open known PRs also get a by-number alias (robust when the branch was
-    /// deleted on merge). Terminal-but-running and undiscovered sessions get
-    /// only the head-ref discovery alias.
+    /// deleted on merge). Terminal-but-running sessions get
+    /// only the head-ref discovery alias; undiscovered ones also get `emit_head`.
     emit_num: bool,
     /// Whether the head-ref discovery alias is emitted at all. True for every
     /// remote-derived plan; false for a PINNED session, whose only alias is the
     /// by-number refresh of the pin (discovery would answer for a PR the user
     /// deliberately overrode).
     emit_ref: bool,
+    /// Whether the head-name alias is emitted: a session with no known pull
+    /// request, whose pull request may have been merged and its branch deleted
+    /// before dux ever saw it. See [`select_head_name_match`].
+    emit_head: bool,
+    /// The agent's working copy, where a head-name match's commit is looked up.
+    worktree_path: String,
+    /// When dux minted the branch, for a branch it minted and the agent is
+    /// still on; `None` otherwise. A head-name match opened before then
+    /// belongs to an earlier branch of the same name.
+    branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
     /// A manually attached PR: the plan targets the PIN's repo and number, and
     /// the merge rule reports the pin (or its stored reconstruction), never a
     /// discovery result.
@@ -300,6 +323,7 @@ impl Planned {
                 && normalize_github_host(&k.host).eq_ignore_ascii_case(&host)
         });
         let emit_num = known_matches_target && !is_terminal;
+        let known_is_none = known.is_none();
         Planned {
             session_id,
             host,
@@ -310,8 +334,23 @@ impl Planned {
             is_terminal,
             emit_num,
             emit_ref: true,
+            emit_head: known_is_none,
+            worktree_path: String::new(),
+            branch_minted_at: None,
             pinned: false,
         }
+    }
+
+    /// Name the working copy a head-name match is checked against, and when
+    /// dux minted the branch (see [`Planned::branch_minted_at`]).
+    fn with_working_copy(
+        mut self,
+        worktree_path: String,
+        branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        self.worktree_path = worktree_path;
+        self.branch_minted_at = branch_minted_at;
+        self
     }
 
     /// Build the plan for a PINNED session: exactly one alias, the by-number
@@ -337,6 +376,9 @@ impl Planned {
             is_terminal,
             emit_num: true,
             emit_ref: false,
+            emit_head: false,
+            worktree_path: String::new(),
+            branch_minted_at: None,
             pinned: true,
         }
     }
@@ -350,7 +392,7 @@ impl Planned {
 ///
 /// | Known PR state | Agent running? | Aliases                                   |
 /// |----------------|----------------|-------------------------------------------|
-/// | None           | any            | head-ref discovery                        |
+/// | None           | any            | head-ref discovery **+** head-name lookup |
 /// | OPEN           | any            | head-ref discovery **+** by-number refresh|
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
 /// | MERGED/CLOSED  | no             | zero calls, except discovery on a deliberate trigger |
@@ -404,7 +446,9 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = (planned[i].emit_ref as usize) + (planned[i].emit_num as usize);
+            let cost = (planned[i].emit_ref as usize)
+                + (planned[i].emit_num as usize)
+                + (planned[i].emit_head as usize);
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
@@ -583,14 +627,17 @@ fn plan_entries(
             continue;
         };
 
-        planned.push(Planned::new(
-            entry.session_id.clone(),
-            host,
-            owner.to_string(),
-            repo.to_string(),
-            entry.branch_name.clone(),
-            entry.known_pr.clone(),
-        ));
+        planned.push(
+            Planned::new(
+                entry.session_id.clone(),
+                host,
+                owner.to_string(),
+                repo.to_string(),
+                entry.branch_name.clone(),
+                entry.known_pr.clone(),
+            )
+            .with_working_copy(entry.worktree_path.clone(), entry.branch_minted_at),
+        );
     }
 
     (results, planned)
@@ -630,6 +677,9 @@ fn ref_alias(pos: usize) -> String {
 }
 fn num_alias(pos: usize) -> String {
     format!("s{pos}_num")
+}
+fn head_alias(pos: usize) -> String {
+    format!("s{pos}_head")
 }
 
 /// Which hosts dux may name when it calls `gh`.
@@ -1284,7 +1334,13 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
             },
         ));
     }
-    let (out, rate) = parse_chunk_response(planned, chunk, &pos_repo, data);
+    let (out, rate) = parse_chunk_response(
+        planned,
+        chunk,
+        &pos_repo,
+        data,
+        &head_commit_in_local_history,
+    );
     (out, rate, hard_failed, rate_limited)
 }
 
@@ -1352,6 +1408,18 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                     ref_alias(pos),
                 ));
             }
+            if p.emit_head {
+                // The same question asked by head NAME, which still answers
+                // after a merge deleted the branch and the ref lookup above
+                // came back null. A name is not an identity, so each node
+                // carries what `select_head_name_match` needs to refuse an
+                // older pull request that merely used the same name.
+                q.push_str(&format!(
+                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}\n",
+                    head_alias(pos),
+                    graphql_string(&p.branch),
+                ));
+            }
             if p.emit_num
                 && let Some(known) = &p.known
             {
@@ -1378,6 +1446,7 @@ fn parse_chunk_response(
     chunk: &[usize],
     pos_repo: &[usize],
     data: Option<&serde_json::Value>,
+    in_local_history: &dyn Fn(&Planned, &str) -> bool,
 ) -> (Vec<(String, Option<PrInfo>)>, Option<RateLimitInfo>) {
     let rate = data.and_then(parse_rate_limit);
     let mut out = Vec::with_capacity(chunk.len());
@@ -1416,6 +1485,20 @@ fn parse_chunk_response(
                         .collect(),
                 )
             });
+        // A branch a merge deleted has no ref left to ask about, so its pull
+        // request is looked for by head name. Only for a null ref: while the
+        // branch exists, the ref lookup is the answer.
+        let ref_pr = ref_pr.or_else(|| {
+            let ref_value = repo_obj.and_then(|r| r.get(ref_alias(pos).as_str()));
+            if !p.emit_head || !ref_value.is_some_and(serde_json::Value::is_null) {
+                return None;
+            }
+            let nodes = repo_obj
+                .and_then(|r| r.get(head_alias(pos).as_str()))
+                .and_then(|h| h.get("nodes"))
+                .and_then(|n| n.as_array())?;
+            select_head_name_match(p, &owner_repo, nodes, in_local_history)
+        });
         let num_pr = if p.emit_num {
             repo_obj
                 .and_then(|r| r.get(num_alias(pos).as_str()))
@@ -1560,6 +1643,70 @@ fn select_discovered_pr(nodes: Vec<PrInfo>) -> Option<PrInfo> {
     nodes
         .into_iter()
         .max_by_key(|pr| (pr.state == PrState::Open, pr.number))
+}
+
+/// Pick the pull request a head-name lookup found for a branch whose ref is
+/// gone, or none.
+///
+/// A head name is not an identity: branch names are reused, so an older pull
+/// request from an earlier branch of the same name answers the lookup just as
+/// well. A node is accepted only when every one of these holds:
+///   - its head repository is the queried repository, not a fork (a node whose
+///     head repository is gone cannot be shown to be this one);
+///   - for a branch dux minted, it was opened after the branch was born, give
+///     or take [`HEAD_NAME_CLOCK_SLACK`];
+///   - its head commit is in the agent's own branch (`in_local_history`, which
+///     refuses a commit this clone does not have).
+///
+/// Among the nodes that pass, the most recently created one wins.
+fn select_head_name_match(
+    p: &Planned,
+    owner_repo: &str,
+    nodes: &[serde_json::Value],
+    in_local_history: &dyn Fn(&Planned, &str) -> bool,
+) -> Option<PrInfo> {
+    let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, &str, PrInfo)> = nodes
+        .iter()
+        .filter_map(|node| {
+            let head_repo = node
+                .get("headRepository")
+                .and_then(|r| r.get("nameWithOwner"))
+                .and_then(|v| v.as_str())?;
+            if !head_repo.eq_ignore_ascii_case(owner_repo) {
+                return None;
+            }
+            let created_at = node
+                .get("createdAt")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+                .with_timezone(&chrono::Utc);
+            if p.branch_minted_at
+                .is_some_and(|minted| created_at < minted - HEAD_NAME_CLOCK_SLACK)
+            {
+                return None;
+            }
+            let head_oid = node.get("headRefOid").and_then(|v| v.as_str())?;
+            let pr = parse_pr_json_value(node, &p.host, owner_repo)?;
+            Some((created_at, head_oid, pr))
+        })
+        .collect();
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    let (_, _, pr) = candidates
+        .into_iter()
+        .find(|(_, head_oid, _)| in_local_history(p, head_oid))?;
+    logger::debug(&format!(
+        "[gh-integration] branch {} is gone on {owner_repo}; adopted PR #{} found by head name, \
+         whose head commit is in the agent's branch",
+        p.branch, pr.number,
+    ));
+    Some(pr)
+}
+
+/// The production check for [`select_head_name_match`]: whether `head_oid` is
+/// in the history of the agent's branch, read from its working copy. Runs git,
+/// which is fine here because the whole sync runs on a background worker.
+fn head_commit_in_local_history(p: &Planned, head_oid: &str) -> bool {
+    git::commit_is_in_branch_history(Path::new(&p.worktree_path), head_oid, &p.branch)
 }
 
 /// Reconcile the head-ref discovery result and the by-number refresh into the
@@ -3110,6 +3257,12 @@ mod tests {
         )
     }
 
+    /// The head-name check for tests whose response carries no head-name
+    /// nodes: it is never reached, and refuses if it ever is.
+    fn never_in_local_history(_: &Planned, _: &str) -> bool {
+        false
+    }
+
     /// A ref-discovery node wrapped as the GraphQL shape `s{pos}_ref` resolves to.
     fn ref_node(number: u64, state: &str) -> serde_json::Value {
         serde_json::json!({
@@ -3156,6 +3309,13 @@ mod tests {
         assert!(!q.contains("CREATED_AT"));
         // No known PR → no by-number alias.
         assert!(!q.contains("s0_num"));
+        // ...but a lookup by head name, which still answers once a merge has
+        // deleted the branch, with what it takes to tell this branch's pull
+        // request from an older one that happened to use the same name.
+        assert!(q.contains(
+            "s0_head: pullRequests(headRefName: \"feat/x\", states: [OPEN, MERGED, CLOSED], last: 5) \
+{ nodes { number state title url createdAt headRefOid headRepository { nameWithOwner } } }"
+        ));
     }
 
     #[test]
@@ -3170,6 +3330,9 @@ mod tests {
         let (q, _) = build_chunk_query(&ps, &[0]);
         assert!(q.contains("s0_ref: ref(qualifiedName:"));
         assert!(q.contains("s0_num: pullRequest(number: 42)"));
+        // A known pull request is followed by number, so nothing is looked up
+        // by head name.
+        assert!(!q.contains("s0_head"));
     }
 
     #[test]
@@ -3206,7 +3369,8 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": ref_node(10, "OPEN"), "s1_ref": ref_node(20, "OPEN") },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
         assert_eq!(by_id[&"s0".to_string()].as_ref().unwrap().number, 10);
         assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 20);
@@ -3279,7 +3443,8 @@ mod tests {
         )];
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let (results, rate) = parse_chunk_response(&ps, &chunk, &pos_repo, None);
+        let (results, rate) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, None, &never_in_local_history);
         let pr = results[0].1.as_ref().expect("kept last-known PR");
         assert_eq!(pr.number, 42);
         assert_eq!(pr.state, PrState::Open);
@@ -3295,7 +3460,8 @@ mod tests {
             "rateLimit": { "remaining": 42, "resetAt": "2030-01-01T00:00:00Z" },
             "r0": { "s0_ref": ref_node(7, "OPEN") },
         });
-        let (results, rate) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, rate) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         assert_eq!(results.len(), 1);
         let pr = results[0].1.as_ref().expect("discovered pr");
         assert_eq!(pr.number, 7);
@@ -3318,7 +3484,8 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": ref_node(43, "OPEN"), "s0_num": pr_node(42, "OPEN") },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         assert_eq!(results[0].1.as_ref().unwrap().number, 43);
     }
 
@@ -3338,10 +3505,206 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": serde_json::Value::Null, "s0_num": pr_node(42, "MERGED") },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 42);
         assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A repository whose `feat/x` holds two commits, plus a commit on another
+    /// line that `feat/x` does not contain. Returns the folder, `feat/x`'s tip,
+    /// and the stray commit.
+    fn repo_with_feature_branch() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = crate::git::test_support::git_command()
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "test"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&["switch", "-q", "-c", "other"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "stray"]);
+        let stray = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "main"]);
+        git(&["switch", "-q", "-c", "feat/x"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        (dir, tip, stray)
+    }
+
+    fn head_node(
+        number: u64,
+        state: &str,
+        created_at: &str,
+        head_oid: &str,
+        head_repo: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "state": state,
+            "title": format!("PR {number}"),
+            "url": format!("https://github.com/octocat/Hello-World/pull/{number}"),
+            "createdAt": created_at,
+            "headRefOid": head_oid,
+            "headRepository": head_repo.map(|name| serde_json::json!({ "nameWithOwner": name })),
+        })
+    }
+
+    /// A merge that deletes the head branch leaves the ref lookup with nothing
+    /// to answer, so a pull request dux never saw while the branch existed is
+    /// found by its head name instead. Branch names get reused, so a match is
+    /// taken only when its head commit is in this agent's own branch, it came
+    /// from this repository rather than a fork, and (for a branch dux minted)
+    /// it was opened after the branch was born.
+    #[test]
+    fn a_pull_request_whose_branch_was_deleted_is_found_by_head_name_only_when_it_is_ours() {
+        let (dir, tip, stray) = repo_with_feature_branch();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let lookup = |ref_value: serde_json::Value,
+                      nodes: Vec<serde_json::Value>,
+                      minted: Option<&str>|
+         -> Option<(u64, PrState)> {
+            let mut p = planned("s0", "octocat", "Hello-World", "feat/x", None);
+            p.worktree_path = worktree.clone();
+            p.branch_minted_at = minted.map(|t| t.parse().unwrap());
+            let ps = vec![p];
+            let chunk = [0usize];
+            let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+            let data = serde_json::json!({
+                "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
+            });
+            let (results, _) = parse_chunk_response(
+                &ps,
+                &chunk,
+                &pos_repo,
+                Some(&data),
+                &head_commit_in_local_history,
+            );
+            results[0]
+                .1
+                .as_ref()
+                .map(|pr| (pr.number, pr.state.clone()))
+        };
+        let ours = Some("octocat/Hello-World");
+        let null = serde_json::Value::Null;
+
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
+                None,
+            ),
+            Some((72, PrState::Merged)),
+            "the merged pull request is adopted"
+        );
+
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(
+                    72,
+                    "MERGED",
+                    "2026-10-09T10:00:00Z",
+                    &stray,
+                    ours
+                )],
+                None,
+            ),
+            None,
+            "a same-name pull request whose commit this branch does not contain is not ours"
+        );
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(
+                    72,
+                    "MERGED",
+                    "2026-10-09T10:00:00Z",
+                    "0123456789abcdef0123456789abcdef01234567",
+                    ours
+                )],
+                None,
+            ),
+            None,
+            "a head commit this clone does not have is never adopted"
+        );
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(
+                    72,
+                    "MERGED",
+                    "2026-10-09T10:00:00Z",
+                    &tip,
+                    Some("contributor/Hello-World")
+                )],
+                None,
+            ),
+            None,
+            "a fork's pull request is somebody else's"
+        );
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, None)],
+                None,
+            ),
+            None,
+            "a head repository that is gone cannot be shown to be this one"
+        );
+
+        let newest = lookup(
+            null.clone(),
+            vec![
+                head_node(60, "CLOSED", "2026-10-09T09:00:00Z", &tip, ours),
+                head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
+                head_node(80, "OPEN", "2026-10-09T11:00:00Z", &stray, ours),
+            ],
+            None,
+        )
+        .expect("one of them is ours");
+        assert_eq!(
+            newest.0, 72,
+            "the most recently created pull request that passes wins"
+        );
+
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(72, "MERGED", "2026-10-01T10:00:00Z", &tip, ours)],
+                Some("2026-10-09T09:00:00Z"),
+            ),
+            None,
+            "a branch dux minted cannot have had a pull request before it existed"
+        );
+        assert_eq!(
+            lookup(
+                null.clone(),
+                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
+                Some("2026-10-09T09:00:00Z"),
+            )
+            .map(|pr| pr.0),
+            Some(72)
+        );
+
+        assert_eq!(
+            lookup(
+                serde_json::json!({ "associatedPullRequests": { "nodes": [] } }),
+                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
+                None,
+            ),
+            None,
+            "while the branch exists the ref lookup is the answer"
+        );
     }
 
     #[test]
@@ -3357,11 +3720,18 @@ mod tests {
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
         // Same PR still on the branch → keep the stored terminal PR, not a re-fetch.
         let same = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "MERGED") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same), &never_in_local_history);
         assert_eq!(results[0].1.as_ref().unwrap().number, 42);
         // A strictly-newer follow-up PR (#50) replaces it.
         let newer = serde_json::json!({ "r0": { "s0_ref": ref_node(50, "OPEN") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&newer));
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&newer),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 50);
         assert_eq!(pr.state, PrState::Open);
@@ -3369,7 +3739,13 @@ mod tests {
         // replica) must NOT flip the merged badge back. This is the one place
         // the closed-reopen rule deliberately does not reach.
         let stale = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "OPEN") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&stale));
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&stale),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 42);
         assert_eq!(pr.state, PrState::Merged);
@@ -3457,7 +3833,8 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": ref_nodes(&[(7, "MERGED"), (47, "OPEN")]) },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let pr = results[0].1.as_ref().expect("a pull request");
         assert_eq!(pr.number, 47);
         assert_eq!(pr.state, PrState::Open);
@@ -3480,7 +3857,8 @@ mod tests {
                 ]),
             },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let pr = results[0].1.as_ref().expect("a pull request");
         assert_eq!(pr.number, 12);
         assert_eq!(pr.owner_repo, "octocat/Hello-World");
@@ -3496,7 +3874,8 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": ref_nodes(&[(12, "OPEN"), (99, "DRAFTED_SOMEHOW")]) },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let pr = results[0].1.as_ref().expect("a pull request");
         assert_eq!(pr.number, 12);
     }
@@ -3519,7 +3898,8 @@ mod tests {
         let data = serde_json::json!({
             "r0": { "s0_ref": ref_nodes(&[(7, "OPEN"), (47, "MERGED")]) },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let pr = results[0].1.as_ref().expect("a pull request");
         assert_eq!(pr.number, 47);
         assert_eq!(pr.state, PrState::Merged);
@@ -3667,7 +4047,8 @@ mod tests {
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
         let same = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "CLOSED") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same), &never_in_local_history);
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Closed);
@@ -3688,7 +4069,13 @@ mod tests {
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
         let other = serde_json::json!({ "r0": { "s0_ref": ref_node(7, "OPEN") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&other));
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&other),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Closed);
@@ -3709,7 +4096,13 @@ mod tests {
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
         let reopened = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "OPEN") } });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&reopened));
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&reopened),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().expect("reopened pr");
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Open);
@@ -3730,7 +4123,8 @@ mod tests {
             // pull request rather than some fork's.
             "r1": { "s1_ref": ref_nodes_from(&[(9, "OPEN", "octocat/repo-b")]) },
         });
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
         let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
         assert!(by_id[&"s0".to_string()].is_none());
         assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 9);
@@ -3760,6 +4154,7 @@ mod tests {
             agent_exited: true,
             pinned: None,
             inactive: false,
+            branch_minted_at: None,
         };
         let trigger = SyncTrigger::BlindPoll;
         let (results, signals) = run_entries(
@@ -3836,6 +4231,7 @@ mod tests {
             agent_exited: true,
             pinned: None,
             inactive: false,
+            branch_minted_at: None,
         };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
@@ -3878,7 +4274,8 @@ mod tests {
         )];
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, None);
+        let (results, _) =
+            parse_chunk_response(&ps, &chunk, &pos_repo, None, &never_in_local_history);
         let pr = results[0].1.as_ref().expect("kept last-known terminal PR");
         assert_eq!(pr.number, 42);
         assert_eq!(pr.state, PrState::Closed);
@@ -4496,6 +4893,7 @@ mod tests {
             agent_exited: false,
             pinned: None,
             inactive: false,
+            branch_minted_at: None,
         }
     }
 
@@ -4767,13 +5165,25 @@ mod tests {
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&planned, &chunk);
         let data = serde_json::json!({ "r0": serde_json::Value::Null });
-        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let (results, _) = parse_chunk_response(
+            &planned,
+            &chunk,
+            &pos_repo,
+            Some(&data),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().expect("pin preserved");
         assert_eq!(pr.number, 12);
 
         // And a real answer for the pin refreshes it (a CLOSED pin can reopen).
         let data = serde_json::json!({ "r0": { "s0_num": pr_node(12, "MERGED") } });
-        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let (results, _) = parse_chunk_response(
+            &planned,
+            &chunk,
+            &pos_repo,
+            Some(&data),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().expect("refreshed pin");
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Merged);
@@ -4819,7 +5229,13 @@ mod tests {
         // semantics), and cannot surface an unrelated same-number PR because
         // no by-number alias exists to fetch one.
         let data = serde_json::json!({ "r0": { "s0_ref": serde_json::Value::Null } });
-        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let (results, _) = parse_chunk_response(
+            &planned,
+            &chunk,
+            &pos_repo,
+            Some(&data),
+            &never_in_local_history,
+        );
         let pr = results[0].1.as_ref().expect("stored badge kept");
         assert_eq!(pr.owner_repo, "forker/Hello-World");
         assert_eq!(pr.number, 12);

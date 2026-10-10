@@ -4608,6 +4608,7 @@ impl Engine {
             // the flag the blind poll narrows on has nothing to say here; it is
             // recorded truthfully all the same.
             inactive: crate::flat_list::is_inactive(session),
+            branch_minted_at: session.branch_minted_at(),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -5031,6 +5032,7 @@ impl Engine {
                         agent_exited: !self.providers.contains_key(s.slot_tab_id()),
                         pinned: pinned_row.map(pinned_pr_from_stored),
                         inactive: crate::flat_list::is_inactive(s),
+                        branch_minted_at: s.branch_minted_at(),
                     })
                 })
                 .collect();

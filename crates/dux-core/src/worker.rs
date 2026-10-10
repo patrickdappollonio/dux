@@ -848,6 +848,12 @@ pub struct PrSyncEntry {
     /// session's own status, and which the alias planner reads for a different
     /// question (whether a terminal pull request is worth a call at all).
     pub inactive: bool,
+    /// When dux minted the branch, for an agent still on a branch dux created
+    /// for it; `None` for a branch that existed before the agent, or one the
+    /// agent has since moved off. No pull request from a minted branch can be
+    /// older than this, which is what tells it apart from an earlier branch
+    /// that used the same name when a pull request is found by head name.
+    pub branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Debug)]
