@@ -397,4 +397,90 @@ mod tests {
                 .is_ok()
         );
     }
+
+    /// An agent a browser creates or starts lands on the browser, not here:
+    /// this surface keeps drawing the agent it was on, so deleting the
+    /// browser's agent from anywhere is not refused in this surface's name,
+    /// while the pane this surface really draws still is.
+    #[test]
+    fn an_agent_a_browser_launches_is_not_drawn_or_guarded_here() {
+        use dux_core::engine::{AgentLaunchReadyOutcome, AgentLaunchReadyView};
+
+        let browser_views = [
+            AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created agent.".to_string().into(),
+                startup_result_error: None,
+            },
+            AgentLaunchReadyView::Reconnect {
+                status_message: "Launched agent.".to_string().into(),
+            },
+            AgentLaunchReadyView::ResumeFallback {
+                session_id: "from-the-browser".to_string(),
+                status_message: "Started fresh.".to_string().into(),
+            },
+        ];
+        for view in browser_views {
+            let mut app = test_app(default_bindings());
+            let spawn = || {
+                PtyClient::spawn(
+                    "/bin/sh",
+                    &["-c".to_string(), "sleep 30".to_string()],
+                    std::path::Path::new("."),
+                    24,
+                    80,
+                    1_000,
+                )
+                .expect("spawn pty")
+            };
+            let shown = app.engine.sessions[0].id.clone();
+            app.engine
+                .mark_session_status(&shown, crate::model::SessionStatus::Active);
+            app.engine
+                .providers
+                .insert(TabId::new("session-1-slot".to_string()), spawn());
+            app.rebuild_left_items();
+            render(&mut app);
+
+            let mut created = app.engine.sessions[0].clone();
+            created.id = "from-the-browser".to_string();
+            created.slot_tab_id = "from-the-browser-slot".to_string();
+            app.engine.sessions.push(created.clone());
+            app.engine
+                .providers
+                .insert(TabId::new("from-the-browser-slot".to_string()), spawn());
+            app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+                session: created,
+                tab_id: "from-the-browser-slot".to_string(),
+                pty_size: (24, 80),
+                detached_session_id: None,
+                wants_fullscreen: false,
+                status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
+                view,
+            });
+            render(&mut app);
+
+            assert_eq!(
+                app.selected_session().map(|s| s.id.as_str()),
+                Some("session-1"),
+                "a browser's launch must not move this surface's selection"
+            );
+            app.engine.dispatch_policy = Some(Policy::default());
+            assert!(
+                app.engine
+                    .reserve_destruction(app.engine.agent_scope("from-the-browser"))
+                    .is_ok(),
+                "deleting the browser's agent is not refused for this surface"
+            );
+            let refused = match app
+                .engine
+                .reserve_destruction(app.engine.agent_scope("session-1"))
+            {
+                Ok(_) => panic!("the pane drawn here did not block its delete"),
+                Err(refused) => refused,
+            };
+            assert_eq!(refused.blockers.len(), 1);
+            assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);
+            assert_eq!(refused.blockers[0].target.id, "session-1-slot");
+        }
+    }
 }

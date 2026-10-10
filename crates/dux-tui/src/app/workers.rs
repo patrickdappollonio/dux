@@ -1652,7 +1652,13 @@ impl App {
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
         ) && std::mem::take(&mut self.create_agent_started_here);
-        if (armed || created_here)
+        let started_here = armed || created_here;
+        // The agent this surface was on before the launch landed. A launch a
+        // browser started leaves it there: moving the cursor would draw the
+        // browser's agent here, and a drawn pane is an attachment that refuses
+        // that browser's own delete in this surface's name.
+        let shown = self.selected_session().map(|session| session.id.clone());
+        if started_here
             && self
                 .engine
                 .providers
@@ -1668,6 +1674,9 @@ impl App {
                 // The create op's keyed error final is resolved ENGINE-SIDE and
                 // arrives alongside this View as a sibling `Status` in the same
                 // `Multi`, so there is no status to set here.
+            }
+            AgentLaunchReadyView::CreateCommitted { .. } if !started_here => {
+                self.keep_showing(shown.as_deref());
             }
             AgentLaunchReadyView::CreateCommitted {
                 status_message: _,
@@ -1711,21 +1720,25 @@ impl App {
                 self.status.retire_newest_busy();
             }
             AgentLaunchReadyView::Reconnect { status_message } => {
-                self.show_agent_surface();
-                // Land minimized unless the launch sought
-                // fullscreen (see CreateCommitted above).
-                self.land_completed_launch(outcome.wants_fullscreen);
+                // Only a launch started here lands here, and only a landing
+                // earns the note about where it landed.
+                let status_message = if started_here {
+                    self.show_agent_surface();
+                    // Land minimized unless the launch sought
+                    // fullscreen (see CreateCommitted above).
+                    self.land_completed_launch(outcome.wants_fullscreen);
+                    self.launch_completion_message(
+                        status_message.to_string(),
+                        outcome.wants_fullscreen,
+                    )
+                } else {
+                    status_message.to_string()
+                };
                 // Resolve the keyed reconnect op so its success replaces exactly
                 // the "Launching…"/"Starting fresh…" busy. Keyed by tab id, which
                 // the slot pointer names; an extra-tab launch has no op under its
                 // tab id and falls back to an anonymous info rather than
-                // resolving the slot tab's op with the wrong message. The engine's
-                // message is shared with the web; the TUI appends where the launch
-                // landed and how to toggle fullscreen.
-                let status_message = self.launch_completion_message(
-                    status_message.to_string(),
-                    outcome.wants_fullscreen,
-                );
+                // resolving the slot tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
                     dux_core::engine::LaunchOutcome::Ready {
@@ -1736,9 +1749,14 @@ impl App {
                 // The engine flipped the session Active while launching it, so the
                 // flat list must re-partition: a just-reconnected agent leaves the
                 // Inactive tail and rejoins the active section. Re-follow it by id
-                // so the cursor stays on the agent as its row moves.
-                self.rebuild_left_items();
-                self.reselect_left_session(&outcome.session.id);
+                // so the cursor stays on the agent as its row moves, or on the
+                // one it was on when the launch was not this surface's.
+                if started_here {
+                    self.rebuild_left_items();
+                    self.reselect_left_session(&outcome.session.id);
+                } else {
+                    self.keep_showing(shown.as_deref());
+                }
             }
             AgentLaunchReadyView::ResumeFallback {
                 session_id,
@@ -1770,10 +1788,22 @@ impl App {
                     },
                 );
                 // Same re-partition as Reconnect: the resumed agent is Active now.
-                self.rebuild_left_items();
-                self.reselect_left_session(&session_id);
+                self.keep_showing(shown.as_deref());
             }
             AgentLaunchReadyView::StartupAutoReopen => {}
+        }
+    }
+
+    /// Re-partition the agent list after a launch changed it, keeping the
+    /// cursor on `shown`, the agent it was on before.
+    fn keep_showing(&mut self, shown: Option<&str>) {
+        self.rebuild_left_items();
+        match shown {
+            Some(session_id) => self.reselect_left_session(session_id),
+            None if self.selected_left >= self.left_items_cache.len() => {
+                self.selected_left = self.left_items_cache.len().saturating_sub(1);
+            }
+            None => {}
         }
     }
 
@@ -2966,7 +2996,7 @@ mod tests {
         );
     }
 
-    /// A completed launch lands focused-but-minimized. The
+    /// A completed launch this surface started lands focused-but-minimized. The
     /// Reconnect ready with `wants_fullscreen: false` must put focus on the
     /// Center pane with NO fullscreen overlay and NO interactive input
     /// target, leaving the pane typeable (the derived predicate).
@@ -2990,6 +3020,9 @@ mod tests {
             .providers
             .insert(session.slot_tab_id().to_owned(), client);
         app.focus = FocusPane::Left;
+        // Started here: the dispatch arms its tab.
+        app.tui_launched_ptys
+            .insert(session.slot_tab_id().to_string());
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.slot_tab_id().to_string(),
@@ -3027,6 +3060,7 @@ mod tests {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
+        app.tui_launched_ptys.insert(session.id.clone());
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.id.clone(),
@@ -3044,13 +3078,14 @@ mod tests {
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
-    /// A create is never fullscreen-seeking: the CreateCommitted ready lands
-    /// the fresh agent focused-but-minimized.
+    /// A create is never fullscreen-seeking: the CreateCommitted ready of a
+    /// create started here lands the fresh agent focused-but-minimized.
     #[test]
     fn create_committed_ready_lands_minimized() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
+        app.create_agent_started_here = true;
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.id.clone(),
@@ -3070,7 +3105,7 @@ mod tests {
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
-    /// A fresh agent is the list's selection AND on screen, even when the
+    /// A fresh agent created here is the list's selection AND on screen, even when the
     /// sidebar cursor was in the Terminals section and the agent lands at the
     /// bottom of a list taller than the pane: the agent list scrolls only to
     /// the selection of the section that has the cursor.
@@ -3101,6 +3136,7 @@ mod tests {
         app.selected_terminal_index = 0;
 
         let newest = app.engine.sessions[19].clone();
+        app.create_agent_started_here = true;
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: newest.id.clone(),
             session: newest.clone(),
@@ -3229,6 +3265,7 @@ mod tests {
         let op_key = op.id().to_string();
         app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
         app.pending_reconnect_ops.insert(session.id.clone(), op);
+        app.tui_launched_ptys.insert(session.id.clone());
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.id.clone(),
