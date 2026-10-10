@@ -277,7 +277,7 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
   // ONE CLICK. Selecting an agent whose first tab came back dormant (a restart,
   // a stop) mounts the pane, and the pane's PTY subscription is what starts it.
   // The card here would make starting an agent a two-click job.
-  it("mounts the pane for a healthy dormant first tab instead of the card", async () => {
+  it("mounts the pane for a healthy dormant first tab instead of the card, until its run ends on screen", async () => {
     const spine = dormantSpine()
     spine!.sessions[0].tabs[0].has_live_process = false
     mockState = makeState({
@@ -285,11 +285,23 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
       selectedSessionId: "s1",
       selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
     })
-    render(<TerminalArea />)
+    const { rerender } = render(<TerminalArea />)
 
     await vi.waitFor(() => expect(paneProps.length).toBeGreaterThan(0))
     expect(screen.queryByText("Start session")).toBeNull()
     expect(paneProps.at(-1)).toMatchObject({ kind: "agent", id: "s1" })
+
+    // The user quit it while looking at it: the idle screen and its one act
+    // take the pane's place, so nothing re-subscribes and relaunches it.
+    mockState = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      endedInViewTab: "s1",
+    })
+    rerender(<TerminalArea />)
+    expect(await screen.findByText("Start session")).toBeTruthy()
+    expect(screen.queryByTestId("terminal-pane-stub")).toBeNull()
   })
 
   // ...unless that tab's last run ENDED BADLY. Then the card is the diagnosis

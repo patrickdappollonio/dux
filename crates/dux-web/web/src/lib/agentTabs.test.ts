@@ -10,7 +10,7 @@ import {
   slotSuccessorLabel,
   defaultProviderForSession,
   dormantTabNeedsCard,
-  exitEjectsToWelcome,
+  slotTabEndedInView,
   isFirstTab,
   isSlotTabTarget,
   resolveFocusedTab,
@@ -158,6 +158,24 @@ describe("dormantTabNeedsCard", () => {
     const sessionSlot = { ...extraTab("s1", false), id: "s1" }
     expect(
       dormantTabNeedsCard(agentTarget("s1", "s1"), slotSession, sessionSlot, []),
+    ).toBe(false)
+  })
+
+  // A first tab whose run ended cleanly while the user watched rests on the
+  // idle screen: the user just quit it, so staying on the agent must not start
+  // it again. A press (the started latch) or a live process takes it off.
+  it("is true for a first tab whose run ended while it was on screen", () => {
+    const sessionSlot = { ...extraTab("s1", false), id: "s1" }
+    const target = agentTarget("s1", "s1")
+    expect(
+      dormantTabNeedsCard(target, slotSession, sessionSlot, [], undefined, "s1"),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(target, slotSession, sessionSlot, ["s1"], undefined, "s1"),
+    ).toBe(false)
+    const live = { ...extraTab("s1", true), id: "s1" }
+    expect(
+      dormantTabNeedsCard(target, slotSession, live, [], undefined, "s1"),
     ).toBe(false)
   })
 
@@ -602,19 +620,19 @@ describe("slotSuccessorLabel", () => {
   })
 })
 
-describe("exitEjectsToWelcome", () => {
-  it("ejects when the agent we were attached to stops", () => {
-    expect(exitEjectsToWelcome(true, true, "detached", false)).toBe(true)
+describe("slotTabEndedInView", () => {
+  it("reports when the agent we were attached to stops", () => {
+    expect(slotTabEndedInView(true, true, "detached", false)).toBe(true)
   })
 
-  it("stays put when the run ended badly, so the diagnosis card replaces the pane", () => {
-    expect(exitEjectsToWelcome(true, true, "detached", true)).toBe(false)
+  it("does not report a run that ended badly, whose diagnosis card replaces the pane", () => {
+    expect(slotTabEndedInView(true, true, "detached", true)).toBe(false)
   })
 
-  it("never ejects on an extra tab, a pane that never came up, or a live agent", () => {
-    expect(exitEjectsToWelcome(false, true, "detached", false)).toBe(false)
-    expect(exitEjectsToWelcome(true, false, "detached", false)).toBe(false)
-    expect(exitEjectsToWelcome(true, true, "active", false)).toBe(false)
-    expect(exitEjectsToWelcome(true, true, undefined, false)).toBe(false)
+  it("never reports for an extra tab, a pane that never came up, or a live agent", () => {
+    expect(slotTabEndedInView(false, true, "detached", false)).toBe(false)
+    expect(slotTabEndedInView(true, false, "detached", false)).toBe(false)
+    expect(slotTabEndedInView(true, true, "active", false)).toBe(false)
+    expect(slotTabEndedInView(true, true, undefined, false)).toBe(false)
   })
 })

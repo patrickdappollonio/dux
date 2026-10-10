@@ -468,8 +468,8 @@ describe("the editor and the changes screen", () => {
     expect(loc.hash).toBe("#/agent/s1")
   })
 
-  it("suspends and restores across the phone's changes screen too", async () => {
-    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+  it("suspends and restores across the phone's changes screen, and the count leaves it on a computer without that screen", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["t2"] }])
     mod.selectSession("s1")
     mod.enterTheater()
 
@@ -480,6 +480,29 @@ describe("the editor and the changes screen", () => {
     mod.navigateUp()
     expect(mod.getSnapshot().theater).toBe(true)
     expect(loc.hash).toBe("#/agent/s1?view=theater")
+
+    // On a computer the pill's count is the way to the Changes pane, which
+    // theater hides: it leaves the mode, shows the pane if it was hidden, and
+    // writes no phone screen into the address.
+    void mod.setChangesPaneVisibility(false)
+    pushStateMock.mockClear()
+    replaceStateMock.mockClear()
+    mod.openChangedFiles()
+    expect(mod.getSnapshot().theater).toBe(false)
+    expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
+    // Leaving theater pushes, as it does from the toggle.
+    expect(pushStateMock).toHaveBeenCalledTimes(1)
+
+    // A tab switch inside the agent is a move within one position.
+    pushStateMock.mockClear()
+    replaceStateMock.mockClear()
+    mod.selectTab("s1", "t2")
+    expect(loc.hash).toBe("#/agent/s1/tab/t2")
+    expect(mod.getSnapshot().theater).toBe(false)
+    expect(pushStateMock).not.toHaveBeenCalled()
+    expect(replaceStateMock).toHaveBeenCalled()
   })
 })
 

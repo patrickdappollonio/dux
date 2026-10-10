@@ -176,6 +176,11 @@ agent is, and asking for the agent is asking for it. Extra tabs wait: each says 
 running until you click *Start session*, so a tab you added deliberately does not spring
 back to life just because you looked at it.
 
+If the agent's only tab stops while you are looking at it (you quit the provider, or
+stopped the tab), the web stays on the agent rather than sending you home, and the tab
+shows the idle screen described below. It does not start again until you click *Start
+session*, or until you leave the agent and select it again.
+
 The terminal UI never starts anything just because you looked at it, the first tab
 included. A dormant extra tab shows a *Tab not running* card naming the key that launches
 it, and a detached agent comes back through the reconnect action.

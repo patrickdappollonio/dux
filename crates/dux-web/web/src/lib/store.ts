@@ -460,6 +460,12 @@ export interface DuxState {
   // process, so the card does not sit in front of a launch already on its way.
   // See `markTabStarted`; every other launch needs no entry here.
   startedDormantTabs: string[]
+  // The first tab whose run ended cleanly while this client was looking at it.
+  // It rests on the idle screen instead of relaunching under the user who just
+  // quit it, until a press starts it or the selection moves to another tab
+  // (`setState` drops it then), after which selecting the agent starts it as
+  // usual. See `settleSlotTabExit`.
+  endedInViewTab: string | null
   // The unstaged file pending discard confirmation, or null. The TUI confirms
   // every discard (it's destructive); the web mirrors that.
   discardTarget: DiscardTarget | null
@@ -1049,6 +1055,7 @@ let state: DuxState = {
   forceStopAgentTarget: null,
   createTabInFlight: [],
   startedDormantTabs: [],
+  endedInViewTab: null,
   discardTarget: null,
   globalEnvOpen: false,
   globalEnvVersion: null,
@@ -1172,6 +1179,13 @@ function setState(patch: Partial<DuxState>): void {
       next.mobileScreen = patch.selectedTarget ? "terminal" : "home"
     }
     if (!("routeNotFound" in patch)) next.routeNotFound = null
+    const target = patch.selectedTarget
+    if (
+      !("endedInViewTab" in patch) &&
+      (target?.kind !== "agent" || target.tabId !== state.endedInViewTab)
+    ) {
+      next.endedInViewTab = null
+    }
   }
   state = next
   emit()
@@ -2501,8 +2515,8 @@ if (hasBrowser) {
   window.addEventListener("popstate", () => {
     applyUrlRoute()
   })
-  // Fragment navigation the page itself initiates (the standalone header's
-  // plain-anchor "Open in dux" link is the one shipping case) is delivered
+  // Fragment navigation the page itself initiates (`openStandaloneEditorInThisTab`
+  // assigning the hash, or a plain in-page hash anchor) is delivered
   // as `hashchange`, and whether a `popstate` accompanies it varies by
   // environment (jsdom fires only `hashchange`; browsers fire both). Listen
   // to both: `applyUrlRoute` is idempotent and by contract never writes the
@@ -2891,7 +2905,7 @@ export function standaloneEditorHash(
 // surface, so Back lands exactly where the user came from.
 export function openStandaloneEditorInThisTab(
   root: EditorRoot,
-  editor: { mode: EditorViewMode; path: string },
+  editor: { mode: EditorViewMode; path: string | null },
 ): void {
   if (typeof location === "undefined") return
   location.hash = standaloneEditorHash(root, editor)
@@ -2976,8 +2990,9 @@ function historyUrlFor(hash: string): string {
 // `routePushKey`, not `routeScreen`: the editor-open bit must push and pop like
 // a screen without being one. `mode: "push"` is for a move the key cannot
 // describe: entering theater is a position Back must come out of, while still
-// being the terminal screen. Leaving replaces, so Back never re-enters a mode
-// just dismissed.
+// being the terminal screen. Leaving theater and closing the editor push as
+// well, deliberately, so Back after leaving re-enters the mode just dismissed
+// rather than being a dead press.
 function movesScreen(
   mode: "replace" | "push" | undefined,
   next: string,
@@ -3791,6 +3806,36 @@ export function ejectSelectionForReconnect(): void {
   lastClearWasReconnectEject = true
 }
 
+// The center pane saw its agent's first tab end cleanly (`slotTabEndedInView`).
+// The agent is still there, so its address is still true: the user stays on
+// it, with no history write, and the tab rests on the idle screen rather than
+// relaunching under someone who just quit it.
+//
+// The one exception is a reconnect still settling for this agent: there the
+// stop is the transient one an events-socket drop reports, and the eject the
+// reconnect restore knows how to undo is kept exactly as it was.
+export function settleSlotTabExit(sessionId: string, tabId: string): void {
+  if (reconnectArmedFor(sessionId)) {
+    ejectSelectionForReconnect()
+    return
+  }
+  const target = state.selectedTarget
+  if (target?.kind !== "agent" || target.tabId !== tabId) return
+  setState({ endedInViewTab: tabId })
+}
+
+// Whether a reconnect deep-link intent is live and names this agent, or a
+// terminal it owns.
+function reconnectArmedFor(sessionId: string): boolean {
+  const armed = reconnectDeepLink
+  if (!armed) return false
+  if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) return false
+  const target = armed.target
+  const armedSession =
+    target.kind === "agent" ? target.sessionId : ownerSessionId(target.owner)
+  return armedSession === sessionId
+}
+
 // Focus a specific provider tab of a session. Naming the session-slot tab is
 // equivalent to `selectSession`. The changed files belong to the SESSION, so the
 // subscription/fetch key off `sessionId` regardless of tab.
@@ -4300,6 +4345,14 @@ export function openEditor(
   // is the open choke point; `editorOpenFile` coerces too, and the render
   // keeps the image arm above the diff arm as defense in depth.
   const effectiveMode: EditorViewMode = editorMode(root, mode, initialPath)
+  // The overlay does not render on a phone, so its address would be one the
+  // screen cannot show (and would outrank the changes screen in the hash).
+  // The phone's editor is the standalone surface in this same tab, the road
+  // the Changes list takes, so an opener that reaches here goes there too.
+  if (isMobileViewport()) {
+    openStandaloneEditorInThisTab(root, { mode: effectiveMode, path: initialPath })
+    return
+  }
   const editorPatch: Partial<DuxState> & { theater: boolean } = {
     editorTarget: { root, initialPath, initialMode: effectiveMode },
     editorRoute: { root, mode: effectiveMode, path: initialPath },
@@ -6526,6 +6579,21 @@ export function openChangesScreen(): void {
   if (!state.selectedTarget || state.mobileScreen === "changes") return
   setState(withTheaterLayout({ mobileScreen: "changes", ...theaterSuspendPatch() }))
   syncUrl()
+}
+
+// What the theater pill's changed-file count does. On a phone that is the
+// changes screen. On a computer there is no such screen (the address would
+// look like the plain layout and Back would seem to do nothing): the Changes
+// pane is the place the files are, and theater is what hides it, so the count
+// leaves the mode the way the toggle does and shows the pane if the user had
+// hidden it.
+export function openChangedFiles(): void {
+  if (isMobileViewport()) {
+    openChangesScreen()
+    return
+  }
+  exitTheater()
+  if (changesPaneEffectivelyHidden(state)) showChangesPane()
 }
 
 // Navigate to the parent route rather than stepping browser history. Real route

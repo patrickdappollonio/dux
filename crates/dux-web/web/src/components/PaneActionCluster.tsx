@@ -7,7 +7,7 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
 import { armTheaterToggleFocus } from "@/hooks/use-theater"
-import { openChangesScreen, toggleTheater, useDux } from "@/lib/store"
+import { openChangedFiles, toggleTheater, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
@@ -107,8 +107,8 @@ function TheaterMorphButton({
 // tall, because the number is data.
 //
 // It acts rather than reports: one call opens the changed files, which is the
-// changes screen on a phone and the restored chrome on a computer, pushing a
-// history entry so Back returns.
+// changes screen on a phone and, on a computer, leaving theater for the layout
+// with the Changes pane in it. Either way it pushes, so Back returns.
 function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
   const { changes } = useDux()
   const summary = changesSummary(changes, sessionId)
@@ -121,7 +121,7 @@ function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
         data-testid="pane-changes-count"
         className="h-10 w-auto shrink-0 gap-1.5 rounded-full px-3"
         aria-label={summary.countLabel}
-        onClick={() => openChangesScreen()}
+        onClick={() => openChangedFiles()}
       >
         <Diff />
         <span className="text-sm">{summary.count}</span>

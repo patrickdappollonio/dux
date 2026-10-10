@@ -72,6 +72,9 @@ const hashRef = { value: "" }
 // otherwise grow the back stack one entry per drop, and Back would stop being
 // one press from home.
 let pushedUrls: string[] = []
+// Every URL the store REPLACED, so a test can say the entry the user is on was
+// left alone rather than rewritten.
+let replacedUrls: string[] = []
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
@@ -117,6 +120,7 @@ beforeEach(() => {
   spineBody = makeSpine([])
   hashRef.value = ""
   pushedUrls = []
+  replacedUrls = []
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -132,6 +136,7 @@ beforeEach(() => {
       hashRef.value = url.startsWith("#") ? url : ""
     },
     replaceState: (_s: unknown, _t: string, url: string) => {
+      replacedUrls.push(String(url))
       hashRef.value = url.startsWith("#") ? url : ""
     },
     state: null,
@@ -203,12 +208,11 @@ describe("reconnect preserves a deep-linked agent route", () => {
     mod.eventsSocket.onOpen()
     await settle()
 
-    // The center pane (TerminalPane) mirrors the TUI exit behavior and ejects to
-    // the welcome screen for a non-active session-slot agent, wiping the hash to
-    // home. Model that eject here via the marker function TerminalPane calls
-    // instead of a bare `selectSession(null)` (it fires from a React effect
-    // after the apply).
-    mod.ejectSelectionForReconnect()
+    // The center pane (TerminalPane) reports its slot tab's run ending, and
+    // while a reconnect is armed that report ejects to the welcome screen,
+    // wiping the hash to home. Model it via the call TerminalPane makes (it
+    // fires from a React effect after the apply).
+    mod.settleSlotTabExit("s1", "s1")
     expect(mod.getSnapshot().selectedTarget).toBeNull()
     expect(hashRef.value).toBe("")
 
@@ -333,6 +337,41 @@ describe("reconnect preserves a deep-linked agent route", () => {
     // nothing here may push: a flaky link would otherwise deepen the back stack
     // once per drop.
     expect(pushedUrls).toEqual([])
+  })
+})
+
+describe("a clean exit of the viewed agent keeps the user on it", () => {
+  it("leaves the address and the history alone, and rests the tab on screen", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "active" },
+    ])
+    await consumeBootOpen(mod)
+    replacedUrls = []
+
+    // No reconnect: the agent's only tab quits cleanly while the user watches,
+    // and the server reports the agent detached.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine?.sessions[0]?.status).toBe("detached")
+    })
+    mod.settleSlotTabExit("s1", "s1")
+
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+    expect(hashRef.value).toBe("#/agent/s1")
+    expect(pushedUrls).toEqual([])
+    expect(replacedUrls).toEqual([])
+    // The tab rests on screen rather than relaunching under the user.
+    expect(mod.getSnapshot().endedInViewTab).toBe("s1")
+
+    // Moving to home is a deliberate navigation and lets the rest go, so a
+    // later visit is an ordinary selection that starts the agent.
+    mod.selectSession(null)
+    expect(mod.getSnapshot().endedInViewTab).toBeNull()
   })
 })
 

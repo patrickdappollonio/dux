@@ -264,8 +264,10 @@ link that goes straight into theater and there was no layout on screen to rememb
 leaving lands on your saved preferences instead.
 
 A small floating pill in the bottom-right corner is the only thing left over the
-terminal. On a computer it holds the way out, the macro picker and the pane's own `⋯`,
-so nothing you could reach before you went full screen has gone anywhere.
+terminal. On a computer it holds the way out, the macro picker, the changed-file count
+where there is one, and the pane's own `⋯`, so nothing you could reach before you went
+full screen has gone anywhere. The count leaves theater there and brings the changes list
+back, showing it even if you had hidden it.
 On a phone it is the flap that flew there: the theater button (now showing the way out),
 the macro picker, the changed-file count where there is one, and the same `⋯`, opening the
 same menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,

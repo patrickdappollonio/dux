@@ -39,6 +39,7 @@ export function terminalAreaModel(ctx: {
   terminalEpoch: number
   startedDormantTabs: DuxState["startedDormantTabs"]
   pendingSlotTab: DuxState["pendingSlotTab"]
+  endedInViewTab: DuxState["endedInViewTab"]
 }): TerminalAreaModel {
   const { target, spine } = ctx
   // For an agent the streamed id is the FOCUSED TAB id; for a terminal it is
@@ -72,13 +73,15 @@ export function terminalAreaModel(ctx: {
     slotTabId,
     // Whether this tab gets the "Start session" card instead of the pane. The
     // helper owns the whole rule (a dormant extra tab waits; the agent's first
-    // tab starts on selection unless its last run failed).
+    // tab starts on selection unless its last run failed or just ended under
+    // the user).
     dormant: dormantTabNeedsCard(
       target,
       session,
       focusedTab,
       ctx.startedDormantTabs,
       slotTabId,
+      ctx.endedInViewTab,
     ),
   }
 }
