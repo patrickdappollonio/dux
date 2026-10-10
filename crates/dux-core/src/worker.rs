@@ -566,6 +566,8 @@ pub enum WorkerEvent {
         outcome: crate::gh::GhProbe,
     },
     PrStatusReady(Vec<PrStatusResult>),
+    /// The debounce that refused an agent's owed branch check has passed.
+    PrCheckOwedDue(String),
     /// A one-shot PR check worker panicked; carries the session id so its
     /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.
     PrCheckAborted(String),

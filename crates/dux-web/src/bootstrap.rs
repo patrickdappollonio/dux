@@ -248,6 +248,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pr_inactive_sweep_at: Default::default(),
         pr_return_checks_owed: Default::default(),
         pr_branch_generations: Default::default(),
+        pr_branch_checks_owed: Default::default(),
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         branch_sync_wait: Arc::new(Default::default()),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

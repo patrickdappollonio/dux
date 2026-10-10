@@ -525,6 +525,11 @@ pub struct Engine {
     /// matches. Runtime only: a restart starts every agent at zero, and no
     /// check survives a restart to be compared.
     pub pr_branch_generations: HashMap<String, u64>,
+    /// Agents whose branch moved while their pull-request check could not run
+    /// (one for the old branch was still in flight, or inside its debounce).
+    /// Each is owed exactly one check for the branch it is on, dispatched when
+    /// the running check finishes or the debounce window passes.
+    pub pr_branch_checks_owed: std::collections::HashSet<String>,
     /// Seconds between branch-sync sweeps, shared with the loop thread so a
     /// config reload can retune it live. `0` reaching the loop means "nap and
     /// look again", never "exit": the thread stays live so
@@ -4364,6 +4369,56 @@ impl Engine {
                 "[gh-integration] seeded {} PR statuses from database",
                 self.pr_statuses.len(),
             ));
+        }
+    }
+
+    /// Check an agent's pull request for the branch it is on now, because that
+    /// branch just changed (a rename or a drift). When a check that is still
+    /// running, or the debounce it started, refuses this one, the agent is owed
+    /// it: [`Self::retry_owed_branch_check`] dispatches it once the running
+    /// check finishes, and a timer when the debounce window passes. A refusal
+    /// for a lasting reason (GitHub unavailable, a detach, a standalone agent,
+    /// a missing working copy) owes nothing.
+    pub(crate) fn request_branch_pr_check(&mut self, session_id: &str) {
+        if self.spawn_pr_check_for_session(session_id, PR_CHECK_MIN_INTERVAL) {
+            self.pr_branch_checks_owed.remove(session_id);
+            return;
+        }
+        let in_flight = self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string()));
+        let debounce_left = self
+            .pr_last_checked
+            .get(session_id)
+            .map(|last| PR_CHECK_MIN_INTERVAL.saturating_sub(last.elapsed()))
+            .filter(|left| !left.is_zero());
+        if !in_flight && debounce_left.is_none() {
+            self.pr_branch_checks_owed.remove(session_id);
+            return;
+        }
+        self.pr_branch_checks_owed.insert(session_id.to_string());
+        // A running check is answered by its own completion; only a debounce
+        // needs a clock.
+        if let (false, Some(left)) = (in_flight, debounce_left) {
+            let due = session_id.to_string();
+            self.spawn_background_worker(
+                BackgroundWorkerSpec {
+                    label: format!("pr-check-owed:{session_id}"),
+                    in_flight_key: None,
+                    // A lost timer leaves the agent to the poll, as before.
+                    panic_event: None,
+                },
+                move |tx| {
+                    thread::sleep(left);
+                    let _ = tx.send(WorkerEvent::PrCheckOwedDue(due));
+                },
+            );
+        }
+    }
+
+    /// Dispatch the check an agent is owed, if it is still owed one. Called
+    /// when its running check finishes and when its debounce timer fires.
+    pub(crate) fn retry_owed_branch_check(&mut self, session_id: &str) {
+        if self.pr_branch_checks_owed.contains(session_id) {
+            self.request_branch_pr_check(session_id);
         }
     }
 

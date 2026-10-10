@@ -2341,6 +2341,7 @@ impl Engine {
         // reuses the id does not inherit a detach it never asked for.
         self.pr_suppressions.remove(&session.id);
         self.pr_branch_generations.remove(&session.id);
+        self.pr_branch_checks_owed.remove(&session.id);
         // Re-derive the PR-sync plan from the surviving sessions. The periodic
         // poller snapshots this list every cycle, so leaving the deleted
         // agent's entry in it means dux keeps asking GitHub about a pull
@@ -3392,7 +3393,7 @@ impl Engine {
         // to may already have a pull request, so it is asked about once now.
         self.update_pr_sync_sessions();
         for session_id in moved {
-            self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
+            self.request_branch_pr_check(&session_id);
         }
         EventReaction::RebuildLeftItems
     }
@@ -3507,7 +3508,7 @@ impl Engine {
                 // So does the pull-request plan, which asks GitHub by branch, and
                 // the renamed branch is asked about once now.
                 self.update_pr_sync_sessions();
-                self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
+                self.request_branch_pr_check(&session_id);
             }
             Err(err) => {
                 logger::warn(&format!(
@@ -3895,12 +3896,14 @@ impl Engine {
     ) -> EventReaction {
         let checked_at = Instant::now();
         let mut changed = false;
+        let mut finished: Vec<String> = Vec::new();
         for crate::worker::PrStatusResult {
             session_id,
             branch_generation,
             pr: maybe_pr,
         } in results
         {
+            finished.push(session_id.clone());
             if self.pr_status_result_is_current(
                 &session_id,
                 branch_generation,
@@ -3909,6 +3912,11 @@ impl Engine {
             ) {
                 changed |= self.apply_pr_status_result(session_id, maybe_pr);
             }
+        }
+        // Each finished check may have been holding up the one an agent is
+        // owed for the branch it moved to.
+        for session_id in finished {
+            self.retry_owed_branch_check(&session_id);
         }
         if !changed {
             return EventReaction::Nothing;
@@ -4574,10 +4582,15 @@ impl Engine {
                 outcome,
             } => self.process_gh_status_checked(generation, outcome),
             WorkerEvent::PrStatusReady(results) => self.process_pr_status_ready(results),
+            WorkerEvent::PrCheckOwedDue(session_id) => {
+                self.retry_owed_branch_check(&session_id);
+                EventReaction::Nothing
+            }
             WorkerEvent::PrCheckAborted(session_id) => {
                 // The one-shot check worker panicked; clear its guard so the next
                 // trigger can retry. The badge is left untouched.
-                self.clear_in_flight(&InFlightKey::PrCheck(session_id));
+                self.clear_in_flight(&InFlightKey::PrCheck(session_id.clone()));
+                self.retry_owed_branch_check(&session_id);
                 EventReaction::Nothing
             }
             WorkerEvent::PullRequestReferenceResolved { .. } => {
@@ -5977,6 +5990,48 @@ mod tests {
             engine.pr_last_checked.contains_key("s1"),
             "the branch it moved to is asked about at once"
         );
+    }
+
+    /// A move that lands while a check for the old branch is still running,
+    /// and inside the debounce that check started, is not lost: the new
+    /// branch's check runs once the old one has finished and the window has
+    /// passed, with the blind poll switched off.
+    #[test]
+    fn a_branch_check_refused_by_a_running_check_runs_once_it_can() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.sessions.push(sample_session("s1", "p1", "feat/a"));
+        // A check for feat/a is running, dispatched 9.5 seconds ago.
+        engine.mark_in_flight(InFlightKey::PrCheck("s1".to_string()));
+        let dispatched = Instant::now() - std::time::Duration::from_millis(9_500);
+        engine.pr_last_checked.insert("s1".to_string(), dispatched);
+        let asked_for_a = pr_status_ready(&engine, vec![("s1".to_string(), None)]);
+
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "feat/b".to_string(),
+        )]));
+        assert_eq!(
+            engine.pr_last_checked.get("s1"),
+            Some(&dispatched),
+            "refused while the feat/a check runs"
+        );
+        engine.process_worker_event(asked_for_a);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while engine.pr_last_checked.get("s1") == Some(&dispatched) {
+            assert!(
+                Instant::now() < deadline,
+                "feat/b was never checked after the feat/a check finished"
+            );
+            if let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+            {
+                engine.process_worker_event(event);
+            }
+        }
     }
 
     #[test]
