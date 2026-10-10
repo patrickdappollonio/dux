@@ -93,6 +93,7 @@ import {
   openCommit,
   openDiscard,
   openEditor,
+  openStandaloneEditorInThisTab,
   refreshChanges,
   standaloneEditorHash,
   toggleChangesPane,
@@ -334,6 +335,7 @@ interface FileRowProps {
   selected: boolean
   onToggleSelected: (path: string) => void
   onOpenDiff: (path: string) => void
+  onEdit: (path: string) => void
   // 0 for a row of the listing itself, one more per expanded folder above it.
   depth: number
   // A folded folder whose contents are showing under it.
@@ -376,6 +378,21 @@ function depthIndent(depth: number): React.CSSProperties | undefined {
     : undefined
 }
 
+// Open a changed file in the agent's editor: the in-page overlay on a computer,
+// and on a phone, where that overlay does not render, this same tab at the
+// standalone editor's address, so Back returns to the Changes screen.
+function openChangedFile(
+  sessionId: string,
+  path: string,
+  mode: "diff" | "file",
+  isMobile: boolean,
+): void {
+  const root = agentRoot(sessionId)
+  if (isMobile) openStandaloneEditorInThisTab(root, { mode, path })
+  else if (mode === "diff") openEditor(root, path, "diff")
+  else openEditor(root, path)
+}
+
 // Memoized: the list re-renders on every scroll step and selection change, and
 // a row whose file, selection and handlers did not move has nothing to redraw.
 const FileRow = memo(function FileRow({
@@ -385,6 +402,7 @@ const FileRow = memo(function FileRow({
   selected,
   onToggleSelected,
   onOpenDiff,
+  onEdit,
   depth,
   expanded,
   onToggleExpand,
@@ -440,14 +458,12 @@ const FileRow = memo(function FileRow({
   // inside it under it; a repository of its own is not looked inside.
   const folderCount = folderCountLabel(file)
   const expandable = onToggleExpand !== undefined && isExpandable(file)
-  // The row menu's items, decided before the trigger is: Edit (desktop only,
-  // and never for a deleted file or a folder), stage or unstage, and discard.
+  // The row menu's items, decided before the trigger is: Edit (never for a
+  // deleted file or a folder), stage or unstage, and discard.
   const showEdit = kind !== "deleted" && folderCount === null
   const showStageAction = action === "unstage" || stageActsOn(file)
   const showDiscard = action === "stage" && discardActsOn(file)
-  // Edit alone would leave a phone an empty menu (it is desktop only), so it
-  // never makes the trigger exist by itself.
-  const hasMenuItems = showStageAction || showDiscard
+  const hasMenuItems = showEdit || showStageAction || showDiscard
   const displayPath = folderCount === null ? file.path : `${file.path}/`
 
   return (
@@ -608,14 +624,11 @@ const FileRow = memo(function FileRow({
           </DropdownMenuTrigger>
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
-              {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
-                  for deleted files (nothing on disk to edit) and for a folded
-                  folder (a directory is not a file to edit). */}
+              {/* Open in the editor. Skipped for deleted files (nothing on
+                  disk to edit) and for a folded folder (a directory is not a
+                  file to edit). */}
               {showEdit && (
-                <DropdownMenuItem
-                  className="hidden md:flex"
-                  onClick={() => openEditor(agentRoot(sessionId), file.path)}
-                >
+                <DropdownMenuItem onClick={() => onEdit(file.path)}>
                   <Pencil />
                   Edit
                 </DropdownMenuItem>
@@ -1292,9 +1305,14 @@ function ChangesList({
   const hasMatches = filtered.staged.length > 0 || filtered.unstaged.length > 0
   // Stable per session, like the toggles below, so the memoized rows skip a
   // re-render of the list that did not touch them.
+  const isMobile = useIsMobile()
   const openDiff = useCallback(
-    (path: string) => openEditor(agentRoot(sessionId), path, "diff"),
-    [sessionId],
+    (path: string) => openChangedFile(sessionId, path, "diff", isMobile),
+    [sessionId, isMobile],
+  )
+  const openFile = useCallback(
+    (path: string) => openChangedFile(sessionId, path, "file", isMobile),
+    [sessionId, isMobile],
   )
   const toggleStaged = useCallback(
     (path: string) => onToggle("staged", path),
@@ -1662,6 +1680,7 @@ function ChangesList({
         selected={selected[section].has(item.file.path)}
         onToggleSelected={section === "staged" ? toggleStaged : toggleUnstaged}
         onOpenDiff={openDiff}
+        onEdit={openFile}
         depth={item.depth}
         expanded={item.expanded}
         refreshError={item.refreshError}

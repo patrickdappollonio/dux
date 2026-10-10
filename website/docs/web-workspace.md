@@ -541,7 +541,8 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   two things a terminal does not have: there is no changed-file count and no PR chip. Its
   `⋯` opens the terminal's own menu, with the **Input** group,
   **Open editor in new tab** and **Close…**, then the same **Settings** drill.
-- The **changes** screen is the full Changes pane.
+- The **changes** screen is the full Changes pane. Tapping a file opens its diff in the
+  standalone editor in the same browser tab, and Back comes back to the Changes screen.
 
 The flap is the small tab shape hanging off the right of the band, and it is the whole
 reason the header can stay as quiet as it is:

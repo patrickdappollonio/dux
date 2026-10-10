@@ -32,6 +32,8 @@ there, so saves, renames, deletes and uploads confirm in the tab you did them in
 > [!IMPORTANT]
 > The editor overlay is **desktop-only**. Monaco is a poor experience on a touch screen,
 > so on a phone the overlay does not open. The standalone tab is the deliberate exception.
+> On a phone, tapping a changed file or picking its **Edit** opens that file in the
+> standalone editor in the same browser tab, and Back takes you to the Changes screen.
 
 The standalone tab works on phones, best-effort. The file explorer starts collapsed so the
 file gets the width (the header's toggle reopens it at a phone-sized width), and the

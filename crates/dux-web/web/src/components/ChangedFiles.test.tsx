@@ -166,6 +166,15 @@ const { ChangedFiles } = await import("./ChangedFiles")
 const { standaloneEditorHash } = await import("@/lib/store")
 const { agentRoot } = await import("@/lib/editorRoot")
 
+// The layout is chosen by width alone, below the md breakpoint for the phone.
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    value: width,
+    configurable: true,
+    writable: true,
+  })
+}
+
 function loadedChanges(): ChangesSlice {
   return {
     sessionId: "s1",
@@ -205,6 +214,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  setViewportWidth(1024)
+  window.location.hash = ""
   bootMedia?.restore()
   bootMedia = null
   vi.unstubAllGlobals()
@@ -737,10 +748,27 @@ describe("the changes pane's multi-select", () => {
     expect(openEditor).not.toHaveBeenCalled()
   })
 
-  it("still opens the diff when the row is clicked", () => {
+  // A computer opens the in-page overlay. A phone has no overlay, so the
+  // same tab moves to the standalone editor's address, in diff mode.
+  it.each([
+    {
+      layout: "a computer",
+      width: 1024,
+      overlayCalls: [[{ kind: "agent", sessionId: "s1" }, "a.ts", "diff"]],
+      hash: "",
+    },
+    {
+      layout: "a phone",
+      width: 400,
+      overlayCalls: [],
+      hash: "#/editor/agent/s1/diff/a.ts",
+    },
+  ])("still opens the diff when the row is clicked, on $layout", ({ width, overlayCalls, hash }) => {
+    setViewportWidth(width)
     render(<ChangedFiles />)
     fireEvent.click(screen.getByText("a.ts"))
-    expect(openEditor).toHaveBeenCalledTimes(1)
+    expect(openEditor.mock.calls).toEqual(overlayCalls)
+    expect(window.location.hash).toBe(hash)
   })
 
   // The leading slot belongs to the status marker again. The checkbox lives IN
@@ -1558,14 +1586,6 @@ describe("the changes pane's group recaps", () => {
 // standalone editor's address on a phone (where the overlay renders nothing at
 // all), with the new-tab variant left to the row menus.
 describe("the Changes pane header's Open editor button", () => {
-  function setViewportWidth(width: number) {
-    Object.defineProperty(window, "innerWidth", {
-      value: width,
-      configurable: true,
-      writable: true,
-    })
-  }
-
   const editorButton = () => screen.getByLabelText("Open editor")
   const actionsTrigger = () => screen.getByLabelText("Changes actions")
 
@@ -1831,7 +1851,23 @@ describe("the Changes pane's windowed list", () => {
     expect(screen.queryByText("src/file3.ts")).toBeNull()
   })
 
-  it("mounts a row's menu only once it is opened, and it still opens", async () => {
+  // Edit is offered on both layouts. A computer opens the in-page overlay; a
+  // phone moves this same tab to the standalone editor's address, in file mode.
+  it.each([
+    {
+      layout: "a computer",
+      width: 1024,
+      overlayCalls: [[{ kind: "agent", sessionId: "s1" }, "a.ts"]],
+      hash: "",
+    },
+    {
+      layout: "a phone",
+      width: 400,
+      overlayCalls: [],
+      hash: "#/editor/agent/s1/file/a.ts",
+    },
+  ])("mounts a row's menu only once it is opened, and it still opens, on $layout", async ({ width, overlayCalls, hash }) => {
+    setViewportWidth(width)
     mockState = withFiles([], [["a.ts", "M"]])
     render(<ChangedFiles />)
     expect(document.querySelector('[data-slot="dropdown-menu-content"]')).toBeNull()
@@ -1841,6 +1877,14 @@ describe("the Changes pane's windowed list", () => {
     const menu = within(await screen.findByRole("menu"))
     expect(menu.getByText("Stage")).toBeTruthy()
     expect(menu.getByText("Discard…")).toBeTruthy()
+    const edit = menu.getByRole("menuitem", { name: "Edit" })
+    // jsdom applies no stylesheet, so the class is what says it is shown.
+    expect(edit.className).not.toMatch(/(^|\s)hidden(\s|$)/)
+    expect(edit.querySelector("svg")).toBeTruthy()
+
+    fireEvent.click(edit)
+    expect(openEditor.mock.calls).toEqual(overlayCalls)
+    expect(window.location.hash).toBe(hash)
   })
 })
 

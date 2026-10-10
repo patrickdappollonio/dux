@@ -136,12 +136,13 @@ tracked files it will restore.
 
 ## Stage, unstage, discard
 
-Clicking a row still opens its diff; only the checkbox selects. For a single
-file, hover a row for its `⋯` menu:
+Clicking a row still opens its diff; only the checkbox selects. On a phone the diff, and
+**Edit** below, open in the standalone editor in the same browser tab, and Back returns
+to the Changes screen. For a single file, hover a row for its `⋯` menu:
 
 - **Stage** and **Unstage** move a file between the two groups. The row jumps to its new
   group as soon as dux confirms.
-- **Edit** opens the file in the editor (desktop only, and hidden for deleted files).
+- **Edit** opens the file in the editor (hidden for deleted files).
 - **Discard…** throws away a file's uncommitted changes. It only shows up on **unstaged**
   rows, both in the menu and on the server: unstage a file first if you want to discard it.
 
