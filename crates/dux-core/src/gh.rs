@@ -224,8 +224,8 @@ struct Planned {
     known: Option<StoredPr>,
     is_terminal: bool,
     /// Open known PRs also get a by-number alias (robust when the branch was
-    /// deleted on merge). Terminal-but-running sessions get
-    /// only the head-ref discovery alias; undiscovered ones also get `emit_head`.
+    /// deleted on merge). Terminal and undiscovered sessions get the head-ref
+    /// discovery alias and `emit_head` instead.
     emit_num: bool,
     /// Whether the head-ref discovery alias is emitted at all. True for every
     /// remote-derived plan; false for a PINNED session, whose only alias is the
@@ -233,8 +233,9 @@ struct Planned {
     /// deliberately overrode).
     emit_ref: bool,
     /// Whether the head-name alias is emitted: a session with no known pull
-    /// request, whose pull request may have been merged and its branch deleted
-    /// before dux ever saw it. See [`select_head_name_match`].
+    /// request, or only a merged or closed one, whose (next) pull request may
+    /// have been merged and its branch deleted before dux ever saw it. See
+    /// [`select_head_name_match`].
     emit_head: bool,
     /// The agent's working copy, where a head-name match's commit is looked up.
     worktree_path: String,
@@ -323,7 +324,10 @@ impl Planned {
                 && normalize_github_host(&k.host).eq_ignore_ascii_case(&host)
         });
         let emit_num = known_matches_target && !is_terminal;
-        let known_is_none = known.is_none();
+        // A merged or closed known pull request does not end the search: a
+        // follow-up on the same branch can be merged and its branch deleted
+        // between two checks, leaving the ref lookup nothing to answer with.
+        let emit_head = known.is_none() || is_terminal;
         Planned {
             session_id,
             host,
@@ -334,7 +338,7 @@ impl Planned {
             is_terminal,
             emit_num,
             emit_ref: true,
-            emit_head: known_is_none,
+            emit_head,
             worktree_path: String::new(),
             branch_minted_at: None,
             pinned: false,
@@ -394,7 +398,7 @@ impl Planned {
 /// |----------------|----------------|-------------------------------------------|
 /// | None           | any            | head-ref discovery **+** head-name lookup |
 /// | OPEN           | any            | head-ref discovery **+** by-number refresh|
-/// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
+/// | MERGED/CLOSED  | yes            | head-ref discovery **+** head-name lookup (catch a follow-up PR) |
 /// | MERGED/CLOSED  | no             | zero calls, except discovery on a deliberate trigger |
 ///
 /// A PINNED session is the exception: it emits only the by-number refresh, so a
@@ -3569,11 +3573,12 @@ mod tests {
     fn a_pull_request_whose_branch_was_deleted_is_found_by_head_name_only_when_it_is_ours() {
         let (dir, tip, stray) = repo_with_feature_branch();
         let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup = |ref_value: serde_json::Value,
-                      nodes: Vec<serde_json::Value>,
-                      minted: Option<&str>|
+        let lookup_with = |known: Option<StoredPr>,
+                           ref_value: serde_json::Value,
+                           nodes: Vec<serde_json::Value>,
+                           minted: Option<&str>|
          -> Option<(u64, PrState)> {
-            let mut p = planned("s0", "octocat", "Hello-World", "feat/x", None);
+            let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
             p.worktree_path = worktree.clone();
             p.branch_minted_at = minted.map(|t| t.parse().unwrap());
             let ps = vec![p];
@@ -3594,6 +3599,7 @@ mod tests {
                 .as_ref()
                 .map(|pr| (pr.number, pr.state.clone()))
         };
+        let lookup = |ref_value, nodes, minted| lookup_with(None, ref_value, nodes, minted);
         let ours = Some("octocat/Hello-World");
         let null = serde_json::Value::Null;
 
@@ -3704,6 +3710,35 @@ mod tests {
             ),
             None,
             "while the branch exists the ref lookup is the answer"
+        );
+
+        // A merged pull request dux already knows does not hide a follow-up on
+        // the same branch that was merged and deleted between two checks: a
+        // newer match that passes every check above replaces it, and one that
+        // does not leaves the known one in place.
+        assert_eq!(
+            lookup_with(
+                Some(stored(10, "MERGED")),
+                null.clone(),
+                vec![head_node(11, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
+                Some("2026-10-09T09:00:00Z"),
+            ),
+            Some((11, PrState::Merged))
+        );
+        assert_eq!(
+            lookup_with(
+                Some(stored(10, "MERGED")),
+                null.clone(),
+                vec![head_node(
+                    11,
+                    "MERGED",
+                    "2026-10-09T10:00:00Z",
+                    &stray,
+                    ours
+                )],
+                Some("2026-10-09T09:00:00Z"),
+            ),
+            Some((10, PrState::Merged))
         );
     }
 

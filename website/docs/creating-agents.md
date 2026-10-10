@@ -456,7 +456,8 @@ When a branch name is reused, dux follows the most recent pull request on it, pr
 one that is open.
 
 A pull request that was merged, and its branch deleted, before dux ever saw it is still
-found, by the branch's name. Because branch names get reused, dux takes such a match only
+found, by the branch's name, and so is a newer one that replaced a pull request dux
+already knew. Because branch names get reused, dux takes such a match only
 when the pull request came from the agent's own repository rather than a fork, its last
 commit is in the agent's local branch, and, for a branch dux created, it was opened after
 the agent was. Anything else is left alone, and you can attach the pull request by hand.
