@@ -1682,7 +1682,8 @@ fn select_discovered_pr(nodes: Vec<PrInfo>) -> Option<PrInfo> {
 ///   - its head commit is in the agent's own branch (`in_local_history`, which
 ///     refuses a commit this clone does not have).
 ///
-/// Among the nodes that pass, the most recently created one wins.
+/// Among the nodes that pass, the most recently created one wins, and the
+/// higher number between two created in the same second.
 fn select_head_name_match(
     p: &Planned,
     owner_repo: &str,
@@ -1714,7 +1715,8 @@ fn select_head_name_match(
             Some((created_at, head_oid, pr))
         })
         .collect();
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    // Newest first; within one second, the higher number is the later one.
+    candidates.sort_by_key(|candidate| std::cmp::Reverse((candidate.0, candidate.2.number)));
     let (_, _, pr) = candidates
         .into_iter()
         .find(|(_, head_oid, _)| in_local_history(p, head_oid))?;
@@ -3759,6 +3761,20 @@ mod tests {
                 Some("2026-10-09T09:00:00Z"),
             ),
             Some((10, PrState::Merged))
+        );
+        // Two that pass, created in the same second: the higher number is the
+        // later one, so it wins whatever order GitHub listed them in.
+        assert_eq!(
+            lookup_with(
+                Some(stored(10, "MERGED")),
+                null.clone(),
+                vec![
+                    head_node(10, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
+                    head_node(11, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
+                ],
+                Some("2026-10-09T09:00:00Z"),
+            ),
+            Some((11, PrState::Merged))
         );
     }
 
