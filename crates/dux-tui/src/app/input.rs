@@ -1449,7 +1449,7 @@ impl App {
                 if let Some(input) = self.agent_filter.as_mut()
                     && input.handle_key(key)
                 {
-                    self.rebuild_left_items_after_own_change();
+                    self.rebuild_left_items_for_filter();
                     return Ok(true);
                 }
                 Ok(false)
@@ -8302,7 +8302,7 @@ impl App {
                     dux_core::statusline::StatusTone::Busy,
                     busy,
                 );
-                self.rebuild_left_items_after_own_change();
+                self.rebuild_left_items();
             }
         }
         false
@@ -8558,7 +8558,7 @@ impl App {
         }) {
             Ok(outcome) => {
                 self.engine.sync_has_active_processes();
-                self.rebuild_left_items_after_own_change();
+                self.rebuild_left_items();
                 if let Some(status) = outcome.status {
                     self.set_info(status.message);
                 }
