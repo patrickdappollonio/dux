@@ -21059,7 +21059,8 @@ not_a_real_action = ["x"]
         }
         for _ in 0..200 {
             app.refresh_snapshot_buf();
-            if app.snapshot_buf.scrollback_total == total {
+            // Also drawable, or a test that renders next gets the loading card.
+            if app.snapshot_buf.scrollback_total == total && surface_has_output(app) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));

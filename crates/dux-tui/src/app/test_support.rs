@@ -445,11 +445,11 @@ pub(crate) fn stop_watching(app: &App, token: u64) {
 
 /// Whether the selected terminal surface has raised its has-output flag, the
 /// one the renderer checks before it draws the grid rather than the loading
-/// card. The reader thread raises it only AFTER it has released the grid it
-/// just parsed into, so a test can already see the child's text (or its
-/// cursor, or its history) and still render a loading card, which leaves the
-/// snapshot the test then inspects unrefreshed for that frame.
-fn surface_has_output(app: &App) -> bool {
+/// card. A frame drawn while it is down leaves the snapshot the test then
+/// inspects unrefreshed, so a wait on the child's text, cursor or history
+/// that a render follows waits on this too, rather than relying on the
+/// reader to have raised it in the same step it parsed that output.
+pub(crate) fn surface_has_output(app: &App) -> bool {
     app.selected_terminal_surface_client()
         .is_some_and(|provider| provider.has_output())
 }
