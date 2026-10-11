@@ -2424,10 +2424,10 @@ impl App {
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
-        // The deleted session is already gone from `engine.sessions`, so the row
-        // that slid into the freed slot sits at the same display index. This
-        // arm runs for this surface's own deletes, which put the cursor there.
-        self.rebuild_left_items_after_own_change();
+        // The deleted session is already gone from `engine.sessions`, so a
+        // cursor on it rests on no row and the centre shows the tips screen:
+        // the row that slid into its place is an agent nobody picked.
+        self.rebuild_left_items();
         self.reload_changed_files();
 
         if update_status {
@@ -3901,16 +3901,15 @@ impl App {
         project_id: String,
         project_name: String,
     ) -> Result<()> {
-        let row = self.selected_left;
         let reaction = self.engine.apply(Command::RemoveProject {
             project_id,
             project_name,
         })?;
         self.apply_reaction(reaction);
         // The cascade mutates engine.sessions synchronously; refresh the cache
-        // so render never indexes a stale row. This surface removed them, so
-        // the cursor moves on to the row that took its place.
-        self.rebuild_left_items_after_own_change_from(row);
+        // so render never indexes a stale row. A cursor on a removed agent
+        // rests on no row.
+        self.rebuild_left_items();
         Ok(())
     }
 
@@ -3924,16 +3923,15 @@ impl App {
         // worker once its agent has stopped, under one keyed busy the engine
         // opens here and resolves when the last removal lands.
         logger::info(&format!("deleting project {}", project.path));
-        let row = self.selected_left;
         let reaction = self.engine.apply(Command::DeleteProject {
             project_id: project.id.clone(),
             project_name: project.name.clone(),
         })?;
         self.apply_reaction(reaction);
         // The cascade mutated engine.sessions/projects synchronously; refresh the
-        // cache so render never indexes a stale row. This surface deleted them,
-        // so the cursor moves on to the row that took its place.
-        self.rebuild_left_items_after_own_change_from(row);
+        // cache so render never indexes a stale row. A cursor on a deleted agent
+        // rests on no row.
+        self.rebuild_left_items();
         Ok(())
     }
 
@@ -4748,9 +4746,9 @@ impl App {
             self.focus = FocusPane::Left;
         }
 
-        // A killed agent can leave for the Inactive tail; this surface did it,
-        // so the cursor moves on to its neighbour.
-        self.rebuild_left_items_after_own_change();
+        // A killed agent can leave for the Inactive tail, and a cursor on it
+        // then rests on no row.
+        self.rebuild_left_items();
         // The kill just removed PTYs; keep the poll-cadence flag honest right
         // away rather than waiting for the next tick.
         self.engine.sync_has_active_processes();
@@ -7424,12 +7422,11 @@ mod tests {
         );
     }
 
-    /// Deleting the selected agent must land the cursor on the row that slid
-    /// into the freed slot (id-stable reselection), not on the row above it.
-    /// The old `saturating_sub(1)` double-adjusted after the rebuild already
-    /// re-clamped, jumping the cursor up one row.
+    /// Deleting the selected agent leaves nothing selected and the tips screen
+    /// in the centre: the row that slid into its place is an agent nobody
+    /// picked, and drawing it would attach this surface to it.
     #[test]
-    fn delete_selected_agent_keeps_cursor_on_next_row() {
+    fn deleting_the_selected_agent_here_leaves_nothing_selected() {
         let project = make_project_at("project-1", "codex", "/tmp/project");
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
@@ -7448,15 +7445,11 @@ mod tests {
         app.selected_left = 1;
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s2"));
 
+        mark_active(&mut app, "s3");
+
         app.do_delete_session("s2", false, None).expect("delete s2");
 
-        // The cursor stays at display index 1, which now holds s3 (the row that
-        // slid up), NOT s1 (which a decrement would have selected).
-        assert_eq!(
-            app.selected_session().map(|s| s.id.as_str()),
-            Some("s3"),
-            "cursor should land on the row that took the deleted row's place",
-        );
+        assert_resting_on_the_tips_screen(&mut app);
     }
 
     /// Deleting a row OTHER than the selected one must not drag the selection
@@ -11215,6 +11208,25 @@ mod tests {
         assert_back_on_the_action_list(&app, "Escape on the startup logs");
     }
 
+    /// Nothing is selected, the centre shows the dux tips screen, and this
+    /// surface is attached to no agent, though the agent that took the gone
+    /// one's row is running.
+    fn assert_resting_on_the_tips_screen(app: &mut App) {
+        let _ = rendered_text(app);
+        assert_eq!(app.selected_session().map(|s| s.id.clone()), None);
+        assert!(app.welcome_logo_visible, "the centre shows the tips screen");
+        let attached: Vec<String> = app
+            .engine
+            .attachments
+            .connections(std::time::Instant::now())
+            .into_iter()
+            .filter(|c| c.surface == dux_core::attachments::Surface::TerminalUi)
+            .flat_map(|c| c.attachments)
+            .map(|a| a.target.id)
+            .collect();
+        assert!(attached.is_empty(), "attached to {attached:?}");
+    }
+
     /// Three running agents in manual order, the middle one in `middle_project`
     /// and under the cursor, the other two in project-1.
     fn three_running_agents_cursor_on_the_middle(middle_project: &str) -> App {
@@ -11256,24 +11268,22 @@ mod tests {
     }
 
     /// Detaching the agent under the cursor from here sends it to the collapsed
-    /// Inactive tail, and the cursor moves on to the row that took its place,
-    /// as this surface's own changes always have.
+    /// Inactive tail and leaves nothing selected.
     #[test]
-    fn detaching_the_selected_agent_here_moves_the_cursor_to_its_neighbour() {
+    fn detaching_the_selected_agent_here_leaves_nothing_selected() {
         let mut app = three_running_agents_cursor_on_the_middle("project-1");
 
         app.confirm_detach_selected_session().expect("dispatch");
         app.resolve_confirm_detach_agent(true);
 
         assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+        assert_resting_on_the_tips_screen(&mut app);
     }
 
-    /// Removing the orphaned group the cursor's agent is in, from here, moves the
-    /// cursor on to the row that took its place, as this surface's own agent
-    /// deletes do.
+    /// Removing the orphaned group the cursor's agent is in, from here, leaves
+    /// nothing selected.
     #[test]
-    fn removing_a_project_here_moves_the_cursor_to_its_neighbour() {
+    fn removing_a_project_here_leaves_nothing_selected() {
         let mut app = three_running_agents_cursor_on_the_middle("gone-project");
 
         app.run_remove_orphaned_project("gone-project".to_string(), "gone".to_string())
@@ -11284,14 +11294,13 @@ mod tests {
             "{}",
             app.status.text()
         );
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+        assert_resting_on_the_tips_screen(&mut app);
     }
 
     /// Stopping the only running tab of the agent under the cursor, from here,
-    /// sends it to the collapsed Inactive tail, and the cursor moves on to the
-    /// row that took its place.
+    /// sends it to the collapsed Inactive tail and leaves nothing selected.
     #[test]
-    fn stopping_the_selected_agents_tab_here_moves_the_cursor_to_its_neighbour() {
+    fn stopping_the_selected_agents_tab_here_leaves_nothing_selected() {
         let mut app = three_running_agents_cursor_on_the_middle("project-1");
 
         app.stop_focused_tab_prompt();
@@ -11299,27 +11308,26 @@ mod tests {
         app.resolve_confirm_stop_tab(true);
 
         assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+        assert_resting_on_the_tips_screen(&mut app);
     }
 
     /// Killing the agent under the cursor from the running-processes list sends
-    /// it to the collapsed Inactive tail, and the cursor moves on to the row
-    /// that took its place.
+    /// it to the collapsed Inactive tail and leaves nothing selected.
     #[test]
-    fn killing_the_selected_agent_here_moves_the_cursor_to_its_neighbour() {
+    fn killing_the_selected_agent_here_leaves_nothing_selected() {
         let mut app = three_running_agents_cursor_on_the_middle("project-1");
 
         let (agents, _) = app.kill_runtime_targets(&[RuntimeTargetId::Agent("s2".to_string())]);
 
         assert_eq!(agents, 1);
         assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+        assert_resting_on_the_tips_screen(&mut app);
     }
 
-    /// Deleting the project the cursor's agent is in, from here, moves the
-    /// cursor on to the row that took its place.
+    /// Deleting the project the cursor's agent is in, from here, leaves nothing
+    /// selected.
     #[test]
-    fn deleting_a_project_here_moves_the_cursor_to_its_neighbour() {
+    fn deleting_a_project_here_leaves_nothing_selected() {
         let mut app = three_running_agents_cursor_on_the_middle("project-2");
         let project = app
             .engine
@@ -11336,6 +11344,6 @@ mod tests {
             "{}",
             app.status.text()
         );
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+        assert_resting_on_the_tips_screen(&mut app);
     }
 }

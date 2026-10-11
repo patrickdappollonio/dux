@@ -6403,14 +6403,14 @@ impl App {
 
     pub(crate) fn open_agent_filter(&mut self) {
         self.agent_filter = Some(TextInput::new());
-        self.rebuild_left_items_after_own_change();
+        self.rebuild_left_items_for_filter();
     }
 
     /// Leave agent-list filter mode: clear the query and restore the full list,
     /// keeping a sensible (selectable) selection via `rebuild_left_items`.
     pub(crate) fn close_agent_filter(&mut self) {
         self.agent_filter = None;
-        self.rebuild_left_items_after_own_change();
+        self.rebuild_left_items_for_filter();
     }
 
     pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
@@ -6503,8 +6503,10 @@ impl App {
     /// does not hand it to whatever took its place: an agent deleted, or one
     /// gone dormant into the collapsed Inactive tail, or a non-agent row that
     /// went away, leaves the cursor on no row, and so does an empty list that
-    /// agents then appear in. This surface's own changes go through
-    /// [`Self::rebuild_left_items_after_own_change`], which moves it on instead.
+    /// agents then appear in, whoever made the change: the centre then shows
+    /// the tips screen until the user picks a row. Only a filter, which is
+    /// the user choosing what the list shows, goes through
+    /// [`Self::rebuild_left_items_for_filter`] and lands on a row.
     fn put_left_cursor_back(&mut self, was_on: LeftCursorOn) {
         match was_on {
             LeftCursorOn::Row(row) => {
@@ -6534,17 +6536,11 @@ impl App {
         self.left_cursor_parked = true;
     }
 
-    /// Rebuild the agent list after a change this surface made itself: a row
-    /// it was on that went away hands the cursor to the row that took its place,
-    /// and a cursor on no row lands on one, as this surface's own deletes and
-    /// filters always have.
-    pub(crate) fn rebuild_left_items_after_own_change(&mut self) {
-        self.rebuild_left_items_after_own_change_from(self.selected_left);
-    }
-
-    /// The same, for a change that rebuilt the list already on its way here:
-    /// `row` is where the cursor was before the change began.
-    pub(crate) fn rebuild_left_items_after_own_change_from(&mut self, row: usize) {
+    /// Rebuild the agent list after the filter changed: the user is choosing
+    /// what the list shows, so a row the query hid hands the cursor to the row
+    /// that took its place, and a cursor on no row lands on one.
+    pub(crate) fn rebuild_left_items_for_filter(&mut self) {
+        let row = self.selected_left;
         self.rebuild_left_items();
         if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
             self.left_cursor_parked = false;
