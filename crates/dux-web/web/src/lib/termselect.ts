@@ -79,9 +79,8 @@ function clamp(value: number, low: number, high: number): number {
  * for a wide glyph, 0 for the CONTINUATION cell after it, 1 otherwise; `chars`
  * is empty for a continuation cell and for a cell never written.
  *
- * Which glyphs are wide is xterm's answer, and it is narrower than "anything
- * that looks big": under its default Unicode v6 provider, CJK and the fullwidth
- * forms are the two-cell case and a U+1F300-block emoji is a single cell.
+ * Which glyphs are wide is xterm's answer, under the Unicode 11 table every
+ * pane selects: CJK, the fullwidth forms and emoji are the two-cell case.
  */
 export interface RowCell {
   chars: string

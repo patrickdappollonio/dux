@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { Unicode11Addon } from "@xterm/addon-unicode11"
 import { Terminal } from "@xterm/xterm"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -85,7 +86,15 @@ async function openTerminal(
   restoreMedia = stubMatchMedia()
   const host = document.createElement("div")
   document.body.appendChild(host)
-  const term = new Terminal({ cols: options.cols ?? 40, rows: options.rows ?? 10 })
+  const term = new Terminal({
+    cols: options.cols ?? 40,
+    rows: options.rows ?? 10,
+    allowProposedApi: true,
+  })
+  // The width table every dux pane runs with, so a glyph is as wide here as it
+  // is on screen.
+  term.loadAddon(new Unicode11Addon())
+  term.unicode.activeVersion = "11"
   term.open(host)
   opened.push(term)
   await new Promise<void>((resolve) => term.write(text, resolve))
@@ -157,21 +166,21 @@ describe("the pure helpers against a real xterm buffer", () => {
     }
   })
 
-  it("takes an emoji as ONE cell, because that is what xterm makes it", async () => {
-    // MEASURED, and it contradicts the obvious assumption, so it is pinned
-    // rather than left as folklore: under xterm's DEFAULT Unicode provider (v6
-    // wcwidth) an emoji from the U+1F300 block is width ONE, not two. The
-    // widths of "🎉😀★→日ａ" come back 1, 1, 1, 1, 2, 2. So the two-cell case
-    // this module cares about is CJK and the fullwidth forms; an emoji needs no
-    // special handling here at all, and a helper that assumed every emoji was
-    // wide would be wrong in this terminal. If dux ever registers the v11
-    // provider, these widths move and the CJK tests above are what still hold.
+  it("keeps an emoji whole from either half of its two cells", async () => {
+    // Under the Unicode 11 table an emoji from the U+1F300 block is two cells,
+    // the same count the server's terminal model makes, so it follows the CJK
+    // rules above rather than being a one-cell glyph of its own.
     const { term, cells } = await openTerminal("ship 🎉 it\r\n")
     const row = cells(0)
-    expect(row[5]).toEqual({ chars: "🎉", width: 1 })
-    const word = wordRangeAt(row, 5)
-    term.select(word.startCol, 0, word.endColExclusive - word.startCol)
-    expect(term.getSelection()).toBe("🎉")
+    expect(row.slice(5, 7)).toEqual([
+      { chars: "🎉", width: 2 },
+      { chars: "", width: 0 },
+    ])
+    for (const col of [5, 6]) {
+      const word = wordRangeAt(row, col)
+      term.select(word.startCol, 0, word.endColExclusive - word.startCol)
+      expect(term.getSelection()).toBe("🎉")
+    }
   })
 
   it("keeps a fullwidth run whole from either half of any of its cells", async () => {

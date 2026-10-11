@@ -5527,10 +5527,13 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_repaint_maps_tabs_to_spaces_without_drift() {
+    fn reconnect_repaint_keeps_columns_after_tabs_and_emoji() {
         let mut src = TerminalState::with_scrollback(4, 40, 100);
         // Tabs stop every 8 columns: a@0, b@8, c@16.
         src.process(b"a\tb\tc");
+        // U+2705 is two cells wide here, the count the browser's xterm must
+        // share for the replay and the live stream to land in the same columns.
+        src.process("\r\n\u{2705}X".as_bytes());
         let replay = src.reconnect_repaint();
         assert!(
             !replay.contains(&b'\t'),
@@ -5552,6 +5555,8 @@ mod tests {
         assert_eq!(at(0, 0), Some("a"));
         assert_eq!(at(0, 8), Some("b"));
         assert_eq!(at(0, 16), Some("c"));
+        assert_eq!(at(1, 0), Some("\u{2705}"));
+        assert_eq!(at(1, 2), Some("X"));
     }
 
     #[test]
