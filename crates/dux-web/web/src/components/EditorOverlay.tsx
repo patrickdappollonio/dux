@@ -24,6 +24,9 @@ export function EditorOverlay() {
 
   return (
     <Dialog
+      // The open editor is a position in the URL already, so Back leaves it
+      // through the router rather than through a dialog's entry of its own.
+      historyEntry={false}
       open={editorTarget !== null}
       onOpenChange={(open) => {
         if (!open) closeEditor()

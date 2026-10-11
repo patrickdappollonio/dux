@@ -23,12 +23,13 @@ interface RootOpenProps<Details extends { isCanceled: boolean }, Actions extends
 // it through the Root's own imperative close, so the caller's `onOpenChange`
 // hears `false` exactly as it does for Cancel or Escape and abandons whatever
 // the modal was offering. Returns the two props to pass on to the Root in place
-// of the caller's.
+// of the caller's. With `enabled` false the Root is never registered.
 export function useBackDismiss<
   Details extends { isCanceled: boolean },
   Actions extends Closable,
 >(
   props: RootOpenProps<Details, Actions>,
+  enabled = true,
 ): {
   actionsRef: RefObject<Actions | null>
   onOpenChange: (open: boolean, details: Details) => void
@@ -43,9 +44,9 @@ export function useBackDismiss<
   const isOpen = open ?? uncontrolledOpen
 
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !enabled) return
     return registerModal(() => actionsRef.current?.close())
-  }, [isOpen, actionsRef])
+  }, [isOpen, enabled, actionsRef])
 
   const handleOpenChange = (next: boolean, details: Details) => {
     onOpenChange?.(next, details)

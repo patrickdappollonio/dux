@@ -18,6 +18,7 @@ import {
 } from "@/lib/editorLayout"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
+import { openModals } from "@/lib/modalHistory"
 
 // These cases render the whole editor shell and then wait on `waitFor` polls, so
 // a busy machine can push a perfectly healthy run past the default per-test
@@ -458,8 +459,12 @@ describe("drafts survive the editor closing", () => {
     vi.unstubAllGlobals()
   })
 
-  it("closing with a dirty tab does not prompt, it just closes", async () => {
+  it("takes no history entry of a dialog's, and closing with a dirty tab does not prompt, it just closes", async () => {
     await mountWithDirtyTab()
+    // The open editor is a position in the URL, which Back already leaves
+    // through the router; a dialog's own entry on top would make that Back
+    // close it by pushing the closed position instead.
+    expect(openModals()).toEqual([])
     fireEvent.click(screen.getByRole("button", { name: /^close$/i }))
     // No discard dialog: the close is immediate and non-destructive.
     expect(screen.queryByText(/discard unsaved changes/i)).toBeNull()

@@ -7,9 +7,14 @@ import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { XIcon } from "lucide-react"
 
 // Every dialog closes on the browser's Back, the way its Cancel does
-// (`useBackDismiss`).
-function Dialog({ ...props }: DialogPrimitive.Root.Props) {
-  const back = useBackDismiss(props)
+// (`useBackDismiss`). `historyEntry={false}` is for a dialog whose being open is
+// already a position in the URL (the editor overlay), which Back leaves through
+// the router instead.
+function Dialog({
+  historyEntry = true,
+  ...props
+}: DialogPrimitive.Root.Props & { historyEntry?: boolean }) {
+  const back = useBackDismiss(props, historyEntry)
   return <DialogPrimitive.Root data-slot="dialog" {...props} {...back} />
 }
 
