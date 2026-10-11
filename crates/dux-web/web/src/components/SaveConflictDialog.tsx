@@ -50,6 +50,9 @@ export function SaveConflictDialog({
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
+      // Raised by the server refusing a save, not by a click, so it takes no
+      // history entry for the browser's Back.
+      historyEntry={false}
     >
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>

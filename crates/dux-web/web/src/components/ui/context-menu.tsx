@@ -2,10 +2,14 @@ import * as React from "react"
 import { ContextMenu as ContextMenuPrimitive } from "@base-ui/react/context-menu"
 
 import { cn } from "@/lib/utils"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { ChevronRightIcon, CheckIcon } from "lucide-react"
 
+// An open context menu closes on the browser's Back, the way Escape closes it
+// (`useBackDismiss`).
 function ContextMenu({ ...props }: ContextMenuPrimitive.Root.Props) {
-  return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} />
+  const back = useBackDismiss(props)
+  return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} {...back} />
 }
 
 function ContextMenuPortal({ ...props }: ContextMenuPrimitive.Portal.Props) {

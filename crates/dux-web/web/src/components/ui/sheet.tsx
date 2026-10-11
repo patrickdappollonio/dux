@@ -5,10 +5,14 @@ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { XIcon } from "lucide-react"
 
+// Every sheet closes on the browser's Back, the way its close does
+// (`useBackDismiss`).
 function Sheet({ ...props }: SheetPrimitive.Root.Props) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />
+  const back = useBackDismiss(props)
+  return <SheetPrimitive.Root data-slot="sheet" {...props} {...back} />
 }
 
 function SheetTrigger({ ...props }: SheetPrimitive.Trigger.Props) {

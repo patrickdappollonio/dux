@@ -3,10 +3,22 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { XIcon } from "lucide-react"
 
-function Dialog({ ...props }: DialogPrimitive.Root.Props) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />
+// Every dialog closes on the browser's Back, the way its Cancel does
+// (`useBackDismiss`). `historyEntry={false}` takes a dialog out of that: one
+// whose being open is already a position in the URL (the editor overlay), which
+// Back leaves through the router instead, and one that opened by itself rather
+// than from the user's own click or tap (a screen raised at boot, a server's
+// answer, a target that vanished). Back must never be what dismisses those,
+// and their entry would land in history with no gesture behind it.
+function Dialog({
+  historyEntry = true,
+  ...props
+}: DialogPrimitive.Root.Props & { historyEntry?: boolean }) {
+  const back = useBackDismiss(props, historyEntry)
+  return <DialogPrimitive.Root data-slot="dialog" {...props} {...back} />
 }
 
 function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {

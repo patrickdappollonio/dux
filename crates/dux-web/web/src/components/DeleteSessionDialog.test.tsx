@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { installBrowserHistory } from "@/test/browserHistory"
 
 // Override `useDux` (seeded spine + target) and spy the store actions the
 // dialog fires, while every other store export stays intact.
@@ -41,6 +42,9 @@ function installBootStubs() {
   )
 }
 installBootStubs()
+// A history the store gives the dialog an entry in, so Back reaches it the way
+// the browser delivers it.
+const browser = installBrowserHistory()
 const { DeleteSessionDialog } = await import("./DeleteSessionDialog")
 const store = await import("@/lib/store")
 const api = await import("@/lib/sessionsApi")
@@ -136,11 +140,20 @@ function chipsIn(el: HTMLElement): (string | null)[] {
 }
 
 describe("DeleteSessionDialog", () => {
-  it("opens for an existing session", () => {
+  // The browser's Back abandons the dialog exactly as Cancel does: it closes,
+  // and the agent is not deleted.
+  it("opens for an existing session, and the browser's Back abandons it", async () => {
     seed("s1", [session1])
+    const before = browser.index
     render(<DeleteSessionDialog />)
     expect(screen.getByText("Delete agent?")).toBeTruthy()
     expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
+    await waitFor(() => {
+      expect(browser.index).toBe(before + 1)
+    })
+    act(() => browser.back())
+    expect(closeDelete).toHaveBeenCalledOnce()
+    expect(deleteSession).not.toHaveBeenCalled()
   })
 
   // The branch is its own decision now, so it is its own box. It appears only

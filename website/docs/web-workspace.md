@@ -84,6 +84,16 @@ stay where you already are rewrite the one entry instead: switching between an a
 own tabs, reconnecting after the wifi drops, and following a link back to where you
 already were.
 
+An open dialog, sheet or menu is one step of its own, with no change to the address. Back
+(or your phone's back gesture) closes it exactly as Cancel or `Escape` would: nothing it
+offered is saved, confirmed or sent, and the page underneath stays where it is. Press Back
+again to move the page. Closing a dialog any other way takes its step away too, so Back is
+never spent on something already closed, and Forward never brings a closed dialog's step
+back. A dialog opened from another one stacks, and each Back closes the top one. A dialog
+that is in the middle of saving when you press Back closes as soon as the save finishes. Two cases keep the plain behavior, where Back moves the page
+and leaves the dialog alone: a browser without the Navigation API, and a dialog dux raises
+by itself rather than in answer to a click or a tap, such as the welcome screen.
+
 dux never presses Back for you. The phone's back chevron is an **up** control: it takes
 you one level up (Changes to its agent, an agent to the home screen), adds its own
 history entry, and can never step out of dux.

@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+
+import { installBrowserHistory } from "@/test/browserHistory"
+
+// The browser's Back reaches an open menu through the store, which gives it a
+// history entry of its own, so the real store is loaded over a history that
+// has one.
+const browser = installBrowserHistory()
+vi.stubGlobal(
+  "fetch",
+  vi.fn(() => Promise.reject(new Error("offline test"))),
+)
+await import("@/lib/store")
 
 import {
   DropdownMenu,
@@ -153,13 +165,20 @@ describe("DropdownMenuContent on mobile (innerWidth 500)", () => {
     expect(popup.className).toContain("overscroll-contain")
   })
 
-  it("keeps menu semantics: items are menuitems and Escape closes", async () => {
+  it("keeps menu semantics: items are menuitems, and Escape and the browser's Back close it", async () => {
     renderMenu()
     await openRoot()
     expect(
       screen.getAllByRole("menuitem").map((el) => el.textContent),
     ).toContain("Alpha")
     fireEvent.keyDown(popupEl(), { key: "Escape" })
+    await settle()
+    expect(screen.queryByRole("menu")).toBeNull()
+    const before = browser.index
+    await openRoot()
+    await settle()
+    expect(browser.index).toBe(before + 1)
+    act(() => browser.back())
     await settle()
     expect(screen.queryByRole("menu")).toBeNull()
   })

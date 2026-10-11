@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react"
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
 import { NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
+import { installBrowserHistory } from "@/test/browserHistory"
 import type { DuxState, FirstLoadDialogState } from "@/lib/store"
 
 // The ONE dialog serves both screens, so what matters here is the SELECTION:
@@ -40,6 +43,9 @@ function installBootStubs() {
   )
 }
 installBootStubs()
+// A history the store can give a dialog an entry in, so Back reaches it the
+// way the browser delivers it.
+const browser = installBrowserHistory()
 
 const { FirstLoadDialog } = await import("./FirstLoadDialog")
 const store = await import("@/lib/store")
@@ -131,6 +137,30 @@ describe("FirstLoadDialog", () => {
     seed(null)
     render(<FirstLoadDialog />)
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  // Closing a screen that opened by itself records it as seen, so the
+  // browser's Back must never be what closes it: it gets no history entry, and
+  // Back leaves it alone. Opened from the menu, it is an ordinary dialog.
+  it("takes no history entry when it opened by itself, and Back never acknowledges it", async () => {
+    seed({ automatic: true })
+    const before = browser.index
+    render(<FirstLoadDialog />)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(browser.index).toBe(before)
+    act(() => browser.back())
+    expect(closeFirstLoad).not.toHaveBeenCalled()
+  })
+
+  it("closes on Back when it was opened from the menu", async () => {
+    seed({ automatic: false })
+    const before = browser.index
+    render(<FirstLoadDialog />)
+    await waitFor(() => {
+      expect(browser.index).toBe(before + 1)
+    })
+    act(() => browser.back())
+    expect(closeFirstLoad).toHaveBeenCalledOnce()
   })
 
   it("stands down on the standalone editor surface", () => {

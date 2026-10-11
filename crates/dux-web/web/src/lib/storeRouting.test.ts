@@ -130,10 +130,10 @@ const fakeHistory = {
 const fakeNavigation = {
   transition: null as unknown,
   get currentEntry() {
-    return { key: entryKeys[index], index }
+    return { key: entryKeys[index], index, url: entries[index] }
   },
   entries() {
-    return entryKeys.map((key, i) => ({ key, index: i }))
+    return entryKeys.map((key, i) => ({ key, index: i, url: entries[i] }))
   },
   traverseTo(key: string) {
     const calls = { resolve: () => {}, reject: (_err: unknown) => {} }
@@ -270,8 +270,27 @@ function holdSpine(): void {
   })
 }
 
+// Which run of the server answers `GET /api/v1/build`. A test that moves it and
+// reconnects sees the page reload, which `reloadPage` records rather than does.
+let serverRun = "run-1"
+let reloadedAtIndex: number | null = null
+vi.mock("./reloadPage", () => ({
+  reloadPage: () => {
+    reloadedAtIndex = index
+  },
+}))
+
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
+  if (u.includes("/api/v1/build")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ version: "development", process: serverRun }),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/api/v1/workspace")) {
     if (spineGate) await spineGate
     return {
@@ -312,6 +331,8 @@ class FakeWebSocket {
 }
 
 beforeEach(() => {
+  serverRun = "run-1"
+  reloadedAtIndex = null
   spineBody = makeSpine([])
   spineGate = null
   releaseSpine = () => {}
@@ -859,6 +880,253 @@ describe("moving in pushes, and Back unwinds exactly", () => {
     history.back()
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+  })
+
+  // A dialog, sheet or open menu holds ONE history entry of its own that names
+  // no new position, so the browser's Back closes it and leaves the page where
+  // it is. These drive the store through the same registry the shared UI
+  // primitives use; a test dialog's close does what a real one does, which is
+  // to stop being open.
+  describe("with a dialog open", () => {
+    // Open a dialog the way a shared primitive does. `closedByBack` counts the
+    // closes the store asked for; `cancel` is any other way out (Cancel, a
+    // confirm, Escape, the target vanishing).
+    async function openDialog() {
+      const modals = await import("./modalHistory")
+      const dialog = { closedByBack: 0, cancel: () => {} }
+      dialog.cancel = modals.registerModal(() => {
+        dialog.closedByBack += 1
+        dialog.cancel()
+      })
+      await settle()
+      return dialog
+    }
+
+    // The store reconciles history after the commit that opened or closed a
+    // dialog, so a test lets that turn pass before it looks.
+    function settle(): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    it("closes the dialog on Back and leaves the page and its address alone", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      // One entry more, at the same address.
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1"])
+      expect(index).toBe(3)
+      history.back()
+      expect(dialog.closedByBack).toBe(1)
+      expect(loc.hash).toBe("#/agent/s1")
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+      expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+      // And Back again moves the page as usual.
+      await settle()
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+      expect(loc.hash).toBe("")
+      expect(dialog.closedByBack).toBe(1)
+    })
+
+    it("takes its entry away when it closes another way, so the next Back moves the page", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      expect(index).toBe(3)
+      dialog.cancel()
+      await settle()
+      expect(index).toBe(2)
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+      expect(loc.hash).toBe("")
+    })
+
+    it("leaves no entry behind when it closes and then navigates", async () => {
+      const mod = await loadStore("", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      expect(index).toBe(3)
+      dialog.cancel()
+      mod.selectSession("s2")
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s2"])
+      expect(index).toBe(3)
+      history.back()
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    })
+
+    it("leaves no entry behind when it navigates and then closes", async () => {
+      const mod = await loadStore("", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      expect(index).toBe(3)
+      mod.selectSession("s2")
+      dialog.cancel()
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s2"])
+      expect(index).toBe(3)
+      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+      history.back()
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    })
+
+    it("closes nested dialogs one per Back, top first", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const outer = await openDialog()
+      const inner = await openDialog()
+      expect(index).toBe(4)
+      history.back()
+      expect(inner.closedByBack).toBe(1)
+      expect(outer.closedByBack).toBe(0)
+      await settle()
+      history.back()
+      expect(outer.closedByBack).toBe(1)
+      expect(loc.hash).toBe("#/agent/s1")
+      await settle()
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
+    it("hands a closing menu's entry to the dialog it opened", async () => {
+      // A menu item that opens a dialog closes the menu in the same commit.
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const menu = await openDialog()
+      const modals = await import("./modalHistory")
+      menu.cancel()
+      let dialogClosed = 0
+      const release = modals.registerModal(() => {
+        dialogClosed += 1
+        release()
+      })
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s1"])
+      history.back()
+      expect(dialogClosed).toBe(1)
+      expect(menu.closedByBack).toBe(0)
+      expect(loc.hash).toBe("#/agent/s1")
+      await settle()
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
+    it("takes a menu's entry away before a phone's editor opens over it", async () => {
+      // On a phone the editor is this tab at the standalone address, reached by
+      // a fragment navigation rather than a store write, so it must wait for
+      // the menu's entry to go or it lands on top of it.
+      viewportWidth = 390
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const menu = await openDialog()
+      expect(index).toBe(3)
+      mod.openEditor(agentRoot("s1"), "a.ts")
+      menu.cancel()
+      await settle()
+      expect(index).toBe(2)
+      expect(loc.hash).toBe("#/editor/agent/s1/file/a.ts")
+    })
+
+    it("steps onto the page behind when the agent under a dialog is deleted elsewhere", async () => {
+      viewportWidth = 390
+      const mod = await loadStore("#/agent/s2", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.navigateUp()
+      mod.selectSession("s1")
+      expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s2", "/", "#/agent/s1"])
+      await openDialog()
+      expect(index).toBe(4)
+      // A browser takes the dialog's entry away as a later task.
+      deferTraversal = true
+      await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+      releaseTraversals()
+      await settle()
+      // Home was already the entry behind the agent, so the fallback lands on
+      // it rather than writing a second home over the agent's entry.
+      expect(mod.getSnapshot().mobileScreen).toBe("home")
+      expect(index).toBe(2)
+      expect(entries.slice(0, 3)).toEqual([OUTSIDE_ENTRY, "#/agent/s2", "/"])
+      history.back()
+      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    })
+
+    it("never stops on a dialog's entry again once Back has closed it", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      history.back()
+      expect(dialog.closedByBack).toBe(1)
+      await settle()
+      // Forward lands on the closed dialog's entry, which is no place at all.
+      history.forward()
+      await settle()
+      expect(index).toBe(2)
+      expect(dialog.closedByBack).toBe(1)
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
+    it("takes the dialog's entry away before a new server run reloads the page", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      // The first open belongs to boot; the next one is a reconnect.
+      mod.eventsSocket.onOpen()
+      await settle()
+      await openDialog()
+      expect(index).toBe(3)
+      serverRun = "run-2"
+      mod.eventsSocket.onOpen()
+      await vi.waitFor(() => {
+        expect(reloadedAtIndex).not.toBeNull()
+      })
+      expect(reloadedAtIndex).toBe(2)
+    })
+
+    it("steps off a dialog's entry a previous load of the page left current", async () => {
+      // A reload while a dialog was open: the page comes back up on the
+      // dialog's entry, at the same address as the page entry behind it.
+      entries = [OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1"]
+      entryStates = [null, null, { duxModal: { session: "an-earlier-load", id: 1 } }]
+      entryKeys = [mintKey(), mintKey(), mintKey()]
+      index = 2
+      loc = { protocol: "http:", host: "localhost:0", hash: "#/agent/s1", pathname: "/", search: "" }
+      vi.stubGlobal("location", loc)
+      spineBody = makeSpine([{ id: "s1", project_id: "p1" }])
+      const mod = await import("./store")
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+      })
+      await settle()
+      expect(index).toBe(1)
+      expect(loc.hash).toBe("#/agent/s1")
+    })
+
+    it("pushes no entry for a dialog that opened without the user's gesture", async () => {
+      // Chrome marks the entry a page pushes over without a user activation as
+      // one Back skips, which would carry Back past the page and out of dux.
+      vi.stubGlobal("navigator", { userActivation: { isActive: false } })
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      await openDialog()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1"])
+    })
+
+    it("pushes no entry where the browser has no Navigation API", async () => {
+      navigationApi = false
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      await openDialog()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1"])
+      expect(index).toBe(2)
+    })
   })
 })
 

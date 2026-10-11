@@ -50,7 +50,14 @@ export function FirstLoadDialog() {
   }
 
   return (
-    <Dialog open={firstLoad !== null} onOpenChange={handleOpenChange}>
+    <Dialog
+      open={firstLoad !== null}
+      onOpenChange={handleOpenChange}
+      // A screen that opened by itself records itself as seen when it closes, so
+      // the browser's Back must not be what closes it. Opened from the menu, it
+      // is an ordinary dialog and Back closes it.
+      historyEntry={firstLoad?.automatic !== true}
+    >
       {/* Wider than a routine dialog, because this one carries the duck column
         * beside prose, and a bottom sheet on phones from the same component.
         * The base primitive caps the height to the viewport and would scroll the
