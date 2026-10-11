@@ -1398,7 +1398,7 @@ async function reloadIfServerChanged(): Promise<void> {
     // ids, the applied replay generation) can be read in the meantime. See
     // `serverRun.ts`.
     noteServerRunProbe("changed")
-    reloadPage()
+    reloadLeavingNoModalEntry()
     return
   }
   noteServerRunProbe(current === null ? "unknown" : "same")
@@ -2531,6 +2531,13 @@ if (hasBrowser) {
   // An open dialog, sheet or menu gets a history entry of its own (see "Modal
   // entries").
   onModalsChange(scheduleModalReconcile)
+  // A load onto a modal entry (a reload while one was open) steps off it. After
+  // this module has finished loading, since the history state it uses is
+  // declared further down.
+  queueMicrotask(() => {
+    recoverFromStrandedModalEntry()
+    rememberEntryIndex()
+  })
 }
 
 export function useDux(): DuxState {
@@ -2974,6 +2981,9 @@ function syncUrl(mode?: "replace" | "push"): void {
   // landing writes it (`landTraversal`).
   if (pendingTraversal !== null) {
     pendingTraversal.newerIntent = true
+    // A newer write is what the landing writes now, not the fallback that was
+    // waiting for it.
+    pendingTraversal.fallback = undefined
     return
   }
   const next = routeHash(currentRoute())
@@ -2983,7 +2993,7 @@ function syncUrl(mode?: "replace" | "push"): void {
   // unchanged screen) and rewrite the identical URL. Skipping the write is
   // cheaper and keeps `history.state` untouched, but nothing depends on it.
   if (current === next) return
-  if (dropModalEntriesBeforeMove()) return
+  if (dropModalEntriesBeforeWrite(mode)) return
   const url = historyUrlFor(next)
   const movedScreen = movesScreen(mode, next, current)
   const key = positionKey(parseRoute(next))
@@ -2993,6 +3003,7 @@ function syncUrl(mode?: "replace" | "push"): void {
       const label = { session: PAGE_SESSION, id: nextEntryId++, key, prev: behind }
       history.pushState(entryState(null, next, label), "", url)
       labelledEntryKeys.set(label.id, key)
+      rememberEntryIndex()
       return
     }
     if (fallbackWrite && traverseOnto(key)) return
@@ -3100,10 +3111,13 @@ let fallbackWrite = false
 // entries away). `newerIntent` records that something asked for a URL write
 // meanwhile: a click, or another fallback. That position is held in state, and
 // the landing writes it rather than letting the landed entry's older address
-// overwrite it. `then` is a fragment navigation waiting for the landing
-// (`openStandaloneEditorInThisTab`), whose position state does not hold.
+// overwrite it. `fallback` says that write is a fallback's (`fallBackTo`) and
+// keeps its mode, so the landing runs it as one, with its step back onto an
+// entry that already names the destination. `then` is a move waiting for the
+// landing that state does not hold (a fragment navigation, a reload).
 interface PendingTraversal {
   newerIntent: boolean
+  fallback?: { mode: "replace" | "push" | undefined }
   then?: () => void
 }
 let pendingTraversal: PendingTraversal | null = null
@@ -3200,7 +3214,9 @@ function landTraversal(): void {
   pendingTraversal = null
   // Modal entries wait for a pending traversal; this is where they stop.
   scheduleModalReconcile()
+  const fallback = pending?.fallback
   if (!pending?.newerIntent) applyUrlRoute()
+  else if (fallback) fallBackTo(() => syncUrl(fallback.mode))
   else writeNewerIntent()
   pending?.then?.()
 }
@@ -3226,9 +3242,12 @@ function routeTargetLive(spine: Spine, route: Route): boolean {
 
 // What a popstate or hashchange does: land a pending traversal of dux's own,
 // close the modals whose entries the browser left, or otherwise follow the URL.
+// A landing on a modal entry that is no longer a place moves on instead.
 function onTraversal(): void {
   if (pendingTraversal !== null) landTraversal()
+  else if (stepOffRetiredEntry()) return
   else if (!leaveModalEntries()) applyUrlRoute()
+  rememberEntryIndex()
 }
 
 // --- Modal entries ------------------------------------------------------------
@@ -3310,7 +3329,9 @@ function reconcileModalEntries(): void {
   if (stale.length > 0) {
     const top = stale[stale.length - 1]
     if (!parkedOn(top, nav)) {
-      // The browser is somewhere else: those entries are not dux's to remove.
+      // The browser is somewhere else: those entries are not dux's to remove,
+      // and no longer places either.
+      retireModalEntries(stale)
     } else if (stale.length === 1 && fresh.length > 0) {
       // A modal closed and another opened in the same commit (a menu item
       // opening its dialog): the entry passes to the new one rather than being
@@ -3324,6 +3345,7 @@ function reconcileModalEntries(): void {
         return
       }
     } else if (exactlyBehind(nav, stale[0].behindNavKey, stale.length)) {
+      retireModalEntries(stale)
       // Pushing waits for the landing, which reconciles again.
       if (traverseExactly(nav, stale[0].behindNavKey, { newerIntent: false }, () => {})) {
         return
@@ -3350,6 +3372,7 @@ function reconcileModalEntries(): void {
     const navKey = nav.currentEntry?.key
     if (!navKey || navKey === behind) return
     modalEntries.push({ modalId: modal.id, navKey, behindNavKey: behind })
+    rememberEntryIndex()
   }
 }
 
@@ -3365,6 +3388,7 @@ function leaveModalEntries(): boolean {
   const left = modalEntries.slice(at + 1)
   const stayed = at >= 0 || here === modalEntries[0].behindNavKey
   modalEntries = modalEntries.slice(0, at + 1)
+  retireModalEntries(left)
   closeModals(left.map((entry) => entry.modalId))
   return stayed
 }
@@ -3379,23 +3403,130 @@ function userActivated(): boolean {
 
 // A move while the browser is parked on a modal entry would land on top of
 // that entry and strand the page's own entry behind it. So the modal entries
-// are taken away first and the move is made on landing: a URL write the way a
-// fallback's newer position is (`landTraversal`), or `then`, a fragment
-// navigation. Every modal still open loses its entry for good: the page moved
-// under it. Returns true when the move was deferred.
-function dropModalEntriesBeforeMove(then?: () => void): boolean {
+// are taken away first and the move is made on landing. Every modal still open
+// loses its entry for good: the page moved under it. Returns true when the move
+// was deferred.
+//
+// A URL write (`syncUrl`) is made on landing from the position state holds, as
+// a fallback's newer position is (`landTraversal`), and a fallback's write runs
+// as a fallback again, so it can still step onto an entry that already names
+// its destination.
+function dropModalEntriesBeforeWrite(mode: "replace" | "push" | undefined): boolean {
+  const fallback = fallbackWrite ? { mode } : undefined
+  return dropModalEntries({ newerIntent: true, fallback }, () => {
+    if (fallback) fallBackTo(() => syncUrl(mode))
+    else syncUrl(mode)
+  })
+}
+
+// Any other move (a fragment navigation, a reload) runs as `then` on landing.
+function dropModalEntriesBeforeMove(then: () => void): boolean {
+  return dropModalEntries({ newerIntent: false, then }, then)
+}
+
+function dropModalEntries(pending: PendingTraversal, onFail: () => void): boolean {
   if (modalEntries.length === 0) return false
   const nav = navigationApi()
   const dropped = modalEntries
   modalEntries = []
+  retireModalEntries(dropped)
   spendModals(openModals().map((modal) => modal.id))
   if (nav === null || nav.transition || !parkedOn(dropped[dropped.length - 1], nav)) {
     return false
   }
   const behind = dropped[0].behindNavKey
   if (!exactlyBehind(nav, behind, dropped.length)) return false
-  const pending = { newerIntent: then === undefined, then }
-  return traverseExactly(nav, behind, pending, then ?? (() => syncUrl()))
+  return traverseExactly(nav, behind, pending, onFail)
+}
+
+// Reload the page, the one place the app does (`reloadPage`), with the modal
+// entries taken away first: a reload starts with no modals open, so an entry
+// left current would be a stop Back spends on nothing.
+function reloadLeavingNoModalEntry(): void {
+  if (!dropModalEntriesBeforeMove(reloadPage)) reloadPage()
+}
+
+// The Navigation API keys of every modal entry this page has taken away or
+// left. Those entries are still in the browser's list, ahead of the page (a
+// Back that closes a modal leaves its entry as the Forward one), and none of
+// them is a place: a traversal that lands on one moves on (`stepOffRetiredEntry`).
+const retiredModalKeys = new Set<string>()
+
+function retireModalEntries(entries: readonly ModalEntry[]): void {
+  for (const entry of entries) retiredModalKeys.add(entry.navKey)
+}
+
+// Where the browser was before the traversal now being handled, so a landing on
+// a retired modal entry knows which way the user was going. Recorded after
+// every push and every traversal.
+let lastEntryIndex: number | null = null
+
+function rememberEntryIndex(): void {
+  const here = navigationApi()?.currentEntry
+  if (here) lastEntryIndex = here.index
+}
+
+// A traversal landed on a modal entry that holds no open modal: one this page
+// retired, or one an earlier load of the page left behind. It moves on, by
+// exact key, to the nearest entry that is a place, in the direction the user
+// was going (or the other way when there is none that way). Returns true when
+// it did.
+function stepOffRetiredEntry(): boolean {
+  const nav = navigationApi()
+  if (nav === null || nav.transition) return false
+  const here = nav.currentEntry
+  if (!here) return false
+  if (modalEntries.some((entry) => entry.navKey === here.key)) return false
+  if (!retiredModalKeys.has(here.key) && !carriesModalLabel(history.state)) return false
+  const forward = lastEntryIndex !== null && here.index > lastEntryIndex
+  const places = nav
+    .entries()
+    .filter((entry) => !retiredModalKeys.has(entry.key) && entry.key !== here.key)
+  const ahead = places.filter((entry) => entry.index > here.index)
+  const behind = places.filter((entry) => entry.index < here.index)
+  const nearestAhead = ahead[0]
+  const nearestBehind = behind[behind.length - 1]
+  const target = forward ? (nearestAhead ?? nearestBehind) : (nearestBehind ?? nearestAhead)
+  if (!target) return false
+  return traverseExactly(nav, target.key, { newerIntent: false }, () => {})
+}
+
+function carriesModalLabel(entryState: unknown): boolean {
+  return (
+    typeof entryState === "object" &&
+    entryState !== null &&
+    "duxModal" in (entryState as Record<string, unknown>)
+  )
+}
+
+// A page loaded onto a modal entry (a reload, by dux or by the browser, while a
+// modal was open) has no modal for it: the modal state did not survive the
+// load. The entry was pushed at the address of the one behind it, so the page
+// steps back onto that one by its exact key, or, where it cannot, rewrites the
+// entry as a plain one, so the first Back is never spent on nothing.
+function recoverFromStrandedModalEntry(): void {
+  if (typeof history === "undefined" || !carriesModalLabel(history.state)) return
+  const nav = navigationApi()
+  const here = nav?.currentEntry
+  if (nav && here && !nav.transition) {
+    const behind = nav.entries().find((entry) => entry.index === here.index - 1)
+    if (behind && behind.url === here.url) {
+      retiredModalKeys.add(here.key)
+      if (traverseExactly(nav, behind.key, { newerIntent: false }, stripModalLabel)) return
+    }
+  }
+  stripModalLabel()
+}
+
+function stripModalLabel(): void {
+  if (!carriesModalLabel(history.state)) return
+  const rest: Record<string, unknown> = { ...(history.state as Record<string, unknown>) }
+  delete rest.duxModal
+  try {
+    history.replaceState(rest, "", historyUrlFor(currentHash()))
+  } catch (err) {
+    console.warn("[dux] history write refused", err)
+  }
 }
 
 // The hash the browser is parked on, or "" where there is no browser to ask:

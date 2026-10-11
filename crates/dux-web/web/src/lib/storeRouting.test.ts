@@ -130,10 +130,10 @@ const fakeHistory = {
 const fakeNavigation = {
   transition: null as unknown,
   get currentEntry() {
-    return { key: entryKeys[index], index }
+    return { key: entryKeys[index], index, url: entries[index] }
   },
   entries() {
-    return entryKeys.map((key, i) => ({ key, index: i }))
+    return entryKeys.map((key, i) => ({ key, index: i, url: entries[i] }))
   },
   traverseTo(key: string) {
     const calls = { resolve: () => {}, reject: (_err: unknown) => {} }
@@ -270,8 +270,27 @@ function holdSpine(): void {
   })
 }
 
+// Which run of the server answers `GET /api/v1/build`. A test that moves it and
+// reconnects sees the page reload, which `reloadPage` records rather than does.
+let serverRun = "run-1"
+let reloadedAtIndex: number | null = null
+vi.mock("./reloadPage", () => ({
+  reloadPage: () => {
+    reloadedAtIndex = index
+  },
+}))
+
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
+  if (u.includes("/api/v1/build")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ version: "development", process: serverRun }),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/api/v1/workspace")) {
     if (spineGate) await spineGate
     return {
@@ -312,6 +331,8 @@ class FakeWebSocket {
 }
 
 beforeEach(() => {
+  serverRun = "run-1"
+  reloadedAtIndex = null
   spineBody = makeSpine([])
   spineGate = null
   releaseSpine = () => {}
@@ -1010,6 +1031,82 @@ describe("moving in pushes, and Back unwinds exactly", () => {
       await settle()
       expect(index).toBe(2)
       expect(loc.hash).toBe("#/editor/agent/s1/file/a.ts")
+    })
+
+    it("steps onto the page behind when the agent under a dialog is deleted elsewhere", async () => {
+      viewportWidth = 390
+      const mod = await loadStore("#/agent/s2", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.navigateUp()
+      mod.selectSession("s1")
+      expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s2", "/", "#/agent/s1"])
+      await openDialog()
+      expect(index).toBe(4)
+      // A browser takes the dialog's entry away as a later task.
+      deferTraversal = true
+      await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+      releaseTraversals()
+      await settle()
+      // Home was already the entry behind the agent, so the fallback lands on
+      // it rather than writing a second home over the agent's entry.
+      expect(mod.getSnapshot().mobileScreen).toBe("home")
+      expect(index).toBe(2)
+      expect(entries.slice(0, 3)).toEqual([OUTSIDE_ENTRY, "#/agent/s2", "/"])
+      history.back()
+      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    })
+
+    it("never stops on a dialog's entry again once Back has closed it", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const dialog = await openDialog()
+      history.back()
+      expect(dialog.closedByBack).toBe(1)
+      await settle()
+      // Forward lands on the closed dialog's entry, which is no place at all.
+      history.forward()
+      await settle()
+      expect(index).toBe(2)
+      expect(dialog.closedByBack).toBe(1)
+      history.back()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
+    it("takes the dialog's entry away before a new server run reloads the page", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      // The first open belongs to boot; the next one is a reconnect.
+      mod.eventsSocket.onOpen()
+      await settle()
+      await openDialog()
+      expect(index).toBe(3)
+      serverRun = "run-2"
+      mod.eventsSocket.onOpen()
+      await vi.waitFor(() => {
+        expect(reloadedAtIndex).not.toBeNull()
+      })
+      expect(reloadedAtIndex).toBe(2)
+    })
+
+    it("steps off a dialog's entry a previous load of the page left current", async () => {
+      // A reload while a dialog was open: the page comes back up on the
+      // dialog's entry, at the same address as the page entry behind it.
+      entries = [OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1"]
+      entryStates = [null, null, { duxModal: { session: "an-earlier-load", id: 1 } }]
+      entryKeys = [mintKey(), mintKey(), mintKey()]
+      index = 2
+      loc = { protocol: "http:", host: "localhost:0", hash: "#/agent/s1", pathname: "/", search: "" }
+      vi.stubGlobal("location", loc)
+      spineBody = makeSpine([{ id: "s1", project_id: "p1" }])
+      const mod = await import("./store")
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+      })
+      await settle()
+      expect(index).toBe(1)
+      expect(loc.hash).toBe("#/agent/s1")
     })
 
     it("pushes no entry for a dialog that opened without the user's gesture", async () => {
