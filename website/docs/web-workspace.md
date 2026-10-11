@@ -88,8 +88,9 @@ An open dialog, sheet or menu is one step of its own, with no change to the addr
 (or your phone's back gesture) closes it exactly as Cancel or `Escape` would: nothing it
 offered is saved, confirmed or sent, and the page underneath stays where it is. Press Back
 again to move the page. Closing a dialog any other way takes its step away too, so Back is
-never spent on something already closed. A dialog opened from another one stacks, and
-each Back closes the top one. Two cases keep the plain behavior, where Back moves the page
+never spent on something already closed, and Forward never brings a closed dialog's step
+back. A dialog opened from another one stacks, and each Back closes the top one. A dialog
+that is in the middle of saving when you press Back closes as soon as the save finishes. Two cases keep the plain behavior, where Back moves the page
 and leaves the dialog alone: a browser without the Navigation API, and a dialog dux raises
 by itself rather than in answer to a click or a tap, such as the welcome screen.
 
