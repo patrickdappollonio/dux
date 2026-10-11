@@ -6764,11 +6764,19 @@ mod tests {
         let mut statuses = handle.subscribe_status();
         let config_path = tmp.path().join("config.toml");
         std::fs::write(&config_path, "[ui]\nleft_width_pct = 30\n").expect("write config.toml");
-        let mut reload_statuses = async || {
-            tokio::time::timeout(std::time::Duration::from_secs(5), reloads.recv())
+        // The reload is applied on the engine loop after its worker has read
+        // the file, and the broadcast goes out midway through that apply. A
+        // request answered afterwards was drained after the whole apply, so
+        // every status the reload raised has been sent by then.
+        let mut reload_statuses = async |handle: &crate::engine_actor::EngineHandle| {
+            tokio::time::timeout(std::time::Duration::from_secs(30), reloads.recv())
                 .await
                 .expect("the engine reloaded")
                 .expect("config reload broadcast");
+            handle
+                .spine()
+                .await
+                .expect("the engine answers after the reload");
             let mut messages = Vec::new();
             while let Ok(status) = statuses.try_recv() {
                 messages.push(status.message);
@@ -6781,12 +6789,15 @@ mod tests {
             .await
             .expect("the reload is asked for");
         assert_eq!(
-            reload_statuses().await,
+            reload_statuses(&handle).await,
             vec!["Configuration reloaded. New settings are active now.".to_string()]
         );
 
-        (reload_through_the_engine(handle))();
-        assert_eq!(reload_statuses().await, Vec::<String>::new());
+        // A clone: the engine loop stops once every handle is gone, so giving
+        // it the test's own would let the loop exit before the reload's
+        // worker answered.
+        (reload_through_the_engine(handle.clone()))();
+        assert_eq!(reload_statuses(&handle).await, Vec::<String>::new());
     }
 
     /// A reload that is refused (here, config.toml does not exist) changes

@@ -1333,6 +1333,12 @@ async fn dismissing_the_warning_writes_the_setting_and_keeps_the_comments() {
         .await
         .expect("the engine reloaded")
         .expect("config reload broadcast");
+    // The broadcast goes out midway through the engine loop's apply; a
+    // request answered after it was drained once the whole apply had run.
+    dux.handle
+        .spine()
+        .await
+        .expect("the engine answers after the reload");
     let mut said = Vec::new();
     while let Ok(status) = statuses.try_recv() {
         said.push(status.message);
