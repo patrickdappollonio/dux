@@ -1025,15 +1025,19 @@ impl ReaderLoopState {
         if terminal.take_content_change() {
             self.received_data.store(true, Ordering::Release);
         }
+        // Raised while the grid is still locked, so anyone who can see the
+        // parsed output (every grid read takes this lock) also sees the flag.
+        // Raised after the release, a renderer could find the text in the grid
+        // and still draw the loading card in its place.
         let newly_visible =
             !self.has_output.load(Ordering::Acquire) && terminal.has_visible_output();
+        if newly_visible {
+            self.has_output.store(true, Ordering::Release);
+        }
         // Never hold the terminal lock while handing replies to the writer.
         drop(terminal);
         if !replies.is_empty() && !pty_queue_send(&self.writer_tx, replies) {
             log_dropped_pty_write();
-        }
-        if newly_visible {
-            self.has_output.store(true, Ordering::Release);
         }
     }
 

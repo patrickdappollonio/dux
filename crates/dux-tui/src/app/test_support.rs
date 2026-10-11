@@ -443,14 +443,56 @@ pub(crate) fn stop_watching(app: &App, token: u64) {
     );
 }
 
+/// Whether the selected terminal surface has raised its has-output flag, the
+/// one the renderer checks before it draws the grid rather than the loading
+/// card. A frame drawn while it is down leaves the snapshot the test then
+/// inspects unrefreshed, so a wait on the child's text, cursor or history
+/// that a render follows waits on this too, rather than relying on the
+/// reader to have raised it in the same step it parsed that output.
+pub(crate) fn surface_has_output(app: &App) -> bool {
+    app.selected_terminal_surface_client()
+        .is_some_and(|provider| provider.has_output())
+}
+
+/// Block until the selected terminal surface has parsed `marker` into its
+/// visible grid and is ready to be drawn (see [`surface_has_output`]). Pass the
+/// LAST thing the child prints, so a test that scrolls or measures afterwards
+/// is not racing output that is still arriving. Panics if that has not
+/// happened within 10s.
+pub(crate) fn wait_for_parsed_output(app: &mut App, marker: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        app.refresh_snapshot_buf();
+        let screen: String = app
+            .snapshot_buf
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        if screen.contains(marker) && surface_has_output(app) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test setup: the child's output {marker:?} was not parsed and drawable within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Put the selected terminal surface into SCROLL MODE the way a user does:
 /// wait until the child has actually produced scrollback history, scroll up by
 /// `lines`, and record the gesture through the same entry point the scroll keys
 /// and the wheel use. Polls instead of sleeping a fixed amount, so the test is
 /// waiting on the fact it depends on (real history) rather than on a guess.
+/// Also waits until the surface is drawable (see [`surface_has_output`]).
 /// Panics if no history appears within ~2s.
 pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
     for _ in 0..200 {
+        if !surface_has_output(app) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
         if let Some(provider) = app.selected_terminal_surface_client() {
             provider.scroll(true, lines);
             if provider.scrollback_offset() > 0 {
@@ -473,12 +515,15 @@ pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
 /// so `refresh_snapshot_buf` resolves a provider: either `session_surface ==
 /// Agent` with the session's provider in `app.engine.providers`, or
 /// `session_surface == Terminal` with `active_terminal_id` pointing at an
-/// `app.engine.companion_terminals` entry. Panics with the observed cursor if
+/// `app.engine.companion_terminals` entry. Also waits until the surface is
+/// drawable (see [`surface_has_output`]). Panics with the observed cursor if
 /// the child does not reach the expected position within ~2s.
 pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
     for _ in 0..200 {
         app.refresh_snapshot_buf();
-        if matches!(app.snapshot_buf.cursor, Some(c) if c.row == row && c.col == col) {
+        if matches!(app.snapshot_buf.cursor, Some(c) if c.row == row && c.col == col)
+            && surface_has_output(app)
+        {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
