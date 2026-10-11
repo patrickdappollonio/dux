@@ -61,6 +61,8 @@ class TermStub {
     },
   }
   loadAddon() {}
+  // The pane selects its width table here; nothing in this file reads it.
+  unicode = { activeVersion: "6", register() {} }
   open(parent: HTMLElement) {
     parent.appendChild(this.textarea)
     this.textarea.addEventListener("paste", (e) => {

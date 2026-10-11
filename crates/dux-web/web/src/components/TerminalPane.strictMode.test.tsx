@@ -49,6 +49,8 @@ class TermStub {
   loadAddon(addon: { activate?: (term: TermStub) => void }) {
     addon.activate?.(this)
   }
+  // The pane selects its width table here; nothing in this file reads it.
+  unicode = { activeVersion: "6", register() {} }
   open(container: HTMLElement) {
     const element = container.ownerDocument.createElement("div")
     element.className = "xterm"

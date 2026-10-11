@@ -36,6 +36,10 @@ import {
   usePaneCoverKnown,
 } from "@/lib/paneCover"
 
+const { Terminal: RealTerminal } =
+  await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm")
+type RealTerminal = InstanceType<typeof RealTerminal>
+
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane, exercising
 // its actual JSX and the Reconnect button's real `onClick`, against a minimal
@@ -91,9 +95,9 @@ class TermStub {
   // A line as COLUMNS, not characters. A wide glyph really does take two of
   // them (the glyph, then a zero-width continuation cell), because column and
   // character index part company there and that is the whole point of the
-  // wide-glyph handling under test. The range is the one xterm's own default
-  // Unicode provider calls wide; an emoji is deliberately NOT in it (measured
-  // in `lib/termselect.xterm.test.ts`).
+  // wide-glyph handling under test. The range covers CJK and the fullwidth
+  // forms only; emoji, also wide under the pane's Unicode 11 table, are pinned
+  // against a real xterm in `lib/termselect.xterm.test.ts` instead.
   static WIDE =
     /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/
   lineCells(y: number): { chars: string; width: number }[] | undefined {
@@ -150,6 +154,21 @@ class TermStub {
     registerOscHandler: () => {
       return { dispose: this.oscHandlerDispose }
     },
+  }
+  // A real, headless xterm built from the options the pane passed, standing in
+  // for the stub's Unicode handling, so the width table the pane selects is
+  // measured by xterm itself. Built on first use: most tests never ask.
+  private widthTerminal: RealTerminal | null = null
+  get widths(): RealTerminal {
+    this.widthTerminal ??= new RealTerminal({
+      allowProposedApi: this.options.allowProposedApi === true,
+      cols: this.cols,
+      rows: this.rows,
+    })
+    return this.widthTerminal
+  }
+  get unicode() {
+    return this.widths.unicode
   }
   // Real xterm hands itself to an addon through `activate`; mirroring that lets
   // FitStub re-grid the terminal the way the real FitAddon does.
@@ -2123,17 +2142,32 @@ describe("TerminalPane compose macro insert sink", () => {
   })
 })
 
-// Desktop wheel scrolling: one wheel notch moves 3 lines of local scrollback,
-// via xterm's scrollSensitivity option (the installed xterm 6 Viewport feeds it
-// to its scrollable element as mouseWheelScrollSensitivity for LOCAL scrolling
-// only; the wheel-report path to a mouse-tracking app sends one report per
-// wheel event regardless, so forwarding stays 1:1 per tick).
-describe("TerminalPane wheel scroll speed", () => {
-  it("constructs the terminal with scrollSensitivity 3", () => {
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+describe.each([
+  { kind: "agent" as const, id: "s1" },
+  { kind: "terminal" as const, id: "t1" },
+])("the terminal a $kind pane constructs", ({ kind, id }) => {
+  // Desktop wheel scrolling: one wheel notch moves 3 lines of local scrollback,
+  // via xterm's scrollSensitivity option (the installed xterm 6 Viewport feeds
+  // it to its scrollable element as mouseWheelScrollSensitivity for LOCAL
+  // scrolling only; the wheel-report path to a mouse-tracking app sends one
+  // report per wheel event regardless, so forwarding stays 1:1 per tick).
+  it("has scrollSensitivity 3", () => {
+    render(<TerminalPane {...paneProps(kind, id)} />)
     const term = TermStub.instances.at(-1)
     if (!term) throw new Error("no terminal constructed")
     expect(term.options.scrollSensitivity).toBe(3)
+  })
+
+  // The server's terminal model counts U+2705 as two cells; a browser counting
+  // it as one draws every later character of the row one cell left of where
+  // the program put it.
+  it("counts an emoji as two cells, with the Unicode 11 width table", async () => {
+    render(<TerminalPane {...paneProps(kind, id)} />)
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    expect(term.unicode.activeVersion).toBe("11")
+    await new Promise<void>((resolve) => term.widths.write("✅X", resolve))
+    expect(term.widths.buffer.active.cursorX).toBe(3)
   })
 })
 

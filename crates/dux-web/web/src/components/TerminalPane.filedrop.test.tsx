@@ -49,6 +49,8 @@ class TermStub {
     },
   }
   loadAddon() {}
+  // The pane selects its width table here; nothing in this file reads it.
+  unicode = { activeVersion: "6", register() {} }
   open() {}
   // The pane reports every local re-grid to the PTY through xterm's own resize
   // event; this suite never re-grids, so the stub only has to be subscribable.
