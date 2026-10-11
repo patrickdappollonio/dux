@@ -5,6 +5,7 @@ import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import {
   SHEET_BACKDROP_CLASS,
   SHEET_POPUP_CLASS,
@@ -19,8 +20,11 @@ import { ChevronRightIcon, ChevronLeftIcon, CheckIcon } from "lucide-react"
 // and only the presentation swaps: the base-ui Root, Trigger, Popup and Item
 // machinery is the same in both.
 
+// An open menu closes on the browser's Back, the way Escape closes it
+// (`useBackDismiss`). Its submenus are part of it and close with it.
 function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
-  return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} />
+  const back = useBackDismiss(props)
+  return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} {...back} />
 }
 
 function DropdownMenuPortal({ ...props }: MenuPrimitive.Portal.Props) {

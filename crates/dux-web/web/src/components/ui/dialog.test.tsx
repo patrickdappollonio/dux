@@ -1,10 +1,37 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest"
-import { cleanup, render } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
+import { closeModals, openModals } from "@/lib/modalHistory"
 
 afterEach(cleanup)
+
+describe("the browser's Back", () => {
+  // A dialog nobody controls keeps its open state inside base-ui, so this is
+  // the case where the primitive has to know it is open by itself.
+  it("closes a dialog opened from its own trigger", async () => {
+    render(
+      <Dialog>
+        <DialogTrigger>open</DialogTrigger>
+        <DialogContent>
+          <DialogTitle>Plain</DialogTitle>
+        </DialogContent>
+      </Dialog>,
+    )
+    fireEvent.click(screen.getByText("open"))
+    await screen.findByText("Plain")
+    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
+    await waitFor(() => {
+      expect(screen.queryByText("Plain")).toBeNull()
+    })
+  })
+})
 
 function overlay() {
   return document.querySelector('[data-slot="dialog-overlay"]')

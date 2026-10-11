@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -47,6 +47,7 @@ const api = await import("@/lib/sessionsApi")
 const deleteSession = vi.mocked(store.deleteSession)
 const closeDelete = vi.mocked(store.closeDelete)
 const branchUnpushed = vi.mocked(api.sessionsApi.branchUnpushed)
+const { closeModals, openModals } = await import("@/lib/modalHistory")
 
 function managed(branch: string) {
   return {
@@ -136,11 +137,16 @@ function chipsIn(el: HTMLElement): (string | null)[] {
 }
 
 describe("DeleteSessionDialog", () => {
-  it("opens for an existing session", () => {
+  // The browser's Back abandons the dialog exactly as Cancel does: it closes,
+  // and the agent is not deleted.
+  it("opens for an existing session, and the browser's Back abandons it", () => {
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
     expect(screen.getByText("Delete agent?")).toBeTruthy()
     expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
+    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
+    expect(closeDelete).toHaveBeenCalledOnce()
+    expect(deleteSession).not.toHaveBeenCalled()
   })
 
   // The branch is its own decision now, so it is its own box. It appears only

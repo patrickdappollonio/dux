@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+
+import { closeModals, openModals } from "@/lib/modalHistory"
 
 import {
   DropdownMenu,
@@ -153,13 +155,17 @@ describe("DropdownMenuContent on mobile (innerWidth 500)", () => {
     expect(popup.className).toContain("overscroll-contain")
   })
 
-  it("keeps menu semantics: items are menuitems and Escape closes", async () => {
+  it("keeps menu semantics: items are menuitems, and Escape and the browser's Back close it", async () => {
     renderMenu()
     await openRoot()
     expect(
       screen.getAllByRole("menuitem").map((el) => el.textContent),
     ).toContain("Alpha")
     fireEvent.keyDown(popupEl(), { key: "Escape" })
+    await settle()
+    expect(screen.queryByRole("menu")).toBeNull()
+    await openRoot()
+    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
     await settle()
     expect(screen.queryByRole("menu")).toBeNull()
   })

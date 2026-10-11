@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 const openCustomizeWebapp = vi.fn()
 const sortAgents = vi.fn()
@@ -41,6 +41,7 @@ vi.mock("@/lib/configApi", () => ({
 
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { appMenuModel, findSubmenu } from "@/lib/appMenu"
+import { closeModals, openModals } from "@/lib/modalHistory"
 
 const settle = () => new Promise((r) => setTimeout(r, 40))
 
@@ -143,6 +144,15 @@ describe("AppMenuSheet", () => {
     for (const row of screen.getAllByRole("menuitem")) {
       expect(row.className, row.textContent ?? "").toContain("min-h-11")
     }
+  })
+
+  it("closes on the browser's Back without running anything", () => {
+    const onOpenChange = vi.fn()
+    render(<AppMenuSheet open onOpenChange={onOpenChange} />)
+    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
+    expect(onOpenChange).toHaveBeenCalledOnce()
+    expect(onOpenChange.mock.calls[0][0]).toBe(false)
+    expect(openCustomizeWebapp).not.toHaveBeenCalled()
   })
 
   it("runs the item action and closes the sheet", () => {

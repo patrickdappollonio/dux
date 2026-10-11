@@ -3,10 +3,14 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { XIcon } from "lucide-react"
 
+// Every dialog closes on the browser's Back, the way its Cancel does
+// (`useBackDismiss`).
 function Dialog({ ...props }: DialogPrimitive.Root.Props) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />
+  const back = useBackDismiss(props)
+  return <DialogPrimitive.Root data-slot="dialog" {...props} {...back} />
 }
 
 function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {

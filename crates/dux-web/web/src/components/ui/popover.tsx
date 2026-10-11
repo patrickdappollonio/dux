@@ -3,14 +3,18 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import {
   SHEET_BACKDROP_CLASS,
   SHEET_POPUP_CLASS,
   SHEET_POSITIONER_STYLE,
 } from "@/components/ui/popupSheet"
 
+// An open popover (a bottom sheet on a phone) closes on the browser's Back, the
+// way Escape closes it (`useBackDismiss`).
 function Popover({ ...props }: PopoverPrimitive.Root.Props) {
-  return <PopoverPrimitive.Root data-slot="popover" {...props} />
+  const back = useBackDismiss(props)
+  return <PopoverPrimitive.Root data-slot="popover" {...props} {...back} />
 }
 
 function PopoverTrigger({ ...props }: PopoverPrimitive.Trigger.Props) {
