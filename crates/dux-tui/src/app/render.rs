@@ -13366,7 +13366,7 @@ mod tests {
 
     use crate::app::test_support::{
         agent_provider_prompt, default_bindings, default_provider_prompt, enter_scroll_mode,
-        project_default_provider_prompt, test_app, wait_for_agent_cursor,
+        project_default_provider_prompt, test_app, wait_for_agent_cursor, wait_for_parsed_output,
     };
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
@@ -18571,16 +18571,10 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
-        // First draw resizes the PTY to the pane; then wait for history at
-        // the final size before scrolling back.
+        // First draw resizes the PTY to the pane; then wait for the last line
+        // at the final size before scrolling back.
         let (_, _) = draw_caret_frame(&mut app);
-        for _ in 0..200 {
-            app.refresh_snapshot_buf();
-            if app.snapshot_buf.scrollback_total > 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        wait_for_parsed_output(&mut app, "L100");
         assert!(
             app.snapshot_buf.scrollback_total > 0,
             "test setup: the child must have produced scrollback"
@@ -18898,6 +18892,10 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render sizing frame");
+        // The shell prints on its own clock: wait for its last line, or a
+        // loaded machine scrolls before the history exists, or renders the
+        // loading card instead of the grid this test measures.
+        wait_for_parsed_output(&mut app, "L200");
         enter_scroll_mode(&mut app, 3);
         // Then one frame to carry the 0 -> N offset change, so the next frame
         // is genuinely the "offset unchanged" case.
@@ -18978,24 +18976,7 @@ mod tests {
             .expect("render sizing frame");
         // The shell prints on its own clock: wait for its last line, or a
         // loaded machine scrolls back through history that is not there yet.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            app.refresh_snapshot_buf();
-            let screen: String = app
-                .snapshot_buf
-                .cells
-                .iter()
-                .map(|cell| cell.symbol.as_str())
-                .collect();
-            if screen.contains("n120") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "test setup: the shell never printed its last line"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_for_parsed_output(&mut app, "n120");
         // Deep enough to land in the wide-glyph half of the history.
         enter_scroll_mode(&mut app, 150);
         terminal
@@ -21578,17 +21559,7 @@ mod tests {
             .insert(TabId::new(slot_tab.clone()), client);
         app.focus = FocusPane::Center;
         let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
-        for _ in 0..200 {
-            let snapshot = app.engine.providers[TabIdRef::new(&slot_tab)].snapshot();
-            if snapshot
-                .cells
-                .iter()
-                .any(|cell| cell.symbol.as_str() == "B")
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        wait_for_parsed_output(&mut app, "BEFORE");
         terminal
             .draw(|frame| app.render(frame))
             .expect("initial frame");
