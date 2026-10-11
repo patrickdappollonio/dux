@@ -33,7 +33,9 @@ export function ConfirmUseExistingBranchDialog() {
   }
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+    // Raised by the server's refusal, not by a click, so it takes no history
+    // entry for the browser's Back.
+    <Dialog open={isOpen} onOpenChange={handleOpenChange} historyEntry={false}>
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>

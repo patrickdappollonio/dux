@@ -35,7 +35,13 @@ export function ConfirmVanishedEditorDialog() {
   }
 
   return (
-    <Dialog open={editorTargetGone !== null} onOpenChange={handleOpenChange}>
+    // Raised by the target vanishing, never by a click, so it takes no history
+    // entry for the browser's Back.
+    <Dialog
+      open={editorTargetGone !== null}
+      onOpenChange={handleOpenChange}
+      historyEntry={false}
+    >
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>

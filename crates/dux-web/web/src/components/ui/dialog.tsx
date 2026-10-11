@@ -7,9 +7,12 @@ import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { XIcon } from "lucide-react"
 
 // Every dialog closes on the browser's Back, the way its Cancel does
-// (`useBackDismiss`). `historyEntry={false}` is for a dialog whose being open is
-// already a position in the URL (the editor overlay), which Back leaves through
-// the router instead.
+// (`useBackDismiss`). `historyEntry={false}` takes a dialog out of that: one
+// whose being open is already a position in the URL (the editor overlay), which
+// Back leaves through the router instead, and one that opened by itself rather
+// than from the user's own click or tap (a screen raised at boot, a server's
+// answer, a target that vanished). Back must never be what dismisses those,
+// and their entry would land in history with no gesture behind it.
 function Dialog({
   historyEntry = true,
   ...props

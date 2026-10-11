@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+
+import { installBrowserHistory } from "@/test/browserHistory"
 
 const openCustomizeWebapp = vi.fn()
 const sortAgents = vi.fn()
@@ -10,7 +12,10 @@ const openCloneProject = vi.fn()
 const createStandaloneTerminal = vi.fn()
 // The renderer reads gh availability from the live bootstrap; tests flip this.
 let ghAvailable = true
-vi.mock("@/lib/store", () => ({
+vi.mock("@/lib/store", async (importOriginal) => ({
+  // The real store underneath, because the browser's Back reaches the sheet
+  // through it.
+  ...(await importOriginal<typeof import("@/lib/store")>()),
   openCustomizeWebapp: () => openCustomizeWebapp(),
   openConfigEditor: vi.fn(),
   openMacrosDialog: vi.fn(),
@@ -39,9 +44,15 @@ vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
 }))
 
-import { AppMenuSheet } from "@/components/AppMenuSheet"
-import { appMenuModel, findSubmenu } from "@/lib/appMenu"
-import { closeModals, openModals } from "@/lib/modalHistory"
+// A history the store gives the sheet an entry in, installed before the store
+// loads, so Back reaches the sheet the way the browser delivers it.
+const browser = installBrowserHistory()
+vi.stubGlobal(
+  "fetch",
+  vi.fn(() => Promise.reject(new Error("offline test"))),
+)
+const { AppMenuSheet } = await import("@/components/AppMenuSheet")
+const { appMenuModel, findSubmenu } = await import("@/lib/appMenu")
 
 const settle = () => new Promise((r) => setTimeout(r, 40))
 
@@ -146,10 +157,14 @@ describe("AppMenuSheet", () => {
     }
   })
 
-  it("closes on the browser's Back without running anything", () => {
+  it("closes on the browser's Back without running anything", async () => {
     const onOpenChange = vi.fn()
+    const before = browser.index
     render(<AppMenuSheet open onOpenChange={onOpenChange} />)
-    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
+    await waitFor(() => {
+      expect(browser.index).toBe(before + 1)
+    })
+    act(() => browser.back())
     expect(onOpenChange).toHaveBeenCalledOnce()
     expect(onOpenChange.mock.calls[0][0]).toBe(false)
     expect(openCustomizeWebapp).not.toHaveBeenCalled()

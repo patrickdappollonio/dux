@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, type RefObject } from "react"
 
 import { registerModal } from "@/lib/modalHistory"
 
+// How often a modal that refused the browser's Back is asked to close again.
+const DISMISS_RETRY_MS = 200
+
 // The imperative handle a base-ui Root fills in: its `close()` runs the Root's
 // own close.
 interface Closable {
@@ -45,7 +48,18 @@ export function useBackDismiss<
 
   useEffect(() => {
     if (!isOpen || !enabled) return
-    return registerModal(() => actionsRef.current?.close())
+    let retry: ReturnType<typeof setInterval> | null = null
+    const unregister = registerModal(() => {
+      actionsRef.current?.close()
+      // A busy modal refuses to close (Settings while a write is in flight).
+      // The Back still counts, so the close is asked again until it lands; the
+      // registration's own end, when the modal finally closes, stops asking.
+      retry ??= setInterval(() => actionsRef.current?.close(), DISMISS_RETRY_MS)
+    })
+    return () => {
+      if (retry !== null) clearInterval(retry)
+      unregister()
+    }
   }, [isOpen, enabled, actionsRef])
 
   const handleOpenChange = (next: boolean, details: Details) => {

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { installBrowserHistory } from "@/test/browserHistory"
 
 // Override `useDux` (seeded spine + target) and spy the store actions the
 // dialog fires, while every other store export stays intact.
@@ -41,13 +42,15 @@ function installBootStubs() {
   )
 }
 installBootStubs()
+// A history the store gives the dialog an entry in, so Back reaches it the way
+// the browser delivers it.
+const browser = installBrowserHistory()
 const { DeleteSessionDialog } = await import("./DeleteSessionDialog")
 const store = await import("@/lib/store")
 const api = await import("@/lib/sessionsApi")
 const deleteSession = vi.mocked(store.deleteSession)
 const closeDelete = vi.mocked(store.closeDelete)
 const branchUnpushed = vi.mocked(api.sessionsApi.branchUnpushed)
-const { closeModals, openModals } = await import("@/lib/modalHistory")
 
 function managed(branch: string) {
   return {
@@ -139,12 +142,16 @@ function chipsIn(el: HTMLElement): (string | null)[] {
 describe("DeleteSessionDialog", () => {
   // The browser's Back abandons the dialog exactly as Cancel does: it closes,
   // and the agent is not deleted.
-  it("opens for an existing session, and the browser's Back abandons it", () => {
+  it("opens for an existing session, and the browser's Back abandons it", async () => {
     seed("s1", [session1])
+    const before = browser.index
     render(<DeleteSessionDialog />)
     expect(screen.getByText("Delete agent?")).toBeTruthy()
     expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
-    act(() => closeModals(openModals().slice(-1).map((modal) => modal.id)))
+    await waitFor(() => {
+      expect(browser.index).toBe(before + 1)
+    })
+    act(() => browser.back())
     expect(closeDelete).toHaveBeenCalledOnce()
     expect(deleteSession).not.toHaveBeenCalled()
   })

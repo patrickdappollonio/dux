@@ -11,9 +11,10 @@ export interface OpenModal {
   // Closes the modal the way its own Cancel or Escape does: the action it was
   // offering is abandoned, nothing is saved, confirmed or submitted.
   close: () => void
-  // Set once the modal has lost its entry for good (Back closed it, or the page
-  // moved under it). A spent modal that is still open is never given a new
-  // one, so a modal that refused to close cannot turn Back into a dead press.
+  // Set once the modal has lost its entry for good: Back closed it, or the page
+  // moved under it. A spent modal that is still open is never given a new one.
+  // One still open after Back is busy, and keeps being asked to close until it
+  // does (`useBackDismiss`), so the Back it was given is not lost.
   spent: boolean
 }
 
