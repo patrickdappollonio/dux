@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
   bufferSaveEncoding,
+  editorTextOf,
+  normalizeEol,
+  saveLandsOn,
   encodingFromFile,
   changeSignalFor,
   diskFactKey,
@@ -550,7 +553,8 @@ describe("encodings on a read", () => {
       encodingRequested: null,
       unwritable: null,
       mixedEol: false,
-      eol: "LF",
+      eol: null,
+      pathReadOnly: false,
       looksLikeUtf8: false,
     })
   })
@@ -575,7 +579,8 @@ describe("encodings on a read", () => {
       encodingRequested: "UTF-16LE",
       unwritable: null,
       mixedEol: false,
-      eol: "LF",
+      eol: null,
+      pathReadOnly: false,
       looksLikeUtf8: false,
     })
   })
@@ -628,5 +633,81 @@ describe("the seeds carry the freshness fields", () => {
     expect(b.stamp).toEqual({ modified: null, size: null })
     expect(b.diskFact).toBeNull()
     expect(b.acknowledgedDisk).toBeNull()
+  })
+})
+
+describe("what the editor holds is what a save writes", () => {
+  it("normalizes every line ending to the style the read says a save writes", () => {
+    expect(normalizeEol("a\r\nb\nc\rd", "CRLF")).toBe("a\r\nb\r\nc\r\nd")
+    expect(normalizeEol("a\r\nb\nc\rd", "LF")).toBe("a\nb\nc\nd")
+    expect(normalizeEol("plain", "LF")).toBe("plain")
+  })
+
+  it("loads a mixed file as the one style the notice names", () => {
+    expect(
+      editorTextOf({
+        path: "a",
+        binary: false,
+        content: "a\r\nb\r\nc\n",
+        eol: "CRLF",
+        mixed_line_endings: true,
+      }),
+    ).toBe("a\r\nb\r\nc\r\n")
+    // An older server sends no style; the text is left as it came.
+    expect(editorTextOf({ path: "a", binary: false, content: "a\r\nb\n" })).toBe("a\r\nb\n")
+  })
+
+  it("reloads in place as the one style, and counts a new generation", () => {
+    const prev = loadedBuffer()
+    const next = reloadedInPlace(
+      prev,
+      "a.ts",
+      { path: "a.ts", binary: false, content: "x\r\ny\n", eol: "CRLF", mixed_line_endings: true },
+      "",
+    )
+    expect(next.loaded).toBe("x\r\ny\r\n")
+    expect(next.draft).toBe("x\r\ny\r\n")
+    expect(next.generation).toBe(prev.generation + 1)
+  })
+
+  it("tells path read-only from encoding read-only", () => {
+    expect(
+      encodingFromFile(
+        { path: "a", binary: false, content: "", read_only: true, unwritable: "round_trip" },
+        null,
+      ).pathReadOnly,
+    ).toBe(false)
+    expect(
+      encodingFromFile(
+        {
+          path: "a",
+          binary: false,
+          content: "",
+          read_only: true,
+          unwritable: "round_trip",
+          path_read_only: true,
+        },
+        null,
+      ).pathReadOnly,
+    ).toBe(true)
+    // An older server sends no split: read-only with no encoding reason is
+    // the path kind.
+    expect(
+      encodingFromFile({ path: "a", binary: false, content: "", read_only: true }, null)
+        .pathReadOnly,
+    ).toBe(true)
+  })
+
+  it("lets a save's answer land only on the buffer it was sent from", () => {
+    const sent = loadedBuffer()
+    expect(saveLandsOn(sent, sent.generation)).toBe(true)
+    const reread = reloadedInPlace(sent, "a.ts", { path: "a.ts", binary: false, content: "z" }, "")
+    expect(saveLandsOn(reread, sent.generation)).toBe(false)
+  })
+
+  it("leaves a converted mixed file truthfully uniform, since what was sent was", () => {
+    const prev = loadedBuffer({ mixedEol: true, eol: "CRLF" })
+    const next = baselineSavedBuffer(prev, "a\r\nb\r\n", { modified: null, size: 6 }, "")
+    expect(next.mixedEol).toBe(false)
   })
 })

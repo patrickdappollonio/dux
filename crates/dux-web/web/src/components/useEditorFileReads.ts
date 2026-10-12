@@ -4,6 +4,7 @@ import { fileApi } from "@/lib/fileApi"
 import {
   changeSignalFor,
   diskFactKey,
+  editorTextOf,
   encodingFromFile,
   fileLoadSeedBuffer,
   isBufferStale,
@@ -32,6 +33,8 @@ interface UseEditorFileReadsOptions {
   tabsRef: RefObject<readonly EditorTab[]>
   buffersRef: RefObject<Map<string, TabBuffer>>
   sliceRef: RefObject<ChangesSliceView | null>
+  // The tab a save is in flight for, if any.
+  savingTabIdRef: RefObject<string | null>
   // The encoding chosen per open path, which outlives a buffer across a rename.
   encodingChoicesRef: RefObject<Map<string, string>>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
@@ -53,6 +56,7 @@ export function useEditorFileReads({
   tabsRef,
   buffersRef,
   sliceRef,
+  savingTabIdRef,
   encodingChoicesRef,
   setBuffers,
   raiseDiskBanner,
@@ -100,8 +104,9 @@ export function useEditorFileReads({
             ...encodingFromFile(file, requested),
             loadedPath: path,
             loading: false,
-            loaded: file.content,
-            draft: file.content,
+            loaded: editorTextOf(file),
+            generation: (current.generation ?? 0) + 1,
+            draft: editorTextOf(file),
             binary: file.binary,
             readOnly: file.read_only ?? false,
             fileError: null,
@@ -173,8 +178,15 @@ export function useEditorFileReads({
     tabId: string,
     path: string,
     asked = false,
-    options: { encoding?: string } = {},
+    options: { encoding?: string; afterSave?: boolean } = {},
   ): void {
+    // A save in flight for this tab answers for the text it sent; replacing
+    // that text underneath it (with a reading the save's answer would then
+    // relabel) is how a conversion double-encodes. A reload nobody asked for
+    // waits: once the save lands, its stamp is the baseline the next check
+    // compares against. The save's own re-read is the exception.
+    const saving = () => !options.afterSave && savingTabIdRef.current === tabId
+    if (!asked && saving()) return
     const token = nextToken(tabId)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
     const reopenAs = options.encoding ?? null
@@ -184,6 +196,7 @@ export function useEditorFileReads({
       .read(root, path, requested)
       .then((file) => {
         if (!isCurrentRequest(tabId, token)) return
+        if (!asked && saving()) return
         const atResolve = buffersRef.current.get(tabId)
         const dirtyNow =
           !asked &&

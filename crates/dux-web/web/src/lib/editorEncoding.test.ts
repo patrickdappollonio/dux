@@ -106,8 +106,22 @@ describe("the encoding notices", () => {
     expect(kinds({ mixedEol: true })).toEqual(["mixed_eol"])
   })
 
-  it("leaves out the line endings of a file that cannot be saved anyway", () => {
-    expect(kinds({ mixedEol: true, unwritable: "round_trip" })).toEqual(["unwritable"])
+  it("keeps the line endings of a read-only file in view, since converting it writes them", () => {
+    expect(kinds({ mixedEol: true, unwritable: "round_trip" })).toEqual([
+      "unwritable",
+      "mixed_eol",
+    ])
+  })
+
+  it("says a leading mark character is what it is, not two marks", () => {
+    const [notice] = encodingNotices(
+      "a.txt",
+      { ...plain, encoding: "gb18030", unwritable: "leading_mark" },
+      () => false,
+    )
+    const words = notice.message.filter((s) => typeof s === "string").join("")
+    expect(words).not.toContain("two byte-order marks")
+    expect(words).toContain("U+FEFF")
   })
 
   it("names the file as a chip and the style a save writes", () => {

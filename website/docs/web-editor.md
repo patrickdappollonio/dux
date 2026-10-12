@@ -242,7 +242,8 @@ bytes you never edited. That happens when:
 - the encoding spells some of the file's characters two ways and would write them back the
   other way, or has no way back for them at all (some Shift_JIS, Big5, GBK and GB18030
   files, and ISO-2022-JP files with half-width katakana, are like this), or
-- the file starts with two byte-order marks, because the editor keeps only one.
+- the file starts with two byte-order marks, or (in an encoding with no mark of its own,
+  like GB18030) with the byte-order mark character, because the editor drops it.
 
 It is still text: reopen it in another encoding from the status bar to edit it, or convert
 it with **Save with encoding** (any encoding except the one that cannot write it back).

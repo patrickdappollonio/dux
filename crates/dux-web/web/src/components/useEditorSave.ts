@@ -10,6 +10,7 @@ import {
   changeSignalFor,
   diskFactKey,
   isBufferStale,
+  saveLandsOn,
 } from "@/lib/editorBuffers"
 import type {
   ChangesSliceView,
@@ -36,6 +37,10 @@ interface UseEditorSaveOptions {
   root: EditorRoot
   tabsRef: RefObject<readonly OpenTabRef[]>
   sliceRef: RefObject<ChangesSliceView | null>
+  buffersRef: RefObject<Map<string, TabBuffer>>
+  // Read the file again, for a save whose answer no longer describes the
+  // buffer (see `saveLandsOn`). Through a ref: the reader is built after this.
+  rereadRef: RefObject<((tabId: string, path: string) => void) | null>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
   raiseDiskBanner: (
     tabId: string,
@@ -51,6 +56,8 @@ export function useEditorSave({
   root,
   tabsRef,
   sliceRef,
+  buffersRef,
+  rereadRef,
   setBuffers,
   raiseDiskBanner,
 }: UseEditorSaveOptions) {
@@ -70,6 +77,9 @@ export function useEditorSave({
     expected?: { modified: string | null; size: number | null },
     converting = false,
   ): void {
+    // Which reading of the file this save is about: an answer arriving after
+    // something else replaced the buffer's text must not relabel that text.
+    const sentGeneration = buffersRef.current.get(tabId)?.generation ?? 0
     setSavingTabId(tabId)
     setSavingPaths((prev) => {
       const next = new Set(prev)
@@ -81,10 +91,21 @@ export function useEditorSave({
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)
-        if (tabStillOpen) {
+        const now = buffersRef.current.get(tabId)
+        const lands = now === undefined || saveLandsOn(now, sentGeneration)
+        if (tabStillOpen && !lands) {
+          // The file was written, but the buffer now holds a different
+          // reading of it; read the file again rather than misdescribe it.
+          rereadRef.current?.(tabId, path)
+        } else if (tabStillOpen) {
           setBuffers((prev) => {
             const current = prev.get(tabId)
-            if (!current || isBufferStale(current, path)) return prev
+            if (
+              !current ||
+              isBufferStale(current, path) ||
+              !saveLandsOn(current, sentGeneration)
+            )
+              return prev
             const next = new Map(prev)
             next.set(
               tabId,

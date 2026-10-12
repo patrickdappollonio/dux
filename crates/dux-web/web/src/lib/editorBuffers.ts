@@ -1,4 +1,9 @@
-import type { FileDiffContents, FileDiffHead, WorktreeFile } from "./fileApi"
+import type {
+  FileDiffContents,
+  FileDiffHead,
+  UnwritableReason,
+  WorktreeFile,
+} from "./fileApi"
 import { encodingAfterSave, type SaveEncoding } from "./editorEncoding"
 
 // The server's freshness token for a file's bytes: RFC 3339 mtime plus byte
@@ -103,13 +108,21 @@ export interface TabBuffer {
   encodingRequested: string | null
   // Why this text cannot be saved in `encoding` without changing bytes nobody
   // edited; the buffer is read-only while it is set. See `WorktreeFile`.
-  unwritable: "round_trip" | "doubled_mark" | null
+  unwritable: UnwritableReason | null
   // The file's line endings are mixed or include a lone CR, so a save writes
   // every one as `eol`, the one style the editor holds.
   mixedEol: boolean
-  eol: "LF" | "CRLF"
+  // Null until a read names it (an older server names none).
+  eol: "LF" | "CRLF" | null
   // Read in a code page the person chose, yet the bytes now look like UTF-8.
   looksLikeUtf8: boolean
+  // Read-only for where the file is (a symlink, a .git path): no save of any
+  // kind, converting included. Apart from `unwritable`.
+  pathReadOnly: boolean
+  // Counts every time `loaded` was replaced from disk (a load, a reload in
+  // place, a reopen), so a save that resolves later can tell whether the
+  // buffer it answers is still the one it was sent from.
+  generation: number
 }
 
 export type BufferEncodingFacts = Pick<
@@ -122,24 +135,54 @@ export type BufferEncodingFacts = Pick<
   | "mixedEol"
   | "eol"
   | "looksLikeUtf8"
+  | "pathReadOnly"
 >
 
 // The encoding fields of a fresh read. An older server sends none and only ever
-// served UTF-8, so absence means plain UTF-8 that writes back unchanged.
+// served UTF-8, so absence means plain UTF-8 that writes back unchanged; with
+// no split of its read-only either, a read-only file there is the path kind.
 export function encodingFromFile(
   file: WorktreeFile,
   requested: string | null,
 ): BufferEncodingFacts {
+  const unwritable = file.unwritable ?? null
   return {
     encoding: file.encoding ?? "UTF-8",
     bom: file.bom ?? false,
     encodingFallback: file.encoding_fallback ?? false,
     encodingRequested: requested,
-    unwritable: file.unwritable ?? null,
+    unwritable,
     mixedEol: file.mixed_line_endings ?? false,
-    eol: file.eol ?? "LF",
+    eol: file.eol ?? null,
     looksLikeUtf8: file.looks_like_utf8 ?? false,
+    pathReadOnly:
+      file.path_read_only ?? ((file.read_only ?? false) && unwritable === null),
   }
+}
+
+// Every line break in `text` (CRLF, a lone CR, LF) as `eol`.
+export function normalizeEol(text: string, eol: "LF" | "CRLF"): string {
+  return text.replace(/\r\n|\r|\n/g, eol === "CRLF" ? "\r\n" : "\n")
+}
+
+// The text a read puts in the editor: the file's content with every line break
+// in the one style the server says the editor holds and a save writes. The
+// editor's model keeps one style per file anyway; holding exactly that text in
+// the buffer is what lets the mixed-endings notice, the status bar, the dirty
+// check and the bytes a save sends all agree.
+export function editorTextOf(file: WorktreeFile): string {
+  return file.eol ? normalizeEol(file.content, file.eol) : file.content
+}
+
+// Whether a save's answer may be applied to `buffer`: only when nothing has
+// replaced its text from disk since the save was sent. Otherwise the answer
+// describes bytes the buffer no longer holds, and relabelling it (say, as the
+// encoding a conversion wrote) would misdescribe a different decoding.
+export function saveLandsOn(
+  buffer: { generation?: number },
+  sentGeneration: number,
+): boolean {
+  return (buffer.generation ?? 0) === sentGeneration
 }
 
 // What a save of this buffer writes, unless the person picked a conversion.
@@ -185,8 +228,10 @@ export function emptyBuffer(path: string): TabBuffer {
     encodingRequested: null,
     unwritable: null,
     mixedEol: false,
-    eol: "LF",
+    eol: null,
     looksLikeUtf8: false,
+    pathReadOnly: false,
+    generation: 0,
   }
 }
 
@@ -360,8 +405,9 @@ export function reloadedInPlace(
     path,
     loadedPath: path,
     loading: false,
-    loaded: file.content,
-    draft: file.content,
+    loaded: editorTextOf(file),
+    generation: (prev.generation ?? 0) + 1,
+    draft: editorTextOf(file),
     binary: file.binary,
     readOnly: file.read_only ?? false,
     fileError: null,

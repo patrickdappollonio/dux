@@ -3225,6 +3225,82 @@ describe("a file that is not plain UTF-8", () => {
     expect(said).not.toContain("A save now writes")
   })
 
+  it("offers no conversion for a file that is read-only for where it is, whatever its encoding", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u2252\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+      path_read_only: true,
+    })
+    await mountWithTab(PATH)
+    await loaded("\u2252\n")
+    fireEvent.click(await encodingButton())
+    expect(
+      await screen.findByRole("menuitem", { name: /reopen with encoding/i }),
+    ).toBeTruthy()
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+  })
+
+  it("holds the text still while a save is out: no reopen, no reload underneath it", async () => {
+    // A stamp, so the freshness check has something to compare.
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    const reads = readMock.mock.calls.length
+    // The disk now says something else, and the window comes back: with a
+    // save out, nothing replaces the text it is about.
+    infoMock.mockResolvedValue({
+      path: PATH,
+      kind: "file" as const,
+      size: 99,
+      modified: "2027-01-01T00:00:00+00:00",
+      mode: "644",
+      permissions: "rw-r--r--",
+      symlink_target: null,
+      git: { state: "clean" as const },
+    })
+    fireEvent(window, new Event("focus"))
+    fireEvent.click(await encodingButton())
+    expect(
+      (await screen.findByRole("menuitem", { name: /reopen with encoding/i })).getAttribute(
+        "aria-disabled",
+      ),
+    ).toBe("true")
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readMock.mock.calls.length).toBe(reads)
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 99 })
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /^file encoding:/i })).getAttribute("aria-label")).toBe(
+        "File encoding: UTF-8",
+      ),
+    )
+  })
+
+  it("converts a mixed file without an edit in the one style the notice named", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\r\nb\nc\n",
+      mixed_line_endings: true,
+      eol: "LF",
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("a\nb\nc\n")
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("a\nb\nc\n")
+  })
+
   it("warns before a save rewrites mixed line endings, and the bar says Mixed", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,

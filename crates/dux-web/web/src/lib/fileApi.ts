@@ -15,6 +15,10 @@ import type { DirEntry } from "@/lib/fileTree"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 import type { SaveEncoding } from "@/lib/editorEncoding"
 
+// Why a text cannot be saved in its encoding without changing bytes nobody
+// edited. Mirrors the Rust `Unwritable`.
+export type UnwritableReason = "round_trip" | "doubled_mark" | "leading_mark"
+
 export interface WorktreeFile {
   path: string
   // True when the file is binary: `content` is empty and the editor refuses it.
@@ -33,7 +37,10 @@ export interface WorktreeFile {
    *  edited: `round_trip` (the encoding writes some of them back differently)
    *  or `doubled_mark` (two byte-order marks, and the editor drops one). The
    *  file is then `read_only`; another encoding is the way out. */
-  unwritable?: "round_trip" | "doubled_mark" | null
+  unwritable?: UnwritableReason | null
+  /** Read-only for where the file is (a symlink, a .git path): no save of any
+   *  kind. Apart from `unwritable`, which only rules out this one encoding. */
+  path_read_only?: boolean
   /** The line endings are mixed or include a lone CR, so a save writes every
    *  one as `eol`. */
   mixed_line_endings?: boolean

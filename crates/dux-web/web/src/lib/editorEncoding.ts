@@ -8,6 +8,7 @@
 // Shift_JIS, and these lists are where they say so.
 
 import { chip, prose, type Prose } from "./prose"
+import type { UnwritableReason } from "./fileApi"
 
 // What a save writes: the encoding's WHATWG name, and whether the bytes start
 // with its byte-order mark.
@@ -182,9 +183,9 @@ export interface NoticeFacts {
   encoding: string
   bom: boolean
   encodingFallback: boolean
-  unwritable: "round_trip" | "doubled_mark" | null
+  unwritable: UnwritableReason | null
   mixedEol: boolean
-  eol: "LF" | "CRLF"
+  eol: "LF" | "CRLF" | null
   looksLikeUtf8: boolean
 }
 
@@ -237,6 +238,12 @@ export function encodingNotices(
       dismissable: false,
       message: prose`${chip(path)} opened read-only: it starts with two byte-order marks and the editor keeps only one, so a save would drop the other. To edit it, reopen it in another encoding from the status bar.`,
     })
+  } else if (facts.unwritable === "leading_mark") {
+    all.push({
+      kind: "unwritable",
+      dismissable: false,
+      message: prose`${chip(path)} opened read-only: in ${label} its text starts with the character U+FEFF, which the editor drops, so a save would lose it. To edit it, reopen it in another encoding from the status bar.`,
+    })
   }
   if (facts.encodingFallback) {
     all.push({
@@ -252,12 +259,13 @@ export function encodingNotices(
       message: prose`${chip(path)} is open as ${label}, but it looks like valid UTF-8 now. If the text looks wrong, pick its encoding from the status bar.`,
     })
   }
-  // Only where a save is possible: a read-only file writes nothing.
-  if (facts.mixedEol && facts.unwritable === null) {
+  // A file read-only for its encoding is included: converting it writes every
+  // line ending in the one style too.
+  if (facts.mixedEol) {
     all.push({
       kind: "mixed_eol",
       dismissable: true,
-      message: prose`${chip(path)} mixes line endings. Saving it writes every line ending as ${facts.eol}.`,
+      message: prose`${chip(path)} mixes line endings. Saving it writes every line ending as ${facts.eol ?? "LF"}.`,
     })
   }
   return all.filter((n) => !n.dismissable || !dismissed(n.kind))

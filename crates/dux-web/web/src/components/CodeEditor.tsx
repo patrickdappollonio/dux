@@ -30,6 +30,29 @@ interface CodeEditorProps {
   // the status bar can follow its cursor and model without this component
   // knowing the bar exists.
   onEditorChange?: (ed: editor.IStandaloneCodeEditor | null) => void
+  // The one line ending style the read named for this file, which the model
+  // is held to. Undefined leaves Monaco's own pick alone.
+  eol?: "LF" | "CRLF"
+}
+
+// Hold the model to `eol`. Monaco rewrites text pushed into an existing model
+// (a reload in place, a reopen) to the model's own style, so without this a
+// file reloaded with a different style would show one style in the notice and
+// the status bar and save another.
+function holdEol(
+  ed: editor.IStandaloneCodeEditor | null,
+  mon: typeof monaco | null,
+  eol: "LF" | "CRLF" | undefined,
+): void {
+  const model = ed?.getModel()
+  if (!model || !mon || eol === undefined) return
+  const want = eol === "CRLF" ? "\r\n" : "\n"
+  if (model.getEOL() === want) return
+  model.setEOL(
+    eol === "CRLF"
+      ? mon.editor.EndOfLineSequence.CRLF
+      : mon.editor.EndOfLineSequence.LF,
+  )
 }
 
 export default function CodeEditor({
@@ -40,6 +63,7 @@ export default function CodeEditor({
   onSave,
   onReady,
   onEditorChange,
+  eol,
 }: CodeEditorProps) {
   // The live editor + the monaco instance, captured at onMount. Needed for the
   // Auto revert below, which the wrapper cannot do for us.
@@ -70,6 +94,12 @@ export default function CodeEditor({
     if (revertTo !== null) mon.editor.setModelLanguage(model, revertTo)
   }, [language, path])
 
+  // Runs after the wrapper has pushed a new value (its effects run first), so
+  // the model ends on the named style whatever the push did to it.
+  useEffect(() => {
+    holdEol(editorRef.current, monacoRef.current, eol)
+  }, [eol, value, path])
+
   // The save chord is bound once on mount while `onSave` is a fresh closure each
   // render, so the binding goes through a ref or it saves old content. The ref
   // is updated in an effect, not during render, so re-renders stay pure.
@@ -97,6 +127,7 @@ export default function CodeEditor({
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
     onReady?.(mon)
     editorChangeRef.current?.(ed)
+    holdEol(ed, mon, eol)
   }
 
   return (

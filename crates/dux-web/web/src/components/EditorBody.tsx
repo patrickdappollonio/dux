@@ -548,9 +548,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // Read-only only because the encoding cannot write the file back unchanged:
   // still text, and converting it to another encoding is the way out. Every
   // other read-only (a symlink, a .git path) has no save at all.
+  const hardReadOnly = readyBufferFlag(fileReady, activeBuffer?.pathReadOnly)
   const encodingUnwritable =
-    readOnly && (activeBuffer?.unwritable ?? null) !== null
-  const hardReadOnly = readOnly && !encodingUnwritable
+    readOnly && !hardReadOnly && (activeBuffer?.unwritable ?? null) !== null
   // File-mode readiness for the preview toggle: a loaded, non-binary buffer.
   // The toggle itself is available in BOTH modes; its diff-mode half needs
   // `diffReady`, declared further down, so `canPreview` lives beside it (one
@@ -673,6 +673,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const { raiseDiskBanner, dismissDiskBanner } =
     createEditorDiskBannerActions(setBuffers)
 
+  // The save's way to read a file again when its answer no longer describes
+  // the buffer; filled in once the reader below exists.
+  const rereadRef = useRef<((tabId: string, path: string) => void) | null>(null)
+
   const {
     savingTabId,
     savingPaths,
@@ -683,8 +687,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     root,
     tabsRef,
     sliceRef,
+    buffersRef,
+    rereadRef,
     setBuffers,
     raiseDiskBanner,
+  })
+  // The tab a save is in flight for, read by the in-place reload, which must
+  // not swap the text under a save that has not answered yet.
+  const savingTabIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    savingTabIdRef.current = savingTabId
   })
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
@@ -833,6 +845,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   }, [buffers])
 
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
+    savingTabIdRef,
     root,
     tabs,
     activeTab,
@@ -843,6 +856,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     encodingChoicesRef,
     setBuffers,
     raiseDiskBanner,
+  })
+
+  useEffect(() => {
+    rereadRef.current = (tabId, path) =>
+      reloadFileInPlace(tabId, path, false, { afterSave: true })
   })
 
   useEditorDiskFreshness({
@@ -1009,7 +1027,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // reopens at once. A file that does not decode in it is refused by the
   // server and the buffer stays as it was (see `reloadFileInPlace`).
   function requestReopen(encoding: string): void {
-    if (!activeTab) return
+    // A save in flight would answer for whatever text this replaced it with.
+    if (!activeTab || isSaving) return
     const tabId = activeTab.id
     const path = activeTab.path
     const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
@@ -1261,7 +1280,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return (
       <>
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
+          {/* Not while this tab is saving: the save's answer is about the text
+              it sent, and a reopen would put a different decoding under it. */}
+          <DropdownMenuSubTrigger disabled={isSaving}>
             <RotateCw />
             Reopen with encoding
           </DropdownMenuSubTrigger>
@@ -2412,6 +2433,8 @@ function FileContentPane({
           onSave={onSave}
           onReady={onMonacoReady}
           onEditorChange={onEditorChange}
+          // Only once a read has named one: an older server names none.
+          eol={buffer?.eol ?? undefined}
         />
       </Suspense>
     </ChunkBoundary>
