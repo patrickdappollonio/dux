@@ -1,4 +1,11 @@
-import type { FileDiffContents, FileDiffHead, WorktreeFile } from "./fileApi"
+import type {
+  FileDiffContents,
+  FileDiffHead,
+  SaveVerdict,
+  UnwritableReason,
+  WorktreeFile,
+} from "./fileApi"
+import { encodingAfterSave, type SaveEncoding } from "./editorEncoding"
 
 // The server's freshness token for a file's bytes: RFC 3339 mtime plus byte
 // size. Both halves travel together and are compared together; see `stampsDiffer`.
@@ -45,6 +52,10 @@ export interface ChangedRowView {
 
 // One tab's Monaco buffer and diff cache, keyed by tab id. A preview-replace
 // reuses a tab id under a new `path`: check `isBufferStale` before any read.
+// What an asked-for read holding a buffer's typing is doing: reopening the
+// file in another encoding (by that encoding's label), or reloading it.
+export type ReadingLock = { kind: "reopen"; label: string } | { kind: "reload" }
+
 export interface TabBuffer {
   path: string
   // The path whose content is actually held in `loaded`/`draft`, or null
@@ -88,6 +99,179 @@ export interface TabBuffer {
   // overwrite it and the guard on the wire must stay armed.
   diskFact: string | null
   acknowledgedDisk: string | null
+  // The encoding `loaded` was decoded from (a WHATWG name) and whether the file
+  // starts with a byte-order mark: together, what an ordinary save writes back.
+  encoding: string
+  bom: boolean
+  // The encoding was the server's last resort for bytes that are not UTF-8,
+  // not something the file said; the editor says so above the text.
+  encodingFallback: boolean
+  // The encoding the person asked for by name (a reopen, or a save that
+  // converted the file), sent with every later read of this buffer so a
+  // reload in place does not quietly go back to the automatic rules. Null
+  // while nobody has asked.
+  encodingRequested: string | null
+  // Why this text cannot be saved in `encoding` without changing bytes nobody
+  // edited; the buffer is read-only while it is set. See `WorktreeFile`.
+  unwritable: UnwritableReason | null
+  // The file's line endings are mixed or include a lone CR, so a save writes
+  // every one as `eol`, the one style the editor holds.
+  mixedEol: boolean
+  // Null until a read names it (an older server names none).
+  eol: "LF" | "CRLF" | null
+  // Read in a code page the person chose, yet the bytes now look like UTF-8.
+  looksLikeUtf8: boolean
+  // Read-only for where the file is (a symlink, a .git path): no save of any
+  // kind, converting included. Apart from `unwritable`.
+  pathReadOnly: boolean
+  // Counts every time `loaded` was replaced from disk (a load, a reload in
+  // place, a reopen), so a save that resolves later can tell whether the
+  // buffer it answers is still the one it was sent from.
+  generation: number
+  // A read the person asked for that replaces the text when it lands (a
+  // reopen in another encoding, or Reload from disk), while it is out; null
+  // otherwise. The editor takes no typing meanwhile: anything typed would be
+  // replaced along with the rest, unsaved, with nothing to say so.
+  readingLock: ReadingLock | null
+  // The mark the next save writes. The same as `bom` (the file's) except
+  // when a save's answer relabelled the file as marked after the draft had
+  // already dropped the character that became the mark: the draft then asks
+  // for no mark, and is unsaved until it is written that way.
+  draftBom: boolean
+}
+
+export type BufferEncodingFacts = Pick<
+  TabBuffer,
+  | "encoding"
+  | "bom"
+  | "encodingFallback"
+  | "encodingRequested"
+  | "unwritable"
+  | "mixedEol"
+  | "eol"
+  | "looksLikeUtf8"
+  | "pathReadOnly"
+  | "draftBom"
+>
+
+// The encoding fields of a fresh read. An older server sends none and only ever
+// served UTF-8, so absence means plain UTF-8 that writes back unchanged; with
+// no split of its read-only either, a read-only file there is the path kind.
+export function encodingFromFile(
+  file: WorktreeFile,
+  requested: string | null,
+): BufferEncodingFacts {
+  const unwritable = file.unwritable ?? null
+  return {
+    encoding: file.encoding ?? "UTF-8",
+    bom: file.bom ?? false,
+    encodingFallback: file.encoding_fallback ?? false,
+    encodingRequested: requested,
+    unwritable,
+    mixedEol: file.mixed_line_endings ?? false,
+    eol: file.eol ?? null,
+    looksLikeUtf8: file.looks_like_utf8 ?? false,
+    pathReadOnly:
+      file.path_read_only ?? ((file.read_only ?? false) && unwritable === null),
+    draftBom: file.bom ?? false,
+  }
+}
+
+// Every line break in `text` (CRLF, a lone CR, LF) as `eol`.
+export function normalizeEol(text: string, eol: "LF" | "CRLF"): string {
+  return text.replace(/\r\n|\r|\n/g, eol === "CRLF" ? "\r\n" : "\n")
+}
+
+// The text a read puts in the editor: the file's content with every line break
+// as LF, whatever the file's own style, which the buffer keeps apart (`eol`).
+//
+// One style for the editor's text means Monaco's model is made in LF and never
+// has its style changed afterwards. Changing a live model's style is something
+// its undo history cannot follow (an undo or redo across it replays text
+// offsets in the wrong style), so a reload that changes the file's style is a
+// pure text replacement in the editor and a new `eol` in the buffer, and the
+// file's style is applied when a save writes (`textForSave`). An older server
+// names no style, and its text is left exactly as it came.
+export function editorTextOf(file: WorktreeFile): string {
+  return file.eol ? normalizeEol(file.content, "LF") : file.content
+}
+
+// The bytes-to-be of a save: the editor's text with its breaks in the file's
+// style, the one the status bar names. Nothing to convert when no read named a
+// style.
+export function textForSave(
+  buffer: { eol?: "LF" | "CRLF" | null } | undefined,
+  text: string,
+): string {
+  const eol = buffer?.eol ?? null
+  return eol === null ? text : normalizeEol(text, eol)
+}
+
+// One counter for every buffer, so a generation names one reading of one file
+// for the life of the page. Per-buffer counters all start at 1, and a preview
+// tab that swaps files under one tab id would then match a save of the first
+// file against the first reading of the second.
+let lastGeneration = 0
+export function freshGeneration(): number {
+  lastGeneration += 1
+  return lastGeneration
+}
+
+// The identity an asynchronous answer (a save's, a read's) is about: the file
+// and the reading of it the request was sent from.
+export interface AnswerTicket {
+  path: string
+  generation: number
+}
+
+// The ONE gate every asynchronous answer passes before it touches anything: the
+// buffer, the tab's unsaved mark, a banner, a dialog. It applies only while the
+// editor that sent it is still mounted (`alive`; a closed and reopened editor
+// is a new one, and the old one's answers must not reach the new one's tabs)
+// and the tab still holds the same reading of the same file.
+export function answerApplies(
+  ticket: AnswerTicket,
+  alive: boolean,
+  buffer: { path: string; generation?: number } | undefined,
+): boolean {
+  return (
+    alive &&
+    buffer !== undefined &&
+    buffer.path === ticket.path &&
+    (buffer.generation ?? 0) === ticket.generation
+  )
+}
+
+// What a save of this buffer writes, unless the person picked a conversion:
+// the encoding it was read in, and the mark its DRAFT asks for (which can
+// differ from the file's, see `draftBom`).
+export function bufferSaveEncoding(
+  buffer: Pick<TabBuffer, "encoding" | "bom"> & { draftBom?: boolean } | undefined,
+): { encoding: string; bom: boolean } {
+  return {
+    encoding: buffer?.encoding ?? "UTF-8",
+    bom: buffer?.draftBom ?? buffer?.bom ?? false,
+  }
+}
+
+// What the file the buffer was read from is in: the encoding and the mark on
+// disk, which a save states as what its text was read in.
+export function bufferReadEncoding(
+  buffer: Pick<TabBuffer, "encoding" | "bom">,
+): { encoding: string; bom: boolean } {
+  return { encoding: buffer.encoding ?? "UTF-8", bom: buffer.bom ?? false }
+}
+
+// Whether the tab holds anything a save has not written: the text, or the mark.
+// The mark is content: a draft whose next save would write a different mark
+// than the file has is as unsaved as one with different text.
+export function isBufferDirty(
+  buffer: Pick<TabBuffer, "draft" | "loaded" | "bom"> & { draftBom?: boolean },
+): boolean {
+  return (
+    buffer.draft !== buffer.loaded ||
+    (buffer.draftBom ?? buffer.bom ?? false) !== (buffer.bom ?? false)
+  )
 }
 
 // A disk fact flattened to one comparable string, or "deleted" when no file is
@@ -120,6 +304,18 @@ export function emptyBuffer(path: string): TabBuffer {
     diskState: "fresh",
     diskFact: null,
     acknowledgedDisk: null,
+    encoding: "UTF-8",
+    bom: false,
+    encodingFallback: false,
+    encodingRequested: null,
+    unwritable: null,
+    mixedEol: false,
+    eol: null,
+    looksLikeUtf8: false,
+    pathReadOnly: false,
+    generation: 0,
+    readingLock: null,
+    draftBom: false,
   }
 }
 
@@ -277,19 +473,26 @@ export function stampFromInfo(info: EntryStampSource): FileStamp {
 // @monaco-editor/react disposes the model, taking undo history, scroll and
 // cursor with it. The text arrives as one full-range edit, so it is undoable
 // and moves the cursor, which is why the caller pauses while a selection lives.
+//
+// `requested` is the encoding the read asked for by name, which the buffer goes
+// on asking for; a reload nobody chose an encoding for keeps the buffer's own.
 export function reloadedInPlace(
   prev: TabBuffer,
   path: string,
   file: WorktreeFile,
   signal: string,
+  requested: string | null = prev.encodingRequested ?? null,
 ): TabBuffer {
   return {
     ...prev,
+    ...encodingFromFile(file, requested),
     path,
     loadedPath: path,
     loading: false,
-    loaded: file.content,
-    draft: file.content,
+    loaded: editorTextOf(file),
+    generation: freshGeneration(),
+    readingLock: null,
+    draft: editorTextOf(file),
     binary: file.binary,
     readOnly: file.read_only ?? false,
     fileError: null,
@@ -310,15 +513,51 @@ export function reloadedInPlace(
 // Re-baseline a buffer on its own successful save: the save moves the
 // changed-files signal exactly like an agent's edit, so adopting the server's
 // post-write stamp keeps the next broadcast from checking the editor's own work.
+//
+// `saved` is the encoding the save wrote; a conversion moves the buffer to it
+// (see `encodingAfterSave`).
 export function baselineSavedBuffer(
   prev: TabBuffer,
   body: string,
   stamp: FileStamp,
   signal: string,
+  saved: SaveEncoding = bufferSaveEncoding(prev),
+  verdict?: SaveVerdict,
 ): TabBuffer {
+  // The server's own judgement of what it wrote, when it gave one (every
+  // save that states an encoding does); otherwise what the editor sent: one
+  // line ending style, nothing new to say about the encoding.
+  const unwritable = verdict ? (verdict.unwritable ?? null) : null
+  // The mark is a flag the save chose, never text (the server refuses a text
+  // starting with U+FEFF in UTF-8 and UTF-16), so the editor's text is exactly
+  // what it was, with nothing to push into Monaco.
+  const loaded = body
+  const draft = prev.draft
+  const bom = saved.bom
+  const draftBom = saved.bom
   return {
     ...prev,
-    loaded: body,
+    ...encodingAfterSave(
+      {
+        encoding: prev.encoding ?? "UTF-8",
+        bom: prev.bom ?? false,
+        encodingFallback: prev.encodingFallback ?? false,
+        encodingRequested: prev.encodingRequested ?? null,
+      },
+      saved,
+    ),
+    bom,
+    draftBom,
+    draft,
+    // A conversion is never assumed to have made the file writable: a text
+    // that still starts with a second mark is two marks in the new encoding
+    // too. Read-only for where the file is never changes.
+    mixedEol: verdict?.mixed_line_endings ?? false,
+    eol: verdict?.eol ?? prev.eol,
+    unwritable,
+    looksLikeUtf8: false,
+    readOnly: (prev.pathReadOnly ?? false) || unwritable !== null,
+    loaded,
     fileLoadedSignal: signal,
     stamp,
     diskState: "fresh",

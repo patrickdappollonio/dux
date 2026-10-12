@@ -18,15 +18,75 @@ use crate::git::{is_under, resolve_worktree_path, resolves_into_git_dir};
 /// generated blobs that happen to appear in `git status`.
 pub const MAX_EDITABLE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Largest file the editor will write. Twice the read cap, so a file that
+/// opened can grow while it is edited; measured on the bytes that would land on
+/// disk, after encoding, never on the text sent, which for a single-byte code
+/// page can be three times larger (every € is one byte on disk and three in
+/// UTF-8).
+pub const MAX_SAVED_BYTES: u64 = 2 * MAX_EDITABLE_BYTES;
+
+/// A save refused because the file it would write is past [`MAX_SAVED_BYTES`].
+/// Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveTooLarge {
+    /// The size the file would have been, in bytes.
+    pub size: u64,
+}
+
+impl std::fmt::Display for SaveTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This file is too large for the editor to save: it would be {} bytes on disk, \
+             over the {} MB limit. Nothing was written. Edit it outside dux instead.",
+            self.size,
+            MAX_SAVED_BYTES / (1024 * 1024)
+        )
+    }
+}
+
+impl std::error::Error for SaveTooLarge {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorktreeFile {
     pub path: String,
-    /// True when the working copy is non-UTF-8/binary; `content` is then empty
-    /// and the editor refuses to open it.
+    /// True when the working copy is binary (see [`crate::text_encoding::decode`]);
+    /// `content` is then empty and the editor refuses to open it.
     pub binary: bool,
     pub content: String,
+    /// The WHATWG name of the encoding `content` was decoded from, which a save
+    /// sends back so the file is written in it again. `None` for binary.
+    pub encoding: Option<String>,
+    /// The file began with a byte-order mark, which `content` does not hold and
+    /// a save has to write back.
+    pub bom: bool,
+    /// The encoding is the fallback for bytes that are not UTF-8 (windows-1252,
+    /// which reads every byte), not something the file said about itself; the
+    /// editor tells the person so, since only they can know the real one.
+    pub encoding_fallback: bool,
+    /// Why the text cannot be saved in `encoding` without changing bytes nobody
+    /// edited (`round_trip` or `doubled_mark`, see
+    /// [`crate::text_encoding::Unwritable`]). The file is then `read_only`, and
+    /// the way out is another encoding.
+    pub unwritable: Option<&'static str>,
+    /// The line endings are mixed or include a lone CR. The editor holds one
+    /// style per file, so a save writes every break as `eol`.
+    pub mixed_line_endings: bool,
+    /// The line ending style the editor holds and a save writes, `LF` or
+    /// `CRLF`. `None` for binary.
+    pub eol: Option<&'static str>,
+    /// The file was read in an encoding the person chose, other than UTF-8 or
+    /// UTF-16, yet its bytes are valid UTF-8 with non-ASCII in them: most
+    /// likely it was rewritten as UTF-8 since that choice was made.
+    pub looks_like_utf8: bool,
+    /// Read-only for where the file is (an outside or symlinked path, a `.git`
+    /// path), which no encoding changes: there is no save of any kind. Apart
+    /// from `unwritable`, which only rules out saving in this one encoding.
+    pub path_read_only: bool,
     /// True when the file was opened read-only: an outside-resolving symlink
-    /// or a `.git/` path. The UI must grey out Save and ignore the dirty guard.
+    /// or a `.git/` path (`path_read_only`), or text its encoding cannot write
+    /// back unchanged (`unwritable`). The UI must grey out Save and ignore the
+    /// dirty guard.
     #[serde(default)]
     pub read_only: bool,
     /// The mtime of the bytes in `content`, [`format_mtime`]'s string, taken
@@ -221,6 +281,53 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
     read_nofollow_stat(abs_path).map(|(bytes, _)| bytes)
 }
 
+/// Open `abs_path` with `flags | O_NOFOLLOW` for the editor, refusing anything
+/// that is not a regular file before a single byte moves.
+///
+/// The path can be swapped for a FIFO, a socket or a device between any check
+/// and the open, and opening a FIFO with no writer blocks until one appears,
+/// which for the editor is forever. So the open is non-blocking, the
+/// descriptor's own `fstat` decides (a stat of the path would be about
+/// whatever is there by then), and only a regular file goes on, with blocking
+/// I/O restored. `on_open_error` words a failed open for its caller.
+pub(crate) fn open_regular_nofollow(
+    abs_path: &Path,
+    flags: rustix::fs::OFlags,
+    mode: rustix::fs::Mode,
+    on_open_error: impl FnOnce(rustix::io::Errno) -> anyhow::Error,
+) -> anyhow::Result<std::fs::File> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl, open as rustix_open};
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+    let fd = rustix_open(abs_path, flags | OFlags::NOFOLLOW | OFlags::NONBLOCK, mode)
+        .map_err(on_open_error)?;
+    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
+    let f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let kind = f.metadata()?.file_type();
+    if !kind.is_file() {
+        let what = if kind.is_fifo() {
+            "a named pipe (FIFO)"
+        } else if kind.is_socket() {
+            "a socket"
+        } else if kind.is_char_device() || kind.is_block_device() {
+            "a device"
+        } else if kind.is_dir() {
+            "a directory"
+        } else {
+            "a special file"
+        };
+        anyhow::bail!(
+            "not a regular file: {} is {what}, which the editor never reads or writes; \
+             nothing was read or written",
+            abs_path.display()
+        );
+    }
+    let now = fcntl_getfl(&f)?;
+    fcntl_setfl(&f, now - OFlags::NONBLOCK)?;
+    Ok(f)
+}
+
 /// [`read_nofollow`] plus the `fstat` of the descriptor the bytes came from,
 /// taken BEFORE the read.
 ///
@@ -233,27 +340,22 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
 /// which makes a fresh buffer look stale (a wasted re-check) instead of making
 /// a stale buffer look fresh (a lost edit).
 pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::Read;
-    use std::os::unix::io::FromRawFd;
-    use std::os::unix::io::IntoRawFd;
 
-    // O_NOFOLLOW | O_RDONLY. rustix's OFlags::NOFOLLOW is available when the
-    // `fs` feature is enabled (already is; see Cargo.toml workspace dep).
-    let fd = rustix_open(abs_path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())
-        .map_err(|e| anyhow::anyhow!("open {}: {e}", abs_path.display()))?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    // O_NOFOLLOW | O_RDONLY, and only ever a regular file.
+    let mut f = open_regular_nofollow(abs_path, OFlags::RDONLY, Mode::empty(), |e| {
+        anyhow::anyhow!("open {}: {e}", abs_path.display())
+    })?;
     let meta = f.metadata()?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)?;
     Ok((bytes, meta))
 }
 
-/// Read a worktree file's working copy as text. A missing file is an error.
-/// Binary content, and content that is not valid UTF-8, yields `binary: true`
-/// with empty `content`.
+/// Read a worktree file's working copy as text, in the encoding its bytes say
+/// (see [`crate::text_encoding::decode`]). A missing file is an error. Binary
+/// content yields `binary: true` with empty `content`.
 ///
 /// ANY symlink leaf is read with `read_only: true` regardless of where its
 /// target lives: `write_file` refuses all symlinks so the Save button would
@@ -261,6 +363,18 @@ pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::
 /// `.git/` paths are always `read_only: true`.
 /// Dangling symlinks (target does not exist) return an error.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
+    read_file_as(worktree, rel_path, None)
+}
+
+/// [`read_file`] in exactly the `requested` encoding when one is given: the
+/// person's answer to a fallback that read the file wrong. Bytes that are not
+/// valid in it are refused (a [`crate::text_encoding::DecodeRefused`]) rather
+/// than shown with replacement characters a save would write back.
+pub fn read_file_as(
+    worktree: &Path,
+    rel_path: &str,
+    requested: Option<&'static encoding_rs::Encoding>,
+) -> anyhow::Result<WorktreeFile> {
     // Use the read-permissive resolver (allows .git/ paths).
     // `is_outside` is true when the canonical real path escapes the worktree
     // via ANY symlink (intermediate or leaf), so an intermediate-dir symlink
@@ -327,26 +441,45 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     // The stamp of the bytes just read, from the fstat of the descriptor they
     // came from. This is the token a later save sends back.
     let stamp = stamp_from_meta(&read_meta);
-    // Anything that is not text the editor can round-trip byte for byte goes
-    // out as binary, which the editor refuses to open. Never fall back to an
-    // empty string here: the editor would show an empty, editable buffer, and
-    // the stamp it carries is a valid one, so a save would replace the file.
-    let text = if crate::diff::is_renderable_text(&bytes) {
-        String::from_utf8(bytes).ok()
-    } else {
-        None
+    // Binary content goes out as binary, which the editor refuses to open.
+    // Never fall back to an empty string here: the editor would show an empty,
+    // editable buffer, and the stamp it carries is a valid one, so a save would
+    // replace the file. Text that cannot be written back unchanged in its
+    // encoding is still text, and goes out read-only instead.
+    let decoded = crate::text_encoding::decode(&bytes, requested).map_err(anyhow::Error::new)?;
+    let looks_like_utf8 = requested.is_some_and(|e| {
+        e != encoding_rs::UTF_8 && e != encoding_rs::UTF_16LE && e != encoding_rs::UTF_16BE
+    }) && crate::text_encoding::looks_like_utf8(&bytes);
+    let text = match decoded {
+        crate::text_encoding::Decoded::Text(t) => Some(t),
+        crate::text_encoding::Decoded::Binary => None,
     };
+    let endings = text
+        .as_ref()
+        .map(|t| crate::text_encoding::line_endings(&t.text));
+    let unwritable = text.as_ref().and_then(|t| t.unwritable).map(|u| u.as_str());
     Ok(WorktreeFile {
         path: rel_path.to_string(),
         binary: text.is_none(),
-        content: text.unwrap_or_default(),
-        read_only,
+        encoding: text.as_ref().map(|t| t.encoding.name().to_string()),
+        bom: text.as_ref().is_some_and(|t| t.bom),
+        encoding_fallback: text.as_ref().is_some_and(|t| t.fallback),
+        unwritable,
+        mixed_line_endings: endings.is_some_and(|e| e.mixed),
+        eol: endings.map(|e| e.saves_as.label()),
+        looks_like_utf8,
+        content: text.map(|t| t.text).unwrap_or_default(),
+        // A text the encoding cannot write back unchanged is shown, never
+        // saved in it: the same read-only the editor gives a symlink.
+        read_only: read_only || unwritable.is_some(),
+        path_read_only: read_only,
         modified: stamp.modified,
         size: Some(stamp.size),
     })
 }
 
-/// Write `content` to `abs_path` with `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW`,
+/// Write `content` to `abs_path` with `O_WRONLY | O_CREAT | O_NOFOLLOW`, truncating once
+/// the descriptor is known to be a regular file (see [`open_regular_nofollow`]),
 /// the write-side counterpart of [`read_nofollow`]. The single open is what
 /// enforces the no-symlink rule: an ordinary truncating write follows a symlink
 /// at the leaf, so a stat that says "regular file" is worthless by the time the
@@ -364,20 +497,24 @@ pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
 /// `fstat` on the same descriptor. That stamp is what a client re-baselines on
 /// so its OWN save never looks like somebody else's edit on the next check.
 pub fn write_nofollow_stamped(abs_path: &Path, content: &str) -> anyhow::Result<FileStamp> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    write_nofollow_bytes_stamped(abs_path, content.as_bytes())
+}
+
+/// [`write_nofollow_stamped`] for text already encoded into bytes.
+fn write_nofollow_bytes_stamped(abs_path: &Path, content: &[u8]) -> anyhow::Result<FileStamp> {
+    use rustix::fs::{Mode, OFlags};
     use std::io::Write;
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
-    let fd = rustix_open(
+    // No O_TRUNC in the open: truncation waits until the descriptor is known
+    // to be a regular file.
+    let mut f = open_regular_nofollow(
         abs_path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW,
+        OFlags::WRONLY | OFlags::CREATE,
         Mode::from_raw_mode(0o666),
-    )
-    .map_err(|e| open_for_writing_error(e, abs_path))?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
-    f.write_all(content.as_bytes())?;
+        |e| open_for_writing_error(e, abs_path),
+    )?;
+    f.set_len(0)?;
+    f.write_all(content)?;
     Ok(stamp_from_meta(&f.metadata()?))
 }
 
@@ -414,29 +551,25 @@ fn open_for_writing_error(e: rustix::io::Errno, abs_path: &Path) -> anyhow::Erro
 /// and the `ftruncate` on the same descriptor.
 fn write_checked_existing(
     abs_path: &Path,
-    content: &str,
+    content: &[u8],
     expected: &FileStamp,
+    encoding: Option<SaveEncoding>,
 ) -> anyhow::Result<FileStamp> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::{Read, Seek, Write};
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
     // Read-write rather than write-only: the bytes about to be replaced are
     // checked through this same descriptor below.
-    let fd =
-        rustix_open(abs_path, OFlags::RDWR | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
-            if e == rustix::io::Errno::NOENT {
-                anyhow::Error::new(WriteConflict {
-                    current: None,
-                    deleted: true,
-                })
-            } else {
-                open_for_writing_error(e, abs_path)
-            }
-        })?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let mut f = open_regular_nofollow(abs_path, OFlags::RDWR, Mode::empty(), |e| {
+        if e == rustix::io::Errno::NOENT {
+            anyhow::Error::new(WriteConflict {
+                current: None,
+                deleted: true,
+            })
+        } else {
+            open_for_writing_error(e, abs_path)
+        }
+    })?;
     let current = stamp_from_meta(&f.metadata()?);
     if !expected.matches(&current) {
         return Err(anyhow::Error::new(WriteConflict {
@@ -452,19 +585,74 @@ fn write_checked_existing(
     // bytes nobody saw.
     //
     // The check is deliberately narrow. Only that case is refused: a file
-    // with a NUL or a byte-order mark was always served without content, so it
-    // never had the empty-buffer problem, and content the editor wrote itself
-    // must stay saveable. Past the read cap the file could not have been read
-    // at all, so a matching stamp there can only be one this client got back
-    // from its own save, which the route allows to grow past the cap.
+    // with a NUL was always served without content, so it never had the
+    // empty-buffer problem, and content the editor wrote itself must stay
+    // saveable. Past the read cap the file could not have been read at all, so
+    // a matching stamp there can only be one this client got back from its own
+    // save, which the route allows to grow past the cap.
+    //
+    // A save that states its encoding comes from a client that reads files in
+    // their own encodings, so it was shown the text it is saving, and that
+    // check does not apply: that is what lets a windows-1252 file be saved
+    // back as windows-1252, or converted to UTF-8 on purpose. A save with no
+    // encoding (an older page, or a draft one kept) is still held to it.
+    //
+    // A stated encoding is held to its own check instead, rather than trusting
+    // the client to have honoured the read's read-only: when the bytes on disk
+    // read in the save's encoding but that encoding cannot write them back
+    // unchanged, the save would quietly rewrite characters nobody edited, so it
+    // is refused. Bytes that do not read in it are a conversion from another
+    // encoding, a whole-file rewrite the person asked for.
     if current.size <= MAX_EDITABLE_BYTES {
         let mut existing = Vec::new();
         (&f).take(MAX_EDITABLE_BYTES).read_to_end(&mut existing)?;
-        if std::str::from_utf8(&existing).is_err() {
-            anyhow::bail!(
+        match encoding {
+            None if std::str::from_utf8(&existing).is_err() => anyhow::bail!(
                 "refusing to save: the file on disk is not UTF-8 text, so the editor never \
                  showed its contents and saving would replace them; nothing was written"
-            );
+            ),
+            Some(save) => {
+                // Whose round trip matters depends on what the save is. In the
+                // encoding the file was read in, it rewrites those same bytes,
+                // which must come back unchanged. In another one it is a
+                // conversion: the old bytes are replaced whole, so only their
+                // reading has to be honest, and the new text answers for
+                // itself (the encoder's own exactness check).
+                let (judge_in, conversion) = match save.read_as {
+                    Some((read, read_bom)) => (read, (read, read_bom) != (save.encoding, save.bom)),
+                    // An older client says nothing about its read: judged in
+                    // the target encoding, the conservative way.
+                    None => (save.encoding, false),
+                };
+                // Whatever the save is, a read encoding the client states must
+                // decode the bytes on disk: if it cannot, the text being saved
+                // was not read from these bytes in it. (An older client states
+                // none; its target-encoding check below treats bytes that do
+                // not decode as a conversion, the conservative old behaviour.)
+                if (conversion || save.read_as.is_some())
+                    && crate::text_encoding::decode(&existing, Some(judge_in)).is_err()
+                {
+                    anyhow::bail!(
+                        "refusing to save: the file on disk is not valid {}, the encoding \
+                         this save says it was read in, so it was not shown as it is; \
+                         nothing was written. Reopen it and try again",
+                        judge_in.name()
+                    );
+                }
+                if conversion {
+                    // The old bytes read honestly and are replaced whole.
+                } else if let Some(reason) =
+                    crate::text_encoding::would_rewrite_untouched(&existing, judge_in)
+                {
+                    return Err(anyhow::Error::new(
+                        crate::text_encoding::WouldRewriteUntouched {
+                            encoding: judge_in,
+                            reason,
+                        },
+                    ));
+                }
+            }
+            None => {}
         }
         f.rewind()?;
     }
@@ -472,7 +660,7 @@ fn write_checked_existing(
     // above is only worth something if nothing between it and the write can
     // point at a different file.
     f.set_len(0)?;
-    f.write_all(content.as_bytes())?;
+    f.write_all(content)?;
     Ok(stamp_from_meta(&f.metadata()?))
 }
 
@@ -508,6 +696,97 @@ pub fn write_file_checked(
     content: &str,
     expected: Option<&FileStamp>,
 ) -> anyhow::Result<FileStamp> {
+    write_file_encoded(worktree, rel_path, content, None, expected)
+}
+
+/// The encoding a save writes its text in, and whether the bytes start with a
+/// byte-order mark: the pair a read handed out, or a conversion the person
+/// chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveEncoding {
+    pub encoding: &'static encoding_rs::Encoding,
+    pub bom: bool,
+    /// The encoding (and mark) the client read the file in, which tells an
+    /// ordinary save (the same pair) from a conversion (any other). `None`
+    /// from an older client, which is held to the conservative check.
+    pub read_as: Option<(&'static encoding_rs::Encoding, bool)>,
+}
+
+/// Mark a refused leading U+FEFF as the file's own when the file on disk,
+/// read in the encoding the save says it was read in, starts with that
+/// character: the editor opened such a file read-only, so the refusal must not
+/// tell the person to delete a character they cannot reach. Any other error,
+/// or a file that cannot be read for this, is returned as it was; the answer
+/// only chooses the refusal's wording, never whether anything is written.
+fn leading_mark_from_file(
+    err: anyhow::Error,
+    worktree: &Path,
+    rel_path: &str,
+    save: SaveEncoding,
+) -> anyhow::Error {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+
+    let Some(refused) = err.downcast_ref::<crate::text_encoding::LeadingMarkInText>() else {
+        return err;
+    };
+    let Some((read, _)) = save.read_as else {
+        return err;
+    };
+    let Ok(path) = resolve_worktree_path(worktree, rel_path) else {
+        return err;
+    };
+    let Ok(f) = open_regular_nofollow(&path, OFlags::RDONLY, Mode::empty(), |e| {
+        anyhow::anyhow!("open {}: {e}", path.display())
+    }) else {
+        return err;
+    };
+    let mut existing = Vec::new();
+    if f.take(MAX_EDITABLE_BYTES)
+        .read_to_end(&mut existing)
+        .is_err()
+    {
+        return err;
+    }
+    let from_file = matches!(
+        crate::text_encoding::decode(&existing, Some(read)),
+        Ok(crate::text_encoding::Decoded::Text(t)) if t.text.starts_with('\u{feff}')
+    );
+    if !from_file {
+        return err;
+    }
+    anyhow::Error::new(crate::text_encoding::LeadingMarkInText {
+        encoding: refused.encoding,
+        from_file: true,
+    })
+}
+
+/// [`write_file_checked`] with the text written in `encoding` rather than as
+/// its own UTF-8.
+///
+/// The text is encoded before anything else happens, so a character the
+/// encoding cannot hold is refused (a [`crate::text_encoding::Unmappable`],
+/// returned unwrapped so the HTTP layer can answer with its details) before the
+/// file is so much as opened. `None` is the old behaviour exactly: the text's
+/// own UTF-8 bytes, and the guard against saving over bytes that are not UTF-8.
+pub fn write_file_encoded(
+    worktree: &Path,
+    rel_path: &str,
+    content: &str,
+    encoding: Option<SaveEncoding>,
+    expected: Option<&FileStamp>,
+) -> anyhow::Result<FileStamp> {
+    let bytes: std::borrow::Cow<'_, [u8]> = match encoding {
+        Some(save) => crate::text_encoding::encode(content, save.encoding, save.bom)
+            .map_err(|e| leading_mark_from_file(e, worktree, rel_path, save))?
+            .into(),
+        None => content.as_bytes().into(),
+    };
+    if bytes.len() as u64 > MAX_SAVED_BYTES {
+        return Err(anyhow::Error::new(SaveTooLarge {
+            size: bytes.len() as u64,
+        }));
+    }
     let path = resolve_worktree_path(worktree, rel_path)?;
     // No-follow stat tells existing-file kind apart from "does not exist".
     match std::fs::symlink_metadata(&path) {
@@ -552,14 +831,14 @@ pub fn write_file_checked(
         // downcasts it for the 409 and its body), so it is the one error here
         // that is not re-wrapped with the path suffix; its own message already
         // says what happened.
-        Some(stamp) => write_checked_existing(&path, content, stamp).map_err(|e| {
+        Some(stamp) => write_checked_existing(&path, &bytes, stamp, encoding).map_err(|e| {
             if e.downcast_ref::<WriteConflict>().is_some() {
                 e
             } else {
                 anyhow::anyhow!("{e} (writing {rel_path})")
             }
         }),
-        None => write_nofollow_stamped(&path, content)
+        None => write_nofollow_bytes_stamped(&path, &bytes)
             .map_err(|e| anyhow::anyhow!("{e} (writing {rel_path})")),
     }
 }
@@ -1217,17 +1496,128 @@ mod tests {
     /// first bytes calls it text; it is not UTF-8, so serving it as text would
     /// mean serving an EMPTY buffer that a save then writes over the original.
     #[test]
-    fn a_non_utf8_file_is_flagged_not_served_as_empty_editable_text() {
+    fn a_non_utf8_file_opens_as_windows_1252_and_says_it_was_a_fallback() {
         let dir = worktree();
         let latin1 = b"caf\xe9 au lait\n";
         std::fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
         let f = read_file(dir.path(), "latin1.txt").unwrap();
-        assert!(
-            f.binary,
-            "a file that is not valid UTF-8 must not open as an editable buffer"
+        assert!(!f.binary);
+        assert_eq!(
+            f.content, "caf\u{e9} au lait\n",
+            "never an empty buffer a save would write over the real bytes"
         );
-        assert!(f.content.is_empty());
+        assert_eq!(f.encoding.as_deref(), Some("windows-1252"));
+        assert!(f.encoding_fallback);
+        assert!(!f.bom);
         assert_eq!(f.size, Some(latin1.len() as u64));
+    }
+
+    #[test]
+    fn a_utf8_file_reports_its_encoding_and_no_fallback() {
+        let dir = worktree();
+        let f = read_file(dir.path(), "hello.txt").unwrap();
+        assert_eq!(f.encoding.as_deref(), Some("UTF-8"));
+        assert!(!f.encoding_fallback && !f.bom);
+    }
+
+    #[test]
+    fn a_utf16_file_with_a_mark_opens_despite_its_zero_bytes() {
+        let dir = worktree();
+        std::fs::write(
+            dir.path().join("wide.txt"),
+            [0xFF, 0xFE, b'h', 0, b'i', 0, b'\r', 0, b'\n', 0],
+        )
+        .unwrap();
+        let f = read_file(dir.path(), "wide.txt").unwrap();
+        assert!(!f.binary);
+        assert_eq!(f.content, "hi\r\n");
+        assert_eq!(f.encoding.as_deref(), Some("UTF-16LE"));
+        assert!(f.bom && !f.encoding_fallback);
+    }
+
+    /// A file whose bytes this encoding cannot write back unchanged is text,
+    /// shown read-only with the reason, never binary.
+    #[test]
+    fn a_file_the_encoding_cannot_write_back_opens_read_only_with_the_reason() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("nec.txt"), [b'a', 0x87, 0x90, b'\n']).unwrap();
+        let f = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+        assert!(!f.binary);
+        assert!(f.read_only);
+        assert_eq!(f.unwritable, Some("round_trip"));
+        assert_eq!(f.content, "a\u{2252}\n");
+
+        std::fs::write(dir.path().join("two.txt"), b"\xEF\xBB\xBF\xEF\xBB\xBFx").unwrap();
+        let f = read_file(dir.path(), "two.txt").unwrap();
+        assert!(f.read_only);
+        assert_eq!(f.unwritable, Some("doubled_mark"));
+
+        let f = read_file(dir.path(), "hello.txt").unwrap();
+        assert!(!f.read_only);
+        assert_eq!(f.unwritable, None);
+    }
+
+    #[test]
+    fn mixed_line_endings_are_reported_with_what_a_save_writes() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("mixed.txt"), "a\r\nb\r\nc\n").unwrap();
+        let f = read_file(dir.path(), "mixed.txt").unwrap();
+        assert!(f.mixed_line_endings);
+        assert_eq!(f.eol, Some("CRLF"));
+        std::fs::write(dir.path().join("mac.txt"), b"a\rb\r").unwrap();
+        let f = read_file(dir.path(), "mac.txt").unwrap();
+        assert!(f.mixed_line_endings);
+        let f = read_file(dir.path(), "hello.txt").unwrap();
+        assert!(!f.mixed_line_endings);
+        assert_eq!(f.eol, Some("LF"));
+    }
+
+    /// A file the person reopened in a code page, since rewritten as UTF-8, is
+    /// flagged rather than silently read as mojibake in the old choice.
+    #[test]
+    fn utf8_read_in_a_chosen_code_page_says_it_looks_like_utf8() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("u.txt"), "caf\u{e9}\n").unwrap();
+        let f = read_file_as(dir.path(), "u.txt", Some(encoding_rs::WINDOWS_1252)).unwrap();
+        assert!(f.looks_like_utf8);
+        assert!(
+            !read_file_as(dir.path(), "u.txt", Some(encoding_rs::UTF_8))
+                .unwrap()
+                .looks_like_utf8
+        );
+        assert!(!read_file(dir.path(), "u.txt").unwrap().looks_like_utf8);
+        let f = read_file_as(dir.path(), "hello.txt", Some(encoding_rs::WINDOWS_1252)).unwrap();
+        assert!(
+            !f.looks_like_utf8,
+            "plain ASCII reads the same in every one"
+        );
+    }
+
+    #[test]
+    fn a_binary_file_reports_no_encoding() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+        let f = read_file(dir.path(), "blob.bin").unwrap();
+        assert!(f.binary);
+        assert_eq!(f.encoding, None);
+    }
+
+    #[test]
+    fn a_requested_encoding_reads_exactly_that_or_is_refused() {
+        let dir = worktree();
+        let sjis = [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea];
+        std::fs::write(dir.path().join("jp.txt"), sjis).unwrap();
+        let f = read_file_as(dir.path(), "jp.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+        assert_eq!(f.content, "\u{65e5}\u{672c}\u{8a9e}");
+        assert_eq!(f.encoding.as_deref(), Some("Shift_JIS"));
+        assert!(!f.encoding_fallback);
+
+        let err = read_file_as(dir.path(), "jp.txt", Some(encoding_rs::UTF_8)).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::text_encoding::DecodeRefused>()
+                .is_some(),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2516,10 +2906,470 @@ mod tests {
             );
         }
 
-        /// A buffer that was ever opened over a non-UTF-8 file (a draft kept
-        /// from before the read refused such files, or any client that ignores
-        /// the binary flag) holds a valid stamp for bytes it never saw. The
-        /// guarded save refuses it, so the original bytes survive.
+        fn stamp_of(read: &WorktreeFile) -> FileStamp {
+            FileStamp {
+                modified: read.modified.clone(),
+                size: read.size.unwrap(),
+            }
+        }
+
+        fn save_as(encoding: &'static encoding_rs::Encoding, bom: bool) -> Option<SaveEncoding> {
+            Some(SaveEncoding {
+                encoding,
+                bom,
+                read_as: None,
+            })
+        }
+
+        fn save_read_as(
+            encoding: &'static encoding_rs::Encoding,
+            read: &'static encoding_rs::Encoding,
+        ) -> Option<SaveEncoding> {
+            Some(SaveEncoding {
+                encoding,
+                bom: false,
+                read_as: Some((read, false)),
+            })
+        }
+
+        /// A conversion is judged by the encoding the file was READ in: UTF-8
+        /// `あ燐` has an exact Shift_JIS form, though its UTF-8 bytes, misread
+        /// as Shift_JIS, hold the `87 90` that does not round-trip.
+        #[test]
+        fn a_conversion_is_judged_by_the_encoding_the_file_was_read_in() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("j.txt"), "\u{3042}\u{71d0}").unwrap();
+            let read = read_file(dir.path(), "j.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "j.txt",
+                &read.content,
+                save_read_as(encoding_rs::SHIFT_JIS, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            let written = std::fs::read(dir.path().join("j.txt")).unwrap();
+            let (back, _, _) = encoding_rs::SHIFT_JIS.decode(&written);
+            assert_eq!(back, "\u{3042}\u{71d0}");
+        }
+
+        #[test]
+        fn a_save_in_the_encoding_it_was_read_in_is_still_held_to_writing_back() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("nec.txt"), [0x87, 0x90]).unwrap();
+            let read = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+            assert!(
+                write_file_encoded(
+                    dir.path(),
+                    "nec.txt",
+                    &read.content,
+                    save_read_as(encoding_rs::SHIFT_JIS, encoding_rs::SHIFT_JIS),
+                    Some(&stamp_of(&read)),
+                )
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("nec.txt")).unwrap(),
+                [0x87, 0x90]
+            );
+        }
+
+        /// An ordinary save (the same encoding read and written) over bytes
+        /// that are not valid in that encoding was never shown those bytes:
+        /// refused, nothing written.
+        #[test]
+        fn an_ordinary_save_over_bytes_its_read_encoding_cannot_decode_is_refused() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "x",
+                save_read_as(encoding_rs::UTF_8, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("l.txt")).unwrap(), b"caf\xe9");
+        }
+
+        /// A read encoding the bytes on disk are not valid in is not what the
+        /// file was read in; the save is refused.
+        #[test]
+        fn a_read_encoding_the_bytes_do_not_decode_in_is_refused() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "x",
+                save_read_as(encoding_rs::WINDOWS_1252, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("l.txt")).unwrap(), b"caf\xe9");
+        }
+
+        /// A GB18030 file whose text starts with U+FEFF opens read-only, so
+        /// there is no character the person could delete: a refused
+        /// conversion of it says the file itself starts with one and points
+        /// outside dux, never "delete that character". A U+FEFF the person
+        /// typed into a file that has none is still told to delete it.
+        #[test]
+        fn a_refused_conversion_says_whether_the_mark_character_came_from_the_file() {
+            let dir = worktree();
+            let on_disk = [0x84, 0x31, 0x95, 0x33, b'x'];
+            std::fs::write(dir.path().join("gb.txt"), on_disk).unwrap();
+            let read = read_file_as(dir.path(), "gb.txt", Some(encoding_rs::GB18030)).unwrap();
+            assert_eq!(read.content, "\u{feff}x");
+            for (encoding, bom) in [
+                (encoding_rs::UTF_8, false),
+                (encoding_rs::UTF_8, true),
+                (encoding_rs::UTF_16LE, true),
+            ] {
+                let err = write_file_encoded(
+                    dir.path(),
+                    "gb.txt",
+                    &read.content,
+                    Some(SaveEncoding {
+                        encoding,
+                        bom,
+                        read_as: Some((encoding_rs::GB18030, false)),
+                    }),
+                    Some(&stamp_of(&read)),
+                )
+                .unwrap_err();
+                let refused = err
+                    .downcast_ref::<crate::text_encoding::LeadingMarkInText>()
+                    .expect("typed refusal");
+                assert!(refused.from_file, "{encoding:?}");
+                let message = err.to_string();
+                assert!(!message.contains("Delete that character"), "{message}");
+                assert!(message.contains("edit it outside dux"), "{message}");
+                assert!(message.contains("nothing was written"), "{message}");
+            }
+            assert_eq!(std::fs::read(dir.path().join("gb.txt")).unwrap(), on_disk);
+
+            std::fs::write(dir.path().join("m.txt"), "m\n").unwrap();
+            let read = read_file(dir.path(), "m.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "m.txt",
+                "\u{feff}m\n",
+                save_read_as(encoding_rs::UTF_8, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            let refused = err
+                .downcast_ref::<crate::text_encoding::LeadingMarkInText>()
+                .expect("typed refusal");
+            assert!(!refused.from_file);
+            assert!(err.to_string().contains("Delete that character"), "{err}");
+        }
+
+        /// A path the editor opens can be swapped for a FIFO (or another special
+        /// file) at any moment, and opening a FIFO with no writer blocks until
+        /// one appears: forever, holding the file's operation in the browser.
+        /// Every editor-facing open refuses anything but a regular file
+        /// without waiting for it.
+        #[test]
+        fn a_fifo_is_refused_at_once_by_every_editor_read_and_write() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("p.txt"), "x\n").unwrap();
+            let read = read_file(dir.path(), "p.txt").unwrap();
+            std::fs::remove_file(dir.path().join("p.txt")).unwrap();
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                dir.path().join("p.txt"),
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .unwrap();
+            let root = dir.path().to_path_buf();
+            let stamp = stamp_of(&read);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let read = read_file(&root, "p.txt")
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let as_gb = read_file_as(&root, "p.txt", Some(encoding_rs::GB18030))
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let diff = crate::diff::file_diff_contents(&root, "p.txt")
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let save = write_file_encoded(
+                    &root,
+                    "p.txt",
+                    "\u{feff}y",
+                    save_read_as(encoding_rs::UTF_8, encoding_rs::GB18030),
+                    Some(&stamp),
+                )
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+                let raw = read_nofollow(&root.join("p.txt"))
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                tx.send((read, as_gb, diff, save, raw)).unwrap();
+            });
+            let (read, as_gb, diff, save, raw) = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("an editor open blocked on a FIFO");
+            for (what, result) in [
+                ("read", read),
+                ("read as", as_gb),
+                ("diff", diff),
+                ("raw", raw),
+            ] {
+                let err = result.expect_err(what);
+                assert!(err.contains("not a regular file"), "{what}: {err}");
+            }
+            // The save is refused too (by its encoding, then its kind); it
+            // only has to come back.
+            assert!(save.is_err());
+        }
+
+        /// The editor's whole loop for a windows-1252 file: read, change one
+        /// character, save in the encoding the read reported. Every other byte
+        /// comes back exactly as it was, CRLF included.
+        #[test]
+        fn a_windows_1252_file_saves_back_in_windows_1252_byte_for_byte() {
+            let dir = worktree();
+            let latin1 = b"caf\xe9\r\nna\xefve \x80\r\n";
+            std::fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
+            let read = read_file(dir.path(), "latin1.txt").unwrap();
+            let edited = read.content.replace("caf\u{e9}", "th\u{e9}");
+            let encoding =
+                crate::text_encoding::encoding_for_label(read.encoding.as_deref().unwrap())
+                    .unwrap();
+            write_file_encoded(
+                dir.path(),
+                "latin1.txt",
+                &edited,
+                save_as(encoding, read.bom),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("latin1.txt")).unwrap(),
+                b"th\xe9\r\nna\xefve \x80\r\n"
+            );
+        }
+
+        #[test]
+        fn a_utf16_file_saves_back_with_its_mark() {
+            let dir = worktree();
+            let wide = [0xFE, 0xFF, 0, b'a', 0, b'\n'];
+            std::fs::write(dir.path().join("wide.txt"), wide).unwrap();
+            let read = read_file(dir.path(), "wide.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "wide.txt",
+                "ab\n",
+                save_as(encoding_rs::UTF_16BE, read.bom),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("wide.txt")).unwrap(),
+                [0xFE, 0xFF, 0, b'a', 0, b'b', 0, b'\n']
+            );
+        }
+
+        /// Converting is a save with a different encoding stated, and it is
+        /// allowed over bytes that are not UTF-8 because the client says it
+        /// read them as something.
+        #[test]
+        fn a_windows_1252_file_can_be_converted_to_utf8_on_purpose() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("latin1.txt"), b"caf\xe9\n").unwrap();
+            let read = read_file(dir.path(), "latin1.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "latin1.txt",
+                &read.content,
+                save_as(encoding_rs::UTF_8, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("latin1.txt")).unwrap(),
+                "caf\u{e9}\n"
+            );
+        }
+
+        /// The read says unwritable; the server must not take the client's word
+        /// for it. A guarded save in Shift_JIS over `87 90 0A` would write
+        /// `81 E0 0A`, so it is refused and the bytes survive.
+        #[test]
+        fn a_save_in_an_encoding_that_cannot_write_the_file_back_is_refused() {
+            let dir = worktree();
+            let nec = [0x87, 0x90, b'\n'];
+            std::fs::write(dir.path().join("nec.txt"), nec).unwrap();
+            let read = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+            assert_eq!(read.unwritable, Some("round_trip"));
+            let err = write_file_encoded(
+                dir.path(),
+                "nec.txt",
+                &read.content,
+                save_as(encoding_rs::SHIFT_JIS, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("nec.txt")).unwrap(), nec);
+
+            // Converting it is still allowed: its bytes are not UTF-8, so a
+            // UTF-8 save is a conversion, not a rewrite in place.
+            write_file_encoded(
+                dir.path(),
+                "nec.txt",
+                &read.content,
+                save_as(encoding_rs::UTF_8, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("nec.txt")).unwrap(),
+                "\u{2252}\n"
+            );
+        }
+
+        #[test]
+        fn a_save_over_a_doubled_mark_in_its_own_encoding_is_refused() {
+            let dir = worktree();
+            let two = b"\xEF\xBB\xBF\xEF\xBB\xBFx";
+            std::fs::write(dir.path().join("two.txt"), two).unwrap();
+            let read = read_file(dir.path(), "two.txt").unwrap();
+            assert!(
+                write_file_encoded(
+                    dir.path(),
+                    "two.txt",
+                    "x",
+                    save_as(encoding_rs::UTF_8, true),
+                    Some(&stamp_of(&read)),
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(dir.path().join("two.txt")).unwrap(), two);
+        }
+
+        /// Every ordinary save, and a conversion to windows-1252 (which reads
+        /// and writes back every byte), goes through.
+        #[test]
+        fn the_save_limit_is_on_the_bytes_written_not_the_text_sent() {
+            let dir = worktree();
+            // 4 MiB of € in windows-1252 is 4 MiB on disk, though its text is
+            // 12 MiB of UTF-8: it saves.
+            let euros = "\u{20ac}".repeat(4 * 1024 * 1024);
+            write_file_encoded(
+                dir.path(),
+                "euro.txt",
+                &euros,
+                save_as(encoding_rs::WINDOWS_1252, false),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::metadata(dir.path().join("euro.txt"))
+                    .unwrap()
+                    .len(),
+                4 * 1024 * 1024
+            );
+            // Past the limit on disk it is refused, typed, and writes nothing.
+            let over = "a".repeat(MAX_SAVED_BYTES as usize + 1);
+            let err = write_file_encoded(
+                dir.path(),
+                "big.txt",
+                &over,
+                save_as(encoding_rs::UTF_8, false),
+                None,
+            )
+            .unwrap_err();
+            assert!(err.downcast_ref::<SaveTooLarge>().is_some(), "{err}");
+            assert!(!dir.path().join("big.txt").exists());
+        }
+
+        #[test]
+        fn ordinary_saves_and_conversions_are_not_mistaken_for_rewrites() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9\n").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let stamp = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "caf\u{e9}!\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "caf\u{e9}!\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp),
+            )
+            .unwrap();
+            let read = read_file(dir.path(), "hello.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "hello.txt",
+                "x\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+        }
+
+        /// A character the encoding cannot hold stops the save before the file
+        /// is touched, as a typed refusal the route can describe.
+        #[test]
+        fn an_unmappable_character_is_refused_and_nothing_is_written() {
+            let dir = worktree();
+            let latin1 = b"caf\xe9\n";
+            std::fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
+            let read = read_file(dir.path(), "latin1.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "latin1.txt",
+                "caf\u{e9} \u{2603}\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            let unmappable = err
+                .downcast_ref::<crate::text_encoding::Unmappable>()
+                .expect("typed refusal");
+            assert_eq!(unmappable.character, '\u{2603}');
+            assert_eq!((unmappable.line, unmappable.column), (1, 6));
+            assert_eq!(
+                std::fs::read(dir.path().join("latin1.txt")).unwrap(),
+                latin1
+            );
+            // Not even a create: an unguarded save to a new path is refused too.
+            assert!(
+                write_file_encoded(
+                    dir.path(),
+                    "new.txt",
+                    "\u{2603}",
+                    save_as(encoding_rs::WINDOWS_1252, false),
+                    None,
+                )
+                .is_err()
+            );
+            assert!(!dir.path().join("new.txt").exists());
+        }
+
+        /// A buffer that was ever opened over a non-UTF-8 file by a page that
+        /// does not know about encodings (a draft kept from before the read
+        /// refused such files, or any client that ignores the binary flag)
+        /// holds a valid stamp for bytes it never saw. Its save states no
+        /// encoding, and the guarded save refuses it, so the bytes survive.
         #[test]
         fn a_guarded_save_over_a_non_utf8_file_is_refused_and_the_bytes_survive() {
             let dir = worktree();

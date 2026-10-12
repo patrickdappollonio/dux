@@ -27,6 +27,7 @@ import {
   DIFF_TOKEN,
   type DiffRule,
 } from "@/lib/diffGrammar"
+import { holdNewModelsInLf } from "@/lib/monacoModelEol"
 
 // Self-host: point the wrapper at the bundled `monaco` instance and supply the
 // one worker via a Vite `?worker` import (a hashed chunk rust-embed bakes into
@@ -36,6 +37,9 @@ self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
 }
 loader.config({ monaco })
+// Every model is LF from the moment it is made, on every browser platform
+// (see `holdNewModelsInLf`).
+holdNewModelsInLf(monaco)
 
 // Monaco ships no TOML grammar, so `config.toml` would fall back to plaintext.
 // A minimal Monarch tokenizer instead: highlighting only, no language service.

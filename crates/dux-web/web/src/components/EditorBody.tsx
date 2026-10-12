@@ -18,6 +18,7 @@ import {
   FileCode2,
   FilePlus,
   FileText,
+  FileType,
   GitCompare,
   Laptop,
   Loader2,
@@ -27,6 +28,7 @@ import {
   RefreshCw,
   RotateCw,
   Save,
+  SaveAll,
   Search,
   SquareTerminal,
   Wand2,
@@ -38,6 +40,9 @@ import { chip, prose } from "@/lib/prose"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
+  bufferReadEncoding,
+  bufferSaveEncoding,
+  isBufferDirty,
   changeSignalFor,
   isBufferStale,
   pruneByIds,
@@ -48,6 +53,17 @@ import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
+import { laneKey, useLaneBusy } from "@/lib/editorLane"
+import {
+  REOPEN_CHOICES,
+  SAVE_CHOICES,
+  dismissNotice,
+  encodingNotices,
+  encodingLabel,
+  noticeDismissed,
+  sameSaveEncoding,
+  type SaveEncoding,
+} from "@/lib/editorEncoding"
 import {
   rootHasDiff,
   rootKey,
@@ -73,6 +89,7 @@ import {
   withLanguageOverride,
 } from "@/lib/editorLanguage"
 import type { RegisteredLanguage } from "@/lib/editorLanguage"
+import { loadRegisteredLanguages } from "@/lib/monacoLanguages"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
@@ -109,6 +126,11 @@ import { ConfirmReloadFileDialog } from "@/components/ConfirmReloadFileDialog"
 import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { FileDiskBanner } from "@/components/FileDiskBanner"
+import { EncodingNotice } from "@/components/EncodingNotice"
+import {
+  ConfirmReopenEncodingDialog,
+  type ReopenEncodingTarget,
+} from "@/components/ConfirmReopenEncodingDialog"
 import { SaveConflictDialog } from "@/components/SaveConflictDialog"
 import { useEditorDiffReads } from "@/components/useEditorDiffReads"
 import { useEditorFileReads } from "@/components/useEditorFileReads"
@@ -328,6 +350,18 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     buffersRef.current = buffers
   })
 
+  // Whether this editor is still mounted. Every asynchronous answer (a
+  // save's, a read's) checks it before touching anything, the tab's unsaved
+  // mark in the global store above all: an editor closed and opened again is
+  // a new one, and the old one's answers belong to nobody.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
   // Markdown preview toggle: render the buffer instead of the Monaco editor.
   // Kept per tab id rather than as one shared boolean, so each tab remembers
   // its own choice and no effect has to reset it on every tab switch.
@@ -380,6 +414,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const [reloadTarget, setReloadTarget] = useState<ReloadFileTarget | null>(
     null,
   )
+  // Reopening a dirty buffer in another encoding discards the edits, so it
+  // asks first, with the same live truth as the reload confirm: still dirty.
+  const [reopenTarget, setReopenTarget] =
+    useState<ReopenEncodingTarget | null>(null)
+  // The fallback notice's dismissals live in a page-session set outside React
+  // (lib/editorEncoding.ts); this only makes a dismissal re-render.
+  const [, setNoticeDismissals] = useState(0)
   // Bumped by `revalidateDirs` after a create/rename/delete lands, so
   // `FileTree` force-refetches the affected dir(s) past its lazy-load cache.
   const [treeRevalidate, setTreeRevalidate] = useState<{
@@ -412,8 +453,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The language picker's two pieces of state.
   //
   // The registry, read off Monaco through a dynamic import so this module never
-  // pulls the Monaco bundle into the main chunk; it resolves to the chunk
-  // CodeEditor and DiffViewer already lazy-load. Read in an effect rather than
+  // pulls the Monaco bundle into the main chunk (see `loadRegisteredLanguages`).
+  // Read in an effect rather than
   // from CodeEditor's `onReady`, because the picker must also work in diff
   // mode, where CodeEditor never mounts.
   const [registeredLanguages, setRegisteredLanguages] = useState<
@@ -520,6 +561,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const fileReady = bufferIsFileReady(activeTab, activeBuffer)
   const binary = readyBufferFlag(fileReady, activeBuffer?.binary)
   const readOnly = readyBufferFlag(fileReady, activeBuffer?.readOnly)
+  // Read-only only because the encoding cannot write the file back unchanged:
+  // still text, and converting it to another encoding is the way out. Every
+  // other read-only (a symlink, a .git path) has no save at all.
+  const hardReadOnly = readyBufferFlag(fileReady, activeBuffer?.pathReadOnly)
+  const encodingUnwritable =
+    readOnly && !hardReadOnly && (activeBuffer?.unwritable ?? null) !== null
   // File-mode readiness for the preview toggle: a loaded, non-binary buffer.
   // The toggle itself is available in BOTH modes; its diff-mode half needs
   // `diffReady`, declared further down, so `canPreview` lives beside it (one
@@ -540,9 +587,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     let cancelled = false
     // The registry does not change after the grammars register at import
     // time, so this runs once and then short-circuits on the state check.
-    void import("@/lib/monacoSetup")
-      .then((m) => {
-        if (!cancelled) setRegisteredLanguages(m.monaco.languages.getLanguages())
+    void loadRegisteredLanguages()
+      .then((languages) => {
+        if (!cancelled) setRegisteredLanguages(languages)
       })
       // Monaco failing to load is already fatal for the pane behind us, which
       // reports it; the picker simply does not appear.
@@ -571,6 +618,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // prefixes included.
   function retargetOverrides(from: string, to: string): void {
     setLanguageOverrides((prev) => retargetLanguageOverrides(prev, from, to))
+    encodingChoicesRef.current = retargetLanguageOverrides(
+      encodingChoicesRef.current,
+      from,
+      to,
+    )
   }
   function pickLanguage(id: string | null): void {
     if (languageTabPath === null) return
@@ -637,6 +689,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const { raiseDiskBanner, dismissDiskBanner } =
     createEditorDiskBannerActions(setBuffers)
 
+  // The save's way to read a file again when its answer no longer describes
+  // the buffer; filled in once the reader below exists.
+  const rereadRef = useRef<((tabId: string, path: string) => void) | null>(null)
+
   const {
     savingTabId,
     savingPaths,
@@ -647,9 +703,19 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     root,
     tabsRef,
     sliceRef,
+    buffersRef,
+    aliveRef,
+    rereadRef,
     setBuffers,
     raiseDiskBanner,
   })
+  // The operation out on the open file, if any (lib/editorLane.ts). While
+  // one is, every control that would start another is unavailable: Save, the
+  // encoding menu's rows, the banner's Reload and the conflict dialog's offers.
+  const laneOp = useLaneBusy(
+    activeTab === null ? null : laneKey(key, activeTab.path),
+  )
+  const fileBusy = laneOp !== undefined
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
@@ -684,6 +750,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // What the status bar carries for what is on screen. The size is the disk's
   // as of the last read or save (the freshness stamp), not the unsaved
   // buffer's, so it never claims bytes that are not on disk yet.
+  // The encoding of a large file's diff (the head of git's patch), while that
+  // view is what is on screen and is not binary.
+  const shownHead =
+    activeTab?.mode === "diff" && diffReady ? activeBuffer?.diffHead : null
+  const diffHeadEncoding =
+    shownHead && !shownHead.binary
+      ? encodingLabel(shownHead.encoding ?? "UTF-8", false)
+      : null
   const statusPlan = planStatusBar({
     tab: activeTab === null ? null : { path: activeTab.path, mode: activeTab.mode },
     dirty,
@@ -696,6 +770,24 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     diffEditorShown: diffEditorIsShown(activeTab, diffReady, activeBuffer, showPreview),
     size: activeBuffer?.stamp.size ?? null,
     languageAvailable: showLanguagePicker,
+    // Every text file names its encoding, plain UTF-8 included, the way VS
+    // Code does, so any file can be reopened in any encoding from the bar.
+    encodingLabel:
+      activeBuffer !== undefined
+        ? encodingLabel(
+            activeBuffer.encoding,
+            activeBuffer.bom,
+          )
+        : null,
+    mixedEol: activeBuffer?.mixedEol ?? false,
+    eol: activeBuffer?.eol ?? null,
+    diffHeadEncodingLabel: diffHeadEncoding,
+    readOnlyReason: encodingUnwritable
+      ? `This file is read-only: ${encodingLabel(
+          activeBuffer?.encoding ?? "UTF-8",
+          activeBuffer?.bom ?? false,
+        )} can't write it back without changing bytes you didn't touch. Reopen or convert it from the encoding menu.`
+      : null,
   })
 
   // The one preview pane both content arms share (file mode and diff mode),
@@ -761,7 +853,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The encoding the person chose for each open path, kept beside the buffers
+  // for the one moment a buffer cannot carry it: a rename, which moves the tab
+  // to a new path and so starts a fresh read. Same lifetime as a language
+  // pick: it follows a rename or move and dies when the file is closed.
+  const encodingChoicesRef = useRef<Map<string, string>>(new Map())
+  useEffect(() => {
+    for (const buffer of buffers.values()) {
+      if (buffer.encodingRequested) {
+        encodingChoicesRef.current.set(buffer.path, buffer.encodingRequested)
+      }
+    }
+  }, [buffers])
+
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
+    aliveRef,
     root,
     tabs,
     activeTab,
@@ -769,8 +875,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     tabsRef,
     buffersRef,
     sliceRef,
+    encodingChoicesRef,
     setBuffers,
     raiseDiskBanner,
+  })
+
+  useEffect(() => {
+    rereadRef.current = (tabId, path) =>
+      reloadFileInPlace(tabId, path, false, { afterSave: true })
   })
 
   useEditorDiskFreshness({
@@ -788,12 +900,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     reloadFileInPlace,
   })
 
-  const { loadDiffBuffer, refreshDiff } = useEditorDiffReads({
+  const { loadDiffBuffer, refreshDiff, reloadDiffAs } = useEditorDiffReads({
     root,
     tabs,
     activeTab,
     activeBuffer,
     tabsRef,
+    buffersRef,
     loadedSignalRef: openFileSignalRef,
     setBuffers,
   })
@@ -828,6 +941,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // inherited by a different file that later takes it. Every way a tab leaves
     // ends in `tabs` losing the entry, so this covers all of them.
     setLanguageOverrides((prev) => pruneLanguageOverrides(prev, currentPaths))
+    // The encoding choices die with their tab the same way.
+    const choices = encodingChoicesRef.current
+    for (const path of [...choices.keys()]) {
+      if (!currentPaths.has(path)) choices.delete(path)
+    }
   }, [tabs])
 
   // Dispose every retained model when the body unmounts: @monaco-editor/react
@@ -866,19 +984,27 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // the close-confirm gating read from one place), and promote a preview tab
   // to permanent on its first edit, so an in-progress edit is never silently
   // discarded by a later preview-replace.
-  function handleDraftChange(value: string): void {
-    if (!activeTab) return
+  // `path` is the file the change is the text of. It must be the file the
+  // buffer holds, checked against the LIVE buffer: a preview tab reuses its id
+  // for another file, and a change for one file must never land in another's
+  // draft, whatever order the editor wrapper delivers it in.
+  function handleDraftChange(value: string, path: string): void {
+    if (!activeTab || activeTab.path !== path) return
     const tabId = activeTab.id
     setBuffers((prev) => {
       const cur = prev.get(tabId)
-      if (!cur) return prev
+      if (!cur || cur.path !== path || cur.loadedPath !== path) return prev
+      // Nobody can type into a read-only buffer (nor one an asked-for reopen
+      // or reload is reading), so a change here is the editor's own echo and
+      // never an edit; it must not move the text a conversion would write.
+      if (cur.readOnly || cur.readingLock) return prev
       const next = new Map(prev)
       next.set(tabId, { ...cur, draft: value })
       return next
     })
     const cur = buffers.get(tabId)
-    if (cur && !cur.binary && !cur.readOnly) {
-      const newDirty = value !== cur.loaded
+    if (cur && cur.path === path && !cur.binary && !cur.readOnly) {
+      const newDirty = isBufferDirty({ ...cur, draft: value })
       // Only dispatch when the dirty flag actually flips: `useDux()` is an
       // unselective `useSyncExternalStore`, so a dispatch on every keystroke
       // fans out a store-wide re-render to every consumer, not just this
@@ -898,13 +1024,60 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // dropping the token is exactly what "yes, I know, do it anyway" means on
   // this route.
   function save(): void {
-    if (!activeTab || binary || isSaving || !dirty) return
+    // A busy file is answered by `writeBuffer`, which says so.
+    if (!activeTab || binary || !dirty) return
     writeBuffer(
       activeTab.id,
       activeTab.path,
       activeBuffer?.draft ?? "",
+      bufferSaveEncoding(activeBuffer),
       activeBuffer?.stamp,
     )
+  }
+
+  // "Save with encoding": write the buffer now in `choice`, with the same
+  // freshness token as any save. Offered whether or not there are edits, since
+  // converting the file is itself the change; a character the encoding cannot
+  // hold refuses the whole save and writes nothing.
+  function saveWithEncoding(choice: SaveEncoding): void {
+    if (!activeTab || binary || hardReadOnly || fileBusy || !fileReady) return
+    if (!activeBuffer) return
+    // What the file is now; that row is inert, so a save from here is always
+    // a conversion.
+    if (sameSaveEncoding(choice, bufferReadEncoding(activeBuffer))) return
+    // The text goes exactly as the editor holds it: the row's mark choice
+    // alone decides whether a mark is written, and nothing in the text is
+    // taken out or put in for it.
+    writeBuffer(
+      activeTab.id,
+      activeTab.path,
+      activeBuffer.draft,
+      choice,
+      activeBuffer.stamp,
+      true,
+    )
+  }
+
+  // "Reopen with encoding": read the file again in exactly `encoding`. With
+  // unsaved edits that throws them away, so it confirms first; a clean buffer
+  // reopens at once. A file that does not decode in it is refused by the
+  // server and the buffer stays as it was (see `reloadFileInPlace`).
+  function requestReopen(encoding: string): void {
+    // A save in flight would answer for whatever text this replaced it with.
+    if (!activeTab || fileBusy) return
+    const tabId = activeTab.id
+    const path = activeTab.path
+    const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
+    if (isDirty) {
+      setReopenTarget({
+        tabId,
+        path,
+        encoding,
+        label: encodingLabel(encoding, false),
+      })
+      return
+    }
+    reloadFileInPlace(tabId, path, true, { encoding })
   }
 
   // The banner's "Reload from disk". Confirmed only when there is something to
@@ -1124,6 +1297,91 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  // The encoding menu's rows, behind the status bar's encoding selector on
+  // every screen. Two submenus, not dialogs, so no trailing ellipsis. Any file
+  // can be reopened in any encoding: a garbled result is the person's call and
+  // a reopen away from undone, while a decode that would lose bytes is refused
+  // by the server. Save with is gone for a read-only file, which has no save.
+  function encodingMenuItems(): React.ReactNode {
+    // The large-file diff view rereads the patch and has no save; the file
+    // view reopens the file and can save in another encoding.
+    const inDiff = activeTab?.mode === "diff"
+    const current = inDiff
+      ? { encoding: activeBuffer?.diffHead?.encoding ?? "UTF-8", bom: false }
+      : activeBuffer
+        ? bufferReadEncoding(activeBuffer)
+        : bufferSaveEncoding(undefined)
+    const reopen = (encoding: string) => {
+      if (inDiff && activeTab) reloadDiffAs(activeTab.id, activeTab.path, encoding)
+      else requestReopen(encoding)
+    }
+    return (
+      <>
+        <DropdownMenuSub>
+          {/* Not while this tab is saving: the save's answer is about the text
+              it sent, and a reopen would put a different decoding under it. */}
+          <DropdownMenuSubTrigger disabled={fileBusy}>
+            <RotateCw />
+            Reopen with encoding
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+            {REOPEN_CHOICES.map((choice) => (
+              <DropdownMenuItem
+                key={choice.encoding}
+                aria-current={
+                  choice.encoding === current.encoding ? "true" : undefined
+                }
+                onClick={() => reopen(choice.encoding)}
+              >
+                <FileType />
+                {choice.label}
+                {choice.encoding === current.encoding && (
+                  <Check className="ml-auto" />
+                )}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        {!inDiff && !hardReadOnly && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={fileBusy}>
+              <SaveAll />
+              Save with encoding
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+              {SAVE_CHOICES.map((choice) => {
+                const isCurrent = sameSaveEncoding(choice, current)
+                return (
+                  <DropdownMenuItem
+                    key={`${choice.encoding}:${choice.bom}`}
+                    aria-current={isCurrent ? "true" : undefined}
+                    // A file its encoding cannot write back unchanged can be
+                    // converted, never saved again in that same encoding.
+                    // The current encoding and mark is never a row to act
+                    // on: it is not a conversion, and not an edit either, so
+                    // a save from it would only rewrite untouched bytes (the
+                    // line endings, say) for nothing.
+                    disabled={isCurrent}
+                    onClick={() =>
+                      saveWithEncoding({
+                        encoding: choice.encoding,
+                        bom: choice.bom,
+                      })
+                    }
+                  >
+                    <FileType />
+                    {choice.label}
+                    {isCurrent && <Check className="ml-auto" />}
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+      </>
+    )
+  }
+
   function localEditorMenuItems(): React.ReactNode {
     return OPEN_IN_EDITORS.map((editor) => (
       <DropdownMenuItem
@@ -1259,7 +1517,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       <Button
         variant="default"
         className={cn(HEADER_CONTROL, "max-md:h-10")}
-        disabled={!dirty || isSaving || readOnly}
+        disabled={!dirty || fileBusy || readOnly}
         aria-busy={isSaving}
         onClick={save}
       >
@@ -1703,6 +1961,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 activeTab.mode === "file" &&
                 !isBufferStale(activeBuffer, activeTab.path) && (
                   <FileDiskBanner
+                    busy={fileBusy}
                     state={activeBuffer?.diskState ?? "fresh"}
                     path={activeTab.path}
                     dirty={dirty}
@@ -1721,6 +1980,30 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     }}
                   />
                 )}
+              {/* The encoding notices: how this file was read decides what
+                  a save would do, so it is said before anything is written.
+                  Beside, never instead of, the disk banner above: separate
+                  facts. */}
+              {activeTab !== null &&
+                activeTab.mode === "file" &&
+                fileReady &&
+                !binary &&
+                activeBuffer !== undefined &&
+                encodingNotices(
+                  activeTab.path,
+                  activeBuffer,
+                  (kind) =>
+                  noticeDismissed(key, activeTab.path, kind),
+                ).map((notice) => (
+                  <EncodingNotice
+                    key={notice.kind}
+                    notice={notice}
+                    onDismiss={() => {
+                      dismissNotice(key, activeTab.path, notice.kind)
+                      setNoticeDismissals((n) => n + 1)
+                    }}
+                  />
+                ))}
               <div className="relative min-h-0 flex-1">
                 <EditorContentPane
                   root={root}
@@ -1755,6 +2038,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           editor={codeEditor}
           languageLabel={activeLanguageLabel}
           languageItems={languagePickerItems()}
+          encodingItems={encodingMenuItems()}
         />
       </>
     )
@@ -1825,6 +2109,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           resolve a conflict that is waiting on an answer), so the guard is a
           plain tab lookup rather than the shared hook's two-value form. */}
       <SaveConflictDialog
+        busy={fileBusy}
         target={
           saveConflict !== null &&
           tabs.some((t) => t.id === saveConflict.tabId)
@@ -1837,7 +2122,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           setSaveConflict(null)
           // No token: the whole meaning of Overwrite is to save without the
           // guard, and the body is the one the refused save carried.
-          writeBuffer(target.tabId, target.path, target.body)
+          writeBuffer(target.tabId, target.path, target.body, target.encoding)
         }}
         onReload={() => {
           const target = saveConflict!
@@ -1846,6 +2131,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           // throws away everything the user typed, and that is the same act
           // the banner's Reload asks about.
           requestReload(target.tabId, target.path)
+        }}
+      />
+      <ConfirmReopenEncodingDialog
+        target={reopenTarget}
+        present={
+          reopenTarget !== null &&
+          (tabs.find((t) => t.id === reopenTarget.tabId)?.dirty ?? false)
+        }
+        onClose={() => setReopenTarget(null)}
+        onConfirm={() => {
+          const target = reopenTarget!
+          setReopenTarget(null)
+          reloadFileInPlace(target.tabId, target.path, true, {
+            encoding: target.encoding,
+          })
         }}
       />
       <DeleteEntryDialog
@@ -2037,7 +2337,7 @@ interface EditorContentPaneProps {
   renderPreview: (path: string) => React.ReactNode
   onRetryFile: (tabId: string, path: string) => void
   onRetryDiff: (tabId: string, path: string) => void
-  onDraftChange: (value: string) => void
+  onDraftChange: (value: string, path: string) => void
   onSave: () => void
   onMonacoReady: (monaco: MonacoInstance) => void
   onEditorChange: (editor: StatusBarEditor | null) => void
@@ -2095,7 +2395,7 @@ function DiffContentPane({
     if (diffHead.binary) {
       return (
         <CenteredPane>
-          This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
+          This file is binary, so it can&rsquo;t be diffed here.
         </CenteredPane>
       )
     }
@@ -2113,7 +2413,7 @@ function DiffContentPane({
   if (buffer?.diff?.binary) {
     return (
       <CenteredPane>
-        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
+        This file is binary, so it can&rsquo;t be diffed here.
       </CenteredPane>
     )
   }
@@ -2164,7 +2464,7 @@ function FileContentPane({
   if (binary) {
     return (
       <CenteredPane>
-        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be edited here.
+        This file is binary, so it can&rsquo;t be edited here.
       </CenteredPane>
     )
   }
@@ -2180,6 +2480,11 @@ function FileContentPane({
           onSave={onSave}
           onReady={onMonacoReady}
           onEditorChange={onEditorChange}
+          // A read that names the file's style hands the text over in LF
+          // (see `editorTextOf`); an older server names none.
+          lfText={(buffer?.eol ?? null) !== null}
+          readOnly={(buffer?.readOnly ?? false) || (buffer?.readingLock ?? null) !== null}
+          readOnlyReason={readOnlyReasonOf(buffer)}
         />
       </Suspense>
     </ChunkBoundary>
@@ -2313,4 +2618,20 @@ function PreviewImageFrame({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   )
+}
+
+// What Monaco says when someone types into a read-only buffer: the same two
+// reasons the status bar's read-only label gives.
+function readOnlyReasonOf(buffer: TabBuffer | undefined): string | undefined {
+  const lock = buffer?.readingLock ?? null
+  if (lock?.kind === "reopen") {
+    return `Reopening as ${lock.label}: the text is replaced when the file has been read again.`
+  }
+  if (lock?.kind === "reload") {
+    return "Reloading from disk: the text is replaced when the file has been read again."
+  }
+  if (!buffer?.readOnly) return undefined
+  return buffer.unwritable !== null && !buffer.pathReadOnly
+    ? "This file is read-only: its encoding can't write it back without changing bytes you didn't touch. Reopen or convert it from the encoding menu in the status bar."
+    : "This file is read-only: it is a symlink to an external file or a .git path."
 }

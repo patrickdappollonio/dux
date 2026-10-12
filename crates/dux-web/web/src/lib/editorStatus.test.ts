@@ -140,6 +140,11 @@ function input(over: Partial<StatusBarInput>): StatusBarInput {
     diffEditorShown: false,
     size: 2048,
     languageAvailable: true,
+    encodingLabel: null,
+    mixedEol: false,
+    eol: null,
+    readOnlyReason: null,
+    diffHeadEncodingLabel: null,
     ...over,
   }
 }
@@ -154,6 +159,10 @@ describe("what the status bar carries in each state", () => {
       dimensions: null,
       editing: false,
       language: false,
+      encoding: null,
+      mixedEol: false,
+      eol: null,
+      readOnlyReason: null,
     })
   })
 
@@ -166,7 +175,18 @@ describe("what the status bar carries in each state", () => {
       dimensions: null,
       editing: true,
       language: true,
+      encoding: null,
+      mixedEol: false,
+      eol: null,
+      readOnlyReason: null,
     })
+  })
+
+  /// The editor's model always holds LF; the item names the file's style,
+  /// which is what a save writes.
+  it("names the line ending style a save writes, not the model's", () => {
+    expect(planStatusBar(input({ eol: "CRLF" })).eol).toBe("CRLF")
+    expect(planStatusBar(input({ eol: "CRLF", binary: true })).eol).toBe(null)
   })
 
   it("says read-only for a read-only file", () => {
@@ -192,6 +212,10 @@ describe("what the status bar carries in each state", () => {
       dimensions: { width: 64, height: 32 },
       editing: false,
       language: false,
+      encoding: null,
+      mixedEol: false,
+      eol: null,
+      readOnlyReason: null,
     })
   })
 
@@ -240,6 +264,10 @@ describe("what the status bar carries in each state", () => {
       dimensions: null,
       editing: false,
       language: true,
+      encoding: null,
+      mixedEol: false,
+      eol: null,
+      readOnlyReason: null,
     })
   })
 
@@ -253,5 +281,43 @@ describe("what the status bar carries in each state", () => {
 
   it("offers no picker before the language registry has loaded", () => {
     expect(planStatusBar(input({ languageAvailable: false })).language).toBe(false)
+  })
+
+  it("names the encoding of a text file that is not plain UTF-8, preview included", () => {
+    expect(planStatusBar(input({ encodingLabel: "Windows-1252" })).encoding).toBe(
+      "Windows-1252",
+    )
+    expect(
+      planStatusBar(input({ encodingLabel: "UTF-16 LE", preview: true })).encoding,
+    ).toBe("UTF-16 LE")
+    expect(planStatusBar(input({ encodingLabel: null })).encoding).toBeNull()
+  })
+
+  it("names no encoding before the read, for a binary file, an image or a diff", () => {
+    const label = { encodingLabel: "Windows-1252" }
+    expect(planStatusBar(input({ ...label, fileReady: false })).encoding).toBeNull()
+    expect(planStatusBar(input({ ...label, binary: true })).encoding).toBeNull()
+    expect(
+      planStatusBar(
+        input({ ...label, tab: { path: "a.png", mode: "file" }, image: true }),
+      ).encoding,
+    ).toBeNull()
+    expect(
+      planStatusBar(
+        input({ ...label, tab: { path: "src/a.ts", mode: "diff" }, diffEditorShown: true }),
+      ).encoding,
+    ).toBeNull()
+  })
+})
+
+describe("a large file's diff", () => {
+  it("names the encoding the head of git's patch was read in", () => {
+    const plan = planStatusBar(
+      input({
+        tab: { path: "big.txt", mode: "diff" },
+        diffHeadEncodingLabel: "Windows-1252",
+      }),
+    )
+    expect(plan.encoding).toBe("Windows-1252")
   })
 })

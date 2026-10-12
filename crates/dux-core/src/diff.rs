@@ -1,8 +1,9 @@
 //! Headless, serializable diff source shared by web clients. Returns the two raw
 //! sides of a single file (its content at HEAD and its working-copy content) as
-//! whole UTF-8 text, leaving the actual diff rendering to the client. The web UI
-//! runs Monaco's DiffEditor over these two sides; non-UTF-8/binary content is
-//! reported as `binary: true` with empty sides. No syntax highlighting, no
+//! whole text, decoded by the editor's encoding rules (`text_encoding`), leaving
+//! the actual diff rendering to the client. The web UI runs Monaco's DiffEditor
+//! over these two sides; binary content is reported as `binary: true` with empty
+//! sides. No syntax highlighting, no
 //! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
 //! in `dux-tui/src/diff.rs`.
 
@@ -52,9 +53,16 @@ pub struct DiffHead {
     /// True when counting stopped at [`DIFF_HEAD_MAX_COUNTED_LINES`], so
     /// `total_lines` is a floor rather than the figure.
     pub total_is_at_least: bool,
-    /// True when either side is non-UTF-8/binary. `text` is then empty and the
-    /// caller should say so rather than render a patch.
+    /// True when either side is binary (a NUL, a binary signature, or git's
+    /// own binary verdict). `text` is then empty and the caller should say so
+    /// rather than render a patch.
     pub binary: bool,
+    /// The WHATWG name of the encoding the patch's content lines were read in.
+    /// `None` for binary.
+    pub encoding: Option<String>,
+    /// The encoding is the windows-1252 last resort for content that is not
+    /// UTF-8, not something the file said.
+    pub encoding_fallback: bool,
 }
 
 /// Read the head of git's own diff for one file, for the case where dux's
@@ -65,6 +73,18 @@ pub struct DiffHead {
 /// a second and this only ever reads the first few thousand lines of what it
 /// says.
 pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffHead> {
+    diff_head_via_git_as(worktree, rel_path, None)
+}
+
+/// [`diff_head_via_git`] reading the file's lines in `requested` rather than by
+/// the editor's automatic rule (UTF-8 when the shown content is, otherwise
+/// windows-1252). A requested encoding the content is not valid in is refused
+/// rather than shown with replacement characters.
+pub fn diff_head_via_git_as(
+    worktree: &Path,
+    rel_path: &str,
+    requested: Option<&'static encoding_rs::Encoding>,
+) -> anyhow::Result<DiffHead> {
     let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
 
     let head_prefix = crate::git::file_prefix_at_head(worktree, rel_path, BINARY_SAMPLE_BYTES)?;
@@ -72,12 +92,15 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
     if head_prefix.is_none() && working_prefix.is_none() {
         anyhow::bail!("file not found in the worktree or at HEAD: {rel_path}");
     }
-    // Only the head of each side is checked, so a large file whose first
-    // non-UTF-8 byte sits past the sample is shown as a patch rather than
-    // called binary. This view is read-only, so that costs a garbled line,
-    // never a write.
-    let sample_is_text =
-        |sample: &Option<Vec<u8>>| sample.as_deref().is_none_or(is_renderable_text_prefix);
+    // Binary is real binary only: a NUL or a known signature in the head of
+    // either side (UTF-16 included, whose zero bytes git calls binary too).
+    // Text in any encoding is text, decoded below.
+    let sample_is_text = |sample: &Option<Vec<u8>>| {
+        sample.as_deref().is_none_or(|b| {
+            !b.contains(&0)
+                && content_inspector::inspect(b) != content_inspector::ContentType::BINARY
+        })
+    };
     if !sample_is_text(&head_prefix) || !sample_is_text(&working_prefix) {
         return Ok(binary_head());
     }
@@ -149,7 +172,11 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
         anyhow::bail!("git diff produced no output stream for {rel_path}");
     };
 
-    let mut text = String::new();
+    // The kept lines as git wrote them. The file's own bytes sit after a
+    // one-byte marker in each hunk line, and are decoded once the encoding
+    // is known; the byte cap is checked again on the decoded text.
+    let mut kept_lines: Vec<Vec<u8>> = Vec::new();
+    let mut kept_bytes = 0usize;
     let mut shown_lines = 0usize;
     let mut total_lines = 0usize;
     let mut total_is_at_least = false;
@@ -165,16 +192,15 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
             }
         };
         total_lines += 1;
-        let kept = String::from_utf8_lossy(&line);
-        if !saw_hunk && kept.starts_with("@@") {
+        if !saw_hunk && line.starts_with(b"@@") {
             saw_hunk = true;
         }
-        if kept.starts_with("Binary files ") || kept.starts_with("GIT binary patch") {
+        if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
             saw_binary_marker = true;
         }
-        if shown_lines < DIFF_HEAD_MAX_LINES && text.len() + kept.len() < DIFF_HEAD_MAX_BYTES {
-            text.push_str(&kept);
-            text.push('\n');
+        if shown_lines < DIFF_HEAD_MAX_LINES && kept_bytes + line.len() < DIFF_HEAD_MAX_BYTES {
+            kept_bytes += line.len() + 1;
+            kept_lines.push(line);
             shown_lines += 1;
         }
         if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
@@ -203,6 +229,22 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
         return Ok(binary_head());
     }
 
+    let (encoding, encoding_fallback, mut lines) = decode_patch_lines(&kept_lines, requested)?;
+    // A decoded line can be longer than its bytes (windows-1252 above 0x7F is
+    // two or three UTF-8 bytes), so the cap is applied again to the text,
+    // dropping whole lines from the end so it still ends on a boundary.
+    let mut size: usize = lines.iter().map(|l| l.len() + 1).sum();
+    while size >= DIFF_HEAD_MAX_BYTES {
+        let Some(last) = lines.pop() else { break };
+        size -= last.len() + 1;
+    }
+    let shown_lines = lines.len();
+    let mut text = String::with_capacity(size);
+    for line in &lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+
     Ok(DiffHead {
         truncated: shown_lines < total_lines,
         text,
@@ -210,7 +252,91 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
         total_lines,
         total_is_at_least,
         binary: false,
+        encoding: Some(encoding.name().to_string()),
+        encoding_fallback,
     })
+}
+
+/// A requested encoding the patch's file lines are not valid in. Its own type,
+/// so a caller can answer with exactly this reason rather than wrap it in the
+/// story of how the diff head came to be asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchNotInEncoding {
+    pub encoding: &'static encoding_rs::Encoding,
+    /// 1-based line of the patch that does not decode.
+    pub line: usize,
+}
+
+impl std::fmt::Display for PatchNotInEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the diff is not valid {}: line {} of the patch is not text in that encoding",
+            self.encoding.name(),
+            self.line
+        )
+    }
+}
+
+impl std::error::Error for PatchNotInEncoding {}
+
+/// Decode a patch's kept lines. Header lines and hunk headers are git's own
+/// (ASCII, with paths as UTF-8); in a hunk, everything after the leading ` `,
+/// `+` or `-` is the file's bytes. Those are read in `requested`, refusing any
+/// line that is not valid in it, or else as UTF-8 when every one is valid
+/// UTF-8 and as windows-1252 (which reads every byte) otherwise.
+///
+/// Splitting at `\n` is safe for every encoding that gets here: UTF-16, the
+/// one family whose characters contain that byte, is binary to git and to the
+/// sample check above.
+fn decode_patch_lines(
+    lines: &[Vec<u8>],
+    requested: Option<&'static encoding_rs::Encoding>,
+) -> anyhow::Result<(&'static encoding_rs::Encoding, bool, Vec<String>)> {
+    let mut in_hunk = false;
+    let content: Vec<bool> = lines
+        .iter()
+        .map(|line| {
+            if line.starts_with(b"@@") {
+                in_hunk = true;
+                return false;
+            }
+            in_hunk && matches!(line.first(), Some(b' ' | b'+' | b'-'))
+        })
+        .collect();
+    let (encoding, fallback) = match requested {
+        Some(encoding) => (encoding, false),
+        None => {
+            let all_utf8 = lines
+                .iter()
+                .zip(&content)
+                .all(|(line, is_content)| !is_content || std::str::from_utf8(&line[1..]).is_ok());
+            if all_utf8 {
+                (encoding_rs::UTF_8, false)
+            } else {
+                (encoding_rs::WINDOWS_1252, true)
+            }
+        }
+    };
+    let mut out = Vec::with_capacity(lines.len());
+    for (index, (line, is_content)) in lines.iter().zip(&content).enumerate() {
+        if !is_content {
+            out.push(String::from_utf8_lossy(line).into_owned());
+            continue;
+        }
+        let Some(body) = encoding.decode_without_bom_handling_and_without_replacement(&line[1..])
+        else {
+            return Err(anyhow::Error::new(PatchNotInEncoding {
+                encoding,
+                line: index + 1,
+            }));
+        };
+        let mut decoded = String::with_capacity(body.len() + 1);
+        decoded.push(char::from(line[0]));
+        decoded.push_str(&body);
+        out.push(decoded);
+    }
+    Ok((encoding, fallback, out))
 }
 
 /// The answer for content no patch can describe: no text, no counts, and the
@@ -223,6 +349,8 @@ fn binary_head() -> DiffHead {
         truncated: false,
         total_is_at_least: false,
         binary: true,
+        encoding: None,
+        encoding_fallback: false,
     }
 }
 
@@ -237,8 +365,14 @@ fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("could not stat {}", path.display())),
     }
-    let file =
-        std::fs::File::open(path).with_context(|| format!("could not read {}", path.display()))?;
+    // Only ever a regular file: a FIFO put at the path would otherwise block
+    // the read until something writes to it.
+    let file = crate::worktree_file::open_regular_nofollow(
+        path,
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+        |e| anyhow::anyhow!("could not read {}: {e}", path.display()),
+    )?;
     let mut buffer = Vec::new();
     file.take(limit as u64)
         .read_to_end(&mut buffer)
@@ -282,7 +416,7 @@ pub struct DiffContents {
     /// Working-copy content on disk. Empty when the path was deleted from the
     /// working tree; the client then renders an all-delete diff.
     pub modified: String,
-    /// True when either side is non-UTF-8/binary. `original` and `modified` are
+    /// True when either side is binary. `original` and `modified` are
     /// then empty and the client should refuse to render a text diff.
     pub binary: bool,
 }
@@ -323,32 +457,31 @@ pub fn is_renderable_text(bytes: &[u8]) -> bool {
     bytes.is_empty() || (std::str::from_utf8(bytes).is_ok() && sniffs_as_utf8(bytes))
 }
 
-/// [`is_renderable_text`] for the first bytes of a longer file. A sample cut at
-/// a fixed length can end in the middle of a scalar, and that cut is the
-/// sampler's rather than the file's, so an incomplete sequence at the very end
-/// is allowed; an invalid one anywhere is not.
-fn is_renderable_text_prefix(bytes: &[u8]) -> bool {
-    let valid = match std::str::from_utf8(bytes) {
-        Ok(_) => true,
-        // `error_len() == None` means the input ended mid-sequence.
-        Err(e) => e.error_len().is_none(),
-    };
-    bytes.is_empty() || (valid && sniffs_as_utf8(bytes))
-}
-
 fn sniffs_as_utf8(bytes: &[u8]) -> bool {
     content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
 }
 
 /// Read the two sides of a single file's working-tree-vs-HEAD diff as whole
 /// text: `original` is the file at HEAD, `modified` the working copy on disk. A
-/// path absent on one side yields an empty string there. Non-UTF-8 content on
+/// path absent on one side yields an empty string there. Each side is decoded by
+/// the editor's encoding rules (see [`decode_diff_side`]); binary content on
 /// either side yields `binary: true` with empty sides.
 ///
 /// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any `..`,
 /// root or prefix component, and symlinks that escape the worktree are rejected,
 /// since the web passes client-supplied paths here.
 pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffContents> {
+    file_diff_contents_as(worktree, rel_path, None)
+}
+
+/// [`file_diff_contents`] reading both sides in `encoding` where they decode in
+/// it: the encoding the person reopened the file in, so the diff and the
+/// editor tab show the same characters.
+pub fn file_diff_contents_as(
+    worktree: &Path,
+    rel_path: &str,
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> anyhow::Result<DiffContents> {
     // Reject absolute paths, `..`/root components, the `.git` dir, and symlinks
     // that escape the worktree.
     let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
@@ -401,28 +534,53 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
     }
 
     let new_bytes = if working_meta.is_some() {
-        std::fs::read(&working_path)
+        // No-follow and regular files only, like the editor's own read.
+        crate::worktree_file::read_nofollow(&working_path)
             .with_context(|| format!("could not read working copy of {rel_path}"))?
     } else {
         Vec::new()
     };
     let old_bytes = crate::git::file_bytes_at_head(worktree, rel_path)?.unwrap_or_default();
 
-    if !is_renderable_text(&old_bytes) || !is_renderable_text(&new_bytes) {
-        return Ok(DiffContents {
+    match (
+        decode_diff_side(&old_bytes, encoding),
+        decode_diff_side(&new_bytes, encoding),
+    ) {
+        (Some(original), Some(modified)) => Ok(DiffContents {
+            path: rel_path.to_string(),
+            original,
+            modified,
+            binary: false,
+        }),
+        _ => Ok(DiffContents {
             path: rel_path.to_string(),
             original: String::new(),
             modified: String::new(),
             binary: true,
-        });
+        }),
     }
+}
 
-    Ok(DiffContents {
-        path: rel_path.to_string(),
-        original: String::from_utf8(old_bytes).unwrap_or_default(),
-        modified: String::from_utf8(new_bytes).unwrap_or_default(),
-        binary: false,
-    })
+/// One side of a diff as text, by the editor's own rules: the encoding the
+/// editor tab was reopened in when the side decodes cleanly in it, otherwise
+/// the automatic ones (a byte-order mark, UTF-8, else windows-1252). The second
+/// chance is deliberate and safe only because a diff is read-only: a file
+/// converted between encodings has a HEAD side in the old one, and refusing the
+/// whole diff over it would hide the change rather than protect anything.
+fn decode_diff_side(
+    bytes: &[u8],
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> Option<String> {
+    use crate::text_encoding::{Decoded, decode};
+    if let Some(encoding) = encoding
+        && let Ok(Decoded::Text(t)) = decode(bytes, Some(encoding))
+    {
+        return Some(t.text);
+    }
+    match decode(bytes, None) {
+        Ok(Decoded::Text(t)) => Some(t.text),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -443,18 +601,6 @@ mod tests {
         assert!(!is_renderable_text(&late));
         // A whole file that ends mid-scalar is not valid UTF-8 either.
         assert!(!is_renderable_text(&"caf\u{e9}".as_bytes()[..4]));
-    }
-
-    /// A prefix cut at a fixed byte count can end in the middle of a scalar;
-    /// that cut is the sampler's, not the file's, so it must not make a UTF-8
-    /// file look like something else.
-    #[test]
-    fn a_prefix_sample_tolerates_a_scalar_cut_at_its_end_only() {
-        let cut = &"caf\u{e9}".as_bytes()[..4];
-        assert!(is_renderable_text_prefix(cut));
-        assert!(is_renderable_text_prefix(b""));
-        assert!(!is_renderable_text_prefix(b"caf\xe9 au lait\n"));
-        assert!(!is_renderable_text_prefix(b"text\0more"));
     }
 
     #[test]
@@ -593,6 +739,35 @@ mod tests {
         assert!(c.binary);
         assert_eq!(c.original, "");
         assert_eq!(c.modified, "");
+    }
+
+    /// A windows-1252 change is a readable diff, decoded the way the editor
+    /// opens the file, rather than a refusal.
+    #[test]
+    fn a_windows_1252_change_is_diffed_as_text() {
+        let repo = init_repo();
+        commit_file_bytes(repo.path(), "f.txt", b"caf\xe9\n");
+        std::fs::write(repo.path().join("f.txt"), b"th\xe9\n").expect("overwrite");
+        let c = file_diff_contents(repo.path(), "f.txt").expect("contents");
+        assert!(!c.binary);
+        assert_eq!(c.original, "caf\u{e9}\n");
+        assert_eq!(c.modified, "th\u{e9}\n");
+    }
+
+    /// The tab's chosen encoding reads both sides where it can, and a side it
+    /// cannot read (the old encoding of a converted file) still shows by the
+    /// automatic rules rather than hiding the whole change.
+    #[test]
+    fn a_requested_encoding_reads_the_sides_it_can() {
+        let repo = init_repo();
+        let sjis = [0x93, 0xfa, 0x96, 0x7b, b'\n'];
+        commit_file_bytes(repo.path(), "f.txt", &sjis);
+        std::fs::write(repo.path().join("f.txt"), "\u{65e5}\u{672c}\u{8a9e}\n").expect("overwrite");
+        let c = file_diff_contents_as(repo.path(), "f.txt", Some(encoding_rs::SHIFT_JIS))
+            .expect("contents");
+        assert!(!c.binary);
+        assert_eq!(c.original, "\u{65e5}\u{672c}\n");
+        assert_eq!(c.modified, "\u{65e5}\u{672c}\u{8a9e}\n");
     }
 
     /// A UTF-8 byte stream that nonetheless contains a NUL must be treated as
@@ -781,6 +956,68 @@ mod tests {
         assert_eq!(head.total_lines, 0);
     }
 
+    /// A large file that is not UTF-8 is a readable patch, read by the
+    /// editor's own rule: UTF-8 when it is, otherwise windows-1252, said to be a
+    /// fallback.
+    #[test]
+    fn a_windows_1252_head_is_readable_and_says_it_was_a_fallback() {
+        let repo = init_repo();
+        commit_file_bytes(repo.path(), "f.txt", b"caf\xe9\n");
+        std::fs::write(repo.path().join("f.txt"), b"th\xe9\n").expect("overwrite");
+        let head = diff_head_via_git(repo.path(), "f.txt").expect("head");
+        assert!(!head.binary);
+        assert!(head.text.contains("-caf\u{e9}\n"), "{}", head.text);
+        assert!(head.text.contains("+th\u{e9}\n"), "{}", head.text);
+        assert_eq!(head.encoding.as_deref(), Some("windows-1252"));
+        assert!(head.encoding_fallback);
+        assert!(head.text.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_utf8_head_says_utf8() {
+        let repo = init_repo();
+        commit_file(repo.path(), "f.txt", "caf\u{e9}\n");
+        std::fs::write(repo.path().join("f.txt"), "th\u{e9}\n").expect("overwrite");
+        let head = diff_head_via_git(repo.path(), "f.txt").expect("head");
+        assert_eq!(head.encoding.as_deref(), Some("UTF-8"));
+        assert!(!head.encoding_fallback);
+        assert!(head.text.contains("+th\u{e9}\n"));
+    }
+
+    #[test]
+    fn a_head_reads_in_a_requested_encoding_or_refuses_it_truthfully() {
+        let repo = init_repo();
+        commit_file_bytes(repo.path(), "f.txt", &[0x93, 0xfa, b'\n']);
+        std::fs::write(repo.path().join("f.txt"), [0x93, 0xfa, 0x96, 0x7b, b'\n'])
+            .expect("overwrite");
+        let head =
+            diff_head_via_git_as(repo.path(), "f.txt", Some(encoding_rs::SHIFT_JIS)).expect("head");
+        assert!(head.text.contains("+\u{65e5}\u{672c}\n"), "{}", head.text);
+        assert_eq!(head.encoding.as_deref(), Some("Shift_JIS"));
+        assert!(!head.encoding_fallback);
+
+        // These bytes are not UTF-8, and a requested decode that would need
+        // replacement characters is refused rather than shown.
+        let err = diff_head_via_git_as(repo.path(), "f.txt", Some(encoding_rs::UTF_8)).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+        // Typed, so the route answers with this reason alone.
+        assert!(err.downcast_ref::<PatchNotInEncoding>().is_some());
+    }
+
+    /// UTF-16 is full of NULs, and git itself calls it binary.
+    #[test]
+    fn utf16_and_nul_bytes_are_still_binary_in_a_head() {
+        let repo = init_repo();
+        commit_file(repo.path(), "w.txt", "x\n");
+        std::fs::write(repo.path().join("w.txt"), [0xFF, 0xFE, b'h', 0, b'\n', 0])
+            .expect("overwrite");
+        assert!(
+            diff_head_via_git(repo.path(), "w.txt")
+                .expect("head")
+                .binary
+        );
+    }
+
     #[test]
     fn a_path_with_a_space_and_a_non_ascii_name_is_not_quoted_away() {
         let repo = init_repo();
@@ -894,6 +1131,8 @@ mod tests {
             truncated: true,
             total_is_at_least: false,
             binary: false,
+            encoding: None,
+            encoding_fallback: false,
         };
         assert_eq!(
             diff_head_banner(&head),
@@ -913,6 +1152,8 @@ mod tests {
             truncated: true,
             total_is_at_least: true,
             binary: false,
+            encoding: None,
+            encoding_fallback: false,
         };
         assert!(
             diff_head_banner(&head).contains("of more than 2,000,000 lines."),

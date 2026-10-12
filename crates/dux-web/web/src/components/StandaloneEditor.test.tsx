@@ -76,6 +76,11 @@ function codeEditorStub() {
 }
 vi.mock("@/components/CodeEditor", codeEditorStub)
 vi.mock("./CodeEditor", codeEditorStub)
+// The language picker's registry read would otherwise load real Monaco, which
+// cannot run under jsdom.
+vi.mock("@/lib/monacoLanguages", () => ({
+  loadRegisteredLanguages: async () => [],
+}))
 
 // Panel props recorded at render time. This shell is the UNCAPPED half of the
 // width question: the overlay's DialogContent caps at min(80rem, 100%-2rem)

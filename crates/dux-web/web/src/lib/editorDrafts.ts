@@ -27,7 +27,10 @@ export function loadRootDrafts(rootKey: string): Map<string, TabBuffer> {
   const restored = new Map<string, TabBuffer>()
   if (!entry) return restored
   for (const [tabId, buffer] of entry) {
-    if (!buffer.loading) restored.set(tabId, buffer)
+    if (buffer.loading) continue
+    // An asked-for read (a reopen, a reload) died with the component too, so
+    // the buffer it held read-only for that read is given its typing back.
+    restored.set(tabId, buffer.readingLock ? { ...buffer, readingLock: null } : buffer)
   }
   return restored
 }

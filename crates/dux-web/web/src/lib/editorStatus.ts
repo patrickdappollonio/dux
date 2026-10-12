@@ -113,6 +113,21 @@ export interface StatusBarInput {
   size: number | null
   // The language registry has loaded, so the picker has rows to offer.
   languageAvailable: boolean
+  // The status bar's name for the file's encoding, plain UTF-8 included, or
+  // null when no read has said.
+  encodingLabel: string | null
+  // The file's line endings are mixed or include a lone CR.
+  mixedEol: boolean
+  // The line ending style a save writes (the file's, as the last read or save
+  // named it), or null when no read has said; the editor's own model is always
+  // LF and is not what a save writes.
+  eol: "LF" | "CRLF" | null
+  // The encoding a large file's diff (the head of git's patch) was read in,
+  // by its label, while that view is on screen; null otherwise.
+  diffHeadEncodingLabel: string | null
+  // Why a read-only file is read-only, when it is for a reason of its own
+  // (its encoding cannot write it back unchanged); null for the usual ones.
+  readOnlyReason: string | null
 }
 
 export interface StatusBarPlan {
@@ -125,6 +140,17 @@ export interface StatusBarPlan {
   // line endings. Only while it is the thing on screen.
   editing: boolean
   language: boolean
+  // The encoding item, by its label: any text file in file mode. Never in
+  // diff mode, which shows two versions that need not share
+  // one, and never for a picture or a binary file, which have no text.
+  encoding: string | null
+  // Say "Mixed" in place of the editor's own line ending style, which is
+  // only what a save would write.
+  mixedEol: boolean
+  // What the line ending item names: the style a save writes, null to fall
+  // back to the editor's own report (an older server that names none).
+  eol: "LF" | "CRLF" | null
+  readOnlyReason: string | null
 }
 
 const EMPTY_PLAN: StatusBarPlan = {
@@ -135,6 +161,10 @@ const EMPTY_PLAN: StatusBarPlan = {
   dimensions: null,
   editing: false,
   language: false,
+  encoding: null,
+  mixedEol: false,
+  eol: null,
+  readOnlyReason: null,
 }
 
 export function planStatusBar(input: StatusBarInput): StatusBarPlan {
@@ -156,6 +186,10 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
       path: tab.path,
       dirty: input.dirty,
       language: input.diffEditorShown && input.languageAvailable,
+      // A two-sided diff decodes each side by itself and need not share one
+      // encoding; the head of git's patch is read in one, which can be
+      // corrected here.
+      encoding: input.diffHeadEncodingLabel,
     }
   }
   const editing = input.fileReady && !input.binary && !input.preview
@@ -167,5 +201,11 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
     size: input.fileReady ? input.size : null,
     editing,
     language: editing && input.languageAvailable,
+    // The preview still shows this file's text, decoded this way, and a save
+    // from it still writes it this way, so the item stays with it.
+    encoding: input.fileReady && !input.binary ? input.encodingLabel : null,
+    mixedEol: editing && input.mixedEol,
+    eol: editing ? input.eol : null,
+    readOnlyReason: input.readOnly ? input.readOnlyReason : null,
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ChevronDown, Code2 } from "lucide-react"
+import { ChevronDown, Code2, FileType } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
@@ -20,6 +20,9 @@ import {
   type StatusBarPlan,
 } from "@/lib/editorStatus"
 import { cn } from "@/lib/utils"
+import { copyToClipboard } from "@/lib/clipboard"
+import { notifyError, notifySuccess } from "@/lib/notify"
+import { chip, prose } from "@/lib/prose"
 
 interface Subscription {
   dispose(): void
@@ -65,9 +68,43 @@ function useEditorCursorStatus(
   return editor !== null && reading?.editor === editor ? reading.status : null
 }
 
+// The open file's path, which copies itself when pressed. It ellipsizes at the
+// start, so the file's name always shows. The copy is confirmed in a toast:
+// nothing on screen changes when the clipboard does.
+//
+// Its neighbours are the dirty dot and the read-only label, both plain text,
+// so under a fine pointer it keeps the bar's own height; a finger gets the
+// 40px floor on both axes (the bar grows to match on the vertical one).
+function PathCopyButton({ path }: { path: string }) {
+  function copy(): void {
+    void copyToClipboard(path).then((ok) => {
+      if (ok) notifySuccess(prose`Copied ${chip(path)} to the clipboard.`)
+      else
+        notifyError(
+          prose`Couldn't copy ${chip(path)}: the browser refused the clipboard.`,
+        )
+    })
+  }
+  return (
+    <SimpleTooltip content="Copy path">
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={`Copy path ${path}`}
+        className="flex h-full min-w-0 items-center rounded-sm text-left outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-w-10"
+      >
+        <StartTruncatedText
+          text={path}
+          className="min-w-0 font-mono text-foreground"
+        />
+      </button>
+    </SimpleTooltip>
+  )
+}
+
 // Hidden on a phone, where the bar keeps only the path, the dirty dot, the
-// read-only label, the cursor and an image's dimensions, and so holds no touch
-// target at all.
+// read-only label, an image's dimensions and the encoding selector: the facts
+// a phone user acts on, and the one control that has no other home there.
 const DESKTOP_ONLY = "max-md:hidden"
 
 export function EditorStatusBar({
@@ -75,6 +112,7 @@ export function EditorStatusBar({
   editor,
   languageLabel,
   languageItems,
+  encodingItems = null,
 }: {
   plan: StatusBarPlan
   editor: StatusBarEditor | null
@@ -82,19 +120,19 @@ export function EditorStatusBar({
   // The picker's rows, shared with the phone fold's submenu so the two
   // cannot drift.
   languageItems: React.ReactNode
+  // The encoding menu's rows (reopen, save with). Shown while the plan names
+  // an encoding, on every screen: this selector is their only home.
+  encodingItems?: React.ReactNode
 }) {
   const status = useEditorCursorStatus(plan.editing ? editor : null)
   return (
     // One fixed height whatever it carries, so the content above it never
-    // jumps as items come and go. A finger at desktop width gets the 40px
-    // floor for the picker; a phone shows no control here at all.
-    <div className="flex h-6.5 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground md:pointer-coarse:h-10">
+    // jumps as items come and go. A finger, at any width, gets the 40px
+    // floor: the encoding selector is on the bar on a phone too.
+    <div className="flex h-6.5 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground pointer-coarse:h-10">
       {plan.path !== null && (
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <StartTruncatedText
-            text={plan.path}
-            className="min-w-0 font-mono text-foreground"
-          />
+          <PathCopyButton path={plan.path} />
           {plan.dirty && (
             <>
               <SimpleTooltip content="Unsaved changes">
@@ -106,7 +144,12 @@ export function EditorStatusBar({
             </>
           )}
           {plan.readOnly && (
-            <SimpleTooltip content="This file is read-only: it is a symlink to an external file or a .git path">
+            <SimpleTooltip
+              content={
+                plan.readOnlyReason ??
+                "This file is read-only: it is a symlink to an external file or a .git path"
+              }
+            >
               <span className="shrink-0">read-only</span>
             </SimpleTooltip>
           )}
@@ -115,14 +158,26 @@ export function EditorStatusBar({
       <div className="ml-auto flex shrink-0 items-center gap-3">
         {status !== null && (
           <>
-            <span className="tabular-nums">{cursorLabel(status)}</span>
+            <span className={cn("tabular-nums", DESKTOP_ONLY)}>
+              {cursorLabel(status)}
+            </span>
             <span className={cn("tabular-nums", DESKTOP_ONLY)}>
               {lineCountLabel(status.lineCount)}
             </span>
             <span className={DESKTOP_ONLY}>
               {indentationLabel(status.indentation)}
             </span>
-            <span className={DESKTOP_ONLY}>{status.eol}</span>
+            {/* The style a save writes: the file's, not the editor model's,
+                which always holds LF and is converted at the save. */}
+            {plan.mixedEol ? (
+              <SimpleTooltip
+                content={`Mixed line endings: a save writes every one as ${plan.eol ?? status.eol}`}
+              >
+                <span className={DESKTOP_ONLY}>Mixed</span>
+              </SimpleTooltip>
+            ) : (
+              <span className={DESKTOP_ONLY}>{plan.eol ?? status.eol}</span>
+            )}
           </>
         )}
         {plan.dimensions !== null && (
@@ -136,6 +191,38 @@ export function EditorStatusBar({
               {formatFileSize(plan.size)}
             </span>
           </SimpleTooltip>
+        )}
+        {plan.encoding !== null && (
+          // On every screen, unlike the language picker: on a phone this is
+          // the bar's one control and the encoding menu's only home.
+          <span className="inline-flex">
+            <DropdownMenu>
+              <SimpleTooltip content={`File encoding: ${plan.encoding}`}>
+                <DropdownMenuTrigger
+                  render={
+                    // Under the 40px floor on the vertical axis for a fine
+                    // pointer only: its neighbours on this bar are plain
+                    // text. A finger at any width gets the floor (the bar
+                    // grows to match), and the label keeps it wider than
+                    // 40px on the other axis.
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5.5 font-normal text-muted-foreground pointer-coarse:h-10"
+                      aria-label={`File encoding: ${plan.encoding}`}
+                    />
+                  }
+                >
+                  <FileType />
+                  {plan.encoding}
+                  <ChevronDown />
+                </DropdownMenuTrigger>
+              </SimpleTooltip>
+              <DropdownMenuContent align="end" side="top">
+                {encodingItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </span>
         )}
         {plan.language && (
           <span className={cn("inline-flex", DESKTOP_ONLY)}>

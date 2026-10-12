@@ -91,21 +91,26 @@ view toggles, **Save** and **Close**.
 
 A thin status bar runs along the bottom, under both panes, and describes the open file:
 
-- its path, with a dot when it has unsaved edits and a read-only badge where that applies
+- its path, with a dot when it has unsaved edits and a read-only badge where that applies.
+  A long path is cut at the start, so the file name always shows. Click or tap the path to
+  copy it
 - the cursor position (`Ln 12, Col 5`, plus how many characters are selected when you have
   a selection)
 - how many lines the file has
 - its indentation (`Spaces: 2` or `Tabs: 4`), as Monaco detected it from the file
-- its line endings, `LF` or `CRLF`
+- its line endings, `LF` or `CRLF`, which is the style a save writes, or `Mixed` for a file
+  that has both or a lone CR (see [File encodings](#file-encodings))
 - its size on disk, as of the last time the editor read or saved it (unsaved edits do not
   count until you save)
+- its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM`
+  and so on), which opens the encoding menu
 - the syntax language picker
 
 Only what applies is shown. The cursor, line count, indentation and line endings appear
 while the text editor itself is on screen, so a preview or a diff leaves them out; a
 binary file shows its path and size; an image shows its path and pixel dimensions. On a
-phone the bar keeps just the path, the unsaved dot, the read-only badge, the cursor
-position and an image's dimensions.
+phone the bar keeps just the path, the unsaved dot, the read-only badge, an image's
+dimensions and the encoding.
 
 Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
 end of the header. Your width (in pixels) and collapsed state are remembered in the
@@ -173,9 +178,8 @@ Any file inside the worktree is editable. Open it, type, and the dirty dot appea
 writes it to disk.
 
 dux keeps you inside the worktree: files outside it, inside `.git`, or binary blobs come
-back read-only or not at all, with a badge explaining why. A text file saved in an encoding
-other than UTF-8 (Latin-1 or Shift-JIS, say) is treated like a binary blob: the editor
-won't open it, so a save can never replace bytes it couldn't show you.
+back read-only or not at all, with a badge explaining why. Text in an encoding other than
+UTF-8 opens and saves in that encoding; see [File encodings](#file-encodings).
 
 Unsaved edits survive the editor closing. Close it with the button, Escape, or the
 browser's Back, and reopening brings every tab back, dirty dot and typed text included. The
@@ -191,9 +195,99 @@ Two size limits, both generous:
 
 - A file over **5 MiB** does not open in the editor at all; you get the read-only badge
   saying so.
-- A save is refused past roughly **10 MiB**. The refusal names the limit and **your text
+- A save is refused when the file it would write is past **10 MiB** on disk, in the file's
+  own encoding. The refusal names the limit and **your text
   is kept**: the tab stays dirty with everything you typed, so you can trim it down and
   save again, or copy it out.
+
+## File encodings
+
+dux does not guess a file's encoding. It goes by what the file itself says, and otherwise
+by one fixed rule:
+
+- A file that starts with a byte-order mark opens in the encoding the mark names: UTF-8,
+  UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
+- A file that is valid UTF-8 opens as UTF-8.
+- Anything else opens as Windows-1252 (the superset of ISO-8859-1, or Latin-1). Every byte
+  has a character there, so nothing is lost.
+
+Binary means real binary content, like a picture: a file with NUL bytes or a known binary
+signature. It is the one thing that does not open as text in any encoding.
+
+When a file lands in that last case, an amber notice above the text says it isn't valid
+UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that is really
+Shift_JIS or Windows-1251 will look wrong. Dismiss the notice with its `×`, and it stays
+away for that file until you reload the page.
+
+The status bar always names the open file's encoding, on a phone too. Click it for two
+menus:
+
+- **Reopen with encoding** reads the file again in the encoding you pick: UTF-8, UTF-16,
+  the Windows and ISO-8859 code pages, Mac Roman, KOI8, Shift_JIS, EUC-JP, GBK, GB18030,
+  Big5, EUC-KR and more. Any file can be reopened in any of them, plain UTF-8 included; if
+  the text comes out garbled, reopen it in the right one. If the bytes are not valid in the
+  encoding you picked, the file stays open as it was and a toast says why: you never get
+  replacement characters that a save would write back over the real bytes.
+  With unsaved edits, dux asks first, because reopening replaces them. The diff view of the
+  file follows the encoding you picked.
+- **Save with encoding** saves the file right now in the encoding you pick, which is how
+  you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
+  it is recognised the next time it opens. A file that is read-only for any reason other
+  than its encoding has no save, so it has no such menu either. The encoding the file is
+  already in is shown as current there, not offered: saving in it is just **Save**.
+
+One thing happens to a file at a time. While a save, a conversion, a reopen or a reload
+of it is under way, the others wait: their menu rows and buttons are unavailable until it
+finishes, and the text cannot be typed into while a reopen or **Reload from disk** is
+reading the file, since what it reads replaces the text. If the server has not answered
+after a minute, the editor stops waiting, says so, and frees the file; a save that timed
+out may or may not have been written, so reload the file to see what it holds. The editor
+only opens regular files: a named pipe, socket or device at a file's path is refused.
+
+A save writes back exactly the bytes it read for everything you did not touch, with one
+exception, line endings, below. Where an encoding cannot keep that promise, the file opens
+read-only in it and an amber notice says why, rather than letting a save quietly change
+bytes you never edited. That happens when:
+
+- the encoding spells some of the file's characters two ways and would write them back the
+  other way, or has no way back for them at all (some Shift_JIS, Big5, GBK and GB18030
+  files, and ISO-2022-JP files with half-width katakana, are like this), or
+- the file starts with two byte-order marks, or (in an encoding with no mark of its own,
+  like GB18030) with the byte-order mark character, because the editor drops it.
+
+It is still text: reopen it in another encoding from the status bar to edit it, or convert
+it with **Save with encoding** (any encoding except the one that cannot write it back). A
+file whose text starts with the byte-order mark character cannot be converted to UTF-8 or
+UTF-16 either (see below); edit it outside dux instead.
+
+The byte-order mark is a property of the file, chosen with **Save with encoding**, never a
+character in the text. A save in UTF-8 or UTF-16 is refused when the text itself starts
+with the character U+FEFF, because those encodings would write it as a mark and the file
+would read back without it. Nothing is written; delete that character and save again.
+
+The editor keeps one line ending style per file, the one the status bar names, and a save
+writes every line ending in it, whatever you typed or pasted. A file whose line endings are
+mixed, or that has a lone carriage return (as old Mac files do), gets an amber notice
+saying that saving writes every line ending as the style named there, and the status bar
+says `Mixed`. Nothing changes until you save. When the file is rewritten with the other
+style and reloads, the style changes with it, and undoing past that reload brings back
+your earlier text but not the earlier style: the status bar always names what a save
+writes.
+
+If you reopened a file in a code page and it is later rewritten as UTF-8 (by an agent,
+say), it is not silently shown as garbled text: an amber notice says it is open in the
+encoding you chose but now looks like valid UTF-8, so you can pick UTF-8 from the status
+bar before you save. A chosen encoding stays with the file when you rename or move it, and
+ends when you close it.
+
+> [!IMPORTANT]
+> A save is refused when the text holds a character the file's encoding cannot represent,
+> such as an emoji or a Chinese character typed into a Windows-1252 file, or one it would
+> only write as a look-alike that reads back differently (Shift_JIS writes `¥` as a
+> backslash). Nothing is
+> written, your text stays in the tab, and the toast names the first such character and
+> its line and column as the editor shows them. Remove it, or use **Save with encoding**
+> to convert the file to UTF-8.
 
 ## When the agent edits a file you have open
 
@@ -365,6 +459,14 @@ syntax-highlighted comparison of the file's working copy against its last commit
 shown inline. Added files render as all-insert, deleted files as all-delete. If the file
 changes on disk while you are looking, an amber **Reload** button appears so you refresh on
 your own terms.
+
+Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
+editor, so a change to a Windows-1252 file is a readable diff. A file too large for the
+editor to open is shown as the start of git's own patch, read by the same rule: UTF-8 when
+it is, Windows-1252 otherwise. The status bar names that encoding there too, and **Reopen
+with encoding** rereads the patch in the one you pick; if the patch is not valid in it, the
+diff stays as it was and a toast says why. Only real binary content, which includes
+UTF-16 for git, is shown as a binary file.
 
 ## Open in your local editor
 

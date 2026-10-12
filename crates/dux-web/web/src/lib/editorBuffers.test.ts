@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
+  answerApplies,
+  bufferReadEncoding,
+  textForSave,
+  bufferSaveEncoding,
+  isBufferDirty,
+  editorTextOf,
+  normalizeEol,
+  encodingFromFile,
   changeSignalFor,
   diskFactKey,
   emptyBuffer,
@@ -516,6 +524,91 @@ describe("baselineSavedBuffer", () => {
     )
     expect(next.diskState).toBe("fresh")
   })
+
+  it("keeps a fallback buffer as it was through an ordinary save", () => {
+    const prev = loadedBuffer({ encoding: "windows-1252", encodingFallback: true })
+    const next = baselineSavedBuffer(prev, "x", { modified: null, size: 1 }, "")
+    expect(next.encoding).toBe("windows-1252")
+    expect(next.encodingFallback).toBe(true)
+    expect(next.encodingRequested).toBeNull()
+  })
+
+  it("moves a buffer to the encoding a conversion wrote, and asks for it by name next time", () => {
+    const prev = loadedBuffer({ encoding: "windows-1252", encodingFallback: true })
+    const next = baselineSavedBuffer(prev, "x", { modified: null, size: 1 }, "", {
+      encoding: "Shift_JIS",
+      bom: false,
+    })
+    expect(next.encoding).toBe("Shift_JIS")
+    expect(next.encodingFallback).toBe(false)
+    expect(next.encodingRequested).toBe("Shift_JIS")
+  })
+})
+
+describe("encodings on a read", () => {
+  it("reads an older server's answer, which carries none, as plain UTF-8", () => {
+    expect(
+      encodingFromFile({ path: "a", binary: false, content: "" }, null),
+    ).toEqual({
+      encoding: "UTF-8",
+      bom: false,
+      encodingFallback: false,
+      encodingRequested: null,
+      unwritable: null,
+      mixedEol: false,
+      eol: null,
+      pathReadOnly: false,
+      draftBom: false,
+      looksLikeUtf8: false,
+    })
+  })
+
+  it("takes the encoding, the mark and the fallback flag from the read", () => {
+    expect(
+      encodingFromFile(
+        {
+          path: "a",
+          binary: false,
+          content: "",
+          encoding: "UTF-16LE",
+          bom: true,
+          encoding_fallback: false,
+        },
+        "UTF-16LE",
+      ),
+    ).toEqual({
+      encoding: "UTF-16LE",
+      bom: true,
+      encodingFallback: false,
+      encodingRequested: "UTF-16LE",
+      unwritable: null,
+      mixedEol: false,
+      eol: null,
+      pathReadOnly: false,
+      draftBom: true,
+      looksLikeUtf8: false,
+    })
+  })
+
+  it("an ordinary save writes what the buffer was read in", () => {
+    expect(bufferSaveEncoding(loadedBuffer({ encoding: "UTF-8", bom: true, draftBom: true }))).toEqual({
+      encoding: "UTF-8",
+      bom: true,
+    })
+    expect(bufferSaveEncoding(undefined)).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("a reload in place keeps asking for the encoding the person chose", () => {
+    const prev = loadedBuffer({ encoding: "Shift_JIS", encodingRequested: "Shift_JIS" })
+    const next = reloadedInPlace(
+      prev,
+      "a.ts",
+      { path: "a.ts", binary: false, content: "x", encoding: "Shift_JIS" },
+      "",
+    )
+    expect(next.encodingRequested).toBe("Shift_JIS")
+    expect(next.encoding).toBe("Shift_JIS")
+  })
 })
 
 // The dismissal memory. A boolean would have made "keep mine" mean "never
@@ -545,5 +638,189 @@ describe("the seeds carry the freshness fields", () => {
     expect(b.stamp).toEqual({ modified: null, size: null })
     expect(b.diskFact).toBeNull()
     expect(b.acknowledgedDisk).toBeNull()
+  })
+})
+
+describe("what the editor holds is what a save writes", () => {
+  it("normalizes every line ending to the style the read says a save writes", () => {
+    expect(normalizeEol("a\r\nb\nc\rd", "CRLF")).toBe("a\r\nb\r\nc\r\nd")
+    expect(normalizeEol("a\r\nb\nc\rd", "LF")).toBe("a\nb\nc\nd")
+    expect(normalizeEol("plain", "LF")).toBe("plain")
+  })
+
+  /// The editor's text is held in one style whatever the file's, so Monaco's
+  /// model never has its style changed after it is made (which its undo
+  /// history cannot follow); the file's style is applied when a save writes.
+  it("holds every file's text with LF breaks, the file's style kept apart", () => {
+    const mixed = {
+      path: "a",
+      binary: false,
+      content: "a\r\nb\r\nc\n",
+      eol: "CRLF" as const,
+      mixed_line_endings: true,
+    }
+    expect(editorTextOf(mixed)).toBe("a\nb\nc\n")
+    expect(encodingFromFile(mixed, null).eol).toBe("CRLF")
+    // An older server sends no style; the text is left as it came.
+    expect(editorTextOf({ path: "a", binary: false, content: "a\r\nb\n" })).toBe("a\r\nb\n")
+  })
+
+  it("reloads in place as the one style, and counts a new generation", () => {
+    const prev = loadedBuffer()
+    const next = reloadedInPlace(
+      prev,
+      "a.ts",
+      { path: "a.ts", binary: false, content: "x\r\ny\n", eol: "CRLF", mixed_line_endings: true },
+      "",
+    )
+    expect(next.loaded).toBe("x\ny\n")
+    expect(next.draft).toBe("x\ny\n")
+    expect(next.eol).toBe("CRLF")
+    expect(next.generation).not.toBe(prev.generation)
+  })
+
+  it("writes the editor's text in the file's style", () => {
+    expect(textForSave({ eol: "CRLF" }, "a\nb\n")).toBe("a\r\nb\r\n")
+    expect(textForSave({ eol: "LF" }, "a\nb\n")).toBe("a\nb\n")
+    // An older server names no style, and the text goes as it is.
+    expect(textForSave({ eol: null }, "a\r\nb\n")).toBe("a\r\nb\n")
+  })
+
+  it("tells path read-only from encoding read-only", () => {
+    expect(
+      encodingFromFile(
+        { path: "a", binary: false, content: "", read_only: true, unwritable: "round_trip" },
+        null,
+      ).pathReadOnly,
+    ).toBe(false)
+    expect(
+      encodingFromFile(
+        {
+          path: "a",
+          binary: false,
+          content: "",
+          read_only: true,
+          unwritable: "round_trip",
+          path_read_only: true,
+        },
+        null,
+      ).pathReadOnly,
+    ).toBe(true)
+    // An older server sends no split: read-only with no encoding reason is
+    // the path kind.
+    expect(
+      encodingFromFile({ path: "a", binary: false, content: "", read_only: true }, null)
+        .pathReadOnly,
+    ).toBe(true)
+  })
+
+  it("lets a save's answer land only on the buffer it was sent from", () => {
+    const sent = loadedBuffer()
+    expect(answerApplies({ path: "a.ts", generation: sent.generation }, true, sent)).toBe(true)
+    const reread = reloadedInPlace(sent, "a.ts", { path: "a.ts", binary: false, content: "z" }, "")
+    expect(answerApplies({ path: "a.ts", generation: sent.generation }, true, reread)).toBe(false)
+  })
+
+  it("leaves a converted mixed file truthfully uniform, since what was sent was", () => {
+    const prev = loadedBuffer({ mixedEol: true, eol: "CRLF" })
+    const next = baselineSavedBuffer(prev, "a\r\nb\r\n", { modified: null, size: 6 }, "")
+    expect(next.mixedEol).toBe(false)
+  })
+})
+
+describe("a save's answer and the buffer it is about", () => {
+  it("never gives two readings the same generation, even in different buffers", () => {
+    const file = { path: "a.ts", binary: false, content: "x" }
+    const a = reloadedInPlace(emptyBuffer("a.ts"), "a.ts", file, "")
+    const b = reloadedInPlace(emptyBuffer("b.ts"), "b.ts", { ...file, path: "b.ts" }, "")
+    expect(a.generation).not.toBe(b.generation)
+    // A preview replacement reuses the tab id, so the path is part of it too.
+    expect(answerApplies({ path: "a.ts", generation: a.generation }, true, b)).toBe(false)
+  })
+
+  it("takes a conversion's writability from the server's verdict, never assumes it", () => {
+    const prev = loadedBuffer({
+      readOnly: true,
+      unwritable: "doubled_mark",
+      encoding: "UTF-8",
+      bom: true,
+    })
+    const next = baselineSavedBuffer(
+      prev,
+      "\ufeffx",
+      { modified: null, size: 6 },
+      "",
+      { encoding: "UTF-16LE", bom: true },
+      { unwritable: "doubled_mark", mixed_line_endings: false, eol: "LF" },
+    )
+    expect(next.encoding).toBe("UTF-16LE")
+    expect(next.unwritable).toBe("doubled_mark")
+    expect(next.readOnly).toBe(true)
+
+    const clean = baselineSavedBuffer(
+      prev,
+      "x",
+      { modified: null, size: 1 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, mixed_line_endings: false, eol: "LF" },
+    )
+    expect(clean.unwritable).toBeNull()
+    expect(clean.readOnly).toBe(false)
+  })
+})
+
+// The mark is only ever a flag. A conversion neither takes a leading U+FEFF out
+// of the text nor puts one in: the row's mark choice alone decides, and after it
+// the buffer's text is exactly the editor's, with nothing to push into Monaco.
+describe("the byte-order mark is a flag, never text", () => {
+  it("keeps the text exactly as the editor holds it through a conversion", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "x\n", loaded: "x\n" })
+    const next = baselineSavedBuffer(
+      prev,
+      "x\n",
+      { modified: null, size: 4 },
+      "",
+      { encoding: "UTF-16LE", bom: true },
+      { unwritable: null, mixed_line_endings: false, eol: "LF" },
+    )
+    expect(next.draft).toBe("x\n")
+    expect(next.loaded).toBe("x\n")
+    expect(next.bom).toBe(true)
+    expect(next.draftBom).toBe(true)
+    expect(isBufferDirty(next)).toBe(false)
+  })
+
+  it("labels the file by the flag alone", () => {
+    expect(bufferReadEncoding(loadedBuffer({ encoding: "UTF-8", bom: true }))).toEqual({
+      encoding: "UTF-8",
+      bom: true,
+    })
+    expect(bufferReadEncoding(loadedBuffer({ encoding: "UTF-8", bom: false }))).toEqual({
+      encoding: "UTF-8",
+      bom: false,
+    })
+  })
+})
+
+describe("unsaved means text or mark", () => {
+  it("is unsaved when the text differs or the mark the next save writes differs", () => {
+    expect(isBufferDirty(loadedBuffer())).toBe(false)
+    expect(isBufferDirty(loadedBuffer({ draft: "typed\n" }))).toBe(true)
+    expect(isBufferDirty(loadedBuffer({ bom: true, draftBom: false }))).toBe(true)
+  })
+})
+
+describe("one gate for every answer", () => {
+  it("applies an answer only to a live editor holding the same reading of the same file", () => {
+    const buffer = loadedBuffer()
+    const ticket = { path: "a.ts", generation: buffer.generation }
+    expect(answerApplies(ticket, true, buffer)).toBe(true)
+    // The editor that sent it has gone.
+    expect(answerApplies(ticket, false, buffer)).toBe(false)
+    // Another file in the tab, or another reading of this one.
+    expect(answerApplies({ ...ticket, path: "b.ts" }, true, buffer)).toBe(false)
+    expect(answerApplies({ ...ticket, generation: ticket.generation + 1 }, true, buffer)).toBe(false)
+    expect(answerApplies(ticket, true, undefined)).toBe(false)
   })
 })

@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import type { SaveEncoding } from "@/lib/editorEncoding"
 
 export interface SaveConflictTarget {
   tabId: string
@@ -15,6 +16,9 @@ export interface SaveConflictTarget {
   // exactly what the user asked to save rather than re-reading the draft,
   // which may have moved on.
   body: string
+  // The encoding the refused save was writing in, so "Overwrite" writes the
+  // same bytes the person asked for.
+  encoding: SaveEncoding
   // The file is gone rather than merely different: there is nothing to reload,
   // so the offer is to write it back or to cancel.
   deleted: boolean
@@ -25,6 +29,9 @@ interface SaveConflictDialogProps {
   onOverwrite: () => void
   onReload: () => void
   onClose: () => void
+  // Another operation is out on the file (lib/editorLane.ts): both offers
+  // would start a second one, so they wait for it.
+  busy?: boolean
 }
 
 // What a refused save looks like to the user: the file is not what this buffer
@@ -40,6 +47,7 @@ export function SaveConflictDialog({
   onOverwrite,
   onReload,
   onClose,
+  busy = false,
 }: SaveConflictDialogProps) {
   const path = target?.path ?? ""
   const deleted = target?.deleted ?? false
@@ -83,11 +91,11 @@ export function SaveConflictDialog({
             Cancel
           </Button>
           {!deleted && (
-            <Button variant="outline" onClick={onReload}>
+            <Button variant="outline" disabled={busy} onClick={onReload}>
               Reload from disk
             </Button>
           )}
-          <Button variant="destructive" onClick={onOverwrite}>
+          <Button variant="destructive" disabled={busy} onClick={onOverwrite}>
             {deleted ? "Write it back" : "Overwrite"}
           </Button>
         </DialogFooter>

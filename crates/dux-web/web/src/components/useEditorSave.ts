@@ -1,20 +1,47 @@
 import { useState } from "react"
 import type { Dispatch, RefObject, SetStateAction } from "react"
-import { FileConflictError, fileApi } from "@/lib/fileApi"
 import {
+  FileConflictError,
+  FileUnmappableError,
+  fileApi,
+} from "@/lib/fileApi"
+import {
+  answerApplies,
   baselineSavedBuffer,
+  bufferReadEncoding,
   changeSignalFor,
   diskFactKey,
+  isBufferDirty,
   isBufferStale,
+  textForSave,
 } from "@/lib/editorBuffers"
 import type {
   ChangesSliceView,
   DiskState,
   TabBuffer,
 } from "@/lib/editorBuffers"
-import type { EditorRoot } from "@/lib/editorRoot"
+import { rootKey, type EditorRoot } from "@/lib/editorRoot"
+import {
+  acquireLane,
+  LaneDeadlineError,
+  laneBusy,
+  laneKey,
+  laneOpWords,
+  withLaneDeadline,
+} from "@/lib/editorLane"
+import {
+  encodingLabel,
+  unmappableNotice,
+  type SaveEncoding,
+} from "@/lib/editorEncoding"
+import { chip, prose } from "@/lib/prose"
 import { saveResolutionOutcome } from "@/lib/editorTabs"
-import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
+import {
+  notifyError,
+  notifyInfo,
+  notifySuccess,
+  notifyWarning,
+} from "@/lib/notify"
 import { editorSetTabDirty } from "@/lib/store"
 import type { SaveConflictTarget } from "@/components/SaveConflictDialog"
 
@@ -26,6 +53,13 @@ interface UseEditorSaveOptions {
   root: EditorRoot
   tabsRef: RefObject<readonly OpenTabRef[]>
   sliceRef: RefObject<ChangesSliceView | null>
+  buffersRef: RefObject<Map<string, TabBuffer>>
+  // False once the editor component that owns these buffers has unmounted.
+  aliveRef: RefObject<boolean>
+  // Read the file again, for a save whose answer no longer describes the
+  // buffer (see `answerApplies`). Through a ref: the reader is built after
+  // this.
+  rereadRef: RefObject<((tabId: string, path: string) => void) | null>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
   raiseDiskBanner: (
     tabId: string,
@@ -41,6 +75,9 @@ export function useEditorSave({
   root,
   tabsRef,
   sliceRef,
+  buffersRef,
+  aliveRef,
+  rereadRef,
   setBuffers,
   raiseDiskBanner,
 }: UseEditorSaveOptions) {
@@ -49,27 +86,71 @@ export function useEditorSave({
   const [saveConflict, setSaveConflict] =
     useState<SaveConflictTarget | null>(null)
 
+  // `encoding` is what the text is written in: the buffer's own for an
+  // ordinary save, or the one the person picked to convert the file to.
+  // `converting` says it was a conversion, which the success toast names.
+  //
+  // A save is an operation on the file's lane (lib/editorLane.ts): it does not
+  // start while another operation on the file is out, and none starts while it
+  // is. Its answer, success or failure, passes the one gate (`answerApplies`)
+  // before it touches anything that is not a plain report of what happened:
+  // the buffer, the tab's unsaved mark, the disk banner, the conflict dialog.
   function writeBuffer(
     tabId: string,
     path: string,
     body: string,
+    encoding: SaveEncoding,
     expected?: { modified: string | null; size: number | null },
+    converting = false,
   ): void {
+    const lane = laneKey(rootKey(root), path)
+    const release = acquireLane(lane, converting ? "convert" : "save")
+    if (release === null) {
+      const busy = laneBusy(lane)
+      notifyInfo(
+        prose`${chip(path)} is busy with ${busy ? laneOpWords(busy) : "another operation"}; nothing was saved. Try again when it finishes.`,
+      )
+      return
+    }
+    const from = buffersRef.current.get(tabId)
+    const ticket = { path, generation: from?.generation ?? 0 }
+    // The encoding the text being saved was read in: the file's, from the
+    // reading this save is about.
+    const readAs =
+      from && !isBufferStale(from, path) ? bufferReadEncoding(from) : undefined
+    const applies = () =>
+      answerApplies(ticket, aliveRef.current, buffersRef.current.get(tabId))
+    // Set when the file was written but the tab now holds another reading of
+    // it: read it again once this save has let go of the file.
+    let reread = false
     setSavingTabId(tabId)
     setSavingPaths((prev) => {
       const next = new Set(prev)
       next.add(path)
       return next
     })
-    fileApi
-      .write(root, path, body, expected)
+    // Bounded: a save the server never answers gives the lane back and says
+    // so, and its answer, if it ever comes, is never applied.
+    withLaneDeadline(
+      fileApi.write(
+        root,
+        path,
+        // The editor holds its text with LF breaks; the file gets its own style.
+        textForSave(from && !isBufferStale(from, path) ? from : undefined, body),
+        expected,
+        encoding,
+        readAs,
+      ),
+      converting ? "convert" : "save",
+    )
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)
-        if (tabStillOpen) {
+        if (applies()) {
+          const now = buffersRef.current.get(tabId)!
           setBuffers((prev) => {
             const current = prev.get(tabId)
-            if (!current || isBufferStale(current, path)) return prev
+            if (!current || !answerApplies(ticket, true, current)) return prev
             const next = new Map(prev)
             next.set(
               tabId,
@@ -78,17 +159,49 @@ export function useEditorSave({
                 body,
                 { modified: result.modified, size: result.size },
                 changeSignalFor(sliceRef.current, path),
+                encoding,
+                result,
               ),
             )
             return next
           })
-          editorSetTabDirty(root, tabId, false)
+          // Unsaved is whatever the draft holds beyond what this save wrote,
+          // text and mark, never a blanket "saved": typing while the save was
+          // out is still only in the tab, and closing it must still ask.
+          editorSetTabDirty(
+            root,
+            tabId,
+            isBufferDirty(
+              baselineSavedBuffer(
+                now,
+                body,
+                { modified: result.modified, size: result.size },
+                "",
+                encoding,
+                result,
+              ),
+            ),
+          )
+        } else if (aliveRef.current && tabStillOpen) {
+          const now = buffersRef.current.get(tabId)
+          reread = now !== undefined && !isBufferStale(now, path)
         }
         if (outcome.tone === "warning") notifyWarning(outcome.message)
+        else if (converting)
+          notifySuccess(
+            prose`Saved ${chip(path)} as ${encodingLabel(encoding.encoding, encoding.bom)}.`,
+          )
         else notifySuccess(outcome.message)
       })
       .catch((error) => {
         if (error instanceof FileConflictError) {
+          // The banner and the dialog are offers about THIS reading of the
+          // file (overwrite with this body, or take the disk's). Anywhere
+          // else they would write text that is no longer what the tab holds.
+          if (!applies()) {
+            notifyError(error.message)
+            return
+          }
           raiseDiskBanner(
             tabId,
             path,
@@ -103,8 +216,22 @@ export function useEditorSave({
             tabId,
             path,
             body,
+            encoding,
             deleted: error.deleted,
           })
+          return
+        }
+        if (error instanceof LaneDeadlineError) {
+          // Sticky (weighed): the file may hold this text or the old one, and
+          // the buffer still calls itself unsaved; the person has to look.
+          notifyError(prose`Saving ${chip(path)}: ${error.message}.`, { sticky: true })
+          return
+        }
+        if (error instanceof FileUnmappableError) {
+          // Not sticky (weighed): nothing is lost, the edits stay in the
+          // buffer under its unsaved dot, and the error window is long enough
+          // to read where the character is.
+          notifyError(unmappableNotice(path, error))
           return
         }
         notifyError(
@@ -112,6 +239,7 @@ export function useEditorSave({
         )
       })
       .finally(() => {
+        release()
         setSavingTabId((id) => (id === tabId ? null : id))
         setSavingPaths((prev) => {
           if (!prev.has(path)) return prev
@@ -119,6 +247,7 @@ export function useEditorSave({
           next.delete(path)
           return next
         })
+        if (reread && aliveRef.current) rereadRef.current?.(tabId, path)
       })
   }
 

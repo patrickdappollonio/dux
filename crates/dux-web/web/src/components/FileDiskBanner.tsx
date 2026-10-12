@@ -15,6 +15,9 @@ interface FileDiskBannerProps {
   onReload: () => void
   onDismiss: () => void
   onCloseTab: () => void
+  // Another operation is out on the file (lib/editorLane.ts); Reload would
+  // start a second one, so it waits.
+  busy?: boolean
 }
 
 // The in-pane notice that the file on disk is no longer what this buffer holds.
@@ -33,6 +36,7 @@ export function FileDiskBanner({
   onReload,
   onDismiss,
   onCloseTab,
+  busy = false,
 }: FileDiskBannerProps) {
   if (state === "fresh") return null
   const deleted = state === "deleted"
@@ -79,7 +83,7 @@ export function FileDiskBanner({
           Close tab
         </Button>
       ) : (
-        <Button size="sm" variant="outline" onClick={onReload}>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onReload}>
           <RotateCw />
           Reload from disk
         </Button>

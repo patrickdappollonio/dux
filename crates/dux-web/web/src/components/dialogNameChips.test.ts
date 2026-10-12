@@ -140,6 +140,12 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
       "A search result row: a path that is the whole element, not a name in a sentence.",
   },
   {
+    file: "components/EditorStatusBar.tsx",
+    line: 'className="min-w-0 font-mono text-foreground"',
+    reason:
+      "The status bar's path, which copies itself when pressed: the whole element, not a name in a sentence.",
+  },
+  {
     file: "lib/favicon.ts",
     line: '`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${DUCK_VIEWBOX}">` +',
     reason: "SVG markup for the favicon: an attribute value, not prose.",
@@ -342,7 +348,13 @@ function dialogLibModules(): { name: string; source: string }[] {
 
 // Paths in templates that are not dialog copy: URLs, keys and file names
 // handed to APIs, never shown in a dialog body. Each names why.
-const PLAIN_PATH_ALLOWED: { file: string; line: string; reason: string }[] = []
+const PLAIN_PATH_ALLOWED: { file: string; line: string; reason: string }[] = [
+  {
+    file: "components/EditorStatusBar.tsx",
+    line: "aria-label={`Copy path ${path}`}",
+    reason: "An aria-label, which the chip rule leaves out: a screen reader hears no chip.",
+  },
+]
 
 describe("a path in dialog copy is a chip, not a plain template", () => {
   it("flags a path interpolated into a plain template string", () => {

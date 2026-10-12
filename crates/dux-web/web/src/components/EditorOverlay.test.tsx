@@ -160,7 +160,8 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
     // mocked: the image-pane test asserts the exact URL the <img> gets.
     rawUrl: (_root: unknown, path: string) =>
       `/api/v1/sessions/s1/files/raw?path=${encodeURIComponent(path)}`,
-    diff: () => diffMock(),
+    diff: (...a: unknown[]) =>
+      (diffMock as unknown as (...x: unknown[]) => unknown)(...a),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
     createFile: (...a: unknown[]) => createFileMock(...a),
@@ -214,16 +215,20 @@ function codeEditorStub() {
   return {
     default: ({
       value,
+      path,
       onChange,
       language,
       onReady,
       onEditorChange,
+      readOnly,
     }: {
       value: string
-      onChange: (v: string) => void
+      onChange: (v: string, path: string) => void
+      path: string
       language?: string
       onReady?: (mon: unknown) => void
       onEditorChange?: (ed: unknown) => void
+      readOnly?: boolean
     }) => (
       <>
       <StubEditorLifecycle onEditorChange={onEditorChange} />
@@ -247,8 +252,9 @@ function codeEditorStub() {
         // picker tests can read what was actually handed to Monaco. Empty
         // means no override, which is "let Monaco infer from the URI".
         data-language={language ?? ""}
+        data-read-only={String(readOnly ?? false)}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange(e.target.value, path)}
       />
       </>
     ),
@@ -329,6 +335,12 @@ const LANGUAGES = [
 vi.mock("@/lib/monacoSetup", () => ({
   monaco: { languages: { getLanguages: () => LANGUAGES } },
   monacoLanguageForPath: () => undefined,
+}))
+// The picker's registry read, mocked statically: a mock of the dynamically
+// imported `monacoSetup` alone was now and then not applied, and real Monaco
+// loaded under jsdom (see `loadRegisteredLanguages`).
+vi.mock("@/lib/monacoLanguages", () => ({
+  loadRegisteredLanguages: async () => LANGUAGES,
 }))
 
 const toastError = vi.fn()
@@ -2582,6 +2594,52 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
   })
 
+  /// Reload from disk replaces the text whatever it holds when the read lands,
+  /// so while that read is out the editor takes no typing: anything typed
+  /// meanwhile would be thrown away and the tab marked saved, with no confirm.
+  /// Every ending gives the typing back.
+  it("takes no typing while an asked reload is out, and gives it back however it ends", async () => {
+    const view = await mountOne()
+    selectionActive = true
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    const answer = pending<{ path: string; content: string; binary: boolean }>()
+    readMock.mockReturnValueOnce(answer.promise)
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("true"))
+    // A keystroke that got through anyway is the editor's echo, never an edit.
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    expect(editor().value).toBe(ON_DISK)
+    answer.resolve({ path: PATH, content: AGENT_TEXT, binary: false })
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+    expect(editor().getAttribute("data-read-only")).toBe("false")
+
+  })
+
+  it("gives the typing back when an asked reload fails", async () => {
+    const view = await mountOne()
+    selectionActive = true
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    let fail!: (e: Error) => void
+    readMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        fail = reject
+      }),
+    )
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("true"))
+    fail(new Error("the disk went away"))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("false"))
+    expect(editor().value).toBe(ON_DISK)
+  })
+
   // The interleaving: a check goes out against the pre-save stamp, the save
   // lands and re-baselines, and the check's answer arrives describing the
   // file the buffer now holds. Adopting the signal without clearing the state
@@ -3028,5 +3086,838 @@ describe("the file tree follows what the agent writes", () => {
     rootEntries = [entry("notes.md", false), entry("later.ts", false)]
     fireEvent(window, new Event("focus"))
     expect(await screen.findByText("later.ts")).toBeTruthy()
+  })
+})
+
+describe("a file that is not plain UTF-8", () => {
+  const LATIN1 = {
+    path: PATH,
+    content: "café\n",
+    binary: false,
+    read_only: false,
+    encoding: "windows-1252",
+    bom: false,
+    encoding_fallback: true,
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    const { resetEncodingNotices } = await import("@/lib/editorEncoding")
+    resetEncodingNotices()
+    // A test that leaves a request pending leaves its file's lane held.
+    const { resetLanes } = await import("@/lib/editorLane")
+    resetLanes()
+    readMock.mockResolvedValue(LATIN1)
+    writeMock.mockResolvedValue({
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  async function encodingButton(): Promise<HTMLElement> {
+    return await screen.findByRole("button", { name: /^file encoding:/i })
+  }
+
+  async function pick(submenu: RegExp, row: RegExp): Promise<void> {
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: submenu }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: row }))
+  }
+
+  // The Latin-1 file, open with an edit typed into it, in the dirty state the
+  // store reports for it.
+  async function mountDirty(onDisk = "café\n", typed = "thé\n"): Promise<HTMLTextAreaElement> {
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const { getSnapshot } = await import("@/lib/store")
+    mockState = {
+      ...getSnapshot(),
+      editorTarget: { root: agentRoot(SESSION), initialPath: PATH },
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [{ id: TAB_ID, path: PATH, dirty: true, preview: false, mode: "file" }],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    render(<EditorOverlay />)
+    const box = await loaded(onDisk)
+    fireEvent.change(box, { target: { value: typed } })
+    await waitFor(() => expect(box.value).toBe(typed))
+    return box
+  }
+
+  async function loaded(text: string): Promise<HTMLTextAreaElement> {
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe(text))
+    return box
+  }
+
+  it("says it opened as the fallback, names the file as a chip, and points at the status bar", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const notice = (await screen.findByText(/isn.t valid UTF-8/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(within(notice).getByText(PATH).getAttribute("data-slot")).toBe(
+      "inline-code",
+    )
+    expect(notice.textContent).toContain("opened as Windows-1252")
+    expect(notice.textContent).toContain("the status bar")
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
+  })
+
+  it("stays dismissed for that file for the rest of the session", async () => {
+    await mountWithTab(PATH)
+    await screen.findByText(/isn.t valid UTF-8/)
+    fireEvent.click(
+      screen.getByRole("button", { name: /dismiss this notice/i }),
+    )
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+    cleanup()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    await encodingButton()
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+  })
+
+  it("names plain UTF-8 in the status bar too, with no notice, and reopens it in any encoding", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "plain\n",
+      encoding: "UTF-8",
+      encoding_fallback: false,
+    })
+    await mountWithTab(PATH)
+    await loaded("plain\n")
+    expect((await encodingButton()).textContent).toContain("UTF-8")
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+    // Garbled is the person's call: a lossless decode in another encoding
+    // is asked for and shown, and the server alone refuses a lossy one.
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "plain\n",
+      encoding: "windows-1252",
+      encoding_fallback: false,
+    })
+    await pick(/reopen with encoding/i, /^Windows-1252/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("windows-1252"))
+    await waitFor(async () =>
+      expect((await encodingButton()).textContent).toContain("Windows-1252"),
+    )
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+  })
+
+  it("keeps the encoding rows out of the phone's ⋯ menu, since the bar carries them", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    fireEvent.click(screen.getByRole("button", { name: "More editor actions" }))
+    expect(await screen.findByRole("menuitem", { name: /open local editor/i })).toBeTruthy()
+    expect(screen.queryByText(/^Encoding:/)).toBeNull()
+    expect(screen.queryByRole("menuitem", { name: /reopen with encoding/i })).toBeNull()
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+  })
+
+  it("offers no Save with encoding for a read-only file", async () => {
+    readMock.mockResolvedValue({ ...LATIN1, read_only: true })
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    fireEvent.click(await encodingButton())
+    expect(
+      await screen.findByRole("menuitem", { name: /reopen with encoding/i }),
+    ).toBeTruthy()
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+  })
+
+  it("opens text its encoding cannot write back read-only, says why, and still converts it", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u2252\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+    })
+    await mountWithTab(PATH)
+    await loaded("\u2252\n")
+    const notice = (await screen.findByText(/opened read-only/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("Shift_JIS can\u2019t write it back")
+    expect(within(notice).getByText(PATH).getAttribute("data-slot")).toBe("inline-code")
+    // The editor itself refuses typing, which would otherwise be kept nowhere.
+    expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("true")
+    // Not binary: it is text, and the status bar still offers the way out.
+    expect(screen.queryByText(/binary/)).toBeNull()
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    // Saving back in the same encoding is the one thing it cannot do.
+    expect(
+      (await screen.findByRole("menuitem", { name: /^Shift_JIS/ })).getAttribute("aria-disabled"),
+    ).toBe("true")
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8$/ }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("never promises a save when a reopen lands read-only", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "≒\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+    })
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled())
+    const said = render(<>{toastSuccess.mock.calls.at(-1)?.[0]}</>).container.textContent
+    expect(said).toContain("read-only")
+    expect(said).not.toContain("A save now writes")
+  })
+
+  it("offers no conversion for a file that is read-only for where it is, whatever its encoding", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u2252\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+      path_read_only: true,
+    })
+    await mountWithTab(PATH)
+    await loaded("\u2252\n")
+    fireEvent.click(await encodingButton())
+    expect(
+      await screen.findByRole("menuitem", { name: /reopen with encoding/i }),
+    ).toBeTruthy()
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+  })
+
+  it("holds the text still while a save is out: no reopen, no reload underneath it", async () => {
+    // A stamp, so the freshness check has something to compare.
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    const reads = readMock.mock.calls.length
+    // The disk now says something else, and the window comes back: with a
+    // save out, nothing replaces the text it is about.
+    infoMock.mockResolvedValue({
+      path: PATH,
+      kind: "file" as const,
+      size: 99,
+      modified: "2027-01-01T00:00:00+00:00",
+      mode: "644",
+      permissions: "rw-r--r--",
+      symlink_target: null,
+      git: { state: "clean" as const },
+    })
+    fireEvent(window, new Event("focus"))
+    fireEvent.click(await encodingButton())
+    expect(
+      (await screen.findByRole("menuitem", { name: /reopen with encoding/i })).getAttribute(
+        "aria-disabled",
+      ),
+    ).toBe("true")
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readMock.mock.calls.length).toBe(reads)
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 99 })
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /^file encoding:/i })).getAttribute("aria-label")).toBe(
+        "File encoding: UTF-8",
+      ),
+    )
+  })
+
+  /// A preview tab reuses its id for the next file. A save of the first file
+  /// answering late must not touch the second: not its text, and above all
+  /// not its unsaved mark, or its edits close without a confirm.
+  it("never lets a late save's answer clear another file's unsaved mark", async () => {
+    const view = await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+
+    readMock.mockResolvedValue({ ...LATIN1, path: "src/other.txt", content: "other\n" })
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            { id: TAB_ID, path: "src/other.txt", dirty: true, preview: true, mode: "file" as const },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await loaded("other\n")
+    editorSetTabDirtyMock.mockClear()
+
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+    await new Promise((r) => setTimeout(r, 300))
+    expect(
+      editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+    ).toEqual([])
+    expect(
+      (screen.getByTestId("code-editor") as HTMLTextAreaElement).value,
+    ).toBe("other\n")
+  })
+
+  /// The save took the text as it was when Save was pressed; anything typed
+  /// while it was out is still unsaved, and closing must still ask.
+  for (const kind of ["ordinary", "conversion"] as const) {
+    it(`keeps the tab unsaved when typing went on during a pending ${kind} save`, async () => {
+      const box = await mountDirty()
+      const write = pending<{ modified: string; size: number }>()
+      writeMock.mockReturnValueOnce(write.promise)
+      if (kind === "ordinary") {
+        fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+      } else {
+        await pick(/save with encoding/i, /^UTF-8$/)
+      }
+      await waitFor(() => expect(writeMock).toHaveBeenCalled())
+      expect(writeMock.mock.calls[0][2]).toBe("th\u00e9\n")
+      fireEvent.change(box, { target: { value: "th\u00e9 and more\n" } })
+      await waitFor(() => expect(box.value).toBe("th\u00e9 and more\n"))
+      editorSetTabDirtyMock.mockClear()
+      write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+      await new Promise((r) => setTimeout(r, 300))
+      expect(
+        editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+      ).toEqual([])
+      expect(box.value).toBe("th\u00e9 and more\n")
+    })
+  }
+
+  it("converts a mixed file without an edit in the one style the notice named", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\r\nb\nc\n",
+      mixed_line_endings: true,
+      eol: "LF",
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("a\nb\nc\n")
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("a\nb\nc\n")
+  })
+
+  it("warns before a save rewrites mixed line endings, and the bar says Mixed", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\nb\nc\n",
+      encoding: "UTF-8",
+      encoding_fallback: false,
+      mixed_line_endings: true,
+      eol: "CRLF",
+    })
+    await mountWithTab(PATH)
+    await loaded("a\nb\nc\n")
+    const notice = (await screen.findByText(/mixes line endings/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("writes every line ending as CRLF")
+    expect(await screen.findByText("Mixed")).toBeTruthy()
+    expect(screen.queryByText("LF")).toBeNull()
+  })
+
+  it("says so when a file read in a chosen code page now looks like UTF-8", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "caf\u00c3\u00a9\n",
+      encoding_fallback: false,
+      looks_like_utf8: true,
+    })
+    await mountWithTab(PATH)
+    const notice = (await screen.findByText(/looks like valid UTF-8/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("open as Windows-1252")
+    expect(notice.textContent).toContain("the status bar")
+  })
+
+  it("names a large file's diff encoding and rereads the diff in a picked one", async () => {
+    const headAnswer = (text: string, encoding: string) =>
+      ({
+        path: PATH,
+        head: {
+          text,
+          shown_lines: 4,
+          total_lines: 4,
+          truncated: false,
+          total_is_at_least: false,
+          binary: false,
+          encoding,
+          encoding_fallback: encoding === "windows-1252",
+        },
+      }) as unknown as Awaited<ReturnType<typeof diffMock>>
+    diffMock.mockResolvedValue(headAnswer("@@ -1 +1 @@\n+\u0093\u00fa\n", "windows-1252"))
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-head-viewer")
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
+    diffMock.mockResolvedValue(headAnswer("@@ -1 +1 @@\n+\u65e5\n", "Shift_JIS"))
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /reopen with encoding/i }))
+    // A diff has no save, so the menu offers no Save with encoding.
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Shift_JIS/ }))
+    await waitFor(() =>
+      expect((diffMock.mock.calls.at(-1) as unknown[])?.[2]).toBe("Shift_JIS"),
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("diff-head-viewer").getAttribute("data-text"),
+      ).toContain("\u65e5"),
+    )
+    expect((await encodingButton()).textContent).toContain("Shift_JIS")
+  })
+
+  it("keeps the diff as it was when a picked encoding is refused", async () => {
+    diffMock.mockResolvedValue({
+      path: PATH,
+      head: {
+        text: "@@ -1 +1 @@\n+caf\u00e9\n",
+        shown_lines: 2,
+        total_lines: 2,
+        truncated: false,
+        total_is_at_least: false,
+        binary: false,
+        encoding: "windows-1252",
+        encoding_fallback: true,
+      },
+    } as unknown as Awaited<ReturnType<typeof diffMock>>)
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-head-viewer")
+    diffMock.mockRejectedValueOnce(new Error("the diff is not valid UTF-8"))
+    await pick(/reopen with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(screen.getByTestId("diff-head-viewer").getAttribute("data-text")).toContain(
+      "caf\u00e9",
+    )
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
+  })
+
+  it("names a UTF-16 file in the status bar without calling it a guess", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      encoding: "UTF-16LE",
+      bom: true,
+      encoding_fallback: false,
+    })
+    await mountWithTab(PATH)
+    expect((await encodingButton()).textContent).toContain("UTF-16 LE")
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+  })
+
+  it("saves in the encoding the file was read in", async () => {
+    await mountDirty()
+    fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][4]).toEqual({
+      encoding: "windows-1252",
+      bom: false,
+    })
+    // And says what it was read in, so the server tells a save from a
+    // conversion.
+    expect(writeMock.mock.calls[0][5]).toEqual({
+      encoding: "windows-1252",
+      bom: false,
+    })
+  })
+
+  /// Two reopens out at once: only the later one's answer may touch the
+  /// buffer, and typing stays locked until it lands.
+  /// An editor closed and opened again is a new one. A save the old one
+  /// sent must not touch the new one's tab when it answers: not its unsaved
+  /// mark (or the typing done since closes without a confirm), not a
+  /// conflict dialog offering to overwrite with the old text.
+  for (const answer of ["success", "conflict"] as const) {
+    it(`lets a save from a closed editor reach nothing when it answers (${answer})`, async () => {
+      await mountDirty()
+      let settle!: { ok: (v: unknown) => void; fail: (e: unknown) => void }
+      writeMock.mockReturnValueOnce(
+        new Promise((ok, fail) => {
+          settle = { ok, fail }
+        }) as never,
+      )
+      fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+      await waitFor(() => expect(writeMock).toHaveBeenCalled())
+      cleanup()
+      // Opened again: the draft comes back from the cache, still unsaved.
+      const { EditorOverlay } = await import("@/components/EditorOverlay")
+      render(<EditorOverlay />)
+      const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+      await waitFor(() => expect(box.value).toBe("thé\n"))
+      fireEvent.change(box, { target: { value: "typed in the new editor\n" } })
+      editorSetTabDirtyMock.mockClear()
+      if (answer === "success") {
+        settle.ok({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+      } else {
+        const { FileConflictError } = await import("@/lib/fileApi")
+        settle.fail(new FileConflictError({ modified: null, size: 1, deleted: false }))
+      }
+      await new Promise((r) => setTimeout(r, 300))
+      expect(
+        editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+      ).toEqual([])
+      expect(screen.queryByText(/changed after you opened it/i)).toBeNull()
+    })
+  }
+
+  it("starts no reopen while a save or conversion of the file is out", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    fireEvent.click(await encodingButton())
+    expect(
+      (await screen.findByRole("menuitem", { name: /reopen with encoding/i })).getAttribute(
+        "aria-disabled",
+      ),
+    ).toBe("true")
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+  })
+
+  /// The mark is a flag and never text: a U+FEFF at the head of the text is a
+  /// character like any other, so the bar names the file by its flag alone and
+  /// a conversion sends the text exactly as the editor holds it (the server is
+  /// the one to refuse a save it could not write back as that text).
+  it("names the file by its mark flag alone and converts the text verbatim", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\ufeffx",
+      encoding: "UTF-8",
+      bom: false,
+      encoding_fallback: false,
+    })
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect((await encodingButton()).textContent).not.toContain("with BOM")
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    expect(
+      (await screen.findByRole("menuitem", { name: /^UTF-8$/ })).getAttribute("aria-current"),
+    ).toBe("true")
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8 with BOM/ }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("\ufeffx")
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: true })
+  })
+
+  /// The editor holds LF; a CRLF file is written back in CRLF, converted at
+  /// the save, so an edit never changes the file's style.
+  it("writes a CRLF file's breaks back as CRLF", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\r\nb\r\n",
+      encoding: "UTF-8",
+      bom: false,
+      encoding_fallback: false,
+      eol: "CRLF",
+      mixed_line_endings: false,
+    })
+    // The editor holds the text in LF; the bar names what a save writes.
+    await mountDirty("a\nb\n", "a\nb\nc\n")
+    fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("a\r\nb\r\nc\r\n")
+  })
+
+  /// Saving in the encoding and mark the file already has is neither an edit
+  /// nor a conversion; the row is shown as current and does nothing.
+  it("offers the current encoding as current, never as a save", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    const current = await screen.findByRole("menuitem", { name: /^Windows-1252/ })
+    expect(current.getAttribute("aria-disabled")).toBe("true")
+    expect(current.getAttribute("aria-current")).toBe("true")
+    fireEvent.click(current)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(writeMock).not.toHaveBeenCalled()
+  })
+
+  /// One operation per file: while a reopen is out, no second reopen, save
+  /// or conversion can start, so no two answers can race on one buffer.
+  it("starts nothing else on a file while a reopen of it is out", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const first = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(first.promise)
+    await pick(/reopen with encoding/i, /^Windows-1252/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("windows-1252"))
+    fireEvent.click(await encodingButton())
+    for (const row of [/reopen with encoding/i, /save with encoding/i]) {
+      expect(
+        (await screen.findByRole("menuitem", { name: row })).getAttribute("aria-disabled"),
+      ).toBe("true")
+    }
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+    first.resolve({ ...LATIN1, content: "first\n", encoding_fallback: false })
+    const box = await loaded("first\n")
+    await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("false"))
+  })
+
+  /// A freshness check that finds the file changed while a reopen is out must
+  /// not start a reload of its own: it would supersede the reopen the person
+  /// asked for and apply a reading in the old encoding.
+  it("lets no freshness reload supersede a reopen that is out", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const reopen = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(reopen.promise)
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("Shift_JIS"))
+    const reads = readMock.mock.calls.length
+    infoMock.mockResolvedValue({
+      path: PATH,
+      kind: "file" as const,
+      size: 99,
+      modified: "2027-01-01T00:00:00+00:00",
+      mode: "644",
+      permissions: "rw-r--r--",
+      symlink_target: null,
+      git: { state: "clean" as const },
+    })
+    fireEvent(window, new Event("focus"))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readMock.mock.calls.length).toBe(reads)
+    reopen.resolve({ ...LATIN1, content: "日\n", encoding: "Shift_JIS", encoding_fallback: false })
+    await loaded("日\n")
+  })
+
+  /// A read-only buffer's text never changes from the editor: nobody can type
+  /// there, so any change event is the editor's own echo (Monaco drops a
+  /// leading U+FEFF on setValue), and taking it would lose the character
+  /// from a conversion.
+  it("never lets an editor event change a read-only buffer's text", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\ufeffx",
+      encoding: "UTF-8",
+      bom: true,
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "doubled_mark",
+    })
+    await mountWithTab(PATH)
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe("\ufeffx"))
+    fireEvent.change(box, { target: { value: "x" } })
+    await pick(/save with encoding/i, /^UTF-16 LE/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("\ufeffx")
+  })
+
+  it("reopens a clean buffer in the chosen encoding at once, and says so", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "日本\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+    })
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("Shift_JIS"))
+    await loaded("日本\n")
+    expect((await encodingButton()).textContent).toContain("Shift_JIS")
+    // No longer a guess: the person said what it is.
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled())
+  })
+
+  it("keeps the chosen encoding through a rename, the way the language pick does", async () => {
+    treeMock.mockImplementation(async () => ({
+      dir: "",
+      entries: [
+        { name: "big.txt", path: PATH, is_dir: false, is_symlink: false, expandable: false },
+      ],
+    }))
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const view = await mountWithTab(PATH)
+    await loaded("café\n")
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u65e5\u672c\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+    })
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await loaded("\u65e5\u672c\n")
+
+    const tree = await screen.findByTestId("file-tree-drop-surface")
+    fireEvent.contextMenu(await within(tree).findByText("big.txt"))
+    fireEvent.click(await screen.findByText(/^Rename…$/))
+    fireEvent.change(await screen.findByDisplayValue("big.txt"), {
+      target: { value: "renamed.txt" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
+    await waitFor(() => expect(renameMock).toHaveBeenCalled())
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            { id: TAB_ID, path: "src/renamed.txt", dirty: false, preview: false, mode: "file" as const },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await waitFor(() =>
+      expect(readMock.mock.calls.at(-1)?.slice(1, 3)).toEqual([
+        "src/renamed.txt",
+        "Shift_JIS",
+      ]),
+    )
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  /// A reopen of a clean file replaces its text when the read lands; typing
+  /// before then would be thrown away with no confirm. So the editor takes no
+  /// typing until the reopen answers, either way.
+  it("takes no typing while a reopen is out, and gives it back after", async () => {
+    await mountWithTab(PATH)
+    await loaded("caf\u00e9\n")
+    const read = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(read.promise)
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("true"),
+    )
+    read.resolve({ ...LATIN1, content: "\u65e5\n", encoding: "Shift_JIS", encoding_fallback: false })
+    await loaded("\u65e5\n")
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("false"),
+    )
+  })
+
+  it("gives typing back when a reopen is refused", async () => {
+    await mountWithTab(PATH)
+    await loaded("caf\u00e9\n")
+    readMock.mockRejectedValueOnce(new Error("the file is not valid UTF-8"))
+    await pick(/reopen with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("false")
+  })
+
+  it("asks before a reopen throws away unsaved edits", async () => {
+    await mountDirty()
+    const reads = readMock.mock.calls.length
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    const dialog = await screen.findByRole("dialog", {
+      name: /discard your edits and reopen/i,
+    })
+    expect(readMock.mock.calls.length).toBe(reads)
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /discard & reopen/i }),
+    )
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("Shift_JIS"))
+  })
+
+  /// A read that never comes back (the path swapped for a FIFO) must not hold
+  /// the file for the life of the page: past the deadline the reopen fails out
+  /// loud, the text takes typing again, and the file takes another operation.
+  it("gives up on a reopen the server never answers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await mountWithTab(PATH)
+      const box = await loaded("café\n")
+      readMock.mockReturnValueOnce(new Promise(() => {}))
+      await pick(/reopen with encoding/i, /^UTF-8$/)
+      await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("true"))
+      vi.advanceTimersByTime(60_000)
+      await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("false"))
+      expect(JSON.stringify(toastError.mock.calls)).toContain("didn't answer")
+      expect(box.value).toBe("café\n")
+      // The lane is free: another reopen starts.
+      readMock.mockClear()
+      await pick(/reopen with encoding/i, /^Windows-1252/)
+      await waitFor(() => expect(readMock).toHaveBeenCalled())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps the buffer as it was when the reopen is refused", async () => {
+    await mountWithTab(PATH)
+    const box = await loaded("café\n")
+    readMock.mockRejectedValueOnce(new Error("the file is not valid UTF-8"))
+    await pick(/reopen with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(box.value).toBe("café\n")
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
+  })
+
+  it("converts the file with Save with encoding, and the item then says UTF-8", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
+    await waitFor(async () =>
+      expect((await encodingButton()).getAttribute("aria-label")).toBe(
+        "File encoding: UTF-8",
+      ),
+    )
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+  })
+
+  it("refuses a character the encoding cannot hold, says which and where, and keeps the text", async () => {
+    const { FileUnmappableError } = await import("@/lib/fileApi")
+    writeMock.mockRejectedValueOnce(
+      new FileUnmappableError({
+        message: "refusing to save",
+        character: "☃",
+        line: 1,
+        column: 6,
+        encoding: "windows-1252",
+      }),
+    )
+    // Dirty, so Save is offered.
+    const box = await mountDirty()
+    fireEvent.change(box, { target: { value: "caf\u00e9 \u2603\n" } })
+    fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    const shown = render(<>{toastError.mock.calls[0][0]}</>)
+    expect(shown.container.textContent).toContain("U+2603")
+    expect(shown.container.textContent).toContain("line 1, column 6")
+    expect(shown.container.textContent).toContain("nothing was written")
+    expect(box.value).toBe("café ☃\n")
   })
 })

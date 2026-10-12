@@ -27,6 +27,16 @@ describe("the per-session draft cache", () => {
     clearRootDrafts("s2")
   })
 
+  it("gives typing back to a buffer cached while a reopen was out", () => {
+    storeRootDrafts(
+      "s1",
+      new Map([
+        ["t1", { ...buf("a.txt", "hello"), readingLock: { kind: "reopen", label: "Shift_JIS" } }],
+      ]),
+    )
+    expect(loadRootDrafts("s1").get("t1")?.readingLock).toBeNull()
+  })
+
   it("round-trips buffers per session", () => {
     storeRootDrafts("s1", new Map([["t1", buf("a.txt", "hello")]]))
     storeRootDrafts("s2", new Map([["t9", buf("b.txt", "other")]]))
