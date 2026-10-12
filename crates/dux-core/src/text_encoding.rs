@@ -114,6 +114,32 @@ impl std::fmt::Display for WouldRewriteUntouched {
 
 impl std::error::Error for WouldRewriteUntouched {}
 
+/// What a read of a just-saved file would say about it, judged without reading
+/// it back: whether its encoding writes it back unchanged, and its line endings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedVerdict {
+    pub unwritable: Option<Unwritable>,
+    pub line_endings: LineEndings,
+}
+
+/// The verdict on `text` saved in `encoding` (with a mark when `bom`), the same
+/// rules a read applies, so the editor never assumes a conversion left the file
+/// writable: a text that still starts with U+FEFF after its mark is two marks
+/// in the new encoding as much as in the old.
+pub fn saved_verdict(text: &str, encoding: &'static Encoding, bom: bool) -> SavedVerdict {
+    let unwritable = match encode(text, encoding, bom) {
+        Ok(bytes) => match decode(&bytes, Some(encoding)) {
+            Ok(Decoded::Text(t)) => t.unwritable,
+            _ => Some(Unwritable::RoundTrip),
+        },
+        Err(_) => Some(Unwritable::RoundTrip),
+    };
+    SavedVerdict {
+        unwritable,
+        line_endings: line_endings(text),
+    }
+}
+
 /// Whether a guarded save in `encoding` over `on_disk` would change bytes the
 /// file holds that nobody edited: true when those bytes read in `encoding` and
 /// that encoding cannot write them back. Bytes that do not read in `encoding`
@@ -461,24 +487,51 @@ pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Res
         let (result, read) =
             encoder.encode_from_utf8_to_vec_without_replacement(rest, &mut out, true);
         match result {
-            EncoderResult::InputEmpty => return Ok(out),
+            EncoderResult::InputEmpty => {
+                // Some encoders write a character they have no exact bytes for
+                // as a near one (Shift_JIS writes the yen sign as 5C, which
+                // reads back as a backslash). That is a success to the encoder
+                // and a different text on disk, so the bytes are read back and
+                // must give exactly what was submitted.
+                let back = decode_reporting(&out, encoding).unwrap_or_default();
+                if back == text {
+                    return Ok(out);
+                }
+                let offset = text
+                    .char_indices()
+                    .zip(back.chars().map(Some).chain(std::iter::repeat(None)))
+                    .find(|((_, a), b)| Some(*a) != *b)
+                    .map_or(0, |((i, _), _)| i);
+                let character = text[offset..].chars().next().unwrap_or('\u{fffd}');
+                return Err(unmappable_at(text, offset, character, encoding));
+            }
             EncoderResult::OutputFull => rest = &rest[read..],
             EncoderResult::Unmappable(character) => {
                 // `read` counts the unmappable character itself.
                 let offset = text.len() - rest.len() + read - character.len_utf8();
-                let before = &text[..offset];
-                let line = before.matches('\n').count() + 1;
-                let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-                let column = editor_column(&before[line_start..]);
-                return Err(anyhow::Error::new(Unmappable {
-                    encoding,
-                    character,
-                    line,
-                    column,
-                }));
+                return Err(unmappable_at(text, offset, character, encoding));
             }
         }
     }
+}
+
+/// The refusal for `character` at byte `offset` of `text`, placed the way the
+/// editor shows it.
+fn unmappable_at(
+    text: &str,
+    offset: usize,
+    character: char,
+    encoding: &'static Encoding,
+) -> anyhow::Error {
+    let before = &text[..offset];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    anyhow::Error::new(Unmappable {
+        encoding,
+        character,
+        line,
+        column: editor_column(&before[line_start..]),
+    })
 }
 
 #[cfg(test)]
@@ -785,6 +838,48 @@ mod tests {
         let sjis = [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, b'\n'];
         let t = text(decode(&sjis, Some(encoding_rs::SHIFT_JIS)));
         assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), sjis);
+    }
+
+    #[test]
+    fn a_best_fit_character_that_would_come_back_as_another_is_refused() {
+        // Shift_JIS writes the yen sign as 5C, which reads back as a backslash:
+        // the save would succeed and the file would hold a different text.
+        let err = encode("ok\n\u{a5}1\n", encoding_rs::SHIFT_JIS, false).unwrap_err();
+        let refused = err.downcast_ref::<Unmappable>().expect("typed refusal");
+        assert_eq!(refused.character, '\u{a5}');
+        assert_eq!((refused.line, refused.column), (2, 1));
+        // The overline comes back as a tilde.
+        let err = encode("\u{203e}", encoding_rs::SHIFT_JIS, false).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Unmappable>().unwrap().character,
+            '\u{203e}'
+        );
+        // EUC-JP has the same near fit; ISO-2022-JP writes the yen sign
+        // through its JIS-Roman escape, which reads back as the yen sign.
+        assert!(encode("\u{a5}", encoding_rs::EUC_JP, false).is_err());
+        let iso = encode("\u{a5}", encoding_rs::ISO_2022_JP, false).unwrap();
+        assert_eq!(
+            decode_reporting(&iso, encoding_rs::ISO_2022_JP).unwrap(),
+            "\u{a5}"
+        );
+    }
+
+    /// The single-byte code pages and gb18030 write back exactly what they
+    /// read, so the check never refuses an honest save in them.
+    #[test]
+    fn exact_encodings_are_not_refused_by_the_read_back_check() {
+        let latin = "caf\u{e9} \u{20ac} na\u{ef}ve\n";
+        assert!(encode(latin, WINDOWS_1252, false).is_ok());
+        assert!(encode("\u{416}\u{436}", encoding_rs::WINDOWS_1251, false).is_ok());
+        assert!(
+            encode(
+                "\u{65e5}\u{672c} \u{1f600} \u{a5}",
+                encoding_rs::GB18030,
+                false
+            )
+            .is_ok()
+        );
+        assert!(encode("\u{65e5}\u{672c}\u{8a9e}", encoding_rs::SHIFT_JIS, false).is_ok());
     }
 
     #[test]

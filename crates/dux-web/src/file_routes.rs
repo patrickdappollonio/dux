@@ -122,6 +122,16 @@ struct UnmappableBody {
 struct WriteResult {
     modified: Option<String>,
     size: u64,
+    /// The verdict on what was written, judged the way a read would judge it,
+    /// so the editor takes a conversion's outcome from the server rather than
+    /// assuming it (see `WorktreeFile`). Absent for a save that stated no
+    /// encoding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unwritable: Option<Option<&'static str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mixed_line_endings: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eol: Option<&'static str>,
 }
 
 /// A 409's body. `deleted` is its own field rather than being inferred from a
@@ -813,10 +823,18 @@ async fn write_file<R: EditorRoot>(
             encoding,
             expected.as_ref(),
         )
+        .map(|stamp| {
+            (
+                stamp,
+                encoding.map(|save| {
+                    dux_core::text_encoding::saved_verdict(&content, save.encoding, save.bom)
+                }),
+            )
+        })
     })
     .await
     {
-        Ok(Ok(stamp)) => stamp,
+        Ok(Ok(written)) => written,
         Ok(Err(e)) => {
             if let Some(conflict) = e.downcast_ref::<dux_core::worktree_file::WriteConflict>() {
                 return (
@@ -854,9 +872,13 @@ async fn write_file<R: EditorRoot>(
         }
     };
     refresh_root_changes(&state, &root, &worktree);
+    let (stamp, verdict) = stamp;
     Json(WriteResult {
         modified: stamp.modified,
         size: stamp.size,
+        unwritable: verdict.map(|v| v.unwritable.map(|u| u.as_str())),
+        mixed_line_endings: verdict.map(|v| v.line_endings.mixed),
+        eol: verdict.map(|v| v.line_endings.saves_as.label()),
     })
     .into_response()
 }
@@ -1967,6 +1989,69 @@ mod tests {
 
         /// A character the encoding cannot hold is a 422 that names it and
         /// where it is, and the file is left exactly as it was.
+        #[tokio::test]
+        async fn a_near_fit_character_is_422_and_nothing_is_written() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "yen.txt",
+                        "content": "\u{a5}100\n",
+                        "encoding": "Shift_JIS",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body_json(resp).await["character"], "\u{a5}");
+            assert!(!wt.join("yen.txt").exists());
+        }
+
+        /// What the save wrote, judged by the server: a conversion that still
+        /// leaves two marks is read-only in its new encoding too, and the
+        /// client must not assume otherwise.
+        #[tokio::test]
+        async fn a_save_answers_with_the_verdict_on_what_it_wrote() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "two.txt",
+                        "content": "\u{feff}x",
+                        "encoding": "UTF-16LE",
+                        "bom": true,
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert_eq!(body["unwritable"], "doubled_mark");
+            assert_eq!(
+                std::fs::read(wt.join("two.txt")).unwrap(),
+                [0xFF, 0xFE, 0xFF, 0xFE, b'x', 0]
+            );
+
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "ok.txt",
+                        "content": "a\r\nb\r\n",
+                        "encoding": "UTF-8",
+                    }),
+                ))
+                .await
+                .unwrap();
+            let body = body_json(resp).await;
+            assert!(body["unwritable"].is_null());
+            assert_eq!(body["mixed_line_endings"], false);
+            assert_eq!(body["eol"], "CRLF");
+        }
+
         #[tokio::test]
         async fn an_unmappable_character_is_422_with_its_details() {
             let (_tmp, wt, app) = router_with_session().await;
