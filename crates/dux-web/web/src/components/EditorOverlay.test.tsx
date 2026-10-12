@@ -336,6 +336,12 @@ vi.mock("@/lib/monacoSetup", () => ({
   monaco: { languages: { getLanguages: () => LANGUAGES } },
   monacoLanguageForPath: () => undefined,
 }))
+// The picker's registry read, mocked statically: a mock of the dynamically
+// imported `monacoSetup` alone was now and then not applied, and real Monaco
+// loaded under jsdom (see `loadRegisteredLanguages`).
+vi.mock("@/lib/monacoLanguages", () => ({
+  loadRegisteredLanguages: async () => LANGUAGES,
+}))
 
 const toastError = vi.fn()
 const toastSuccess = vi.fn()

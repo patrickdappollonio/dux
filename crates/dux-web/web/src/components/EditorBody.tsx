@@ -89,6 +89,7 @@ import {
   withLanguageOverride,
 } from "@/lib/editorLanguage"
 import type { RegisteredLanguage } from "@/lib/editorLanguage"
+import { loadRegisteredLanguages } from "@/lib/monacoLanguages"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
@@ -452,8 +453,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The language picker's two pieces of state.
   //
   // The registry, read off Monaco through a dynamic import so this module never
-  // pulls the Monaco bundle into the main chunk; it resolves to the chunk
-  // CodeEditor and DiffViewer already lazy-load. Read in an effect rather than
+  // pulls the Monaco bundle into the main chunk (see `loadRegisteredLanguages`).
+  // Read in an effect rather than
   // from CodeEditor's `onReady`, because the picker must also work in diff
   // mode, where CodeEditor never mounts.
   const [registeredLanguages, setRegisteredLanguages] = useState<
@@ -586,9 +587,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     let cancelled = false
     // The registry does not change after the grammars register at import
     // time, so this runs once and then short-circuits on the state check.
-    void import("@/lib/monacoSetup")
-      .then((m) => {
-        if (!cancelled) setRegisteredLanguages(m.monaco.languages.getLanguages())
+    void loadRegisteredLanguages()
+      .then((languages) => {
+        if (!cancelled) setRegisteredLanguages(languages)
       })
       // Monaco failing to load is already fatal for the pane behind us, which
       // reports it; the picker simply does not appear.
