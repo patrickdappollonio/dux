@@ -1,4 +1,4 @@
-import { FileCode2, Loader2, SquareTerminal } from "lucide-react"
+import { Loader2 } from "lucide-react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { EditorBody } from "@/components/EditorBody"
@@ -7,18 +7,20 @@ import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { swallowMissedFileDrop } from "@/lib/editorDrop"
 import { useDux } from "@/lib/store"
 import { rootKey } from "@/lib/editorRoot"
-import { standaloneEditorName } from "@/lib/standaloneEditorName"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 import { SHELL_SAFE_TOP, shellHeight } from "@/lib/appViewport"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor, at `#/editor/<root>[/<mode>/<encoded-path>]`. It is a full second SPA
-// instance, and that cost is accepted. There is deliberately no in-app way out:
-// the browser's own Back and tab close are the exit. Phones reach it best-effort,
-// so the shell carries `MobileApp`'s two mobile-root behaviors, the safe-area
+// instance, and that cost is accepted. On a computer there is deliberately no
+// in-app way out: the browser's own Back and tab close are the exit. A phone's
+// editor header leads with the Back every phone screen has, which pushes the
+// agent's Changes screen (see `leaveStandaloneEditor`), because a phone opens
+// the editor in this same tab from there. Phones reach it best-effort, so the
+// shell carries `MobileApp`'s two mobile-root behaviors, the safe-area
 // padding and the visual-viewport pin that keeps Monaco clear of the keyboard.
 export function StandaloneEditorShell() {
-  const { editorTarget, routeNotFound, spine } = useDux()
+  const { editorTarget, routeNotFound } = useDux()
   const isMobile = useIsMobile()
   // The editor IS the whole surface and always holds a focusable input, so the
   // pin applies whenever the API reports a height on a phone.
@@ -30,10 +32,6 @@ export function StandaloneEditorShell() {
     constrainToKeyboard &&
     viewportHeight !== null &&
     keyboardLikelyOpen(viewportHeight, window.innerHeight)
-
-  // The header's identity, from the same facts the sidebar row is drawn from,
-  // so the tab and the row cannot disagree about what this editor is on.
-  const named = standaloneEditorName(editorTarget?.root ?? null, spine)
 
   return (
     <div
@@ -62,30 +60,12 @@ export function StandaloneEditorShell() {
           <Loader2 className="size-5 motion-safe:animate-spin" />
         </div>
       ) : (
-        <>
-          <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-            {/* The root's own glyph, so a terminal-rooted tab reads as one at a
-                glance rather than as an agent whose name happens to be a path. */}
-            {named.glyph === "terminal" ? (
-              <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
-            ) : (
-              <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
-            )}
-            <span className="min-w-0 flex-1 truncate text-sm font-medium">
-              {named.name}
-            </span>
-            {named.detail !== null && (
-              <span className="min-w-0 shrink truncate text-xs text-muted-foreground">
-                {named.detail}
-              </span>
-            )}
-          </div>
-          <EditorBody
-            key={rootKey(editorTarget.root)}
-            root={editorTarget.root}
-            standalone
-          />
-        </>
+        // The body's own header names what this editor is rooted at.
+        <EditorBody
+          key={rootKey(editorTarget.root)}
+          root={editorTarget.root}
+          standalone
+        />
       )}
     </div>
   )

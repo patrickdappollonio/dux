@@ -137,12 +137,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     file: "components/EditorBody.tsx",
     line: 'className="flex-1 font-mono text-sm"',
     reason:
-      "The editor header's open path and a search result row: a path that is the whole element, not a name in a sentence.",
-  },
-  {
-    file: "components/EditorBody.tsx",
-    line: '<span className="max-w-full shrink-0 truncate font-mono text-xs text-muted-foreground">',
-    reason: "The caption under a previewed image: only the file's path, not a sentence.",
+      "A search result row: a path that is the whole element, not a name in a sentence.",
   },
   {
     file: "lib/favicon.ts",

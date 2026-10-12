@@ -2924,13 +2924,54 @@ export function openStandaloneEditorInThisTab(
   root: EditorRoot,
   editor: { mode: EditorViewMode; path: string | null },
 ): void {
+  pushHashAfterModals(standaloneEditorHash(root, editor))
+}
+
+// Where the standalone editor's Up control goes on a phone, by name: the
+// screen the editor is about. An agent's is its Changes screen, which is where
+// a phone opens the editor from, and a standalone agent has one too (it asks
+// the folder). A terminal root has no Changes screen, so it is the terminal's
+// own screen; a session-owned terminal never gets here, because its editor is
+// its agent's (`editorRootForTarget`).
+export function standaloneEditorUpHash(root: EditorRoot): string {
+  switch (root.kind) {
+    case "agent":
+      return routeHash({
+        target: slotTargetFor(root),
+        changes: true,
+        editor: null,
+        standalone: false,
+        theater: false,
+      })
+    case "terminal":
+      return routeHash({
+        target: root,
+        changes: false,
+        editor: null,
+        standalone: false,
+        theater: false,
+      })
+    default:
+      return assertNever(root)
+  }
+}
+
+// The standalone editor's Up: a PUSH to the named destination above, never a
+// step back through history, which has no floor when the editor was opened in
+// a fresh tab. The router follows the address out of the standalone surface;
+// the open buffers' drafts are kept in the draft cache as for any other exit.
+export function leaveStandaloneEditor(root: EditorRoot): void {
+  pushHashAfterModals(standaloneEditorUpHash(root))
+}
+
+// A plain fragment navigation, which pushes an entry the router then follows.
+// Started from a menu, it waits for the menu's own entry to go first, or Back
+// from the destination would land on that entry and not move.
+function pushHashAfterModals(hash: string): void {
   if (typeof location === "undefined") return
-  const hash = standaloneEditorHash(root, editor)
   const go = () => {
     location.hash = hash
   }
-  // Opened from a menu, it waits for the menu's entry to go first, or Back
-  // from the editor would land on that entry and not move.
   if (!dropModalEntriesBeforeMove(go)) go()
 }
 

@@ -9,6 +9,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
   CircleAlert,
   Ellipsis,
   ExternalLink,
@@ -27,6 +28,7 @@ import {
   RotateCw,
   Save,
   Search,
+  SquareTerminal,
   Wand2,
   X,
 } from "lucide-react"
@@ -88,6 +90,8 @@ import {
   serializeExplorerLayout,
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
+import { planStatusBar, type ImageDimensions } from "@/lib/editorStatus"
+import { standaloneEditorName } from "@/lib/standaloneEditorName"
 import { performTreeDrop } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { nextFileDropToastId } from "@/lib/fileDrop"
@@ -111,6 +115,11 @@ import {
 } from "@/components/useEditorDiskFreshness"
 import { useEditorSave } from "@/components/useEditorSave"
 import { EditorTabsStrip } from "@/components/EditorTabsStrip"
+import {
+  EditorStatusBar,
+  type StatusBarEditor,
+} from "@/components/EditorStatusBar"
+import { InlineCode } from "@/components/ui/inline-code"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -154,6 +163,7 @@ import {
   editorSetTabDirty,
   editorSetTabMode,
   editorSyncActiveTab,
+  leaveStandaloneEditor,
   openEditorCloseTab,
   standaloneEditorHash,
   useDux,
@@ -229,14 +239,15 @@ interface EditorBodyProps {
   // entry keys off it rather than off a bare id.
   root: EditorRoot
   // True when composed by StandaloneEditorShell: the body IS the tab, so the
-  // header drops its Close button (there is nothing to close into; the
-  // shell's open-in-dux link is the way out) and its open-in-new-tab anchor
-  // (this already is that tab), and on phones the explorer starts collapsed.
+  // header drops its Close button (there is nothing to close into) and its
+  // open-in-new-tab anchor (this already is that tab), and on a phone it leads
+  // with the Back control every phone screen has and starts the explorer
+  // collapsed.
   standalone?: boolean
 }
 
 export function EditorBody({ root, standalone = false }: EditorBodyProps) {
-  const { bootstrap, changes, editorTarget, editorTabs } = useDux()
+  const { bootstrap, changes, editorTarget, editorTabs, spine } = useDux()
   // The namespaced key for every per-root map, and the stable dependency for
   // every effect below: the root itself is a fresh object on each render.
   const key = rootKey(root)
@@ -415,6 +426,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const [languageOverrides, setLanguageOverrides] = useState<
     Map<string, string>
   >(() => new Map())
+
+  // The live Monaco editor while the file pane is showing it, for the status
+  // bar to follow. State rather than a ref so the bar re-subscribes when the
+  // editor comes and goes; the bar's own cursor reads stay inside the bar.
+  const [codeEditor, setCodeEditor] = useState<StatusBarEditor | null>(null)
+  // The pixel size of the last image tab that finished loading, for the
+  // status bar. Tagged with its path, so a picture still loading never shows
+  // the previous one's.
+  const [imageDims, setImageDims] = useState<ImageDimensions | null>(null)
 
   // Explorer panel layout, persisted by dux rather than by the panel library's
   // `useDefaultLayout`, which persists a percentage and so makes the explorer
@@ -658,6 +678,22 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   )
   // This tab's save is in flight.
   const isSaving = tabIsSaving(savingTabId, activeTab)
+  // What the status bar carries for what is on screen. The size is the disk's
+  // as of the last read or save (the freshness stamp), not the unsaved
+  // buffer's, so it never claims bytes that are not on disk yet.
+  const statusPlan = planStatusBar({
+    tab: activeTab === null ? null : { path: activeTab.path, mode: activeTab.mode },
+    dirty,
+    readOnly,
+    image: isImageTab,
+    imageDims,
+    fileReady,
+    binary,
+    preview: showPreview,
+    diffEditorShown: diffEditorIsShown(activeTab, diffReady, activeBuffer, showPreview),
+    size: activeBuffer?.stamp.size ?? null,
+    languageAvailable: showLanguagePicker,
+  })
 
   // The one preview pane both content arms share (file mode and diff mode),
   // rendering `previewContent` (the file's end state, see its derivation
@@ -1097,30 +1133,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     ))
   }
 
-  function renderStatusIndicators(): React.ReactNode {
-    return (
-      <>
-        {dirty && (
-          <>
-            <SimpleTooltip content="Unsaved changes">
-              <span className="shrink-0 text-primary" aria-hidden="true">
-                ●
-              </span>
-            </SimpleTooltip>
-            <span className="sr-only">unsaved changes</span>
-          </>
-        )}
-        {readOnly && activeTab?.mode === "file" && (
-          <SimpleTooltip content="This file is read-only: it is a symlink to an external file or a .git path">
-            <span className="shrink-0 text-xs text-muted-foreground">
-              read-only
-            </span>
-          </SimpleTooltip>
-        )}
-      </>
-    )
-  }
-
   function renderDesktopViewActions(): React.ReactNode {
     const previewLabel =
       showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"
@@ -1186,28 +1198,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               <HeaderLabel>{previewLabel}</HeaderLabel>
             </Button>
           </SimpleTooltip>
-        )}
-        {showLanguagePicker && (
-          <DropdownMenu>
-            <SimpleTooltip content={`Syntax language: ${activeLanguageLabel}`}>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:hidden")}
-                    aria-label={`Syntax language: ${activeLanguageLabel}`}
-                  />
-                }
-              >
-                <Code2 />
-                <HeaderLabel>{activeLanguageLabel}</HeaderLabel>
-                <ChevronDown />
-              </DropdownMenuTrigger>
-            </SimpleTooltip>
-            <DropdownMenuContent align="end">
-              {languagePickerItems()}
-            </DropdownMenuContent>
-          </DropdownMenu>
         )}
       </>
     )
@@ -1391,10 +1381,43 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  // What the editor is rooted at, named from the same facts the sidebar row is
+  // drawn from, so the header and the row cannot call one thing two names. One
+  // line on a computer; two on a phone, where the words sit above the chip.
+  function renderRootTitle(): React.ReactNode {
+    const named = standaloneEditorName(root, spine)
+    const Glyph = named.glyph === "terminal" ? SquareTerminal : FileCode2
+    return (
+      <>
+        {/* The root's own glyph, so a terminal-rooted editor reads as one at a
+            glance rather than as an agent whose name happens to be a path. */}
+        <Glyph className="size-4 shrink-0 text-muted-foreground max-md:hidden" />
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 max-md:flex-col max-md:items-start max-md:gap-0.5">
+          <span className="shrink-0 text-sm text-muted-foreground max-md:text-xs">
+            Editor for
+          </span>
+          <div className="flex min-w-0 max-w-full items-center gap-1.5 text-sm">
+            {/* One line however long the name: it truncates rather than
+                wrapping the header onto a second row. */}
+            <InlineCode className="min-w-0 truncate whitespace-nowrap">
+              {named.name}
+            </InlineCode>
+            {named.detail !== null && (
+              <span className="min-w-0 shrink truncate text-xs text-muted-foreground">
+                {named.detail}
+              </span>
+            )}
+          </div>
+        </div>
+      </>
+    )
+  }
+
   function renderHeader(): React.ReactNode {
     return (
       <>
-        {/* Header: open file path, view toggle, dirty indicator, actions.
+        {/* Header: what this editor is rooted at, the view toggle and the
+          actions. The open file's path lives in the status bar below.
           Every control is HEADER_CONTROL's h-8 (32px), so min-h-12.25 (49px)
           is that plus the row's py-2 (16px) and its own border-b (1px; min-h
           is border-box): the bar keeps one height as controls come and go.
@@ -1403,6 +1426,24 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           the 40px floor, and the explorer toggle always renders there, so
           the row is constant too. */}
       <div className="flex min-h-12.25 items-center gap-2 pointer-coarse:min-h-14.25 border-b px-3 py-2">
+        {standalone && (
+          // The phone's Up control, the same generic Back every phone screen
+          // leads with, and as quiet as theirs: it navigates rather than acts,
+          // so it stays ghost beside the outline cluster. It PUSHES the screen
+          // the editor is about rather than stepping back through history,
+          // which has nothing behind it when the editor opened in a new tab.
+          // A computer has no such control: there the browser's own Back and
+          // closing the tab are the way out.
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-10 shrink-0 md:hidden"
+            aria-label="Back"
+            onClick={() => leaveStandaloneEditor(root)}
+          >
+            <ChevronLeft />
+          </Button>
+        )}
         {/* Explorer collapse/expand toggle: lives in the header, OUTSIDE the
             panel it hides, so it stays reachable while collapsed. */}
         <SimpleTooltip
@@ -1427,12 +1468,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             {explorerCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
           </Button>
         </SimpleTooltip>
-        <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
-        <StartTruncatedText
-          text={openPath ?? "Select a file"}
-          className="flex-1 font-mono text-sm"
-        />
-        {renderStatusIndicators()}
+        {renderRootTitle()}
         {renderDesktopViewActions()}
         {renderLocalEditorAction()}
         {renderSaveAction()}
@@ -1688,12 +1724,22 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   onMonacoReady={(monaco) => {
                     monacoRef.current = monaco
                   }}
+                  onEditorChange={setCodeEditor}
+                  onImageDims={setImageDims}
                 />
               </div>
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
         </div>
+        {/* Full width under the explorer and the content: it describes the
+            open file, whichever pane has focus. */}
+        <EditorStatusBar
+          plan={statusPlan}
+          editor={codeEditor}
+          languageLabel={activeLanguageLabel}
+          languageItems={languagePickerItems()}
+        />
       </>
     )
   }
@@ -1911,6 +1957,24 @@ function previewableDiffIsReady(
   return ready && !(buffer?.diff?.binary ?? false) && !buffer?.diffHead
 }
 
+// Monaco's diff editor is what the content pane shows: not the patch head past
+// the size ceiling, not the binary refusal, and not a preview.
+function diffEditorIsShown(
+  tab: EditorTab | null,
+  diffReady: boolean,
+  buffer: TabBuffer | undefined,
+  preview: boolean,
+): boolean {
+  return (
+    tab?.mode === "diff" &&
+    !isImagePreviewPath(tab.path) &&
+    diffReady &&
+    !buffer?.diffHead &&
+    !(buffer?.diff?.binary ?? false) &&
+    !preview
+  )
+}
+
 function previewIsAvailable(
   kind: ReturnType<typeof previewKind>,
   tab: EditorTab | null,
@@ -1960,10 +2024,12 @@ interface EditorContentPaneProps {
   onDraftChange: (value: string) => void
   onSave: () => void
   onMonacoReady: (monaco: MonacoInstance) => void
+  onEditorChange: (editor: StatusBarEditor | null) => void
+  onImageDims: (dims: ImageDimensions) => void
 }
 
 function EditorContentPane(props: EditorContentPaneProps) {
-  const { root, tab, image } = props
+  const { root, tab, image, onImageDims } = props
   if (tab === null) {
     return (
       <CenteredPane>Select a file from the tree to view or edit it.</CenteredPane>
@@ -1976,6 +2042,7 @@ function EditorContentPane(props: EditorContentPaneProps) {
         key={tab.path}
         src={fileApi.rawUrl(root, tab.path)}
         path={tab.path}
+        onDims={onImageDims}
       />
     )
   }
@@ -2067,6 +2134,7 @@ function FileContentPane({
   onDraftChange,
   onSave,
   onMonacoReady,
+  onEditorChange,
 }: ActiveEditorContentProps) {
   if (buffer?.fileError && !isBufferStale(buffer, tab.path)) {
     return (
@@ -2095,6 +2163,7 @@ function FileContentPane({
           onChange={onDraftChange}
           onSave={onSave}
           onReady={onMonacoReady}
+          onEditorChange={onEditorChange}
         />
       </Suspense>
     </ChunkBoundary>
@@ -2142,12 +2211,19 @@ function ErrorPane({
 // Cache-Control: no-cache). The caller keys the pane by path, so this state
 // resets on a preview-replace.
 //
-// The caption shows the path and the pixel dimensions, because the pane never
-// fetches the file and so cannot know the byte size.
-function ImagePreviewPane({ src, path }: { src: string; path: string }) {
+// The pixel dimensions go to the status bar, which already names the path. It
+// shows no byte size, because the pane never fetches the file through /read.
+function ImagePreviewPane({
+  src,
+  path,
+  onDims,
+}: {
+  src: string
+  path: string
+  onDims: (dims: ImageDimensions) => void
+}) {
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
-  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   if (failed) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
@@ -2161,7 +2237,6 @@ function ImagePreviewPane({ src, path }: { src: string; path: string }) {
           variant="outline"
           onClick={() => {
             setFailed(false)
-            setDims(null)
             setAttempt((a) => a + 1)
           }}
         >
@@ -2172,18 +2247,17 @@ function ImagePreviewPane({ src, path }: { src: string; path: string }) {
     )
   }
   return (
-    <PreviewImageFrame
-      caption={dims === null ? path : `${path} · ${dims.w} × ${dims.h}`}
-    >
+    <PreviewImageFrame>
       <img
         key={attempt}
         src={src}
         alt={path}
         className="max-h-full max-w-full object-contain"
         onLoad={(e) =>
-          setDims({
-            w: e.currentTarget.naturalWidth,
-            h: e.currentTarget.naturalHeight,
+          onDims({
+            path,
+            width: e.currentTarget.naturalWidth,
+            height: e.currentTarget.naturalHeight,
           })
         }
         onError={() => setFailed(true)}
@@ -2200,7 +2274,7 @@ function ImagePreviewPane({ src, path }: { src: string; path: string }) {
 function SvgPreviewPane({ draft, path }: { draft: string; path: string }) {
   const url = useObjectUrl(draft, "image/svg+xml")
   return (
-    <PreviewImageFrame caption={path}>
+    <PreviewImageFrame>
       {url !== null && (
         <img src={url} alt={path} className="max-h-full max-w-full object-contain" />
       )}
@@ -2208,24 +2282,13 @@ function SvgPreviewPane({ draft, path }: { draft: string; path: string }) {
   )
 }
 
-// Shared frame for the two image panes: the image lives in a min-h-0 flex-1
-// box and the caption is a fixed (shrink-0) sibling, so a portrait image can
-// never push the caption out of the pane or force a surprise scrollbar.
-function PreviewImageFrame({
-  caption,
-  children,
-}: {
-  caption: string
-  children: React.ReactNode
-}) {
+// Shared frame for the two image panes: the image is contained in the pane, so
+// a portrait image can never force a surprise scrollbar. The path they used to
+// caption themselves with is the status bar's now.
+function PreviewImageFrame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full min-h-0 flex-col items-center gap-2 bg-muted/30 p-4">
-      <div className="flex min-h-0 w-full flex-1 items-center justify-center">
-        {children}
-      </div>
-      <span className="max-w-full shrink-0 truncate font-mono text-xs text-muted-foreground">
-        {caption}
-      </span>
+    <div className="flex h-full min-h-0 items-center justify-center bg-muted/30 p-4">
+      {children}
     </div>
   )
 }

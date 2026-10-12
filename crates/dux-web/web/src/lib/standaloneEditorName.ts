@@ -1,6 +1,7 @@
-// How the standalone editor tab's header names what the editor is rooted at, drawn from the
-// same facts the sidebar row is, so the two cannot call one thing two different names. A
-// terminal is named as its row names it: its own identity plus the second line's owner text.
+// How the editor's header names what it is rooted at, in the standalone tab and the in-page
+// overlay alike, drawn from the same facts the sidebar row is, so the two cannot call one thing
+// two different names. A terminal is named as its row names it: its own identity plus the
+// second line's owner text.
 
 import { matchWireOwner } from "./terminalOwner"
 import { sessionLabel } from "./agentWorkspace"

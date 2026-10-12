@@ -26,6 +26,10 @@ interface CodeEditorProps {
   // the tab lifecycle, can dispose a closed tab's model by URI. `CodeEditor`
   // stays a pure active-tab renderer and never disposes a model itself.
   onReady?: (mon: MonacoInstance) => void
+  // The live editor, handed over on mount and taken back (null) on unmount, so
+  // the status bar can follow its cursor and model without this component
+  // knowing the bar exists.
+  onEditorChange?: (ed: editor.IStandaloneCodeEditor | null) => void
 }
 
 export default function CodeEditor({
@@ -35,6 +39,7 @@ export default function CodeEditor({
   onChange,
   onSave,
   onReady,
+  onEditorChange,
 }: CodeEditorProps) {
   // The live editor + the monaco instance, captured at onMount. Needed for the
   // Auto revert below, which the wrapper cannot do for us.
@@ -73,6 +78,16 @@ export default function CodeEditor({
     saveRef.current = onSave
   })
 
+  // Through a ref for the same reason as `saveRef`, and so the unmount cleanup
+  // below reaches the latest callback rather than the first one.
+  const editorChangeRef = useRef(onEditorChange)
+  useEffect(() => {
+    editorChangeRef.current = onEditorChange
+  })
+  useEffect(() => {
+    return () => editorChangeRef.current?.(null)
+  }, [])
+
   function handleMount(
     ed: editor.IStandaloneCodeEditor,
     mon: typeof monaco,
@@ -81,6 +96,7 @@ export default function CodeEditor({
     monacoRef.current = mon
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
     onReady?.(mon)
+    editorChangeRef.current?.(ed)
   }
 
   return (
