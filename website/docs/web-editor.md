@@ -411,8 +411,8 @@ your own terms.
 
 Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
 editor, so a change to a Windows-1252 file is a readable diff. A file too large for the
-editor to open is diffed only when it is UTF-8; past that size, any other encoding is shown
-as a binary file.
+editor to open is diffed only when it is plain UTF-8; past that size, any other encoding
+(a byte-order mark included) is shown as a binary file.
 
 ## Open in your local editor
 

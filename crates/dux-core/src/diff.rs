@@ -1,9 +1,9 @@
 //! Headless, serializable diff source shared by web clients. Returns the two raw
 //! sides of a single file (its content at HEAD and its working-copy content) as
-//! whole text, decoded by the editor's encoding rules (`text_encoding`), leaving the
-//! actual diff rendering to the client. The web UI
-//! runs Monaco's DiffEditor over these two sides; binary content is
-//! reported as `binary: true` with empty sides. No syntax highlighting, no
+//! whole text, decoded by the editor's encoding rules (`text_encoding`), leaving
+//! the actual diff rendering to the client. The web UI runs Monaco's DiffEditor
+//! over these two sides; binary content is reported as `binary: true` with empty
+//! sides. No syntax highlighting, no
 //! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
 //! in `dux-tui/src/diff.rs`.
 
