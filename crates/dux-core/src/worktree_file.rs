@@ -18,6 +18,35 @@ use crate::git::{is_under, resolve_worktree_path, resolves_into_git_dir};
 /// generated blobs that happen to appear in `git status`.
 pub const MAX_EDITABLE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Largest file the editor will write. Twice the read cap, so a file that
+/// opened can grow while it is edited; measured on the bytes that would land on
+/// disk, after encoding, never on the text sent, which for a single-byte code
+/// page can be three times larger (every € is one byte on disk and three in
+/// UTF-8).
+pub const MAX_SAVED_BYTES: u64 = 2 * MAX_EDITABLE_BYTES;
+
+/// A save refused because the file it would write is past [`MAX_SAVED_BYTES`].
+/// Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveTooLarge {
+    /// The size the file would have been, in bytes.
+    pub size: u64,
+}
+
+impl std::fmt::Display for SaveTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This file is too large for the editor to save: it would be {} bytes on disk, \
+             over the {} MB limit. Nothing was written. Edit it outside dux instead.",
+            self.size,
+            MAX_SAVED_BYTES / (1024 * 1024)
+        )
+    }
+}
+
+impl std::error::Error for SaveTooLarge {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorktreeFile {
     pub path: String,
@@ -632,6 +661,11 @@ pub fn write_file_encoded(
         Some(save) => crate::text_encoding::encode(content, save.encoding, save.bom)?.into(),
         None => content.as_bytes().into(),
     };
+    if bytes.len() as u64 > MAX_SAVED_BYTES {
+        return Err(anyhow::Error::new(SaveTooLarge {
+            size: bytes.len() as u64,
+        }));
+    }
     let path = resolve_worktree_path(worktree, rel_path)?;
     // No-follow stat tells existing-file kind apart from "does not exist".
     match std::fs::symlink_metadata(&path) {
@@ -2889,6 +2923,40 @@ mod tests {
 
         /// Every ordinary save, and a conversion to windows-1252 (which reads
         /// and writes back every byte), goes through.
+        #[test]
+        fn the_save_limit_is_on_the_bytes_written_not_the_text_sent() {
+            let dir = worktree();
+            // 4 MiB of € in windows-1252 is 4 MiB on disk, though its text is
+            // 12 MiB of UTF-8: it saves.
+            let euros = "\u{20ac}".repeat(4 * 1024 * 1024);
+            write_file_encoded(
+                dir.path(),
+                "euro.txt",
+                &euros,
+                save_as(encoding_rs::WINDOWS_1252, false),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::metadata(dir.path().join("euro.txt"))
+                    .unwrap()
+                    .len(),
+                4 * 1024 * 1024
+            );
+            // Past the limit on disk it is refused, typed, and writes nothing.
+            let over = "a".repeat(MAX_SAVED_BYTES as usize + 1);
+            let err = write_file_encoded(
+                dir.path(),
+                "big.txt",
+                &over,
+                save_as(encoding_rs::UTF_8, false),
+                None,
+            )
+            .unwrap_err();
+            assert!(err.downcast_ref::<SaveTooLarge>().is_some(), "{err}");
+            assert!(!dir.path().join("big.txt").exists());
+        }
+
         #[test]
         fn ordinary_saves_and_conversions_are_not_mistaken_for_rewrites() {
             let dir = worktree();

@@ -195,7 +195,8 @@ Two size limits, both generous:
 
 - A file over **5 MiB** does not open in the editor at all; you get the read-only badge
   saying so.
-- A save is refused past roughly **10 MiB**. The refusal names the limit and **your text
+- A save is refused when the file it would write is past **10 MiB** on disk, in the file's
+  own encoding. The refusal names the limit and **your text
   is kept**: the tab stays dirty with everything you typed, so you can trim it down and
   save again, or copy it out.
 

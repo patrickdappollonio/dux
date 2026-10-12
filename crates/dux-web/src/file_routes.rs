@@ -132,6 +132,13 @@ struct WriteResult {
     mixed_line_endings: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     eol: Option<&'static str>,
+    /// A read of the written bytes finds a byte-order mark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bom: Option<bool>,
+    /// The text began with U+FEFF and a read takes it as the mark: the editor
+    /// relabels the file and drops the character from its copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leading_mark_read_as_bom: Option<bool>,
 }
 
 /// A 409's body. `deleted` is its own field rather than being inferred from a
@@ -210,14 +217,20 @@ struct OpenedEditor {
 /// the reader opens, so it is derived from `MAX_EDITABLE_BYTES` rather than left at
 /// the framework's default, which would let a file open and then refuse to save.
 ///
-/// Not simply the read cap, because the content travels as a JSON string: serde_json
-/// escapes a quote, a backslash and the newline, carriage-return and tab controls to
-/// two bytes each and passes other non-ASCII through, so twice the read cap covers
-/// any text file, and the extra room is the envelope and the path. A file made
-/// largely of OTHER control characters escapes to six bytes each and does not fit;
-/// the refusal names the limit rather than failing opaquely.
+/// Not simply the read cap, because the content travels as decoded text in a JSON
+/// string, and both grow it. A byte of a single-byte code page can decode to a
+/// character three bytes long in UTF-8 (every € in windows-1252), and serde_json
+/// escapes a control character to six bytes (`\u0001`); six bytes per byte read is
+/// the worst any supported encoding reaches, so six times the read cap covers any
+/// file the reader opens, and the extra room is the envelope and the path.
+///
+/// This only bounds the request. The limit that means something to a person is the
+/// size of the file that would be written, [`MAX_SAVED_BYTES`], checked on the
+/// encoded bytes before anything is written.
+///
+/// [`MAX_SAVED_BYTES`]: dux_core::worktree_file::MAX_SAVED_BYTES
 const MAX_EDIT_WRITE_BYTES: usize =
-    2 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
+    6 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
 
 /// What an editor request's paths resolve against, decided by the ADDRESS the
 /// request arrived at and never by the id alone. Each address is an extractor that
@@ -847,6 +860,9 @@ async fn write_file<R: EditorRoot>(
                 )
                     .into_response();
             }
+            if let Some(too_large) = e.downcast_ref::<dux_core::worktree_file::SaveTooLarge>() {
+                return (StatusCode::PAYLOAD_TOO_LARGE, too_large.to_string()).into_response();
+            }
             if let Some(refused) = e.downcast_ref::<dux_core::text_encoding::Unmappable>() {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -879,6 +895,8 @@ async fn write_file<R: EditorRoot>(
         unwritable: verdict.map(|v| v.unwritable.map(|u| u.as_str())),
         mixed_line_endings: verdict.map(|v| v.line_endings.mixed),
         eol: verdict.map(|v| v.line_endings.saves_as.label()),
+        bom: verdict.map(|v| v.bom),
+        leading_mark_read_as_bom: verdict.map(|v| v.leading_mark_read_as_bom),
     })
     .into_response()
 }
@@ -2314,14 +2332,87 @@ mod tests {
                     .to_vec(),
             )
             .unwrap();
+            let limit = format!(
+                "{} MB",
+                crate::file_routes::MAX_EDIT_WRITE_BYTES / (1024 * 1024)
+            );
             assert!(
-                body.contains("too large") && body.contains("10 MB"),
+                body.contains("too large") && body.contains(&limit),
                 "the refusal must name the cause and the limit: {body}"
             );
             assert!(
                 !wt.join("huge.txt").exists(),
                 "a refused save must write nothing"
             );
+        }
+
+        /// A file the reader opens must save: 4 MiB of € in windows-1252 is
+        /// 12 MiB of UTF-8 in the request, and 4 MiB on disk.
+        #[tokio::test]
+        async fn a_code_page_file_the_editor_opened_saves_however_its_text_grows() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("euro.txt"), vec![0x80u8; 4 * 1024 * 1024]).unwrap();
+            let read =
+                body_json(read_json(&app, serde_json::json!({ "path": "euro.txt" })).await).await;
+            assert_eq!(read["encoding"], "windows-1252");
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "euro.txt",
+                        "content": read["content"],
+                        "expected_modified": read["modified"],
+                        "expected_size": read["size"],
+                        "encoding": "windows-1252",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                std::fs::metadata(wt.join("euro.txt")).unwrap().len(),
+                4 * 1024 * 1024
+            );
+        }
+
+        /// The limit that matters is the file that would be written, and its
+        /// refusal says so.
+        #[tokio::test]
+        async fn a_save_whose_file_would_be_too_large_is_refused_naming_that_limit() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let content = "a".repeat(dux_core::worktree_file::MAX_SAVED_BYTES as usize + 1);
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "huge.txt", "content": content, "encoding": "UTF-8" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let body = String::from_utf8(
+                to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(body.contains("on disk") && body.contains("10 MB"), "{body}");
+            assert!(!wt.join("huge.txt").exists());
+        }
+
+        #[tokio::test]
+        async fn a_save_says_a_leading_mark_character_came_back_as_a_mark() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "m.txt", "content": "\u{feff}a", "encoding": "UTF-8" }),
+                ))
+                .await
+                .unwrap();
+            let body = body_json(resp).await;
+            assert_eq!(body["bom"], true);
+            assert_eq!(body["leading_mark_read_as_bom"], true);
         }
 
         /// The root extractor runs before the body is read, so a request that
