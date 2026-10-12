@@ -1877,6 +1877,26 @@ mod tests {
             assert_eq!(nec["binary"], false);
             assert_eq!(nec["read_only"], true);
             assert_eq!(nec["unwritable"], "round_trip");
+            assert_eq!(nec["path_read_only"], false);
+
+            // The server holds the line itself: the client's read-only is not
+            // the only thing between this save and `81 E0`.
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "nec.txt",
+                        "content": nec["content"],
+                        "expected_modified": nec["modified"],
+                        "expected_size": nec["size"],
+                        "encoding": "Shift_JIS",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(std::fs::read(wt.join("nec.txt")).unwrap(), [0x87, 0x90]);
 
             std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
             let latin1 =

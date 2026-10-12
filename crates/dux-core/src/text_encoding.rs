@@ -61,6 +61,10 @@ pub enum Unwritable {
     /// The text starts with a second byte-order mark, which the editor drops
     /// from what it holds, so a save would write one mark fewer.
     DoubledMark,
+    /// The text starts with the character U+FEFF and no mark was set aside
+    /// before it (gb18030 spells it 84 31 95 33, say); the editor drops it the
+    /// same way, so a save would lose it.
+    LeadingMark,
 }
 
 impl Unwritable {
@@ -69,7 +73,56 @@ impl Unwritable {
         match self {
             Unwritable::RoundTrip => "round_trip",
             Unwritable::DoubledMark => "doubled_mark",
+            Unwritable::LeadingMark => "leading_mark",
         }
+    }
+}
+
+/// A save refused because the file on disk reads in the save's encoding but
+/// that encoding cannot write it back unchanged: saving would change bytes the
+/// editor never showed as changed. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WouldRewriteUntouched {
+    pub encoding: &'static Encoding,
+    pub reason: Unwritable,
+}
+
+impl std::fmt::Display for WouldRewriteUntouched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = match self.reason {
+            Unwritable::RoundTrip => {
+                "it would write some of the file's own characters back as \
+                                      different bytes"
+            }
+            Unwritable::DoubledMark => {
+                "the file starts with two byte-order marks and a save \
+                                        would drop one"
+            }
+            Unwritable::LeadingMark => {
+                "the file starts with a byte-order mark character a save \
+                                        would drop"
+            }
+        };
+        write!(
+            f,
+            "refusing to save in {}: {why}; nothing was written. Reopen the file in another \
+             encoding, or save it in another one to convert it",
+            self.encoding.name()
+        )
+    }
+}
+
+impl std::error::Error for WouldRewriteUntouched {}
+
+/// Whether a guarded save in `encoding` over `on_disk` would change bytes the
+/// file holds that nobody edited: true when those bytes read in `encoding` and
+/// that encoding cannot write them back. Bytes that do not read in `encoding`
+/// at all are a conversion from another one, which rewrites the whole file on
+/// purpose, and are not this question.
+pub fn would_rewrite_untouched(on_disk: &[u8], encoding: &'static Encoding) -> Option<Unwritable> {
+    match decode(on_disk, Some(encoding)) {
+        Ok(Decoded::Text(t)) => t.unwritable,
+        _ => None,
     }
 }
 
@@ -268,7 +321,11 @@ pub fn decode(
 
 fn unwritable(bytes: &[u8], t: &DecodedText) -> Option<Unwritable> {
     if t.text.starts_with('\u{FEFF}') {
-        return Some(Unwritable::DoubledMark);
+        return Some(if t.bom {
+            Unwritable::DoubledMark
+        } else {
+            Unwritable::LeadingMark
+        });
     }
     match encode(&t.text, t.encoding, t.bom) {
         Ok(back) if back == bytes => None,
@@ -593,6 +650,19 @@ mod tests {
         assert_eq!(t.unwritable, Some(Unwritable::DoubledMark));
         let t = text(decode(b"\xEF\xBB\xBF\xEF\xBB\xBFhi", Some(UTF_8)));
         assert_eq!(t.unwritable, Some(Unwritable::DoubledMark));
+    }
+
+    /// gb18030 spells U+FEFF as 84 31 95 33 and has no mark of its own, so a
+    /// text starting with it is not "two marks": the reason says what it is.
+    #[test]
+    fn a_leading_mark_character_with_no_mark_before_it_has_its_own_reason() {
+        let t = text(decode(
+            &[0x84, 0x31, 0x95, 0x33, b'h'],
+            Some(encoding_rs::GB18030),
+        ));
+        assert!(!t.bom);
+        assert_eq!(t.unwritable, Some(Unwritable::LeadingMark));
+        assert_eq!(Unwritable::LeadingMark.as_str(), "leading_mark");
     }
 
     #[test]

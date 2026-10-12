@@ -50,8 +50,14 @@ pub struct WorktreeFile {
     /// UTF-16, yet its bytes are valid UTF-8 with non-ASCII in them: most
     /// likely it was rewritten as UTF-8 since that choice was made.
     pub looks_like_utf8: bool,
+    /// Read-only for where the file is (an outside or symlinked path, a `.git`
+    /// path), which no encoding changes: there is no save of any kind. Apart
+    /// from `unwritable`, which only rules out saving in this one encoding.
+    pub path_read_only: bool,
     /// True when the file was opened read-only: an outside-resolving symlink
-    /// or a `.git/` path. The UI must grey out Save and ignore the dirty guard.
+    /// or a `.git/` path (`path_read_only`), or text its encoding cannot write
+    /// back unchanged (`unwritable`). The UI must grey out Save and ignore the
+    /// dirty guard.
     #[serde(default)]
     pub read_only: bool,
     /// The mtime of the bytes in `content`, [`format_mtime`]'s string, taken
@@ -395,6 +401,7 @@ pub fn read_file_as(
         // A text the encoding cannot write back unchanged is shown, never
         // saved in it: the same read-only the editor gives a symlink.
         read_only: read_only || unwritable.is_some(),
+        path_read_only: read_only,
         modified: stamp.modified,
         size: Some(stamp.size),
     })
@@ -475,7 +482,7 @@ fn write_checked_existing(
     abs_path: &Path,
     content: &[u8],
     expected: &FileStamp,
-    encoding_stated: bool,
+    encoding: Option<SaveEncoding>,
 ) -> anyhow::Result<FileStamp> {
     use rustix::fs::{Mode, OFlags, open as rustix_open};
     use std::io::{Read, Seek, Write};
@@ -519,18 +526,38 @@ fn write_checked_existing(
     // save, which the route allows to grow past the cap.
     //
     // A save that states its encoding comes from a client that reads files in
-    // their own encodings, so it was shown the text it is saving, and the
+    // their own encodings, so it was shown the text it is saving, and that
     // check does not apply: that is what lets a windows-1252 file be saved
     // back as windows-1252, or converted to UTF-8 on purpose. A save with no
     // encoding (an older page, or a draft one kept) is still held to it.
-    if !encoding_stated && current.size <= MAX_EDITABLE_BYTES {
+    //
+    // A stated encoding is held to its own check instead, rather than trusting
+    // the client to have honoured the read's read-only: when the bytes on disk
+    // read in the save's encoding but that encoding cannot write them back
+    // unchanged, the save would quietly rewrite characters nobody edited, so it
+    // is refused. Bytes that do not read in it are a conversion from another
+    // encoding, a whole-file rewrite the person asked for.
+    if current.size <= MAX_EDITABLE_BYTES {
         let mut existing = Vec::new();
         (&f).take(MAX_EDITABLE_BYTES).read_to_end(&mut existing)?;
-        if std::str::from_utf8(&existing).is_err() {
-            anyhow::bail!(
+        match encoding {
+            None if std::str::from_utf8(&existing).is_err() => anyhow::bail!(
                 "refusing to save: the file on disk is not UTF-8 text, so the editor never \
                  showed its contents and saving would replace them; nothing was written"
-            );
+            ),
+            Some(save) => {
+                if let Some(reason) =
+                    crate::text_encoding::would_rewrite_untouched(&existing, save.encoding)
+                {
+                    return Err(anyhow::Error::new(
+                        crate::text_encoding::WouldRewriteUntouched {
+                            encoding: save.encoding,
+                            reason,
+                        },
+                    ));
+                }
+            }
+            None => {}
         }
         f.rewind()?;
     }
@@ -649,15 +676,13 @@ pub fn write_file_encoded(
         // downcasts it for the 409 and its body), so it is the one error here
         // that is not re-wrapped with the path suffix; its own message already
         // says what happened.
-        Some(stamp) => {
-            write_checked_existing(&path, &bytes, stamp, encoding.is_some()).map_err(|e| {
-                if e.downcast_ref::<WriteConflict>().is_some() {
-                    e
-                } else {
-                    anyhow::anyhow!("{e} (writing {rel_path})")
-                }
-            })
-        }
+        Some(stamp) => write_checked_existing(&path, &bytes, stamp, encoding).map_err(|e| {
+            if e.downcast_ref::<WriteConflict>().is_some() {
+                e
+            } else {
+                anyhow::anyhow!("{e} (writing {rel_path})")
+            }
+        }),
         None => write_nofollow_bytes_stamped(&path, &bytes)
             .map_err(|e| anyhow::anyhow!("{e} (writing {rel_path})")),
     }
@@ -2804,6 +2829,96 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("latin1.txt")).unwrap(),
                 "caf\u{e9}\n"
             );
+        }
+
+        /// The read says unwritable; the server must not take the client's word
+        /// for it. A guarded save in Shift_JIS over `87 90 0A` would write
+        /// `81 E0 0A`, so it is refused and the bytes survive.
+        #[test]
+        fn a_save_in_an_encoding_that_cannot_write_the_file_back_is_refused() {
+            let dir = worktree();
+            let nec = [0x87, 0x90, b'\n'];
+            std::fs::write(dir.path().join("nec.txt"), nec).unwrap();
+            let read = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+            assert_eq!(read.unwritable, Some("round_trip"));
+            let err = write_file_encoded(
+                dir.path(),
+                "nec.txt",
+                &read.content,
+                save_as(encoding_rs::SHIFT_JIS, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("nec.txt")).unwrap(), nec);
+
+            // Converting it is still allowed: its bytes are not UTF-8, so a
+            // UTF-8 save is a conversion, not a rewrite in place.
+            write_file_encoded(
+                dir.path(),
+                "nec.txt",
+                &read.content,
+                save_as(encoding_rs::UTF_8, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("nec.txt")).unwrap(),
+                "\u{2252}\n"
+            );
+        }
+
+        #[test]
+        fn a_save_over_a_doubled_mark_in_its_own_encoding_is_refused() {
+            let dir = worktree();
+            let two = b"\xEF\xBB\xBF\xEF\xBB\xBFx";
+            std::fs::write(dir.path().join("two.txt"), two).unwrap();
+            let read = read_file(dir.path(), "two.txt").unwrap();
+            assert!(
+                write_file_encoded(
+                    dir.path(),
+                    "two.txt",
+                    "x",
+                    save_as(encoding_rs::UTF_8, true),
+                    Some(&stamp_of(&read)),
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(dir.path().join("two.txt")).unwrap(), two);
+        }
+
+        /// Every ordinary save, and a conversion to windows-1252 (which reads
+        /// and writes back every byte), goes through.
+        #[test]
+        fn ordinary_saves_and_conversions_are_not_mistaken_for_rewrites() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9\n").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let stamp = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "caf\u{e9}!\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "caf\u{e9}!\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp),
+            )
+            .unwrap();
+            let read = read_file(dir.path(), "hello.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "hello.txt",
+                "x\n",
+                save_as(encoding_rs::WINDOWS_1252, false),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
         }
 
         /// A character the encoding cannot hold stops the save before the file
