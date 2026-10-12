@@ -78,6 +78,30 @@ impl Unwritable {
     }
 }
 
+/// A save refused because the text starts with U+FEFF in UTF-8 or UTF-16, where
+/// that character is written as the very bytes of a byte-order mark: a read
+/// would take it as the file's mark, so the text saved and the text read back
+/// would differ. The mark is chosen on its own (the encoding's "with BOM"
+/// row), never typed. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadingMarkInText {
+    pub encoding: &'static Encoding,
+}
+
+impl std::fmt::Display for LeadingMarkInText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to save: the text starts with the character U+FEFF, which {} writes as \
+             a byte-order mark, so the file would read back without it; nothing was written. \
+             Delete that character, or use Save with encoding to choose a byte-order mark",
+            self.encoding.name()
+        )
+    }
+}
+
+impl std::error::Error for LeadingMarkInText {}
+
 /// A save refused because the file on disk reads in the save's encoding but
 /// that encoding cannot write it back unchanged: saving would change bytes the
 /// editor never showed as changed. Nothing is written.
@@ -120,22 +144,11 @@ impl std::error::Error for WouldRewriteUntouched {}
 pub struct SavedVerdict {
     pub unwritable: Option<Unwritable>,
     pub line_endings: LineEndings,
-    /// A read of the written bytes finds a byte-order mark.
-    pub bom: bool,
-    /// The text began with U+FEFF and no mark was asked for, so the bytes
-    /// start with exactly what a mark is: a read sets that character aside as
-    /// the file's mark. The bytes are what the text implies; it is the labels
-    /// (and the editor's copy, which should not hold the character twice)
-    /// that move.
-    pub leading_mark_read_as_bom: bool,
 }
 
 /// The verdict on `text` saved in `encoding` (with a mark when `bom`): what a
 /// read of the bytes written would say, so the editor never assumes how a save
-/// left the file. A conversion is not assumed writable (a text that still
-/// starts with U+FEFF after its mark is two marks in the new encoding as much
-/// as in the old), and a text whose first character is U+FEFF comes back as a
-/// marked file.
+/// left the file: a conversion is not assumed writable in its new encoding.
 pub fn saved_verdict(text: &str, encoding: &'static Encoding, bom: bool) -> SavedVerdict {
     let read =
         encode(text, encoding, bom)
@@ -149,11 +162,6 @@ pub fn saved_verdict(text: &str, encoding: &'static Encoding, bom: bool) -> Save
             .as_ref()
             .map_or(Some(Unwritable::RoundTrip), |t| t.unwritable),
         line_endings: line_endings(text),
-        bom: read.as_ref().is_some_and(|t| t.bom),
-        leading_mark_read_as_bom: !bom
-            && read
-                .as_ref()
-                .is_some_and(|t| t.bom && text.strip_prefix('\u{feff}') == Some(t.text.as_str())),
     }
 }
 
@@ -472,6 +480,9 @@ pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Res
             "{} has no byte-order mark, so a save cannot write one",
             encoding.name()
         );
+    }
+    if has_bom(encoding) && text.starts_with('\u{feff}') {
+        return Err(anyhow::Error::new(LeadingMarkInText { encoding }));
     }
     let mut out = Vec::with_capacity(text.len() + 3);
     if bom {
@@ -884,20 +895,27 @@ mod tests {
     /// The single-byte code pages and gb18030 write back exactly what they
     /// read, so the check never refuses an honest save in them.
     #[test]
-    fn the_save_verdict_says_a_leading_mark_character_reads_back_as_a_mark() {
-        // Deleting what preceded a U+FEFF leaves a text that, written as
-        // UTF-8, is a marked file: a read sets the mark aside and gives "a".
-        let v = saved_verdict("\u{feff}a", UTF_8, false);
-        assert!(v.bom);
-        assert!(v.leading_mark_read_as_bom);
-        assert_eq!(v.unwritable, None);
-        let v = saved_verdict("\u{feff}a", UTF_16LE, false);
-        assert!(v.bom && v.leading_mark_read_as_bom);
-        // An ordinary text reads back exactly as written.
-        let v = saved_verdict("a", UTF_8, false);
-        assert!(!v.bom && !v.leading_mark_read_as_bom);
-        let v = saved_verdict("a", UTF_8, true);
-        assert!(v.bom && !v.leading_mark_read_as_bom);
+    fn a_text_starting_with_a_mark_character_is_refused_in_utf8_and_utf16() {
+        // In UTF-8 and UTF-16 a leading U+FEFF is the bytes of a mark: a read
+        // would take it as one, so the text and the file would disagree. The
+        // mark is a choice of its own, never a character in the text.
+        for (encoding, bom) in [
+            (UTF_8, false),
+            (UTF_8, true),
+            (UTF_16LE, true),
+            (UTF_16BE, false),
+        ] {
+            let err = encode("\u{feff}a", encoding, bom).unwrap_err();
+            let refused = err
+                .downcast_ref::<LeadingMarkInText>()
+                .expect("typed refusal");
+            assert_eq!(refused.encoding, encoding);
+            assert!(err.to_string().contains("nothing was written"));
+        }
+        // Anywhere else in the text it is an ordinary character.
+        assert!(encode("a\u{feff}", UTF_8, false).is_ok());
+        // An encoding with no mark writes it as its own bytes.
+        assert!(encode("\u{feff}a", encoding_rs::GB18030, false).is_ok());
     }
 
     #[test]

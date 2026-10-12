@@ -140,13 +140,6 @@ struct WriteResult {
     mixed_line_endings: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     eol: Option<&'static str>,
-    /// A read of the written bytes finds a byte-order mark.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bom: Option<bool>,
-    /// The text began with U+FEFF and a read takes it as the mark: the editor
-    /// relabels the file and drops the character from its copy.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    leading_mark_read_as_bom: Option<bool>,
 }
 
 /// A 409's body. `deleted` is its own field rather than being inferred from a
@@ -908,8 +901,6 @@ async fn write_file<R: EditorRoot>(
         unwritable: verdict.map(|v| v.unwritable.map(|u| u.as_str())),
         mixed_line_endings: verdict.map(|v| v.line_endings.mixed),
         eol: verdict.map(|v| v.line_endings.saves_as.label()),
-        bom: verdict.map(|v| v.bom),
-        leading_mark_read_as_bom: verdict.map(|v| v.leading_mark_read_as_bom),
     })
     .into_response()
 }
@@ -2044,28 +2035,7 @@ mod tests {
         /// client must not assume otherwise.
         #[tokio::test]
         async fn a_save_answers_with_the_verdict_on_what_it_wrote() {
-            let (_tmp, wt, app) = router_with_session().await;
-            let resp = app
-                .clone()
-                .oneshot(json_req(
-                    "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
-                        "path": "two.txt",
-                        "content": "\u{feff}x",
-                        "encoding": "UTF-16LE",
-                        "bom": true,
-                    }),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let body = body_json(resp).await;
-            assert_eq!(body["unwritable"], "doubled_mark");
-            assert_eq!(
-                std::fs::read(wt.join("two.txt")).unwrap(),
-                [0xFF, 0xFE, 0xFF, 0xFE, b'x', 0]
-            );
-
+            let (_tmp, _wt, app) = router_with_session().await;
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
@@ -2448,18 +2418,36 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_save_says_a_leading_mark_character_came_back_as_a_mark() {
-            let (_tmp, _wt, app) = router_with_session().await;
-            let resp = app
-                .oneshot(json_req(
-                    "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "m.txt", "content": "\u{feff}a", "encoding": "UTF-8" }),
-                ))
-                .await
+        async fn a_save_whose_text_starts_with_a_mark_character_is_refused() {
+            let (_tmp, wt, app) = router_with_session().await;
+            for (encoding, bom) in [("UTF-8", false), ("UTF-16LE", true)] {
+                let resp = app
+                    .clone()
+                    .oneshot(json_req(
+                        "/api/v1/sessions/s1/files/write",
+                        serde_json::json!({
+                            "path": "m.txt",
+                            "content": "\u{feff}a",
+                            "encoding": encoding,
+                            "bom": bom,
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{encoding}");
+                let text = String::from_utf8(
+                    to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
                 .unwrap();
-            let body = body_json(resp).await;
-            assert_eq!(body["bom"], true);
-            assert_eq!(body["leading_mark_read_as_bom"], true);
+                assert!(
+                    text.contains("U+FEFF") && text.contains("nothing was written"),
+                    "{text}"
+                );
+            }
+            assert!(!wt.join("m.txt").exists());
         }
 
         /// The root extractor runs before the body is read, so a request that
