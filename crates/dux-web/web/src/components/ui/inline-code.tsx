@@ -4,19 +4,31 @@ import { cn } from "@/lib/utils"
 // agent, project or terminal name, a pull request number. The chip is what
 // tells the name apart from the sentence around it, so callers drop the quotes
 // they used to wrap it in. Sized relative to its surroundings, so it sits in a
-// dialog title as comfortably as in body text. It is one inline block, so a
-// chip never splits across two rows: one that does not fit the rest of a line
-// moves to the next whole, as the terminal UI's name chip does. Capped at the
-// line's width, a chip longer than a whole row wraps anywhere inside itself,
-// because a path has no spaces to break at and a phone must never scroll
-// sideways. It keeps runs of spaces, because in a command they are part of the
-// value. To a screen reader it is plain inline text.
+// dialog title as comfortably as in body text. To a screen reader it is plain
+// inline text.
+//
+// It is an inline box, not an inline block, so a chip that has to wrap flows
+// like the words around it: every row it spans gets a background of its own
+// that hugs that row's text (`box-decoration-clone`), and the sentence carries
+// on right after the chip ends. An inline block that wraps fills the whole line
+// instead, which turned a long path in a toast into a full-width slab with the
+// rest of the sentence pushed under it.
+//
+// A chip breaks where the words around it do: at a space or after a hyphen.
+// Its spaces are kept (`pre-wrap`), because in a command they are part of the
+// value, and nothing is substituted for them, so a copied chip is byte for byte
+// the value. Breaking anywhere else is a last resort: a run with no break point
+// (a path segment, a file name) that does not fit the rest of a row moves to
+// the next one whole and is split mid-run only when it is longer than a row.
+// `anywhere` rather than `break-word` because it also shrinks the chip's
+// minimum width, so a long path cannot stretch a flex or grid cell, or a
+// toast, past the screen.
 function InlineCode({ className, ...props }: React.ComponentProps<"code">) {
   return (
     <code
       data-slot="inline-code"
       className={cn(
-        "inline-block max-w-full rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] box-decoration-clone whitespace-pre-wrap wrap-anywhere",
+        "inline max-w-full rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] box-decoration-clone whitespace-pre-wrap wrap-anywhere",
         className,
       )}
       {...props}
