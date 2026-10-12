@@ -3082,7 +3082,7 @@ describe("a file that is not plain UTF-8", () => {
 
   // The Latin-1 file, open with an edit typed into it, in the dirty state the
   // store reports for it.
-  async function mountDirty(): Promise<HTMLTextAreaElement> {
+  async function mountDirty(onDisk = "café\n", typed = "thé\n"): Promise<HTMLTextAreaElement> {
     const { EditorOverlay } = await import("@/components/EditorOverlay")
     const { getSnapshot } = await import("@/lib/store")
     mockState = {
@@ -3096,9 +3096,9 @@ describe("a file that is not plain UTF-8", () => {
       },
     } as DuxState
     render(<EditorOverlay />)
-    const box = await loaded("café\n")
-    fireEvent.change(box, { target: { value: "thé\n" } })
-    await waitFor(() => expect(box.value).toBe("thé\n"))
+    const box = await loaded(onDisk)
+    fireEvent.change(box, { target: { value: typed } })
+    await waitFor(() => expect(box.value).toBe(typed))
     return box
   }
 
@@ -3553,31 +3553,49 @@ describe("a file that is not plain UTF-8", () => {
     write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
   })
 
-  /// A leading U+FEFF kept as text is the file's mark in UTF-8: the bar says
-  /// "with BOM", that row is the current one, and converting to plain UTF-8
-  /// writes the text without it rather than a mark-shaped character.
-  it("treats a leading U+FEFF kept as text as the file's mark", async () => {
+  /// The mark is a flag and never text: a U+FEFF at the head of the text is a
+  /// character like any other, so the bar names the file by its flag alone and
+  /// a conversion sends the text exactly as the editor holds it (the server is
+  /// the one to refuse a save it could not write back as that text).
+  it("names the file by its mark flag alone and converts the text verbatim", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,
-      content: "﻿x",
+      content: "\ufeffx",
       encoding: "UTF-8",
       bom: false,
       encoding_fallback: false,
     })
     await mountWithTab(PATH)
     await screen.findByTestId("code-editor")
-    expect((await encodingButton()).textContent).toContain("UTF-8 with BOM")
+    expect((await encodingButton()).textContent).not.toContain("with BOM")
     fireEvent.click(await encodingButton())
     fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
     expect(
-      (await screen.findByRole("menuitem", { name: /^UTF-8 with BOM/ })).getAttribute(
-        "aria-current",
-      ),
+      (await screen.findByRole("menuitem", { name: /^UTF-8$/ })).getAttribute("aria-current"),
     ).toBe("true")
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8$/ }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8 with BOM/ }))
     await waitFor(() => expect(writeMock).toHaveBeenCalled())
-    expect(writeMock.mock.calls[0][2]).toBe("x")
-    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
+    expect(writeMock.mock.calls[0][2]).toBe("\ufeffx")
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: true })
+  })
+
+  /// The editor holds LF; a CRLF file is written back in CRLF, converted at
+  /// the save, so an edit never changes the file's style.
+  it("writes a CRLF file's breaks back as CRLF", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\r\nb\r\n",
+      encoding: "UTF-8",
+      bom: false,
+      encoding_fallback: false,
+      eol: "CRLF",
+      mixed_line_endings: false,
+    })
+    // The editor holds the text in LF; the bar names what a save writes.
+    await mountDirty("a\nb\n", "a\nb\nc\n")
+    fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("a\r\nb\r\nc\r\n")
   })
 
   /// Saving in the encoding and mark the file already has is neither an edit

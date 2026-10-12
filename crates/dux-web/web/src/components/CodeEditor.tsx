@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from "react"
+import { useEffect, useRef } from "react"
 import { Editor } from "@monaco-editor/react"
 import type { editor } from "monaco-editor"
 // Shared self-host bootstrap (workers + bundled monaco). Importing it runs the
@@ -31,13 +31,10 @@ interface CodeEditorProps {
   // the status bar can follow its cursor and model without this component
   // knowing the bar exists.
   onEditorChange?: (ed: editor.IStandaloneCodeEditor | null) => void
-  // The one line ending style the read named for this file, which the model
-  // is held to. Undefined leaves Monaco's own pick alone.
-  eol?: "LF" | "CRLF"
-  // Which reading of the file `value` and `eol` come from (the buffer's
-  // generation). The style is brought in once per reading: after that it is
-  // the person's, and an undo back to the old style is not fought.
-  reading?: number
+  // The text is held with LF breaks (a read named the file's style, which the
+  // buffer keeps apart and a save applies). The model is then made in LF and
+  // its style is never changed again; see `madeInLf`.
+  lfText?: boolean
   // The buffer cannot be saved (a symlink, a .git path, or an encoding that
   // cannot write the file back unchanged). Monaco then refuses keystrokes
   // outright: typed text would be kept nowhere, and closing the tab would
@@ -47,68 +44,27 @@ interface CodeEditorProps {
   readOnlyReason?: string
 }
 
-// Hold the model to `eol`, and bring in `value` with it when that is the
-// change, as ONE undo step with the style changed first.
+// Make sure a model that has just been made holds LF, the style the editor's
+// text is always in (see `editorTextOf`).
 //
-// Monaco rewrites text pushed into an existing model (a reload in place, a
-// reopen) to the model's own style, so the model must take the style the read
-// named or the notice, the status bar and a save disagree. Doing that after
-// the text went in, outside its undo step, records the replacement in the old
-// style and then changes the style underneath it, and undoing the replacement
-// later applies offsets from the wrong style (a file came back with an extra
-// blank line). So the style is pushed as an undoable change, then the text is
-// replaced in the new style, both inside one stack element: an undo reverts
-// both together, in the right order. Run before the editor wrapper pushes the
-// value itself (it does so in a passive effect), so it finds nothing to do.
-//
-// Only for the model of this file: on a file switch the wrapper changes models
-// itself, and the new model is fixed up once it is the one on screen.
-//
-// Returns whether it brought the style in (or found it there), so the caller
-// records the reading as done. `programmatic` is raised for the edits it makes,
-// which are the editor's own and never reach the draft.
-function holdEol(
+// A model's line-ending style is never changed once it has an edit history:
+// Monaco's undo replays text offsets in whatever style the model is in when the
+// undo runs, so a style change between an edit and its undo (or redo) puts the
+// text out by a character per line. Text is therefore always handed over in
+// LF, and Monaco keeps a model made from such text in LF. The one exception it
+// makes is a text with no line break at all, which it gives the browser's
+// platform style (CRLF on Windows); such a model is caught here while it is
+// still brand new (version 1, nothing to undo) and set to LF once.
+function madeInLf(
   ed: editor.IStandaloneCodeEditor | null,
   mon: typeof monaco | null,
   path: string,
-  eol: "LF" | "CRLF" | undefined,
-  value: string | undefined,
-  programmatic: { current: boolean },
-): boolean {
-  const model = ed?.getModel()
-  if (!model || !mon || eol === undefined) return false
-  if (model.uri.toString() !== mon.Uri.parse(path).toString()) return false
-  const want = eol === "CRLF" ? "\r\n" : "\n"
-  if (model.getEOL() === want) return true
-  programmatic.current = true
-  try {
-    applyEol(model, mon, eol, value)
-  } finally {
-    programmatic.current = false
-  }
-  return true
-}
-
-function applyEol(
-  model: editor.ITextModel,
-  mon: typeof monaco,
-  eol: "LF" | "CRLF",
-  value: string | undefined,
 ): void {
-  model.pushStackElement()
-  model.pushEOL(
-    eol === "CRLF"
-      ? mon.editor.EndOfLineSequence.CRLF
-      : mon.editor.EndOfLineSequence.LF,
-  )
-  if (value !== undefined && model.getValue() !== value) {
-    model.pushEditOperations(
-      [],
-      [{ range: model.getFullModelRange(), text: value }],
-      () => null,
-    )
-  }
-  model.pushStackElement()
+  const model = ed?.getModel()
+  if (!model || !mon) return
+  if (model.uri.toString() !== mon.Uri.parse(path).toString()) return
+  if (model.getVersionId() !== 1 || model.getEOL() === "\n") return
+  model.setEOL(mon.editor.EndOfLineSequence.LF)
 }
 
 export default function CodeEditor({
@@ -119,16 +75,13 @@ export default function CodeEditor({
   onSave,
   onReady,
   onEditorChange,
-  eol,
-  reading,
+  lfText = false,
   readOnly = false,
   readOnlyReason,
 }: CodeEditorProps) {
   // The live editor + the monaco instance, captured at onMount. Needed for the
   // Auto revert below, which the wrapper cannot do for us.
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
-  // Raised while this component edits the model itself (see `holdEol`).
-  const programmaticRef = useRef(false)
   const monacoRef = useRef<typeof monaco | null>(null)
   // What the last render asked for, so the effect can see the TRANSITION and
   // not merely the current value.
@@ -155,31 +108,11 @@ export default function CodeEditor({
     if (revertTo !== null) mon.editor.setModelLanguage(model, revertTo)
   }, [language, path])
 
-  // A layout effect: it runs before the wrapper's passive effect pushes the
-  // value, so a reload that changes the style goes in as one undo step.
-  //
-  // Once per reading of a file: `broughtInRef` names the last path and
-  // reading whose style is in the model, and nothing is done again for it,
-  // so the person's own undo of a reload's style change stands.
-  const broughtInRef = useRef<string | null>(null)
-  const readingKey = `${path}\u0000${reading ?? ""}\u0000${eol ?? ""}`
-  useLayoutEffect(() => {
-    if (broughtInRef.current === readingKey) return
-    if (holdEol(editorRef.current, monacoRef.current, path, eol, value, programmaticRef)) {
-      broughtInRef.current = readingKey
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readingKey])
-  // And again once the wrapper has switched to another file's model, which
-  // only happens in its passive effect: that model is brought in here, as an
-  // undoable style change of its own.
+  // A model the wrapper makes for another file (on a file switch, in its own
+  // passive effect, which runs before this one) is brought to LF here.
   useEffect(() => {
-    if (broughtInRef.current === readingKey) return
-    if (holdEol(editorRef.current, monacoRef.current, path, eol, undefined, programmaticRef)) {
-      broughtInRef.current = readingKey
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readingKey])
+    if (lfText) madeInLf(editorRef.current, monacoRef.current, path)
+  }, [path, lfText])
 
   // The save chord is bound once on mount while `onSave` is a fresh closure each
   // render, so the binding goes through a ref or it saves old content. The ref
@@ -208,9 +141,7 @@ export default function CodeEditor({
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
     onReady?.(mon)
     editorChangeRef.current?.(ed)
-    if (holdEol(ed, mon, path, eol, undefined, programmaticRef)) {
-      broughtInRef.current = `${path}\u0000${reading ?? ""}\u0000${eol ?? ""}`
-    }
+    if (lfText) madeInLf(ed, mon, path)
   }
 
   return (
@@ -230,10 +161,6 @@ export default function CodeEditor({
         // The wrapper pushes into a writable editor with its change events
         // held back, so those never arrive here at all.
         if (ev?.isFlush) return
-        // Nor our own reload edits (see `holdEol`): the draft already holds
-        // that text, and the handler the wrapper holds at that moment may
-        // be the previous render's, judging it against an old baseline.
-        if (programmaticRef.current) return
         // A change is only ever about the model that produced it. On a tab
         // switch the wrapper can emit one for the new file's model (its
         // read-only setValue) through the handler it was given for the old

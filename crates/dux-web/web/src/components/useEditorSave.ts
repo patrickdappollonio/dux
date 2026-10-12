@@ -13,6 +13,7 @@ import {
   diskFactKey,
   isBufferDirty,
   isBufferStale,
+  textForSave,
 } from "@/lib/editorBuffers"
 import type {
   ChangesSliceView,
@@ -122,7 +123,15 @@ export function useEditorSave({
       return next
     })
     fileApi
-      .write(root, path, body, expected, encoding, readAs)
+      // The editor holds its text with LF breaks; the file gets its own style.
+      .write(
+        root,
+        path,
+        textForSave(from && !isBufferStale(from, path) ? from : undefined, body),
+        expected,
+        encoding,
+        readAs,
+      )
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)

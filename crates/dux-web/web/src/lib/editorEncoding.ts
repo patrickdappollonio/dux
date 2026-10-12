@@ -242,7 +242,7 @@ export function encodingNotices(
     all.push({
       kind: "unwritable",
       dismissable: false,
-      message: prose`${chip(path)} opened read-only: in ${label} its text starts with the character U+FEFF, which the editor drops, so a save would lose it. To edit it, reopen it in another encoding from the status bar.`,
+      message: prose`${chip(path)} opened read-only: in ${label} its text starts with the character U+FEFF, which the editor drops, so a save would lose it, and a conversion to UTF-8 or UTF-16 is refused for the same reason. Edit it outside dux, or reopen it in another encoding from the status bar if it was not meant to be ${label}.`,
     })
   }
   if (facts.encodingFallback) {

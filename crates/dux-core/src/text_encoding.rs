@@ -94,7 +94,8 @@ impl std::fmt::Display for LeadingMarkInText {
             f,
             "refusing to save: the text starts with the character U+FEFF, which {} writes as \
              a byte-order mark, so the file would read back without it; nothing was written. \
-             Delete that character, or use Save with encoding to choose a byte-order mark",
+             Delete that character and save again; a byte-order mark is chosen with Save with \
+             encoding, never typed",
             self.encoding.name()
         )
     }

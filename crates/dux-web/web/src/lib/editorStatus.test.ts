@@ -142,6 +142,7 @@ function input(over: Partial<StatusBarInput>): StatusBarInput {
     languageAvailable: true,
     encodingLabel: null,
     mixedEol: false,
+    eol: null,
     readOnlyReason: null,
     diffHeadEncodingLabel: null,
     ...over,
@@ -160,6 +161,7 @@ describe("what the status bar carries in each state", () => {
       language: false,
       encoding: null,
       mixedEol: false,
+      eol: null,
       readOnlyReason: null,
     })
   })
@@ -175,8 +177,16 @@ describe("what the status bar carries in each state", () => {
       language: true,
       encoding: null,
       mixedEol: false,
+      eol: null,
       readOnlyReason: null,
     })
+  })
+
+  /// The editor's model always holds LF; the item names the file's style,
+  /// which is what a save writes.
+  it("names the line ending style a save writes, not the model's", () => {
+    expect(planStatusBar(input({ eol: "CRLF" })).eol).toBe("CRLF")
+    expect(planStatusBar(input({ eol: "CRLF", binary: true })).eol).toBe(null)
   })
 
   it("says read-only for a read-only file", () => {
@@ -204,6 +214,7 @@ describe("what the status bar carries in each state", () => {
       language: false,
       encoding: null,
       mixedEol: false,
+      eol: null,
       readOnlyReason: null,
     })
   })
@@ -255,6 +266,7 @@ describe("what the status bar carries in each state", () => {
       language: true,
       encoding: null,
       mixedEol: false,
+      eol: null,
       readOnlyReason: null,
     })
   })

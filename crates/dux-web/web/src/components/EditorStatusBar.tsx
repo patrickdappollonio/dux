@@ -167,12 +167,16 @@ export function EditorStatusBar({
             <span className={DESKTOP_ONLY}>
               {indentationLabel(status.indentation)}
             </span>
+            {/* The style a save writes: the file's, not the editor model's,
+                which always holds LF and is converted at the save. */}
             {plan.mixedEol ? (
-              <SimpleTooltip content={`Mixed line endings: a save writes every one as ${status.eol}`}>
+              <SimpleTooltip
+                content={`Mixed line endings: a save writes every one as ${plan.eol ?? status.eol}`}
+              >
                 <span className={DESKTOP_ONLY}>Mixed</span>
               </SimpleTooltip>
             ) : (
-              <span className={DESKTOP_ONLY}>{status.eol}</span>
+              <span className={DESKTOP_ONLY}>{plan.eol ?? status.eol}</span>
             )}
           </>
         )}

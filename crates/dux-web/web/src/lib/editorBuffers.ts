@@ -178,12 +178,28 @@ export function normalizeEol(text: string, eol: "LF" | "CRLF"): string {
 }
 
 // The text a read puts in the editor: the file's content with every line break
-// in the one style the server says the editor holds and a save writes. The
-// editor's model keeps one style per file anyway; holding exactly that text in
-// the buffer is what lets the mixed-endings notice, the status bar, the dirty
-// check and the bytes a save sends all agree.
+// as LF, whatever the file's own style, which the buffer keeps apart (`eol`).
+//
+// One style for the editor's text means Monaco's model is made in LF and never
+// has its style changed afterwards. Changing a live model's style is something
+// its undo history cannot follow (an undo or redo across it replays text
+// offsets in the wrong style), so a reload that changes the file's style is a
+// pure text replacement in the editor and a new `eol` in the buffer, and the
+// file's style is applied when a save writes (`textForSave`). An older server
+// names no style, and its text is left exactly as it came.
 export function editorTextOf(file: WorktreeFile): string {
-  return file.eol ? normalizeEol(file.content, file.eol) : file.content
+  return file.eol ? normalizeEol(file.content, "LF") : file.content
+}
+
+// The bytes-to-be of a save: the editor's text with its breaks in the file's
+// style, the one the status bar names. Nothing to convert when no read named a
+// style.
+export function textForSave(
+  buffer: { eol?: "LF" | "CRLF" | null } | undefined,
+  text: string,
+): string {
+  const eol = buffer?.eol ?? null
+  return eol === null ? text : normalizeEol(text, eol)
 }
 
 // One counter for every buffer, so a generation names one reading of one file
@@ -230,22 +246,6 @@ export function bufferSaveEncoding(
   return {
     encoding: buffer?.encoding ?? "UTF-8",
     bom: buffer?.draftBom ?? buffer?.bom ?? false,
-  }
-}
-
-// What the file the buffer was read from LOOKS like on disk, for its label and
-// for which encoding row is current: the mark flag, or a leading U+FEFF kept as
-// text (see `baselineSavedBuffer`), which in UTF-8 and UTF-16 is the same bytes
-// as a mark. An encoding with no mark of its own has no such reading.
-export function bufferFileEncoding(
-  buffer: Pick<TabBuffer, "encoding" | "bom" | "loaded">,
-): { encoding: string; bom: boolean } {
-  const encoding = buffer.encoding ?? "UTF-8"
-  const unicode =
-    encoding === "UTF-8" || encoding === "UTF-16LE" || encoding === "UTF-16BE"
-  return {
-    encoding,
-    bom: (buffer.bom ?? false) || (unicode && buffer.loaded.startsWith("﻿")),
   }
 }
 
@@ -523,15 +523,9 @@ export function baselineSavedBuffer(
   // save that states an encoding does); otherwise what the editor sent: one
   // line ending style, nothing new to say about the encoding.
   const unwritable = verdict ? (verdict.unwritable ?? null) : null
-  // A text that begins with U+FEFF, saved with no mark asked for, wrote the
-  // bytes of a marked file. The editor keeps the character as TEXT, in the
-  // baseline and the draft alike, rather than moving it into the mark flag:
-  // moving it would be an edit in Monaco's undo history, and undoing that edit
-  // would put the character back beside a mark, so a save would write two.
-  // Kept as text, undoing or retyping it is ordinary editing, the tab is
-  // unsaved exactly when the text differs, and no save can double the mark
-  // unless someone really types a second one. Only the label follows the
-  // bytes (see `bufferFileEncoding`).
+  // The mark is a flag the save chose, never text (the server refuses a text
+  // starting with U+FEFF in UTF-8 and UTF-16), so the editor's text is exactly
+  // what it was, with nothing to push into Monaco.
   const loaded = body
   const draft = prev.draft
   const bom = saved.bom

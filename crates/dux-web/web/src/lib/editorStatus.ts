@@ -118,6 +118,10 @@ export interface StatusBarInput {
   encodingLabel: string | null
   // The file's line endings are mixed or include a lone CR.
   mixedEol: boolean
+  // The line ending style a save writes (the file's, as the last read or save
+  // named it), or null when no read has said; the editor's own model is always
+  // LF and is not what a save writes.
+  eol: "LF" | "CRLF" | null
   // The encoding a large file's diff (the head of git's patch) was read in,
   // by its label, while that view is on screen; null otherwise.
   diffHeadEncodingLabel: string | null
@@ -143,6 +147,9 @@ export interface StatusBarPlan {
   // Say "Mixed" in place of the editor's own line ending style, which is
   // only what a save would write.
   mixedEol: boolean
+  // What the line ending item names: the style a save writes, null to fall
+  // back to the editor's own report (an older server that names none).
+  eol: "LF" | "CRLF" | null
   readOnlyReason: string | null
 }
 
@@ -156,6 +163,7 @@ const EMPTY_PLAN: StatusBarPlan = {
   language: false,
   encoding: null,
   mixedEol: false,
+  eol: null,
   readOnlyReason: null,
 }
 
@@ -197,6 +205,7 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
     // from it still writes it this way, so the item stays with it.
     encoding: input.fileReady && !input.binary ? input.encodingLabel : null,
     mixedEol: editing && input.mixedEol,
+    eol: editing ? input.eol : null,
     readOnlyReason: input.readOnly ? input.readOnlyReason : null,
   }
 }

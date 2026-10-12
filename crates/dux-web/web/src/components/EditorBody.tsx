@@ -40,7 +40,7 @@ import { chip, prose } from "@/lib/prose"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
-  bufferFileEncoding,
+  bufferReadEncoding,
   bufferSaveEncoding,
   isBufferDirty,
   changeSignalFor,
@@ -775,10 +775,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       activeBuffer !== undefined
         ? encodingLabel(
             activeBuffer.encoding,
-            bufferFileEncoding(activeBuffer).bom,
+            activeBuffer.bom,
           )
         : null,
     mixedEol: activeBuffer?.mixedEol ?? false,
+    eol: activeBuffer?.eol ?? null,
     diffHeadEncodingLabel: diffHeadEncoding,
     readOnlyReason: encodingUnwritable
       ? `This file is read-only: ${encodingLabel(
@@ -1040,20 +1041,20 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function saveWithEncoding(choice: SaveEncoding): void {
     if (!activeTab || binary || hardReadOnly || fileBusy || !fileReady) return
     if (!activeBuffer) return
-    // What the file is now, a leading U+FEFF kept as text counting as its
-    // mark; that row is inert, so a save from here is always a conversion.
-    const current = bufferFileEncoding(activeBuffer)
-    if (sameSaveEncoding(choice, current)) return
-    // Converting decides the mark by the row picked, so a leading U+FEFF
-    // the text carries in place of one (see `baselineSavedBuffer`) is that
-    // mark, not text to carry into the new encoding: kept, it would write a
-    // second mark, or a character a code page has no bytes for. Only when it
-    // stands in for the mark: with the mark flag set, a leading U+FEFF is a
-    // second mark the file really has, and converting keeps it.
-    const draft = activeBuffer.draft
-    const standsInForMark = !activeBuffer.bom && current.bom
-    const body = standsInForMark && draft.startsWith("﻿") ? draft.slice(1) : draft
-    writeBuffer(activeTab.id, activeTab.path, body, choice, activeBuffer.stamp, true)
+    // What the file is now; that row is inert, so a save from here is always
+    // a conversion.
+    if (sameSaveEncoding(choice, bufferReadEncoding(activeBuffer))) return
+    // The text goes exactly as the editor holds it: the row's mark choice
+    // alone decides whether a mark is written, and nothing in the text is
+    // taken out or put in for it.
+    writeBuffer(
+      activeTab.id,
+      activeTab.path,
+      activeBuffer.draft,
+      choice,
+      activeBuffer.stamp,
+      true,
+    )
   }
 
   // "Reopen with encoding": read the file again in exactly `encoding`. With
@@ -1307,7 +1308,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     const current = inDiff
       ? { encoding: activeBuffer?.diffHead?.encoding ?? "UTF-8", bom: false }
       : activeBuffer
-        ? bufferFileEncoding(activeBuffer)
+        ? bufferReadEncoding(activeBuffer)
         : bufferSaveEncoding(undefined)
     const reopen = (encoding: string) => {
       if (inDiff && activeTab) reloadDiffAs(activeTab.id, activeTab.path, encoding)
@@ -1989,7 +1990,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 activeBuffer !== undefined &&
                 encodingNotices(
                   activeTab.path,
-                  { ...activeBuffer, bom: bufferFileEncoding(activeBuffer).bom },
+                  activeBuffer,
                   (kind) =>
                   noticeDismissed(key, activeTab.path, kind),
                 ).map((notice) => (
@@ -2478,9 +2479,9 @@ function FileContentPane({
           onSave={onSave}
           onReady={onMonacoReady}
           onEditorChange={onEditorChange}
-          // Only once a read has named one: an older server names none.
-          eol={buffer?.eol ?? undefined}
-          reading={buffer?.generation}
+          // A read that names the file's style hands the text over in LF
+          // (see `editorTextOf`); an older server names none.
+          lfText={(buffer?.eol ?? null) !== null}
           readOnly={(buffer?.readOnly ?? false) || (buffer?.reopening ?? null) !== null}
           readOnlyReason={readOnlyReasonOf(buffer)}
         />

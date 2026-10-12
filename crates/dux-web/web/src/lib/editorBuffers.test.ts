@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
   answerApplies,
-  bufferFileEncoding,
+  bufferReadEncoding,
+  textForSave,
   bufferSaveEncoding,
   isBufferDirty,
   editorTextOf,
@@ -647,16 +648,19 @@ describe("what the editor holds is what a save writes", () => {
     expect(normalizeEol("plain", "LF")).toBe("plain")
   })
 
-  it("loads a mixed file as the one style the notice names", () => {
-    expect(
-      editorTextOf({
-        path: "a",
-        binary: false,
-        content: "a\r\nb\r\nc\n",
-        eol: "CRLF",
-        mixed_line_endings: true,
-      }),
-    ).toBe("a\r\nb\r\nc\r\n")
+  /// The editor's text is held in one style whatever the file's, so Monaco's
+  /// model never has its style changed after it is made (which its undo
+  /// history cannot follow); the file's style is applied when a save writes.
+  it("holds every file's text with LF breaks, the file's style kept apart", () => {
+    const mixed = {
+      path: "a",
+      binary: false,
+      content: "a\r\nb\r\nc\n",
+      eol: "CRLF" as const,
+      mixed_line_endings: true,
+    }
+    expect(editorTextOf(mixed)).toBe("a\nb\nc\n")
+    expect(encodingFromFile(mixed, null).eol).toBe("CRLF")
     // An older server sends no style; the text is left as it came.
     expect(editorTextOf({ path: "a", binary: false, content: "a\r\nb\n" })).toBe("a\r\nb\n")
   })
@@ -669,9 +673,17 @@ describe("what the editor holds is what a save writes", () => {
       { path: "a.ts", binary: false, content: "x\r\ny\n", eol: "CRLF", mixed_line_endings: true },
       "",
     )
-    expect(next.loaded).toBe("x\r\ny\r\n")
-    expect(next.draft).toBe("x\r\ny\r\n")
+    expect(next.loaded).toBe("x\ny\n")
+    expect(next.draft).toBe("x\ny\n")
+    expect(next.eol).toBe("CRLF")
     expect(next.generation).not.toBe(prev.generation)
+  })
+
+  it("writes the editor's text in the file's style", () => {
+    expect(textForSave({ eol: "CRLF" }, "a\nb\n")).toBe("a\r\nb\r\n")
+    expect(textForSave({ eol: "LF" }, "a\nb\n")).toBe("a\nb\n")
+    // An older server names no style, and the text goes as it is.
+    expect(textForSave({ eol: null }, "a\r\nb\n")).toBe("a\r\nb\n")
   })
 
   it("tells path read-only from encoding read-only", () => {
@@ -758,69 +770,36 @@ describe("a save's answer and the buffer it is about", () => {
   })
 })
 
-// A leading U+FEFF saved with no mark asked for is byte for byte a marked file.
-// The editor keeps the character as text rather than moving it into the mark:
-// moving it would be an edit in Monaco's history, and undoing that edit would
-// bring the character back beside a mark, writing two. Only the label follows
-// the bytes.
-describe("a save whose text begins with U+FEFF", () => {
-  const verdict = {
-    unwritable: null,
-    bom: true,
-    leading_mark_read_as_bom: true,
-    eol: "LF" as const,
-  }
-
-  it("keeps the character as text, the save clean, and labels the file as marked", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" })
+// The mark is only ever a flag. A conversion neither takes a leading U+FEFF out
+// of the text nor puts one in: the row's mark choice alone decides, and after it
+// the buffer's text is exactly the editor's, with nothing to push into Monaco.
+describe("the byte-order mark is a flag, never text", () => {
+  it("keeps the text exactly as the editor holds it through a conversion", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "x\n", loaded: "x\n" })
     const next = baselineSavedBuffer(
       prev,
-      "\ufeffx",
+      "x\n",
       { modified: null, size: 4 },
       "",
-      { encoding: "UTF-8", bom: false },
-      verdict,
+      { encoding: "UTF-16LE", bom: true },
+      { unwritable: null, mixed_line_endings: false, eol: "LF" },
     )
-    expect(next.loaded).toBe("\ufeffx")
-    expect(next.draft).toBe("\ufeffx")
-    expect(next.bom).toBe(false)
+    expect(next.draft).toBe("x\n")
+    expect(next.loaded).toBe("x\n")
+    expect(next.bom).toBe(true)
+    expect(next.draftBom).toBe(true)
     expect(isBufferDirty(next)).toBe(false)
-    expect(bufferFileEncoding(next)).toEqual({ encoding: "UTF-8", bom: true })
-    // The next save writes the same bytes: the character, no extra mark.
-    expect(bufferSaveEncoding(next)).toEqual({ encoding: "UTF-8", bom: false })
   })
 
-  it("leaves undoing the character an ordinary edit: unsaved, and its save writes no mark", () => {
-    const saved = baselineSavedBuffer(
-      loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" }),
-      "\ufeffx",
-      { modified: null, size: 4 },
-      "",
-      { encoding: "UTF-8", bom: false },
-      verdict,
-    )
-    const undone = { ...saved, draft: "x" }
-    expect(isBufferDirty(undone)).toBe(true)
-    expect(bufferSaveEncoding(undone)).toEqual({ encoding: "UTF-8", bom: false })
-  })
-
-  it("agrees with a fresh read of the same bytes on what the file is", () => {
-    // A read sets the mark aside: bom true, text "x".
-    const fresh = loadedBuffer({ encoding: "UTF-8", bom: true, draftBom: true, draft: "x", loaded: "x" })
-    const kept = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx", loaded: "\ufeffx" })
-    expect(bufferFileEncoding(fresh)).toEqual(bufferFileEncoding(kept))
-    expect(isBufferDirty(fresh)).toBe(false)
-    expect(isBufferDirty(kept)).toBe(false)
-  })
-
-  it("says the same of UTF-16, whose label carries no mark", () => {
-    const kept = loadedBuffer({ encoding: "UTF-16LE", bom: false, draft: "\ufeffx", loaded: "\ufeffx" })
-    expect(bufferFileEncoding(kept)).toEqual({ encoding: "UTF-16LE", bom: true })
-  })
-
-  it("does not count a U+FEFF as a mark in an encoding that has none", () => {
-    const kept = loadedBuffer({ encoding: "gb18030", bom: false, draft: "\ufeffx", loaded: "\ufeffx" })
-    expect(bufferFileEncoding(kept)).toEqual({ encoding: "gb18030", bom: false })
+  it("labels the file by the flag alone", () => {
+    expect(bufferReadEncoding(loadedBuffer({ encoding: "UTF-8", bom: true }))).toEqual({
+      encoding: "UTF-8",
+      bom: true,
+    })
+    expect(bufferReadEncoding(loadedBuffer({ encoding: "UTF-8", bom: false }))).toEqual({
+      encoding: "UTF-8",
+      bom: false,
+    })
   })
 })
 

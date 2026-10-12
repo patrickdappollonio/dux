@@ -75,10 +75,6 @@ export interface SaveVerdict {
   unwritable?: UnwritableReason | null
   mixed_line_endings?: boolean
   eol?: "LF" | "CRLF"
-  /** A read of the written bytes finds a byte-order mark. */
-  bom?: boolean
-  /** The text began with U+FEFF and a read takes it as the mark. */
-  leading_mark_read_as_bom?: boolean
 }
 
 

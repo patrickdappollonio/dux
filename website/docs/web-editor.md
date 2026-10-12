@@ -98,8 +98,8 @@ A thin status bar runs along the bottom, under both panes, and describes the ope
   a selection)
 - how many lines the file has
 - its indentation (`Spaces: 2` or `Tabs: 4`), as Monaco detected it from the file
-- its line endings, `LF` or `CRLF`, or `Mixed` for a file that has both or a lone CR (see
-  [File encodings](#file-encodings))
+- its line endings, `LF` or `CRLF`, which is the style a save writes, or `Mixed` for a file
+  that has both or a lone CR (see [File encodings](#file-encodings))
 - its size on disk, as of the last time the editor read or saved it (unsaved edits do not
   count until you save)
 - its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM`
@@ -252,12 +252,23 @@ bytes you never edited. That happens when:
   like GB18030) with the byte-order mark character, because the editor drops it.
 
 It is still text: reopen it in another encoding from the status bar to edit it, or convert
-it with **Save with encoding** (any encoding except the one that cannot write it back).
+it with **Save with encoding** (any encoding except the one that cannot write it back). A
+file whose text starts with the byte-order mark character cannot be converted to UTF-8 or
+UTF-16 either (see below); edit it outside dux instead.
 
-The editor keeps one line ending style per file. A file whose line endings are mixed, or
-that has a lone carriage return (as old Mac files do), gets an amber notice saying that
-saving writes every line ending as the style named there, and the status bar says `Mixed`.
-Nothing changes until you save.
+The byte-order mark is a property of the file, chosen with **Save with encoding**, never a
+character in the text. A save in UTF-8 or UTF-16 is refused when the text itself starts
+with the character U+FEFF, because those encodings would write it as a mark and the file
+would read back without it. Nothing is written; delete that character and save again.
+
+The editor keeps one line ending style per file, the one the status bar names, and a save
+writes every line ending in it, whatever you typed or pasted. A file whose line endings are
+mixed, or that has a lone carriage return (as old Mac files do), gets an amber notice
+saying that saving writes every line ending as the style named there, and the status bar
+says `Mixed`. Nothing changes until you save. When the file is rewritten with the other
+style and reloads, the style changes with it, and undoing past that reload brings back
+your earlier text but not the earlier style: the status bar always names what a save
+writes.
 
 If you reopened a file in a code page and it is later rewritten as UTF-8 (by an agent,
 say), it is not silently shown as garbled text: an amber notice says it is open in the
