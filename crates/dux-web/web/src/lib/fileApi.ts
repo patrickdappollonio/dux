@@ -16,7 +16,8 @@ import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 
 export interface WorktreeFile {
   path: string
-  // True when the file is binary: `content` is empty and the editor refuses it.
+  // True when the file is binary or not valid UTF-8: `content` is empty and the
+  // editor refuses it.
   binary: boolean
   content: string
   /** True when the server opened this file read-only (outside-resolving symlink

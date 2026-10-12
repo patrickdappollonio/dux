@@ -149,7 +149,9 @@ Any file inside the worktree is editable. Open it, type, and the dirty dot appea
 writes it to disk.
 
 dux keeps you inside the worktree: files outside it, inside `.git`, or binary blobs come
-back read-only or not at all, with a badge explaining why.
+back read-only or not at all, with a badge explaining why. A text file saved in an encoding
+other than UTF-8 (Latin-1 or Shift-JIS, say) is treated like a binary blob: the editor
+won't open it, so a save can never replace bytes it couldn't show you.
 
 Unsaved edits survive the editor closing. Close it with the button, Escape, or the
 browser's Back, and reopening brings every tab back, dirty dot and typed text included. The

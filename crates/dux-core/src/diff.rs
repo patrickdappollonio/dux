@@ -72,8 +72,12 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
     if head_prefix.is_none() && working_prefix.is_none() {
         anyhow::bail!("file not found in the worktree or at HEAD: {rel_path}");
     }
+    // Only the head of each side is checked, so a large file whose first
+    // non-UTF-8 byte sits past the sample is shown as a patch rather than
+    // called binary. This view is read-only, so that costs a garbled line,
+    // never a write.
     let sample_is_text =
-        |sample: &Option<Vec<u8>>| sample.as_deref().is_none_or(is_renderable_text);
+        |sample: &Option<Vec<u8>>| sample.as_deref().is_none_or(is_renderable_text_prefix);
     if !sample_is_text(&head_prefix) || !sample_is_text(&working_prefix) {
         return Ok(binary_head());
     }
@@ -303,14 +307,37 @@ impl std::fmt::Display for DiffTooLarge {
 impl std::error::Error for DiffTooLarge {}
 
 /// Whether a byte slice is renderable UTF-8 text (empty counts as text).
-/// `content_inspector` catches UTF-8 byte streams that nonetheless contain
-/// NUL/control bytes, which `String::from_utf8` alone would accept and render
-/// garbled.
+///
+/// Two checks, because each misses what the other catches. `content_inspector`
+/// catches UTF-8 byte streams that nonetheless contain NUL/control bytes, which
+/// `std::str::from_utf8` alone would accept and render garbled. But it only
+/// sniffs the head for NULs and magic numbers and never validates the encoding,
+/// so it calls Latin-1 or Shift-JIS text "UTF-8"; every reader decodes after
+/// this check, and a decode of those bytes yields nothing, which the editor
+/// would serve as an empty buffer a save then writes over the real file. The
+/// full validation is what keeps that from happening.
 ///
 /// The SINGLE binary-vs-text predicate for the whole app, so a file is never
 /// classified as binary on one surface and text on another.
 pub fn is_renderable_text(bytes: &[u8]) -> bool {
-    bytes.is_empty() || content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
+    bytes.is_empty() || (std::str::from_utf8(bytes).is_ok() && sniffs_as_utf8(bytes))
+}
+
+/// [`is_renderable_text`] for the first bytes of a longer file. A sample cut at
+/// a fixed length can end in the middle of a scalar, and that cut is the
+/// sampler's rather than the file's, so an incomplete sequence at the very end
+/// is allowed; an invalid one anywhere is not.
+fn is_renderable_text_prefix(bytes: &[u8]) -> bool {
+    let valid = match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        // `error_len() == None` means the input ended mid-sequence.
+        Err(e) => e.error_len().is_none(),
+    };
+    bytes.is_empty() || (valid && sniffs_as_utf8(bytes))
+}
+
+fn sniffs_as_utf8(bytes: &[u8]) -> bool {
+    content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
 }
 
 /// Read the two sides of a single file's working-tree-vs-HEAD diff as whole
@@ -401,6 +428,34 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// content_inspector only sniffs for NUL bytes and magic numbers, so on its
+    /// own it calls Latin-1 and Shift-JIS "UTF-8". Those must not be text, or
+    /// every reader that decodes after this check decodes them to nothing.
+    #[test]
+    fn is_renderable_text_refuses_bytes_that_are_not_utf8() {
+        assert!(!is_renderable_text(b"caf\xe9 au lait\n"));
+        // Shift-JIS for "nihongo".
+        assert!(!is_renderable_text(&[0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea]));
+        // An invalid byte far past the sniffed head is still caught.
+        let mut late = vec![b'a'; 4096];
+        late.push(0xe9);
+        assert!(!is_renderable_text(&late));
+        // A whole file that ends mid-scalar is not valid UTF-8 either.
+        assert!(!is_renderable_text(&"caf\u{e9}".as_bytes()[..4]));
+    }
+
+    /// A prefix cut at a fixed byte count can end in the middle of a scalar;
+    /// that cut is the sampler's, not the file's, so it must not make a UTF-8
+    /// file look like something else.
+    #[test]
+    fn a_prefix_sample_tolerates_a_scalar_cut_at_its_end_only() {
+        let cut = &"caf\u{e9}".as_bytes()[..4];
+        assert!(is_renderable_text_prefix(cut));
+        assert!(is_renderable_text_prefix(b""));
+        assert!(!is_renderable_text_prefix(b"caf\xe9 au lait\n"));
+        assert!(!is_renderable_text_prefix(b"text\0more"));
+    }
 
     #[test]
     fn is_renderable_text_classifies_empty_utf8_and_binary() {
