@@ -1,7 +1,7 @@
 // Ask a Monaco diff widget whether its last diff computation was cut short.
 //
 // `getDiffComputationResult` is on the widget at runtime (it reads `quitEarly`
-// straight off the diff state) but is absent from monaco-editor 0.55.1's public
+// straight off the diff state) but is absent from monaco-editor 0.57.0's public
 // `editor.api.d.ts`, which exposes only `onDidUpdateDiff` and the deprecated
 // `getLineChanges`. Hence the narrow structural read rather than a cast to a
 // public type: an unknown answer is treated as "it finished", because a notice

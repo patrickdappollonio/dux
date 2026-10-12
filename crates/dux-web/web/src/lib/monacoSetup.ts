@@ -4,16 +4,21 @@
 // `monaco` instance with workers wired, and no CDN is used: dux serves the SPA
 // offline.
 //
-// `edcore.main` is the editor core and its contributions without the
-// typescript/json/css/html language services the default `monaco-editor` barrel
-// registers, so only the editor worker ships (`ts.worker` alone is ~6.6MB) and
-// highlighting runs on the main thread from the Monarch grammars below. What
-// that gives up is IntelliSense and diagnostics. Consumers are lazy-loaded, so
-// even the trimmed Monaco stays out of the main bundle until the editor opens.
+// `monaco-editor/editor` is the bare editor API. The two `register.all`
+// imports opt into every editor feature (find, suggest, hover, folding...) and
+// every Monarch language definition, and deliberately NOT into
+// `languages/features`, the typescript/json/css/html language services the
+// default `monaco-editor` entry registers. So only the editor worker ships
+// (`ts.worker` alone is several MB) and highlighting runs on the main thread
+// from the Monarch grammars. What that gives up is IntelliSense and
+// diagnostics. Each definition loads its grammar on first use, and consumers
+// are lazy-loaded, so Monaco stays out of the main bundle until the editor
+// opens.
 import { loader } from "@monaco-editor/react"
-import * as monaco from "monaco-editor/esm/vs/editor/edcore.main"
-import "@/monacoLanguages"
-import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker"
+import * as monaco from "monaco-editor/editor"
+import "monaco-editor/features/register.all"
+import "monaco-editor/languages/definitions/register.all"
+import editorWorker from "monaco-editor/editor/editor.worker?worker"
 
 import { inferredLanguageId } from "@/lib/editorLanguage"
 import {
