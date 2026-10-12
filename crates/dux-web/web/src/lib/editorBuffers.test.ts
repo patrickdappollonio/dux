@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
+  bufferSaveEncoding,
+  encodingFromFile,
   changeSignalFor,
   diskFactKey,
   emptyBuffer,
@@ -515,6 +517,79 @@ describe("baselineSavedBuffer", () => {
       "",
     )
     expect(next.diskState).toBe("fresh")
+  })
+
+  it("keeps a fallback buffer as it was through an ordinary save", () => {
+    const prev = loadedBuffer({ encoding: "windows-1252", encodingFallback: true })
+    const next = baselineSavedBuffer(prev, "x", { modified: null, size: 1 }, "")
+    expect(next.encoding).toBe("windows-1252")
+    expect(next.encodingFallback).toBe(true)
+    expect(next.encodingRequested).toBeNull()
+  })
+
+  it("moves a buffer to the encoding a conversion wrote, and asks for it by name next time", () => {
+    const prev = loadedBuffer({ encoding: "windows-1252", encodingFallback: true })
+    const next = baselineSavedBuffer(prev, "x", { modified: null, size: 1 }, "", {
+      encoding: "Shift_JIS",
+      bom: false,
+    })
+    expect(next.encoding).toBe("Shift_JIS")
+    expect(next.encodingFallback).toBe(false)
+    expect(next.encodingRequested).toBe("Shift_JIS")
+  })
+})
+
+describe("encodings on a read", () => {
+  it("reads an older server's answer, which carries none, as plain UTF-8", () => {
+    expect(
+      encodingFromFile({ path: "a", binary: false, content: "" }, null),
+    ).toEqual({
+      encoding: "UTF-8",
+      bom: false,
+      encodingFallback: false,
+      encodingRequested: null,
+    })
+  })
+
+  it("takes the encoding, the mark and the fallback flag from the read", () => {
+    expect(
+      encodingFromFile(
+        {
+          path: "a",
+          binary: false,
+          content: "",
+          encoding: "UTF-16LE",
+          bom: true,
+          encoding_fallback: false,
+        },
+        "UTF-16LE",
+      ),
+    ).toEqual({
+      encoding: "UTF-16LE",
+      bom: true,
+      encodingFallback: false,
+      encodingRequested: "UTF-16LE",
+    })
+  })
+
+  it("an ordinary save writes what the buffer was read in", () => {
+    expect(bufferSaveEncoding(loadedBuffer({ encoding: "UTF-8", bom: true }))).toEqual({
+      encoding: "UTF-8",
+      bom: true,
+    })
+    expect(bufferSaveEncoding(undefined)).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("a reload in place keeps asking for the encoding the person chose", () => {
+    const prev = loadedBuffer({ encoding: "Shift_JIS", encodingRequested: "Shift_JIS" })
+    const next = reloadedInPlace(
+      prev,
+      "a.ts",
+      { path: "a.ts", binary: false, content: "x", encoding: "Shift_JIS" },
+      "",
+    )
+    expect(next.encodingRequested).toBe("Shift_JIS")
+    expect(next.encoding).toBe("Shift_JIS")
   })
 })
 

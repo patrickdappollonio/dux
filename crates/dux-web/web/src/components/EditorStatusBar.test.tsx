@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest"
-import { act, cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { EditorStatusBar, type StatusBarEditor } from "./EditorStatusBar"
 import type { StatusBarPlan } from "@/lib/editorStatus"
@@ -59,6 +59,7 @@ const FULL: StatusBarPlan = {
   dimensions: null,
   editing: true,
   language: true,
+  encoding: null,
 }
 
 function renderBar(plan: StatusBarPlan, editor: StatusBarEditor | null) {
@@ -87,7 +88,7 @@ describe("the editor status bar", () => {
     expect(
       screen.getByRole("button", { name: "Syntax language: Rust" }),
     ).toBeTruthy()
-    // No encoding item: every file the editor opens is UTF-8.
+    // No encoding item: a plain UTF-8 file says nothing about it.
     expect(screen.queryByText(/utf-?8/i)).toBeNull()
   })
 
@@ -171,6 +172,7 @@ describe("the editor status bar", () => {
         dimensions: null,
         editing: false,
         language: false,
+        encoding: null,
       },
       null,
     )
@@ -202,6 +204,25 @@ describe("the editor status bar", () => {
     expect(screen.queryByText(/lines$/)).toBeNull()
     expect(screen.queryByRole("button", { name: /syntax language/i })).toBeNull()
     expect(screen.getByText("1.5 KiB")).toBeTruthy()
+  })
+
+  it("shows the encoding of a file that is not plain UTF-8 as a menu, on a computer only", async () => {
+    render(
+      <EditorStatusBar
+        plan={{ ...FULL, encoding: "Windows-1252" }}
+        editor={fakeEditor().editor}
+        languageLabel="Rust"
+        languageItems={null}
+        encodingItems={<div role="menuitem">Reopen with encoding</div>}
+      />,
+    )
+    const trigger = screen.getByRole("button", {
+      name: "File encoding: Windows-1252",
+    })
+    expect(trigger.textContent).toContain("Windows-1252")
+    expect(trigger.closest(".max-md\\:hidden")).not.toBeNull()
+    fireEvent.click(trigger)
+    expect(await screen.findByText("Reopen with encoding")).toBeTruthy()
   })
 
   it("keeps only the path, the dirty dot, read-only and the cursor on a phone", () => {

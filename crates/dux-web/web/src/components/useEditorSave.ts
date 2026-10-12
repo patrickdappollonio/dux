@@ -1,6 +1,10 @@
 import { useState } from "react"
 import type { Dispatch, RefObject, SetStateAction } from "react"
-import { FileConflictError, fileApi } from "@/lib/fileApi"
+import {
+  FileConflictError,
+  FileUnmappableError,
+  fileApi,
+} from "@/lib/fileApi"
 import {
   baselineSavedBuffer,
   changeSignalFor,
@@ -13,6 +17,12 @@ import type {
   TabBuffer,
 } from "@/lib/editorBuffers"
 import type { EditorRoot } from "@/lib/editorRoot"
+import {
+  encodingLabel,
+  unmappableNotice,
+  type SaveEncoding,
+} from "@/lib/editorEncoding"
+import { chip, prose } from "@/lib/prose"
 import { saveResolutionOutcome } from "@/lib/editorTabs"
 import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { editorSetTabDirty } from "@/lib/store"
@@ -49,11 +59,16 @@ export function useEditorSave({
   const [saveConflict, setSaveConflict] =
     useState<SaveConflictTarget | null>(null)
 
+  // `encoding` is what the text is written in: the buffer's own for an
+  // ordinary save, or the one the person picked to convert the file to.
+  // `converting` says it was a conversion, which the success toast names.
   function writeBuffer(
     tabId: string,
     path: string,
     body: string,
+    encoding: SaveEncoding,
     expected?: { modified: string | null; size: number | null },
+    converting = false,
   ): void {
     setSavingTabId(tabId)
     setSavingPaths((prev) => {
@@ -62,7 +77,7 @@ export function useEditorSave({
       return next
     })
     fileApi
-      .write(root, path, body, expected)
+      .write(root, path, body, expected, encoding)
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)
@@ -78,6 +93,7 @@ export function useEditorSave({
                 body,
                 { modified: result.modified, size: result.size },
                 changeSignalFor(sliceRef.current, path),
+                encoding,
               ),
             )
             return next
@@ -85,6 +101,10 @@ export function useEditorSave({
           editorSetTabDirty(root, tabId, false)
         }
         if (outcome.tone === "warning") notifyWarning(outcome.message)
+        else if (converting)
+          notifySuccess(
+            prose`Saved ${chip(path)} as ${encodingLabel(encoding.encoding, encoding.bom)}.`,
+          )
         else notifySuccess(outcome.message)
       })
       .catch((error) => {
@@ -103,8 +123,16 @@ export function useEditorSave({
             tabId,
             path,
             body,
+            encoding,
             deleted: error.deleted,
           })
+          return
+        }
+        if (error instanceof FileUnmappableError) {
+          // Not sticky (weighed): nothing is lost, the edits stay in the
+          // buffer under its unsaved dot, and the error window is long enough
+          // to read where the character is.
+          notifyError(unmappableNotice(path, error))
           return
         }
         notifyError(

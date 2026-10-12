@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ChevronDown, Code2 } from "lucide-react"
+import { ChevronDown, Code2, FileType } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
@@ -75,6 +75,7 @@ export function EditorStatusBar({
   editor,
   languageLabel,
   languageItems,
+  encodingItems = null,
 }: {
   plan: StatusBarPlan
   editor: StatusBarEditor | null
@@ -82,6 +83,9 @@ export function EditorStatusBar({
   // The picker's rows, shared with the phone fold's submenu so the two
   // cannot drift.
   languageItems: React.ReactNode
+  // The encoding menu's rows (reopen, save with), shared with the phone's ⋯
+  // menu the same way. Shown only while the plan names an encoding.
+  encodingItems?: React.ReactNode
 }) {
   const status = useEditorCursorStatus(plan.editing ? editor : null)
   return (
@@ -136,6 +140,37 @@ export function EditorStatusBar({
               {formatFileSize(plan.size)}
             </span>
           </SimpleTooltip>
+        )}
+        {plan.encoding !== null && (
+          // Desktop only, like the language picker: on a phone the same rows
+          // are in the editor's ⋯ menu, under a label that names the
+          // encoding, so the phone bar keeps no control and no extra width.
+          <span className={cn("inline-flex", DESKTOP_ONLY)}>
+            <DropdownMenu>
+              <SimpleTooltip content={`File encoding: ${plan.encoding}`}>
+                <DropdownMenuTrigger
+                  render={
+                    // The language picker's own geometry and the same
+                    // exemption: plain-text neighbours on this bar, and a
+                    // finger at desktop width gets the floor.
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5.5 font-normal text-muted-foreground pointer-coarse:h-10"
+                      aria-label={`File encoding: ${plan.encoding}`}
+                    />
+                  }
+                >
+                  <FileType />
+                  {plan.encoding}
+                  <ChevronDown />
+                </DropdownMenuTrigger>
+              </SimpleTooltip>
+              <DropdownMenuContent align="end" side="top">
+                {encodingItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </span>
         )}
         {plan.language && (
           <span className={cn("inline-flex", DESKTOP_ONLY)}>

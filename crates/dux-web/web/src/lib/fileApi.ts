@@ -13,13 +13,22 @@ import { apiFetch } from "./apiFetch"
 import { rootApiBase, type EditorRoot } from "@/lib/editorRoot"
 import type { DirEntry } from "@/lib/fileTree"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
+import type { SaveEncoding } from "@/lib/editorEncoding"
 
 export interface WorktreeFile {
   path: string
-  // True when the file is binary or not valid UTF-8: `content` is empty and the
-  // editor refuses it.
+  // True when the file is binary: `content` is empty and the editor refuses it.
   binary: boolean
   content: string
+  /** The WHATWG name of the encoding `content` was decoded from, which a save
+   *  sends back. Null for binary, absent from an older server (which only ever
+   *  served UTF-8). */
+  encoding?: string | null
+  /** The file starts with a byte-order mark, which `content` does not hold. */
+  bom?: boolean
+  /** The encoding is windows-1252 as a last resort for bytes that are not
+   *  UTF-8, not something the file said about itself. */
+  encoding_fallback?: boolean
   /** True when the server opened this file read-only (outside-resolving symlink
    *  or a .git/ path). The editor must not allow saving. */
   read_only?: boolean
@@ -89,6 +98,31 @@ export class FileApiError extends Error {
   }
 }
 
+// A save refused (422) because the text holds a character the encoding it is
+// being saved in has no bytes for. Nothing was written. Carries the character
+// and where it is, so the editor can say so in its own words rather than relay
+// the server's sentence.
+export class FileUnmappableError extends FileApiError {
+  readonly character: string
+  readonly line: number
+  readonly column: number
+  readonly encoding: string
+  constructor(body: {
+    message: string
+    character: string
+    line: number
+    column: number
+    encoding: string
+  }) {
+    super(422, body.message)
+    this.name = "FileUnmappableError"
+    this.character = body.character
+    this.line = body.line
+    this.column = body.column
+    this.encoding = body.encoding
+  }
+}
+
 // A save refused (409) because the file moved underneath the buffer. Carries
 // the file's current stamp so the editor can offer overwrite or reload without
 // another round trip, and `deleted`, which is a different rung: there is nothing
@@ -127,6 +161,32 @@ async function postFile<T>(path: string, body: Record<string, unknown>): Promise
     // The save route's freshness refusal carries a structured body, parsed here
     // so callers route on an error type rather than a status plus their own
     // JSON.parse. An unparseable one falls through to the plain error below.
+    if (resp.status === 422) {
+      const body = await resp
+        .clone()
+        .json()
+        .catch(() => null)
+      if (
+        body !== null &&
+        typeof body === "object" &&
+        (body as { error?: unknown }).error === "unmappable"
+      ) {
+        const b = body as {
+          message?: string
+          character?: string
+          line?: number
+          column?: number
+          encoding?: string
+        }
+        throw new FileUnmappableError({
+          message: b.message ?? "the text cannot be written in this encoding",
+          character: b.character ?? "",
+          line: b.line ?? 0,
+          column: b.column ?? 0,
+          encoding: b.encoding ?? "",
+        })
+      }
+    }
     if (resp.status === 409) {
       const body = await resp
         .clone()
@@ -196,8 +256,14 @@ export const fileApi = {
   // 404 (the panel dismisses itself); a refused path answers 400 (it says why).
   info: (root: EditorRoot, path: string) =>
     postFile<WorktreeEntryInfo>(fileUrl(root, "info"), { path }),
-  read: (root: EditorRoot, path: string) =>
-    postFile<WorktreeFile>(fileUrl(root, "read"), { path }),
+  // With `encoding` (a WHATWG name), read in exactly that encoding: a file
+  // whose bytes are not valid in it is refused (400) rather than shown with
+  // replacement characters. Without it, the server's own rules decide.
+  read: (root: EditorRoot, path: string, encoding?: string | null) =>
+    postFile<WorktreeFile>(fileUrl(root, "read"), {
+      path,
+      ...(encoding ? { encoding } : {}),
+    }),
   // The GET URL serving a file's raw bytes (the route `markdownAssetUrl` in
   // lib/markdown.ts also hits): a pure builder, no fetch. The server sends
   // Cache-Control: no-cache, so no cache-busting param is needed here.
@@ -206,21 +272,33 @@ export const fileApi = {
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
   // diff view. The server resolves both sides and the binary flag, and answers
   // with the head of git's own patch for a version it will not send whole.
-  diff: (root: EditorRoot, path: string) =>
-    postFile<FileDiffAnswer>(fileUrl(root, "diff"), { path }),
+  // `encoding` is the one the person reopened the file in, so the diff reads
+  // both sides the way the editor tab does wherever they decode in it.
+  diff: (root: EditorRoot, path: string, encoding?: string | null) =>
+    postFile<FileDiffAnswer>(fileUrl(root, "diff"), {
+      path,
+      ...(encoding ? { encoding } : {}),
+    }),
   // Save a file's working copy. With `expected`, the freshness token the read
   // handed out, a file that moved on disk answers 409 and this rejects with a
   // `FileConflictError` carrying the current stamp; without it the write is
   // unconditional. The resolved stamp is the caller's new baseline.
+  //
+  // `encoding` is what the text is written in, and the editor always sends it:
+  // a save that names none is the old plain-UTF-8 write, which the server
+  // refuses over a file that is not UTF-8. A character the encoding cannot
+  // hold rejects with a `FileUnmappableError` and writes nothing.
   write: (
     root: EditorRoot,
     path: string,
     content: string,
     expected?: { modified: string | null; size: number | null },
+    encoding?: SaveEncoding,
   ) =>
     postFile<WriteResult>(fileUrl(root, "write"), {
       path,
       content,
+      ...(encoding ? { encoding: encoding.encoding, bom: encoding.bom } : {}),
       // Both halves or neither: the server treats half a token as no token,
       // and sending one half would only look like a guard.
       ...(expected && expected.modified !== null && expected.size !== null

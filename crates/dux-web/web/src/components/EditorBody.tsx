@@ -18,6 +18,7 @@ import {
   FileCode2,
   FilePlus,
   FileText,
+  FileType,
   GitCompare,
   Laptop,
   Loader2,
@@ -27,6 +28,7 @@ import {
   RefreshCw,
   RotateCw,
   Save,
+  SaveAll,
   Search,
   SquareTerminal,
   Wand2,
@@ -38,6 +40,7 @@ import { chip, prose } from "@/lib/prose"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
+  bufferSaveEncoding,
   changeSignalFor,
   isBufferStale,
   pruneByIds,
@@ -48,6 +51,17 @@ import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
+import {
+  REOPEN_CHOICES,
+  SAVE_CHOICES,
+  dismissFallbackNotice,
+  encodingLabel,
+  fallbackNoticeDismissed,
+  sameSaveEncoding,
+  showsEncoding,
+  showsFallbackNotice,
+  type SaveEncoding,
+} from "@/lib/editorEncoding"
 import {
   rootHasDiff,
   rootKey,
@@ -109,6 +123,11 @@ import { ConfirmReloadFileDialog } from "@/components/ConfirmReloadFileDialog"
 import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { FileDiskBanner } from "@/components/FileDiskBanner"
+import { EncodingFallbackNotice } from "@/components/EncodingFallbackNotice"
+import {
+  ConfirmReopenEncodingDialog,
+  type ReopenEncodingTarget,
+} from "@/components/ConfirmReopenEncodingDialog"
 import { SaveConflictDialog } from "@/components/SaveConflictDialog"
 import { useEditorDiffReads } from "@/components/useEditorDiffReads"
 import { useEditorFileReads } from "@/components/useEditorFileReads"
@@ -142,7 +161,9 @@ import { StartTruncatedText } from "@/components/StartTruncatedText"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -380,6 +401,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const [reloadTarget, setReloadTarget] = useState<ReloadFileTarget | null>(
     null,
   )
+  // Reopening a dirty buffer in another encoding discards the edits, so it
+  // asks first, with the same live truth as the reload confirm: still dirty.
+  const [reopenTarget, setReopenTarget] =
+    useState<ReopenEncodingTarget | null>(null)
+  // The fallback notice's dismissals live in a page-session set outside React
+  // (lib/editorEncoding.ts); this only makes a dismissal re-render.
+  const [, setNoticeDismissals] = useState(0)
   // Bumped by `revalidateDirs` after a create/rename/delete lands, so
   // `FileTree` force-refetches the affected dir(s) past its lazy-load cache.
   const [treeRevalidate, setTreeRevalidate] = useState<{
@@ -696,6 +724,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     diffEditorShown: diffEditorIsShown(activeTab, diffReady, activeBuffer, showPreview),
     size: activeBuffer?.stamp.size ?? null,
     languageAvailable: showLanguagePicker,
+    encodingLabel:
+      activeBuffer !== undefined &&
+      showsEncoding(activeBuffer.encoding, activeBuffer.bom)
+        ? encodingLabel(activeBuffer.encoding, activeBuffer.bom)
+        : null,
   })
 
   // The one preview pane both content arms share (file mode and diff mode),
@@ -794,6 +827,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     activeTab,
     activeBuffer,
     tabsRef,
+    buffersRef,
     loadedSignalRef: openFileSignalRef,
     setBuffers,
   })
@@ -903,8 +937,47 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       activeTab.id,
       activeTab.path,
       activeBuffer?.draft ?? "",
+      bufferSaveEncoding(activeBuffer),
       activeBuffer?.stamp,
     )
+  }
+
+  // "Save with encoding": write the buffer now in `choice`, with the same
+  // freshness token as any save. Offered whether or not there are edits, since
+  // converting the file is itself the change; a character the encoding cannot
+  // hold refuses the whole save and writes nothing.
+  function saveWithEncoding(choice: SaveEncoding): void {
+    if (!activeTab || binary || readOnly || isSaving || !fileReady) return
+    const current = bufferSaveEncoding(activeBuffer)
+    writeBuffer(
+      activeTab.id,
+      activeTab.path,
+      activeBuffer?.draft ?? "",
+      choice,
+      activeBuffer?.stamp,
+      !sameSaveEncoding(choice, current),
+    )
+  }
+
+  // "Reopen with encoding": read the file again in exactly `encoding`. With
+  // unsaved edits that throws them away, so it confirms first; a clean buffer
+  // reopens at once. A file that does not decode in it is refused by the
+  // server and the buffer stays as it was (see `reloadFileInPlace`).
+  function requestReopen(encoding: string): void {
+    if (!activeTab) return
+    const tabId = activeTab.id
+    const path = activeTab.path
+    const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
+    if (isDirty) {
+      setReopenTarget({
+        tabId,
+        path,
+        encoding,
+        label: encodingLabel(encoding, false),
+      })
+      return
+    }
+    reloadFileInPlace(tabId, path, true, { encoding })
   }
 
   // The banner's "Reload from disk". Confirmed only when there is something to
@@ -1124,6 +1197,74 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  // The encoding menu's rows, shared by the status bar's item on a computer and
+  // the ⋯ menu on a phone so the two cannot drift. Two submenus, not dialogs,
+  // so no trailing ellipsis. Reopen is offered only for a file that is not
+  // plain UTF-8: bytes that are valid UTF-8 are almost never really something
+  // else (a legacy encoding seldom spells valid multi-byte UTF-8 by accident,
+  // and plain ASCII reads the same in every one offered), so the row would
+  // invite the one mistake the automatic rules do not make. Save with is gone
+  // for a read-only file, which has no save at all.
+  function encodingMenuItems(): React.ReactNode {
+    const current = bufferSaveEncoding(activeBuffer)
+    return (
+      <>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <RotateCw />
+            Reopen with encoding
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+            {REOPEN_CHOICES.map((choice) => (
+              <DropdownMenuItem
+                key={choice.encoding}
+                aria-current={
+                  choice.encoding === current.encoding ? "true" : undefined
+                }
+                onClick={() => requestReopen(choice.encoding)}
+              >
+                <FileType />
+                {choice.label}
+                {choice.encoding === current.encoding && (
+                  <Check className="ml-auto" />
+                )}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        {!readOnly && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={isSaving}>
+              <SaveAll />
+              Save with encoding
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+              {SAVE_CHOICES.map((choice) => {
+                const isCurrent = sameSaveEncoding(choice, current)
+                return (
+                  <DropdownMenuItem
+                    key={`${choice.encoding}:${choice.bom}`}
+                    aria-current={isCurrent ? "true" : undefined}
+                    onClick={() =>
+                      saveWithEncoding({
+                        encoding: choice.encoding,
+                        bom: choice.bom,
+                      })
+                    }
+                  >
+                    <FileType />
+                    {choice.label}
+                    {isCurrent && <Check className="ml-auto" />}
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+      </>
+    )
+  }
+
   function localEditorMenuItems(): React.ReactNode {
     return OPEN_IN_EDITORS.map((editor) => (
       <DropdownMenuItem
@@ -1328,6 +1469,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 {languagePickerItems()}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
+          )}
+          {statusPlan.encoding !== null && activeTab.mode === "file" && (
+            // The phone bar holds no controls, so the encoding rows live
+            // here, under a label that says what the file is in now.
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Encoding: {statusPlan.encoding}</DropdownMenuLabel>
+              {encodingMenuItems()}
+            </DropdownMenuGroup>
           )}
           <DropdownMenuSub>
             <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
@@ -1721,6 +1870,30 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     }}
                   />
                 )}
+              {/* The encoding notice: this file's bytes are not UTF-8 and the
+                  editor read them as its fallback. Beside, never instead of,
+                  the disk banner above: the two are separate facts. */}
+              {activeTab !== null &&
+                activeTab.mode === "file" &&
+                fileReady &&
+                !binary &&
+                showsFallbackNotice(
+                  activeBuffer,
+                  fallbackNoticeDismissed(key, activeTab.path),
+                ) && (
+                  <EncodingFallbackNotice
+                    path={activeTab.path}
+                    encodingLabel={encodingLabel(
+                      activeBuffer?.encoding ?? "windows-1252",
+                      false,
+                    )}
+                    phone={isMobile}
+                    onDismiss={() => {
+                      dismissFallbackNotice(key, activeTab.path)
+                      setNoticeDismissals((n) => n + 1)
+                    }}
+                  />
+                )}
               <div className="relative min-h-0 flex-1">
                 <EditorContentPane
                   root={root}
@@ -1755,6 +1928,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           editor={codeEditor}
           languageLabel={activeLanguageLabel}
           languageItems={languagePickerItems()}
+          encodingItems={encodingMenuItems()}
         />
       </>
     )
@@ -1837,7 +2011,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           setSaveConflict(null)
           // No token: the whole meaning of Overwrite is to save without the
           // guard, and the body is the one the refused save carried.
-          writeBuffer(target.tabId, target.path, target.body)
+          writeBuffer(target.tabId, target.path, target.body, target.encoding)
         }}
         onReload={() => {
           const target = saveConflict!
@@ -1846,6 +2020,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           // throws away everything the user typed, and that is the same act
           // the banner's Reload asks about.
           requestReload(target.tabId, target.path)
+        }}
+      />
+      <ConfirmReopenEncodingDialog
+        target={reopenTarget}
+        present={
+          reopenTarget !== null &&
+          (tabs.find((t) => t.id === reopenTarget.tabId)?.dirty ?? false)
+        }
+        onClose={() => setReopenTarget(null)}
+        onConfirm={() => {
+          const target = reopenTarget!
+          setReopenTarget(null)
+          reloadFileInPlace(target.tabId, target.path, true, {
+            encoding: target.encoding,
+          })
         }}
       />
       <DeleteEntryDialog
@@ -2113,7 +2302,7 @@ function DiffContentPane({
   if (buffer?.diff?.binary) {
     return (
       <CenteredPane>
-        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
+        This file is binary, so it can&rsquo;t be diffed here.
       </CenteredPane>
     )
   }
@@ -2164,7 +2353,7 @@ function FileContentPane({
   if (binary) {
     return (
       <CenteredPane>
-        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be edited here.
+        This file is binary, so it can&rsquo;t be edited here.
       </CenteredPane>
     )
   }

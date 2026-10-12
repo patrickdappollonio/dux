@@ -1,4 +1,5 @@
 import type { FileDiffContents, FileDiffHead, WorktreeFile } from "./fileApi"
+import { encodingAfterSave, type SaveEncoding } from "./editorEncoding"
 
 // The server's freshness token for a file's bytes: RFC 3339 mtime plus byte
 // size. Both halves travel together and are compared together; see `stampsDiffer`.
@@ -88,6 +89,39 @@ export interface TabBuffer {
   // overwrite it and the guard on the wire must stay armed.
   diskFact: string | null
   acknowledgedDisk: string | null
+  // The encoding `loaded` was decoded from (a WHATWG name) and whether the file
+  // starts with a byte-order mark: together, what an ordinary save writes back.
+  encoding: string
+  bom: boolean
+  // The encoding was the server's last resort for bytes that are not UTF-8,
+  // not something the file said; the editor says so above the text.
+  encodingFallback: boolean
+  // The encoding the person asked for by name (a reopen, or a save that
+  // converted the file), sent with every later read of this buffer so a
+  // reload in place does not quietly go back to the automatic rules. Null
+  // while nobody has asked.
+  encodingRequested: string | null
+}
+
+// The encoding fields of a fresh read. An older server sends none and only ever
+// served UTF-8, so absence means plain UTF-8.
+export function encodingFromFile(
+  file: WorktreeFile,
+  requested: string | null,
+): Pick<TabBuffer, "encoding" | "bom" | "encodingFallback" | "encodingRequested"> {
+  return {
+    encoding: file.encoding ?? "UTF-8",
+    bom: file.bom ?? false,
+    encodingFallback: file.encoding_fallback ?? false,
+    encodingRequested: requested,
+  }
+}
+
+// What a save of this buffer writes, unless the person picked a conversion.
+export function bufferSaveEncoding(
+  buffer: Pick<TabBuffer, "encoding" | "bom"> | undefined,
+): { encoding: string; bom: boolean } {
+  return { encoding: buffer?.encoding ?? "UTF-8", bom: buffer?.bom ?? false }
 }
 
 // A disk fact flattened to one comparable string, or "deleted" when no file is
@@ -120,6 +154,10 @@ export function emptyBuffer(path: string): TabBuffer {
     diskState: "fresh",
     diskFact: null,
     acknowledgedDisk: null,
+    encoding: "UTF-8",
+    bom: false,
+    encodingFallback: false,
+    encodingRequested: null,
   }
 }
 
@@ -277,14 +315,19 @@ export function stampFromInfo(info: EntryStampSource): FileStamp {
 // @monaco-editor/react disposes the model, taking undo history, scroll and
 // cursor with it. The text arrives as one full-range edit, so it is undoable
 // and moves the cursor, which is why the caller pauses while a selection lives.
+//
+// `requested` is the encoding the read asked for by name, which the buffer goes
+// on asking for; a reload nobody chose an encoding for keeps the buffer's own.
 export function reloadedInPlace(
   prev: TabBuffer,
   path: string,
   file: WorktreeFile,
   signal: string,
+  requested: string | null = prev.encodingRequested ?? null,
 ): TabBuffer {
   return {
     ...prev,
+    ...encodingFromFile(file, requested),
     path,
     loadedPath: path,
     loading: false,
@@ -310,14 +353,27 @@ export function reloadedInPlace(
 // Re-baseline a buffer on its own successful save: the save moves the
 // changed-files signal exactly like an agent's edit, so adopting the server's
 // post-write stamp keeps the next broadcast from checking the editor's own work.
+//
+// `saved` is the encoding the save wrote; a conversion moves the buffer to it
+// (see `encodingAfterSave`).
 export function baselineSavedBuffer(
   prev: TabBuffer,
   body: string,
   stamp: FileStamp,
   signal: string,
+  saved: SaveEncoding = bufferSaveEncoding(prev),
 ): TabBuffer {
   return {
     ...prev,
+    ...encodingAfterSave(
+      {
+        encoding: prev.encoding ?? "UTF-8",
+        bom: prev.bom ?? false,
+        encodingFallback: prev.encodingFallback ?? false,
+        encodingRequested: prev.encodingRequested ?? null,
+      },
+      saved,
+    ),
     loaded: body,
     fileLoadedSignal: signal,
     stamp,

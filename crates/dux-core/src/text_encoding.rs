@@ -58,16 +58,16 @@ impl std::fmt::Display for DecodeRefused {
         if self.nul {
             write!(
                 f,
-                "this file holds a NUL character at byte {} when read as {}, so it is not \
-                 text in that encoding; it was not reopened",
+                "the file holds a NUL character at byte {} when read as {}, so it is not \
+                 text in that encoding",
                 self.offset,
                 self.encoding.name()
             )
         } else {
             write!(
                 f,
-                "this file is not valid {}: the bytes at offset {} are not a character in \
-                 that encoding, so it was not reopened",
+                "the file is not valid {}: the bytes at offset {} are not a character in \
+                 that encoding",
                 self.encoding.name(),
                 self.offset
             )
@@ -519,6 +519,27 @@ mod tests {
     #[test]
     fn a_mark_is_refused_for_an_encoding_that_has_none() {
         assert!(encode("x", WINDOWS_1252, true).is_err());
+    }
+
+    /// The browser's encoding menus (`EDITOR_ENCODINGS` in the web's
+    /// lib/editorEncoding.ts) send these names and compare them against what a
+    /// read reports, so each must be the canonical name this side answers with.
+    #[test]
+    fn every_name_the_web_menus_offer_is_canonical_here() {
+        let source = include_str!("../../dux-web/web/src/lib/editorEncoding.ts");
+        let names: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("{ name: \""))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            names.len() > 20,
+            "the list moved; update this test: {names:?}"
+        );
+        for name in names {
+            let encoding = encoding_for_label(name).unwrap_or_else(|_| panic!("{name}"));
+            assert_eq!(encoding.name(), name);
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { fileApi } from "@/lib/fileApi"
 import {
   changeSignalFor,
   diskFactKey,
+  encodingFromFile,
   fileLoadSeedBuffer,
   isBufferStale,
   pruneByIds,
@@ -18,7 +19,9 @@ import type {
 import type { EditorRoot } from "@/lib/editorRoot"
 import type { EditorTab } from "@/lib/editorTabs"
 import { isImagePreviewPath } from "@/lib/editorPreview"
-import { notifyError } from "@/lib/notify"
+import { encodingLabel } from "@/lib/editorEncoding"
+import { notifyError, notifySuccess } from "@/lib/notify"
+import { chip, prose } from "@/lib/prose"
 import { editorSetTabDirty } from "@/lib/store"
 
 interface UseEditorFileReadsOptions {
@@ -66,13 +69,20 @@ export function useEditorFileReads({
   function loadFileBuffer(tabId: string, path: string): void {
     const token = nextToken(tabId)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
+    // A retry of the same file keeps asking for the encoding the person chose;
+    // a different file starts from the automatic rules.
+    const previous = buffersRef.current.get(tabId)
+    const requested =
+      previous !== undefined && !isBufferStale(previous, path)
+        ? (previous.encodingRequested ?? null)
+        : null
     setBuffers((prev) => {
       const next = new Map(prev)
       next.set(tabId, fileLoadSeedBuffer(path))
       return next
     })
     fileApi
-      .read(root, path)
+      .read(root, path, requested)
       .then((file) => {
         if (!isCurrentRequest(tabId, token)) return
         setBuffers((prev) => {
@@ -81,6 +91,7 @@ export function useEditorFileReads({
           const next = new Map(prev)
           next.set(tabId, {
             ...current,
+            ...encodingFromFile(file, requested),
             loadedPath: path,
             loading: false,
             loaded: file.content,
@@ -148,20 +159,28 @@ export function useEditorFileReads({
     requestTokenRef.current = pruneByIds(requestTokenRef.current, liveIds)
   }, [tabs])
 
+  // `asked` is an explicit request (the banner's Reload, a confirm, a reopen),
+  // which replaces the text even when it is dirty. `options.encoding` reopens
+  // the file in that encoding; without it the buffer's own requested encoding,
+  // if any, is asked for again.
   function reloadFileInPlace(
     tabId: string,
     path: string,
-    requested = false,
+    asked = false,
+    options: { encoding?: string } = {},
   ): void {
     const token = nextToken(tabId)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
+    const reopenAs = options.encoding ?? null
+    const requested =
+      reopenAs ?? buffersRef.current.get(tabId)?.encodingRequested ?? null
     fileApi
-      .read(root, path)
+      .read(root, path, requested)
       .then((file) => {
         if (!isCurrentRequest(tabId, token)) return
         const atResolve = buffersRef.current.get(tabId)
         const dirtyNow =
-          !requested &&
+          !asked &&
           ((atResolve !== undefined &&
             !isBufferStale(atResolve, path) &&
             atResolve.draft !== atResolve.loaded) ||
@@ -184,14 +203,31 @@ export function useEditorFileReads({
           const next = new Map(prev)
           next.set(
             tabId,
-            reloadedInPlace(current, path, file, signalAtRequest),
+            reloadedInPlace(current, path, file, signalAtRequest, requested),
           )
           return next
         })
         editorSetTabDirty(root, tabId, false)
+        // Confirmed, because the only sign on screen may be the status bar's
+        // label: a file that is all ASCII reads the same in most encodings.
+        if (reopenAs !== null) {
+          notifySuccess(
+            prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}. A save now writes it in that encoding.`,
+          )
+        }
       })
       .catch((error) => {
         if (!isCurrentRequest(tabId, token)) return
+        if (reopenAs !== null) {
+          // The buffer is untouched: the file stays open as it was, in the
+          // encoding it had, and the toast says why the reopen did not happen.
+          const reason =
+            error instanceof Error ? error.message : "the read failed"
+          notifyError(
+            prose`Couldn't reopen ${chip(path)} as ${encodingLabel(reopenAs, false)}: ${reason}. It is still open as it was.`,
+          )
+          return
+        }
         notifyError(
           error instanceof Error
             ? `could not reload from disk: ${error.message}`

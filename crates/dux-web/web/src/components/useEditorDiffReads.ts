@@ -14,6 +14,7 @@ interface UseEditorDiffReadsOptions {
   activeTab: EditorTab | null
   activeBuffer: TabBuffer | undefined
   tabsRef: RefObject<readonly EditorTab[]>
+  buffersRef: RefObject<Map<string, TabBuffer>>
   loadedSignalRef: RefObject<string>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
 }
@@ -81,6 +82,7 @@ export function useEditorDiffReads({
   activeTab,
   activeBuffer,
   tabsRef,
+  buffersRef,
   loadedSignalRef,
   setBuffers,
 }: UseEditorDiffReadsOptions) {
@@ -98,8 +100,15 @@ export function useEditorDiffReads({
 
   function loadDiffBuffer(tabId: string, path: string): void {
     const request = nextRequest(tabId, path)
+    // The encoding the person reopened this file in, so the diff shows the
+    // same characters the editor tab does.
+    const buffer = buffersRef.current.get(tabId)
+    const encoding =
+      buffer !== undefined && !isBufferStale(buffer, path)
+        ? (buffer.encodingRequested ?? null)
+        : null
     fileApi
-      .diff(root, path)
+      .diff(root, path, encoding)
       .then((diff) => {
         if (!isCurrentRequest(request)) return
         setBuffers((previous) =>

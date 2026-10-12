@@ -113,6 +113,9 @@ export interface StatusBarInput {
   size: number | null
   // The language registry has loaded, so the picker has rows to offer.
   languageAvailable: boolean
+  // The status bar's name for the file's encoding when it is not plain UTF-8
+  // (see `showsEncoding`), null otherwise or when no read has said.
+  encodingLabel: string | null
 }
 
 export interface StatusBarPlan {
@@ -125,6 +128,10 @@ export interface StatusBarPlan {
   // line endings. Only while it is the thing on screen.
   editing: boolean
   language: boolean
+  // The encoding item, by its label: a file mode text file that is not plain
+  // UTF-8. Never in diff mode, which shows two versions that need not share
+  // one, and never for a picture or a binary file, which have no text.
+  encoding: string | null
 }
 
 const EMPTY_PLAN: StatusBarPlan = {
@@ -135,6 +142,7 @@ const EMPTY_PLAN: StatusBarPlan = {
   dimensions: null,
   editing: false,
   language: false,
+  encoding: null,
 }
 
 export function planStatusBar(input: StatusBarInput): StatusBarPlan {
@@ -167,5 +175,8 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
     size: input.fileReady ? input.size : null,
     editing,
     language: editing && input.languageAvailable,
+    // The preview still shows this file's text, decoded this way, and a save
+    // from it still writes it this way, so the item stays with it.
+    encoding: input.fileReady && !input.binary ? input.encodingLabel : null,
   }
 }
