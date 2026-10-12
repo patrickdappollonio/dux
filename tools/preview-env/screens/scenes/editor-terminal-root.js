@@ -29,6 +29,7 @@ module.exports = {
     await clearToasts(page)
     // The tree rooted at the repository, the file the address opened, and an
     // editor that mounted rather than a frame still waiting for monaco.
+    await expectVisibleText(page, "Editor for", { what: "the header naming the root" })
     await expectVisibleText(page, "README.md", { what: "the opened file" })
     await expectVisibleText(page, "src", { what: "the repository's own tree" })
     await expectVisible(page, ".monaco-editor", "the editor")

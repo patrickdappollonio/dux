@@ -1,7 +1,9 @@
-// How the standalone editor tab's header names what the editor is rooted at, drawn from the
-// same facts the sidebar row is, so the two cannot call one thing two different names. A
-// terminal is named as its row names it: its own identity plus the second line's owner text.
+// How the editor's header names what it is rooted at, in the standalone tab and the in-page
+// overlay alike, drawn from the same facts the sidebar row is, so the two cannot call one thing
+// two different names. A terminal is named as its row names it: its own identity plus the
+// second line's owner text.
 
+import { chip, prose, type Prose } from "./prose"
 import { matchWireOwner } from "./terminalOwner"
 import { sessionLabel } from "./agentWorkspace"
 import { terminalTitle } from "./terminals"
@@ -56,4 +58,12 @@ export function standaloneEditorName(
     name: terminalTitle(terminal, siblings),
     detail,
   }
+}
+
+// The header's sentence: "Editor for <name>", and for a terminal " in <where it lives>", each
+// name a chip, built as prose segments so no renderer has to find a name in finished words.
+export function editorTitleProse(named: StandaloneEditorName): Prose {
+  return named.detail === null
+    ? prose`Editor for ${chip(named.name)}`
+    : prose`Editor for ${chip(named.name)} in ${chip(named.detail)}`
 }

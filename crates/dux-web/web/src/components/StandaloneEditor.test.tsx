@@ -18,8 +18,9 @@ vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor (plan (b)). What is pinned here: the shell composes EditorBody (the
-// code editor mounts), names the agent, deliberately offers NO in-app exit
-// (the browser's own Back/close-tab controls are the way out), renders
+// code editor mounts), names the agent in the body's header, offers an in-app
+// exit only on a phone (the generic Back, which pushes a named screen; on a
+// computer the browser's own Back/close-tab controls are the way out), renders
 // not-found for a vanished agent, and the overlay Dialog stands down while
 // the tab is the standalone surface so EditorBody can never mount twice.
 // Also pinned: the phone header folds its secondary controls into one ⋯
@@ -39,8 +40,10 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return {
     ...actual,
     useDux: () => mockState,
+    leaveStandaloneEditor: (...a: unknown[]) => leaveStandaloneEditor(...a),
   }
 })
+const leaveStandaloneEditor = vi.fn()
 
 vi.mock("@/lib/fileApi", () => ({
   fileApi: {
@@ -188,7 +191,7 @@ describe("the standalone editor shell", () => {
     vi.unstubAllGlobals()
   })
 
-  it("composes EditorBody full-viewport with the agent name and no in-app exit", async () => {
+  it("composes EditorBody full-viewport, naming the agent in the body's own header", async () => {
     await seedState({})
     const { StandaloneEditorShell } = await import(
       "@/components/StandaloneEditor"
@@ -196,9 +199,15 @@ describe("the standalone editor shell", () => {
     render(<StandaloneEditorShell />)
     // The body mounted: the (stubbed) code editor is on screen.
     await screen.findByTestId("code-editor")
-    // The agent is named.
-    expect(screen.getByText("My agent")).toBeTruthy()
-    // No "Open in dux" link: the exit is deliberately the browser's own
+    // The agent is named once, as a chip after "Editor for", in the one
+    // header the body draws: there is no second identity bar above it.
+    const chips = screen.getAllByText("My agent")
+    expect(chips).toHaveLength(1)
+    expect(chips[0].getAttribute("data-slot")).toBe("inline-code")
+    expect(
+      chips[0].parentElement!.parentElement!.textContent!.replace(/\s+/g, ""),
+    ).toBe("EditorforMyagent")
+    // No "Open in dux" link: on a computer the exit is the browser's own
     // controls (Back, or closing the tab), so the shell ships no anchor.
     expect(screen.queryByRole("link", { name: /open in dux/i })).toBeNull()
     // And the body knows it IS the tab: no Close button, no open-in-new-tab.
@@ -254,8 +263,55 @@ describe("the standalone editor shell", () => {
     )
     render(<StandaloneEditorShell />)
     await screen.findByTestId("code-editor")
-    expect(screen.getByText("vim")).toBeTruthy()
-    expect(screen.getByText("~/code")).toBeTruthy()
+    const chip = screen.getByText("vim")
+    expect(chip.getAttribute("data-slot")).toBe("inline-code")
+    // The owner text sits after the chip, quieter.
+    // Where it lives is a name too, so it is a chip, joined by plain words:
+    // "Editor for vim in ~/code".
+    const detail = screen.getByText("~/code")
+    expect(detail.getAttribute("data-slot")).toBe("inline-code")
+    expect(chip.nextElementSibling!.textContent).toBe("in")
+    expect(chip.nextElementSibling!.nextElementSibling).toBe(detail)
+    // The terminal's glyph, not the agent's.
+    const header = chip.closest("div.border-b") as HTMLElement
+    expect(header.querySelector("svg.lucide-square-terminal")).toBeTruthy()
+  })
+
+  it("leads the phone header with the generic Back, which pushes the agent's Changes screen", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    const back = screen.getByRole("button", { name: "Back" })
+    // The same control every phone screen leads with, and a phone's alone.
+    expect(back.className).toContain("size-10")
+    expect(back.className).toContain("md:hidden")
+    expect(back.querySelector("svg.lucide-chevron-left")).toBeTruthy()
+    const header = back.closest("div.border-b") as HTMLElement
+    expect(header.firstElementChild).toBe(back)
+    const historyBack = vi.spyOn(history, "back")
+    fireEvent.click(back)
+    expect(leaveStandaloneEditor).toHaveBeenCalledWith(agentRoot(SESSION))
+    expect(historyBack).not.toHaveBeenCalled()
+    historyBack.mockRestore()
+  })
+
+  it("moves the path to the status bar and keeps the language picker out of the header", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    const path = screen.getByText(PATH)
+    expect(path.closest("div.border-t")).toBeTruthy()
+    expect(path.closest("div.border-b")).toBeNull()
+    const header = screen
+      .getByRole("button", { name: "Back" })
+      .closest("div.border-b") as HTMLElement
+    expect(header.querySelector("[aria-label^='Syntax language']")).toBeNull()
   })
 
   it("keeps the desktop header inline: mode toggle, preview-capable controls, Open local editor", async () => {

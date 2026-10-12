@@ -16,6 +16,7 @@ import {
   EXPLORER_LAYOUT_KEY,
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
+import { useEffect } from "react"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import { openModals } from "@/lib/modalHistory"
@@ -181,6 +182,34 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
 // the only thing that knows in production, so the stub hands `onReady` a fake
 // instance shaped like the one narrow read `EditorBody` makes of it.
 let selectionActive = false
+// The live editor the stand-in hands the status bar: a cursor parked at a known
+// place in a known model, with events that never fire.
+const STATUS_EDITOR = {
+  getModel: () => ({
+    getLineCount: () => 42,
+    getEOL: () => "\n",
+    getOptions: () => ({ insertSpaces: true, tabSize: 4, indentSize: 4 }),
+    getValueLengthInRange: () => 0,
+  }),
+  getPosition: () => ({ lineNumber: 4, column: 2 }),
+  getSelection: () => ({ isEmpty: () => true }),
+  onDidChangeCursorSelection: () => ({ dispose() {} }),
+  onDidChangeModelContent: () => ({ dispose() {} }),
+  onDidChangeModel: () => ({ dispose() {} }),
+  onDidChangeModelOptions: () => ({ dispose() {} }),
+}
+function StubEditorLifecycle({
+  onEditorChange,
+}: {
+  onEditorChange?: (ed: unknown) => void
+}) {
+  useEffect(() => {
+    onEditorChange?.(STATUS_EDITOR)
+    return () => onEditorChange?.(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return null
+}
 function codeEditorStub() {
   return {
     default: ({
@@ -188,12 +217,16 @@ function codeEditorStub() {
       onChange,
       language,
       onReady,
+      onEditorChange,
     }: {
       value: string
       onChange: (v: string) => void
       language?: string
       onReady?: (mon: unknown) => void
+      onEditorChange?: (ed: unknown) => void
     }) => (
+      <>
+      <StubEditorLifecycle onEditorChange={onEditorChange} />
       <textarea
         ref={() => {
           // The whole surface `EditorBody` touches on the instance: the
@@ -217,6 +250,7 @@ function codeEditorStub() {
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
+      </>
     ),
   }
 }
@@ -684,7 +718,7 @@ describe("image and svg preview", () => {
     )
   })
 
-  it("the caption shows the pixel dimensions once the image loads", async () => {
+  it("the status bar shows the pixel dimensions once the image loads", async () => {
     await mountWithTab("assets/logo.png")
     const img = (await screen.findByAltText("assets/logo.png")) as HTMLImageElement
     // jsdom never decodes images; stamp the natural size and fire load.
@@ -692,6 +726,20 @@ describe("image and svg preview", () => {
     Object.defineProperty(img, "naturalHeight", { value: 480 })
     fireEvent.load(img)
     expect(screen.getByText(/640\s*×\s*480/)).toBeTruthy()
+  })
+
+  it("forgets the pixel size when a reload of the image fails, and on Retry", async () => {
+    await mountWithTab("assets/logo.png")
+    const img = (await screen.findByAltText("assets/logo.png")) as HTMLImageElement
+    Object.defineProperty(img, "naturalWidth", { value: 640 })
+    Object.defineProperty(img, "naturalHeight", { value: 480 })
+    fireEvent.load(img)
+    expect(screen.getByText(/640\s*×\s*480/)).toBeTruthy()
+    fireEvent.error(img)
+    expect(screen.queryByText(/640\s*×\s*480/)).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+    await screen.findByAltText("assets/logo.png")
+    expect(screen.queryByText(/640\s*×\s*480/)).toBeNull()
   })
 
   it("an svg tab opens as text and its Preview renders the draft as an image", async () => {
@@ -1227,6 +1275,82 @@ describe("editor panel units and scroll surfaces", () => {
 // external-link arrow, so the pair read as one control accidentally
 // duplicated. The link keeps the arrow, which is what the arrow means on the
 // web; the local spawn takes a laptop.
+describe("the overlay's header names the root, and the status bar names the file", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    // An earlier describe's settled buffer would be seeded straight back in.
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    readMock.mockResolvedValue({
+      path: PATH,
+      content: ON_DISK,
+      binary: false,
+      read_only: false,
+      size: 2048,
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("says Editor for the agent, as a chip, and keeps its own two ways out", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    const header = screen
+      .getByRole("button", { name: /the file explorer/i })
+      .closest("div.border-b") as HTMLElement
+    expect(within(header).getByText("Editor for")).toBeTruthy()
+    // No spine in this harness, so the name falls back to the session id,
+    // which is poor but truthful.
+    const chip = within(header).getByText(SESSION)
+    expect(chip.getAttribute("data-slot")).toBe("inline-code")
+    // The path is no longer the header's.
+    expect(within(header).queryByText(PATH)).toBeNull()
+    // The overlay is desktop-only and keeps Open in new tab and Close; the
+    // phone's Back is the standalone tab's alone.
+    expect(within(header).getByRole("link", { name: /open in new tab/i })).toBeTruthy()
+    expect(within(header).getByRole("button", { name: /^close$/i })).toBeTruthy()
+    expect(within(header).queryByRole("button", { name: "Back" })).toBeNull()
+  })
+
+  it("follows the live editor's cursor and model while it is on screen, and drops them in diff mode", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect(await screen.findByText("Ln 4, Col 2")).toBeTruthy()
+    expect(screen.getByText("42 lines")).toBeTruthy()
+    expect(screen.getByText("Spaces: 4")).toBeTruthy()
+    expect(screen.getByText("LF")).toBeTruthy()
+    cleanup()
+    diffMock.mockResolvedValue({
+      path: PATH,
+      original: "a\n",
+      modified: "b\n",
+      binary: false,
+    })
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-viewer")
+    expect(screen.getByText(PATH).closest("div.border-t")).toBeTruthy()
+    expect(screen.queryByText("Ln 4, Col 2")).toBeNull()
+    expect(screen.queryByText("42 lines")).toBeNull()
+    // The diff editor highlights by the picked language, so the picker stays.
+    expect(
+      screen.getByRole("button", { name: /^syntax language:/i }),
+    ).toBeTruthy()
+  })
+
+  it("puts the path, the dirty dot and the size on disk in the status bar", async () => {
+    await mountWithDirtyTab()
+    const path = screen.getByText(PATH)
+    const bar = path.closest("div.border-t") as HTMLElement
+    expect(bar).toBeTruthy()
+    expect(within(bar).getByText("unsaved changes")).toBeTruthy()
+    expect(within(bar).getByText("2.0 KiB")).toBeTruthy()
+  })
+})
+
 describe("the header's two open controls are told apart by their icons", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1665,7 +1789,7 @@ describe("file mutations confirm themselves when nothing else does", () => {
 // and remains the default; this is the per-file escape hatch for the file it
 // guesses wrong, which for a ".lock" or an extensionless script is every
 // time. The override is session-lived and keyed by path.
-describe("the header's language picker", () => {
+describe("the status bar's language picker", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
@@ -1905,6 +2029,19 @@ describe("the header's language picker", () => {
         screen.getByTestId("diff-viewer").getAttribute("data-language"),
       ).toBe("toml"),
     )
+  })
+
+  it("sits in the status bar and the phone's fold, never in the header", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    const trigger = await picker()
+    expect(trigger.closest("div.border-t")).toBeTruthy()
+    expect(trigger.closest("div.border-b")).toBeNull()
+    // The phone reaches it through the header's one fold, as before.
+    fireEvent.click(screen.getByRole("button", { name: /more editor actions/i }))
+    expect(
+      await screen.findByRole("menuitem", { name: /plain text/i }),
+    ).toBeTruthy()
   })
 
   it("does not render for an image tab, which has no language to pick", async () => {
