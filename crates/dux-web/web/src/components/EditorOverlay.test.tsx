@@ -3553,6 +3553,33 @@ describe("a file that is not plain UTF-8", () => {
     write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
   })
 
+  /// A leading U+FEFF kept as text is the file's mark in UTF-8: the bar says
+  /// "with BOM", that row is the current one, and converting to plain UTF-8
+  /// writes the text without it rather than a mark-shaped character.
+  it("treats a leading U+FEFF kept as text as the file's mark", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "﻿x",
+      encoding: "UTF-8",
+      bom: false,
+      encoding_fallback: false,
+    })
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect((await encodingButton()).textContent).toContain("UTF-8 with BOM")
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    expect(
+      (await screen.findByRole("menuitem", { name: /^UTF-8 with BOM/ })).getAttribute(
+        "aria-current",
+      ),
+    ).toBe("true")
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8$/ }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("x")
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
   /// Saving in the encoding and mark the file already has is neither an edit
   /// nor a conversion; the row is shown as current and does nothing.
   it("offers the current encoding as current, never as a save", async () => {

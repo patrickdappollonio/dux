@@ -40,6 +40,7 @@ import { chip, prose } from "@/lib/prose"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
+  bufferFileEncoding,
   bufferSaveEncoding,
   isBufferDirty,
   changeSignalFor,
@@ -772,7 +773,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // Code does, so any file can be reopened in any encoding from the bar.
     encodingLabel:
       activeBuffer !== undefined
-        ? encodingLabel(activeBuffer.encoding, activeBuffer.bom)
+        ? encodingLabel(
+            activeBuffer.encoding,
+            bufferFileEncoding(activeBuffer).bom,
+          )
         : null,
     mixedEol: activeBuffer?.mixedEol ?? false,
     diffHeadEncodingLabel: diffHeadEncoding,
@@ -1035,16 +1039,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // hold refuses the whole save and writes nothing.
   function saveWithEncoding(choice: SaveEncoding): void {
     if (!activeTab || binary || hardReadOnly || fileBusy || !fileReady) return
-    const current = bufferSaveEncoding(activeBuffer)
-    if (encodingUnwritable && sameSaveEncoding(choice, current)) return
-    writeBuffer(
-      activeTab.id,
-      activeTab.path,
-      activeBuffer?.draft ?? "",
-      choice,
-      activeBuffer?.stamp,
-      !sameSaveEncoding(choice, current),
-    )
+    if (!activeBuffer) return
+    // What the file is now, a leading U+FEFF kept as text counting as its
+    // mark; that row is inert, so a save from here is always a conversion.
+    const current = bufferFileEncoding(activeBuffer)
+    if (sameSaveEncoding(choice, current)) return
+    // Converting decides the mark by the row picked, so a leading U+FEFF
+    // the text carries in place of one (see `baselineSavedBuffer`) is that
+    // mark, not text to carry into the new encoding: kept, it would write a
+    // second mark, or a character a code page has no bytes for. Only when it
+    // stands in for the mark: with the mark flag set, a leading U+FEFF is a
+    // second mark the file really has, and converting keeps it.
+    const draft = activeBuffer.draft
+    const standsInForMark = !activeBuffer.bom && current.bom
+    const body = standsInForMark && draft.startsWith("﻿") ? draft.slice(1) : draft
+    writeBuffer(activeTab.id, activeTab.path, body, choice, activeBuffer.stamp, true)
   }
 
   // "Reopen with encoding": read the file again in exactly `encoding`. With
@@ -1297,7 +1306,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     const inDiff = activeTab?.mode === "diff"
     const current = inDiff
       ? { encoding: activeBuffer?.diffHead?.encoding ?? "UTF-8", bom: false }
-      : bufferSaveEncoding(activeBuffer)
+      : activeBuffer
+        ? bufferFileEncoding(activeBuffer)
+        : bufferSaveEncoding(undefined)
     const reopen = (encoding: string) => {
       if (inDiff && activeTab) reloadDiffAs(activeTab.id, activeTab.path, encoding)
       else requestReopen(encoding)
@@ -1976,7 +1987,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 fileReady &&
                 !binary &&
                 activeBuffer !== undefined &&
-                encodingNotices(activeTab.path, activeBuffer, (kind) =>
+                encodingNotices(
+                  activeTab.path,
+                  { ...activeBuffer, bom: bufferFileEncoding(activeBuffer).bom },
+                  (kind) =>
                   noticeDismissed(key, activeTab.path, kind),
                 ).map((notice) => (
                   <EncodingNotice

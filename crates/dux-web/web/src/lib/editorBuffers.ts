@@ -233,6 +233,22 @@ export function bufferSaveEncoding(
   }
 }
 
+// What the file the buffer was read from LOOKS like on disk, for its label and
+// for which encoding row is current: the mark flag, or a leading U+FEFF kept as
+// text (see `baselineSavedBuffer`), which in UTF-8 and UTF-16 is the same bytes
+// as a mark. An encoding with no mark of its own has no such reading.
+export function bufferFileEncoding(
+  buffer: Pick<TabBuffer, "encoding" | "bom" | "loaded">,
+): { encoding: string; bom: boolean } {
+  const encoding = buffer.encoding ?? "UTF-8"
+  const unicode =
+    encoding === "UTF-8" || encoding === "UTF-16LE" || encoding === "UTF-16BE"
+  return {
+    encoding,
+    bom: (buffer.bom ?? false) || (unicode && buffer.loaded.startsWith("﻿")),
+  }
+}
+
 // What the file the buffer was read from is in: the encoding and the mark on
 // disk, which a save states as what its text was read in.
 export function bufferReadEncoding(
@@ -507,25 +523,19 @@ export function baselineSavedBuffer(
   // save that states an encoding does); otherwise what the editor sent: one
   // line ending style, nothing new to say about the encoding.
   const unwritable = verdict ? (verdict.unwritable ?? null) : null
-  // A text that began with U+FEFF, saved with no mark asked for, wrote exactly
-  // the bytes of a marked file, and a read now sets that character aside as the
-  // mark. The bytes are what the text implied, so nothing is wrong on disk; the
-  // copy and the label move to what a read says, and nothing becomes unsaved:
-  // the editor's text without the character is that file exactly. Anything
-  // typed since the save stays, and so stays unsaved.
-  const markRead = verdict?.leading_mark_read_as_bom === true
-  const loaded = markRead && body.startsWith("\ufeff") ? body.slice(1) : body
-  // The label carries the mark now, so the character leaves the draft too,
-  // typing since or not: left there, the next save would write it a second
-  // time.
-  const stripped = markRead && prev.draft.startsWith("\ufeff")
-  const draft = stripped ? prev.draft.slice(1) : prev.draft
-  // The file's mark is what was written; the mark the draft asks for follows
-  // the save, except where the draft had already dropped the character that a
-  // read now takes as the mark (an undo while the save was out): that draft
-  // asks for none, and stays unsaved until it is written so.
-  const bom = verdict?.bom ?? saved.bom
-  const draftBom = markRead ? stripped : saved.bom
+  // A text that begins with U+FEFF, saved with no mark asked for, wrote the
+  // bytes of a marked file. The editor keeps the character as TEXT, in the
+  // baseline and the draft alike, rather than moving it into the mark flag:
+  // moving it would be an edit in Monaco's undo history, and undoing that edit
+  // would put the character back beside a mark, so a save would write two.
+  // Kept as text, undoing or retyping it is ordinary editing, the tab is
+  // unsaved exactly when the text differs, and no save can double the mark
+  // unless someone really types a second one. Only the label follows the
+  // bytes (see `bufferFileEncoding`).
+  const loaded = body
+  const draft = prev.draft
+  const bom = saved.bom
+  const draftBom = saved.bom
   return {
     ...prev,
     ...encodingAfterSave(

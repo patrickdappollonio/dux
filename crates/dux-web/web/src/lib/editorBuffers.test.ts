@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
   answerApplies,
+  bufferFileEncoding,
   bufferSaveEncoding,
   isBufferDirty,
   editorTextOf,
@@ -757,36 +758,69 @@ describe("a save's answer and the buffer it is about", () => {
   })
 })
 
-describe("a save whose leading U+FEFF reads back as a mark", () => {
-  it("relabels the file as marked and drops the character from the copy, with no edit", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "\ufeffa", loaded: "x" })
+// A leading U+FEFF saved with no mark asked for is byte for byte a marked file.
+// The editor keeps the character as text rather than moving it into the mark:
+// moving it would be an edit in Monaco's history, and undoing that edit would
+// bring the character back beside a mark, writing two. Only the label follows
+// the bytes.
+describe("a save whose text begins with U+FEFF", () => {
+  const verdict = {
+    unwritable: null,
+    bom: true,
+    leading_mark_read_as_bom: true,
+    eol: "LF" as const,
+  }
+
+  it("keeps the character as text, the save clean, and labels the file as marked", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" })
     const next = baselineSavedBuffer(
       prev,
-      "\ufeffa",
+      "\ufeffx",
       { modified: null, size: 4 },
       "",
       { encoding: "UTF-8", bom: false },
-      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+      verdict,
     )
-    expect(next.bom).toBe(true)
-    expect(next.loaded).toBe("a")
-    expect(next.draft).toBe("a")
+    expect(next.loaded).toBe("\ufeffx")
+    expect(next.draft).toBe("\ufeffx")
+    expect(next.bom).toBe(false)
+    expect(isBufferDirty(next)).toBe(false)
+    expect(bufferFileEncoding(next)).toEqual({ encoding: "UTF-8", bom: true })
+    // The next save writes the same bytes: the character, no extra mark.
+    expect(bufferSaveEncoding(next)).toEqual({ encoding: "UTF-8", bom: false })
   })
 
-  it("keeps what was typed since, unsaved, but not the character the mark now carries", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "\ufeffab", loaded: "x" })
-    const next = baselineSavedBuffer(
-      prev,
-      "\ufeffa",
+  it("leaves undoing the character an ordinary edit: unsaved, and its save writes no mark", () => {
+    const saved = baselineSavedBuffer(
+      loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" }),
+      "\ufeffx",
       { modified: null, size: 4 },
       "",
       { encoding: "UTF-8", bom: false },
-      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+      verdict,
     )
-    expect(next.loaded).toBe("a")
-    // The mark is the label now; leaving the character in the draft would
-    // make the next save write it a second time.
-    expect(next.draft).toBe("ab")
+    const undone = { ...saved, draft: "x" }
+    expect(isBufferDirty(undone)).toBe(true)
+    expect(bufferSaveEncoding(undone)).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("agrees with a fresh read of the same bytes on what the file is", () => {
+    // A read sets the mark aside: bom true, text "x".
+    const fresh = loadedBuffer({ encoding: "UTF-8", bom: true, draftBom: true, draft: "x", loaded: "x" })
+    const kept = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx", loaded: "\ufeffx" })
+    expect(bufferFileEncoding(fresh)).toEqual(bufferFileEncoding(kept))
+    expect(isBufferDirty(fresh)).toBe(false)
+    expect(isBufferDirty(kept)).toBe(false)
+  })
+
+  it("says the same of UTF-16, whose label carries no mark", () => {
+    const kept = loadedBuffer({ encoding: "UTF-16LE", bom: false, draft: "\ufeffx", loaded: "\ufeffx" })
+    expect(bufferFileEncoding(kept)).toEqual({ encoding: "UTF-16LE", bom: true })
+  })
+
+  it("does not count a U+FEFF as a mark in an encoding that has none", () => {
+    const kept = loadedBuffer({ encoding: "gb18030", bom: false, draft: "\ufeffx", loaded: "\ufeffx" })
+    expect(bufferFileEncoding(kept)).toEqual({ encoding: "gb18030", bom: false })
   })
 })
 
@@ -795,41 +829,6 @@ describe("unsaved means text or mark", () => {
     expect(isBufferDirty(loadedBuffer())).toBe(false)
     expect(isBufferDirty(loadedBuffer({ draft: "typed\n" }))).toBe(true)
     expect(isBufferDirty(loadedBuffer({ bom: true, draftBom: false }))).toBe(true)
-  })
-
-  it("keeps an undone leading U+FEFF unsaved: the disk has a mark the text no longer asks for", () => {
-    // Saved "\ufeffx" (a read takes the character as the mark), but the
-    // insertion was undone before the answer came: the draft is "x".
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "x" })
-    const next = baselineSavedBuffer(
-      prev,
-      "\ufeffx",
-      { modified: null, size: 4 },
-      "",
-      { encoding: "UTF-8", bom: false },
-      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
-    )
-    expect(next.loaded).toBe("x")
-    expect(next.bom).toBe(true)
-    expect(next.draftBom).toBe(false)
-    expect(isBufferDirty(next)).toBe(true)
-    // Its next save writes no mark.
-    expect(bufferSaveEncoding(next)).toEqual({ encoding: "UTF-8", bom: false })
-  })
-
-  it("is clean after the relabel when the draft still carried the character", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" })
-    const next = baselineSavedBuffer(
-      prev,
-      "\ufeffx",
-      { modified: null, size: 4 },
-      "",
-      { encoding: "UTF-8", bom: false },
-      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
-    )
-    expect(next.draft).toBe("x")
-    expect(next.draftBom).toBe(true)
-    expect(isBufferDirty(next)).toBe(false)
   })
 })
 
