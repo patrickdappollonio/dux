@@ -44,7 +44,8 @@ editor stays above the soft keyboard. The header keeps the **‹** Back button, 
 toggle, the name of what the editor is rooted at and **Save**; the File/Diff switch, the
 preview toggle, the syntax language and **Open local editor** fold into one `⋯` menu at the
 end of the row. The status bar at the bottom keeps the file's path, the unsaved-changes
-dot and the cursor position.
+dot, the read-only badge where it applies, the cursor position, and an image's pixel
+dimensions.
 
 ## Editing next to a terminal
 
@@ -103,7 +104,8 @@ A thin status bar runs along the bottom, under both panes, and describes the ope
 Only what applies is shown. The cursor, line count, indentation and line endings appear
 while the text editor itself is on screen, so a preview or a diff leaves them out; a
 binary file shows its path and size; an image shows its path and pixel dimensions. On a
-phone the bar keeps just the path, the unsaved dot and the cursor position.
+phone the bar keeps just the path, the unsaved dot, the read-only badge, the cursor
+position and an image's dimensions.
 
 Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
 end of the header. Your width (in pixels) and collapsed state are remembered in the

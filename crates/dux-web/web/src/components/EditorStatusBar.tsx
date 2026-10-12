@@ -39,10 +39,16 @@ export interface StatusBarEditor extends EditorStatusSource {
 function useEditorCursorStatus(
   editor: StatusBarEditor | null,
 ): EditorCursorStatus | null {
-  const [status, setStatus] = useState<EditorCursorStatus | null>(null)
+  // Tagged with the editor it was read from, so a reading left over from a
+  // previous editor (the last file, before the pane swapped) is never painted
+  // for the new one while its first read is still to come.
+  const [reading, setReading] = useState<{
+    editor: StatusBarEditor
+    status: EditorCursorStatus | null
+  } | null>(null)
   useEffect(() => {
     if (editor === null) return
-    const refresh = () => setStatus(readEditorStatus(editor))
+    const refresh = () => setReading({ editor, status: readEditorStatus(editor) })
     refresh()
     const subscriptions = [
       editor.onDidChangeCursorSelection(refresh),
@@ -56,11 +62,12 @@ function useEditorCursorStatus(
       for (const s of subscriptions) s.dispose()
     }
   }, [editor])
-  return editor === null ? null : status
+  return editor !== null && reading?.editor === editor ? reading.status : null
 }
 
-// Hidden on a phone, where the bar keeps only the path, the dirty dot and the
-// cursor, and so holds no touch target at all.
+// Hidden on a phone, where the bar keeps only the path, the dirty dot, the
+// read-only label, the cursor and an image's dimensions, and so holds no touch
+// target at all.
 const DESKTOP_ONLY = "max-md:hidden"
 
 export function EditorStatusBar({
@@ -100,7 +107,7 @@ export function EditorStatusBar({
           )}
           {plan.readOnly && (
             <SimpleTooltip content="This file is read-only: it is a symlink to an external file or a .git path">
-              <span className={cn("shrink-0", DESKTOP_ONLY)}>read-only</span>
+              <span className="shrink-0">read-only</span>
             </SimpleTooltip>
           )}
         </div>

@@ -728,6 +728,20 @@ describe("image and svg preview", () => {
     expect(screen.getByText(/640\s*×\s*480/)).toBeTruthy()
   })
 
+  it("forgets the pixel size when a reload of the image fails, and on Retry", async () => {
+    await mountWithTab("assets/logo.png")
+    const img = (await screen.findByAltText("assets/logo.png")) as HTMLImageElement
+    Object.defineProperty(img, "naturalWidth", { value: 640 })
+    Object.defineProperty(img, "naturalHeight", { value: 480 })
+    fireEvent.load(img)
+    expect(screen.getByText(/640\s*×\s*480/)).toBeTruthy()
+    fireEvent.error(img)
+    expect(screen.queryByText(/640\s*×\s*480/)).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+    await screen.findByAltText("assets/logo.png")
+    expect(screen.queryByText(/640\s*×\s*480/)).toBeNull()
+  })
+
   it("an svg tab opens as text and its Preview renders the draft as an image", async () => {
     await mountWithTab("icons/logo.svg")
     // SVG is a text tab: /read is fetched and Monaco (the stub) mounts.

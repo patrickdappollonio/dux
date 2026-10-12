@@ -91,7 +91,10 @@ import {
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { planStatusBar, type ImageDimensions } from "@/lib/editorStatus"
-import { standaloneEditorName } from "@/lib/standaloneEditorName"
+import {
+  editorTitleProse,
+  standaloneEditorName,
+} from "@/lib/standaloneEditorName"
 import { performTreeDrop } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { nextFileDropToastId } from "@/lib/fileDrop"
@@ -1387,6 +1390,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function renderRootTitle(): React.ReactNode {
     const named = standaloneEditorName(root, spine)
     const Glyph = named.glyph === "terminal" ? SquareTerminal : FileCode2
+    // "Editor for <name>[ in <where>]" as prose segments. The leading words get
+    // their own line on a phone; the names follow on one line that truncates
+    // rather than wrapping the header, the first name holding on longest.
+    const [lead, ...rest] = editorTitleProse(named)
     return (
       <>
         {/* The root's own glyph, so a terminal-rooted editor reads as one at a
@@ -1394,20 +1401,27 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <Glyph className="size-4 shrink-0 text-muted-foreground max-md:hidden" />
         <div className="flex min-w-0 flex-1 items-center gap-1.5 max-md:flex-col max-md:items-start max-md:gap-0.5">
           <span className="shrink-0 text-sm text-muted-foreground max-md:text-xs">
-            Editor for
+            {typeof lead === "string" ? lead.trim() : null}
           </span>
           <div className="flex min-w-0 max-w-full items-center gap-1.5 text-sm">
-            {/* One line however long the name: it truncates rather than
-                wrapping the header onto a second row. */}
-            <InlineCode className="min-w-0 truncate whitespace-nowrap">
-              {named.name}
-            </InlineCode>
-            {named.detail !== null && (
-              // Gives way faster than the chip, so a narrow header keeps the
-              // name and loses the owner text first.
-              <span className="min-w-0 shrink-[4] truncate text-xs text-muted-foreground">
-                {named.detail}
-              </span>
+            {rest.map((segment, index) =>
+              typeof segment === "string" ? (
+                <span key={index} className="shrink-0 text-muted-foreground">
+                  {segment.trim()}
+                </span>
+              ) : (
+                <InlineCode
+                  key={index}
+                  className={cn(
+                    "min-w-0 truncate whitespace-nowrap",
+                    // The owner gives way faster than the terminal's own name.
+                    rest.slice(0, index).some((s) => typeof s !== "string") &&
+                      "shrink-[4]",
+                  )}
+                >
+                  {segment.name}
+                </InlineCode>
+              ),
             )}
           </div>
         </div>
@@ -2027,7 +2041,7 @@ interface EditorContentPaneProps {
   onSave: () => void
   onMonacoReady: (monaco: MonacoInstance) => void
   onEditorChange: (editor: StatusBarEditor | null) => void
-  onImageDims: (dims: ImageDimensions) => void
+  onImageDims: (dims: ImageDimensions | null) => void
 }
 
 function EditorContentPane(props: EditorContentPaneProps) {
@@ -2222,7 +2236,7 @@ function ImagePreviewPane({
 }: {
   src: string
   path: string
-  onDims: (dims: ImageDimensions) => void
+  onDims: (dims: ImageDimensions | null) => void
 }) {
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -2239,6 +2253,7 @@ function ImagePreviewPane({
           variant="outline"
           onClick={() => {
             setFailed(false)
+            onDims(null)
             setAttempt((a) => a + 1)
           }}
         >
@@ -2262,7 +2277,12 @@ function ImagePreviewPane({
             height: e.currentTarget.naturalHeight,
           })
         }
-        onError={() => setFailed(true)}
+        onError={() => {
+          // A picture that failed to load has no size to report, whatever the
+          // last successful load of this path measured.
+          onDims(null)
+          setFailed(true)
+        }}
       />
     </PreviewImageFrame>
   )

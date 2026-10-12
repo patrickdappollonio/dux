@@ -108,6 +108,45 @@ describe("the editor status bar", () => {
     expect(screen.getByText("CRLF")).toBeTruthy()
   })
 
+  it("never paints the previous editor's numbers when a new one arrives", () => {
+    const first = fakeEditor()
+    first.state.line = 9
+    first.state.column = 3
+    const { rerender } = renderBar(FULL, first.editor)
+    expect(screen.getByText("Ln 9, Col 3")).toBeTruthy()
+    const bar = (editor: StatusBarEditor | null) => (
+      <EditorStatusBar
+        plan={FULL}
+        editor={editor}
+        languageLabel="Rust"
+        languageItems={null}
+      />
+    )
+    rerender(bar(null))
+    // Every text the bar paints on the way to the new editor, recorded as it
+    // changes: the old file's position must not be one of them.
+    const seen: string[] = []
+    const observer = new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.oldValue !== null) seen.push(r.oldValue)
+      }
+    })
+    observer.observe(document.body, {
+      subtree: true,
+      characterData: true,
+      characterDataOldValue: true,
+      childList: true,
+    })
+    const second = fakeEditor()
+    second.state.line = 2
+    second.state.column = 8
+    rerender(bar(second.editor))
+    seen.push(...observer.takeRecords().flatMap((r) => (r.oldValue === null ? [] : [r.oldValue])))
+    observer.disconnect()
+    expect(screen.getByText("Ln 2, Col 8")).toBeTruthy()
+    expect(seen).not.toContain("Ln 9, Col 3")
+  })
+
   it("lets go of the editor's events when it unmounts", () => {
     const fake = fakeEditor()
     const { unmount } = renderBar(FULL, fake.editor)
@@ -165,7 +204,7 @@ describe("the editor status bar", () => {
     expect(screen.getByText("1.5 KiB")).toBeTruthy()
   })
 
-  it("keeps only the path, the dirty dot and the cursor on a phone", () => {
+  it("keeps only the path, the dirty dot, read-only and the cursor on a phone", () => {
     const fake = fakeEditor()
     renderBar({ ...FULL, dirty: true, readOnly: true }, fake.editor)
     const phoneHidden = (text: string | RegExp) =>
@@ -173,7 +212,9 @@ describe("the editor status bar", () => {
     expect(phoneHidden("src/main.rs")).toBe(false)
     expect(phoneHidden("●")).toBe(false)
     expect(phoneHidden("Ln 1, Col 1")).toBe(false)
-    expect(phoneHidden("read-only")).toBe(true)
+    // A phone can type into a read-only file too, so it must be told why
+    // Save stays disabled.
+    expect(phoneHidden("read-only")).toBe(false)
     expect(phoneHidden("3 lines")).toBe(true)
     expect(phoneHidden("Spaces: 2")).toBe(true)
     expect(phoneHidden("LF")).toBe(true)

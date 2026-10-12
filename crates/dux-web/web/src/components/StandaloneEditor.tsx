@@ -14,9 +14,9 @@ import { SHELL_SAFE_TOP, shellHeight } from "@/lib/appViewport"
 // editor, at `#/editor/<root>[/<mode>/<encoded-path>]`. It is a full second SPA
 // instance, and that cost is accepted. On a computer there is deliberately no
 // in-app way out: the browser's own Back and tab close are the exit. A phone's
-// editor header leads with the Back every phone screen has, which pushes the
-// agent's Changes screen (see `leaveStandaloneEditor`), because a phone opens
-// the editor in this same tab from there. Phones reach it best-effort, so the
+// editor header leads with the Back every phone screen has, an Up control that
+// pushes the editor's named parent (see `leaveStandaloneEditor`) rather than
+// returning wherever the editor was opened from. Phones reach it best-effort, so the
 // shell carries `MobileApp`'s two mobile-root behaviors, the safe-area
 // padding and the visual-viewport pin that keeps Monaco clear of the keyboard.
 export function StandaloneEditorShell() {

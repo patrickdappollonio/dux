@@ -2928,9 +2928,10 @@ export function openStandaloneEditorInThisTab(
 }
 
 // Where the standalone editor's Up control goes on a phone, by name: the
-// screen the editor is about. An agent's is its Changes screen, which is where
-// a phone opens the editor from, and a standalone agent has one too (it asks
-// the folder). A terminal root has no Changes screen, so it is the terminal's
+// editor's parent, the screen it is about, whichever surface opened it (the
+// Changes list, an agent's or a terminal's menu, or a link). An agent's is its
+// Changes screen, the screen about its files, and a standalone agent has one
+// too (it asks the folder). A terminal root has no Changes screen, so it is the terminal's
 // own screen; a session-owned terminal never gets here, because its editor is
 // its agent's (`editorRootForTarget`).
 export function standaloneEditorUpHash(root: EditorRoot): string {

@@ -204,9 +204,9 @@ describe("the standalone editor shell", () => {
     const chips = screen.getAllByText("My agent")
     expect(chips).toHaveLength(1)
     expect(chips[0].getAttribute("data-slot")).toBe("inline-code")
-    expect(chips[0].parentElement!.parentElement!.textContent).toBe(
-      "Editor forMy agent",
-    )
+    expect(
+      chips[0].parentElement!.parentElement!.textContent!.replace(/\s+/g, ""),
+    ).toBe("EditorforMyagent")
     // No "Open in dux" link: on a computer the exit is the browser's own
     // controls (Back, or closing the tab), so the shell ships no anchor.
     expect(screen.queryByRole("link", { name: /open in dux/i })).toBeNull()
@@ -266,9 +266,12 @@ describe("the standalone editor shell", () => {
     const chip = screen.getByText("vim")
     expect(chip.getAttribute("data-slot")).toBe("inline-code")
     // The owner text sits after the chip, quieter.
+    // Where it lives is a name too, so it is a chip, joined by plain words:
+    // "Editor for vim in ~/code".
     const detail = screen.getByText("~/code")
-    expect(detail.className).toContain("text-muted-foreground")
-    expect(chip.nextElementSibling).toBe(detail)
+    expect(detail.getAttribute("data-slot")).toBe("inline-code")
+    expect(chip.nextElementSibling!.textContent).toBe("in")
+    expect(chip.nextElementSibling!.nextElementSibling).toBe(detail)
     // The terminal's glyph, not the agent's.
     const header = chip.closest("div.border-b") as HTMLElement
     expect(header.querySelector("svg.lucide-square-terminal")).toBeTruthy()
