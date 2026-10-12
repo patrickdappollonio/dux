@@ -67,6 +67,21 @@ describe("a change from the editor", () => {
   /// a tab switch) through the handler it was given for the OLD one. A change
   /// is only ever about the model that produced it, so it never lands on the
   /// other file's draft.
+  /// The wrapper pushes a new value into a read-only editor with setValue,
+  /// which Monaco reports as a flush, and Monaco's text can differ from what
+  /// was pushed (it drops a leading U+FEFF). A flush is the editor's own doing,
+  /// never a keystroke, so it never reaches the draft.
+  it("never passes on a flush, which is the editor setting its own value", async () => {
+    const { default: CodeEditor } = await import("./CodeEditor")
+    const onChange = vi.fn()
+    render(<CodeEditor path="a.txt" value="x" onSave={() => {}} onChange={onChange} />)
+    const handler = handlers.at(-1)! as (v: string, ev?: { isFlush: boolean }) => void
+    handler("x stripped", { isFlush: true })
+    expect(onChange).not.toHaveBeenCalled()
+    handler("typed", { isFlush: false })
+    expect(onChange).toHaveBeenCalledWith("typed", "a.txt")
+  })
+
   it("only reaches the file whose model produced it", async () => {
     const { default: CodeEditor } = await import("./CodeEditor")
     const onA = vi.fn()

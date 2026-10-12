@@ -188,14 +188,21 @@ export function useEditorFileReads({
     // compares against. The save's own re-read is the exception.
     const saving = () => !options.afterSave && savingTabIdRef.current === tabId
     if (!asked && saving()) return
+    // Likewise a reopen that is out: a reload nobody asked for would take the
+    // latest-request slot from the read the person did ask for, and apply a
+    // reading in the encoding they were leaving. The reopen's answer is the
+    // fresh read anyway.
+    if (!asked && buffersRef.current.get(tabId)?.reopening) return
     const token = nextToken(tabId)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
     const reopenAs = options.encoding ?? null
     const requested =
       reopenAs ?? buffersRef.current.get(tabId)?.encodingRequested ?? null
     // A reopen replaces the text when it lands, so until then the editor takes
-    // no typing (see `TabBuffer.reopening`); every way this read ends gives it
-    // back.
+    // no typing (see `TabBuffer.reopening`). Only the LATEST read of this tab
+    // may give it back, however it ends: an earlier answer arriving late is
+    // dropped whole, lock included, or it would unlock typing that the later
+    // reopen's answer then replaces.
     const setReopening = (label: string | null) =>
       setBuffers((prev) => {
         const current = prev.get(tabId)
@@ -206,17 +213,17 @@ export function useEditorFileReads({
         return next
       })
     if (reopenAs !== null) setReopening(encodingLabel(reopenAs, false))
-    const endReopening = () => {
-      if (reopenAs !== null) setReopening(null)
+    const settle = () => {
+      if (isCurrentRequest(tabId, token)) setReopening(null)
     }
     fileApi
       .read(root, path, requested)
       .then((file) => {
-        if (!isCurrentRequest(tabId, token)) {
-          endReopening()
+        if (!isCurrentRequest(tabId, token)) return
+        if (!asked && saving()) {
+          settle()
           return
         }
-        if (!asked && saving()) return
         const atResolve = buffersRef.current.get(tabId)
         const dirtyNow =
           !asked &&
@@ -234,6 +241,7 @@ export function useEditorFileReads({
               size: file.size ?? null,
             }),
           )
+          settle()
           return
         }
         setBuffers((prev) => {
@@ -258,8 +266,8 @@ export function useEditorFileReads({
         }
       })
       .catch((error) => {
-        endReopening()
         if (!isCurrentRequest(tabId, token)) return
+        settle()
         if (reopenAs !== null) {
           // The buffer is untouched: the file stays open as it was, in the
           // encoding it had, and the toast says why the reopen did not happen.

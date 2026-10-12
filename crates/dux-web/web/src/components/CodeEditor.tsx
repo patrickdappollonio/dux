@@ -149,7 +149,14 @@ export default function CodeEditor({
       path={path}
       language={language}
       value={value}
-      onChange={(v) => {
+      onChange={(v, ev) => {
+        // A flush is Monaco replacing its whole value (the wrapper's setValue
+        // into a read-only editor), the editor's own doing and never a
+        // keystroke, and its text can differ from what was pushed (a leading
+        // U+FEFF is dropped). Only keystrokes, undo and paste reach the draft.
+        // The wrapper pushes into a writable editor with its change events
+        // held back, so those never arrive here at all.
+        if (ev?.isFlush) return
         // A change is only ever about the model that produced it. On a tab
         // switch the wrapper can emit one for the new file's model (its
         // read-only setValue) through the handler it was given for the old

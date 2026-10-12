@@ -332,11 +332,15 @@ export const fileApi = {
     content: string,
     expected?: { modified: string | null; size: number | null },
     encoding?: SaveEncoding,
+    readAs?: SaveEncoding,
   ) =>
     postFile<WriteResult>(fileUrl(root, "write"), {
       path,
       content,
       ...(encoding ? { encoding: encoding.encoding, bom: encoding.bom } : {}),
+      // What the text was read in, so the server tells an ordinary save (the
+      // same pair) from a conversion (another), and judges each rightly.
+      ...(readAs ? { read_encoding: readAs.encoding, read_bom: readAs.bom } : {}),
       // Both halves or neither: the server treats half a token as no token,
       // and sending one half would only look like a guard.
       ...(expected && expected.modified !== null && expected.size !== null

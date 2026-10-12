@@ -3487,6 +3487,90 @@ describe("a file that is not plain UTF-8", () => {
       encoding: "windows-1252",
       bom: false,
     })
+    // And says what it was read in, so the server tells a save from a
+    // conversion.
+    expect(writeMock.mock.calls[0][5]).toEqual({
+      encoding: "windows-1252",
+      bom: false,
+    })
+  })
+
+  /// Two reopens out at once: only the later one's answer may touch the
+  /// buffer, and typing stays locked until it lands.
+  it("lets only the latest of two overlapping reopens apply or unlock typing", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const first = pending<typeof LATIN1>()
+    const second = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    await pick(/reopen with encoding/i, /^Windows-1252/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("windows-1252"))
+    await pick(/reopen with encoding/i, /^ISO-8859-15/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("ISO-8859-15"))
+    first.resolve({ ...LATIN1, content: "first\n", encoding_fallback: false })
+    await new Promise((r) => setTimeout(r, 200))
+    const box = screen.getByTestId("code-editor") as HTMLTextAreaElement
+    expect(box.getAttribute("data-read-only")).toBe("true")
+    expect(box.value).toBe("café\n")
+    second.resolve({ ...LATIN1, content: "second\n", encoding: "ISO-8859-15", encoding_fallback: false })
+    await loaded("second\n")
+    await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("false"))
+  })
+
+  /// A freshness check that finds the file changed while a reopen is out must
+  /// not start a reload of its own: it would supersede the reopen the person
+  /// asked for and apply a reading in the old encoding.
+  it("lets no freshness reload supersede a reopen that is out", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    } as typeof LATIN1)
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const reopen = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(reopen.promise)
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("Shift_JIS"))
+    const reads = readMock.mock.calls.length
+    infoMock.mockResolvedValue({
+      path: PATH,
+      kind: "file" as const,
+      size: 99,
+      modified: "2027-01-01T00:00:00+00:00",
+      mode: "644",
+      permissions: "rw-r--r--",
+      symlink_target: null,
+      git: { state: "clean" as const },
+    })
+    fireEvent(window, new Event("focus"))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readMock.mock.calls.length).toBe(reads)
+    reopen.resolve({ ...LATIN1, content: "日\n", encoding: "Shift_JIS", encoding_fallback: false })
+    await loaded("日\n")
+  })
+
+  /// A read-only buffer's text never changes from the editor: nobody can type
+  /// there, so any change event is the editor's own echo (Monaco drops a
+  /// leading U+FEFF on setValue), and taking it would lose the character
+  /// from a conversion.
+  it("never lets an editor event change a read-only buffer's text", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\ufeffx",
+      encoding: "UTF-8",
+      bom: true,
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "doubled_mark",
+    })
+    await mountWithTab(PATH)
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe("\ufeffx"))
+    fireEvent.change(box, { target: { value: "x" } })
+    await pick(/save with encoding/i, /^UTF-16 LE/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][2]).toBe("\ufeffx")
   })
 
   it("reopens a clean buffer in the chosen encoding at once, and says so", async () => {

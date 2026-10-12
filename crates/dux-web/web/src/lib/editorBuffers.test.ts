@@ -770,7 +770,7 @@ describe("a save whose leading U+FEFF reads back as a mark", () => {
     expect(next.draft).toBe("a")
   })
 
-  it("keeps what was typed since, which is then still unsaved", () => {
+  it("keeps what was typed since, unsaved, but not the character the mark now carries", () => {
     const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "﻿ab", loaded: "x" })
     const next = baselineSavedBuffer(
       prev,
@@ -781,6 +781,8 @@ describe("a save whose leading U+FEFF reads back as a mark", () => {
       { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
     )
     expect(next.loaded).toBe("a")
-    expect(next.draft).toBe("﻿ab")
+    // The mark is the label now; leaving the character in the draft would
+    // make the next save write it a second time.
+    expect(next.draft).toBe("ab")
   })
 })

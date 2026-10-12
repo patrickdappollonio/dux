@@ -7,6 +7,7 @@ import {
 } from "@/lib/fileApi"
 import {
   baselineSavedBuffer,
+  bufferSaveEncoding,
   changeSignalFor,
   diskFactKey,
   isBufferStale,
@@ -80,6 +81,10 @@ export function useEditorSave({
     // Which reading of the file this save is about: an answer arriving after
     // something else replaced the buffer's text must not relabel that text.
     const sentGeneration = buffersRef.current.get(tabId)?.generation ?? 0
+    // The encoding the text being saved was read in.
+    const sentFrom = buffersRef.current.get(tabId)
+    const readAs =
+      sentFrom && !isBufferStale(sentFrom, path) ? bufferSaveEncoding(sentFrom) : undefined
     setSavingTabId(tabId)
     setSavingPaths((prev) => {
       const next = new Set(prev)
@@ -87,7 +92,7 @@ export function useEditorSave({
       return next
     })
     fileApi
-      .write(root, path, body, expected, encoding)
+      .write(root, path, body, expected, encoding, readAs)
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)

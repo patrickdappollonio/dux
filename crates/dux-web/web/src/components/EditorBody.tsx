@@ -972,6 +972,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     setBuffers((prev) => {
       const cur = prev.get(tabId)
       if (!cur || cur.path !== path || cur.loadedPath !== path) return prev
+      // Nobody can type into a read-only buffer (nor one a reopen is
+      // reading), so a change here is the editor's own echo and never an
+      // edit; it must not move the text a conversion would write.
+      if (cur.readOnly || cur.reopening) return prev
       const next = new Map(prev)
       next.set(tabId, { ...cur, draft: value })
       return next

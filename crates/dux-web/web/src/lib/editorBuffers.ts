@@ -467,8 +467,12 @@ export function baselineSavedBuffer(
   // the editor's text without the character is that file exactly. Anything
   // typed since the save stays, and so stays unsaved.
   const markRead = verdict?.leading_mark_read_as_bom === true
-  const loaded = markRead && body.startsWith("﻿") ? body.slice(1) : body
-  const draft = markRead && prev.draft === body ? loaded : prev.draft
+  const loaded = markRead && body.startsWith("\ufeff") ? body.slice(1) : body
+  // The label carries the mark now, so the character leaves the draft too,
+  // typing since or not: left there, the next save would write it a second
+  // time.
+  const draft =
+    markRead && prev.draft.startsWith("\ufeff") ? prev.draft.slice(1) : prev.draft
   return {
     ...prev,
     ...encodingAfterSave(
