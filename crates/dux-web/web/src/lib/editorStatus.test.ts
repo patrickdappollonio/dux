@@ -143,6 +143,7 @@ function input(over: Partial<StatusBarInput>): StatusBarInput {
     encodingLabel: null,
     mixedEol: false,
     readOnlyReason: null,
+    diffHeadEncodingLabel: null,
     ...over,
   }
 }
@@ -294,5 +295,17 @@ describe("what the status bar carries in each state", () => {
         input({ ...label, tab: { path: "src/a.ts", mode: "diff" }, diffEditorShown: true }),
       ).encoding,
     ).toBeNull()
+  })
+})
+
+describe("a large file's diff", () => {
+  it("names the encoding the head of git's patch was read in", () => {
+    const plan = planStatusBar(
+      input({
+        tab: { path: "big.txt", mode: "diff" },
+        diffHeadEncodingLabel: "Windows-1252",
+      }),
+    )
+    expect(plan.encoding).toBe("Windows-1252")
   })
 })

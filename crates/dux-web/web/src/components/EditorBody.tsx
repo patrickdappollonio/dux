@@ -720,6 +720,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // What the status bar carries for what is on screen. The size is the disk's
   // as of the last read or save (the freshness stamp), not the unsaved
   // buffer's, so it never claims bytes that are not on disk yet.
+  // The encoding of a large file's diff (the head of git's patch), while that
+  // view is what is on screen and is not binary.
+  const shownHead =
+    activeTab?.mode === "diff" && diffReady ? activeBuffer?.diffHead : null
+  const diffHeadEncoding =
+    shownHead && !shownHead.binary
+      ? encodingLabel(shownHead.encoding ?? "UTF-8", false)
+      : null
   const statusPlan = planStatusBar({
     tab: activeTab === null ? null : { path: activeTab.path, mode: activeTab.mode },
     dirty,
@@ -739,6 +747,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         ? encodingLabel(activeBuffer.encoding, activeBuffer.bom)
         : null,
     mixedEol: activeBuffer?.mixedEol ?? false,
+    diffHeadEncodingLabel: diffHeadEncoding,
     readOnlyReason: encodingUnwritable
       ? `This file is read-only: ${encodingLabel(
           activeBuffer?.encoding ?? "UTF-8",
@@ -817,8 +826,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const encodingChoicesRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
     for (const buffer of buffers.values()) {
-      if (buffer.loadedPath !== null && buffer.encodingRequested) {
-        encodingChoicesRef.current.set(buffer.loadedPath, buffer.encodingRequested)
+      if (buffer.encodingRequested) {
+        encodingChoicesRef.current.set(buffer.path, buffer.encodingRequested)
       }
     }
   }, [buffers])
@@ -851,7 +860,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     reloadFileInPlace,
   })
 
-  const { loadDiffBuffer, refreshDiff } = useEditorDiffReads({
+  const { loadDiffBuffer, refreshDiff, reloadDiffAs } = useEditorDiffReads({
     root,
     tabs,
     activeTab,
@@ -1239,7 +1248,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // a reopen away from undone, while a decode that would lose bytes is refused
   // by the server. Save with is gone for a read-only file, which has no save.
   function encodingMenuItems(): React.ReactNode {
-    const current = bufferSaveEncoding(activeBuffer)
+    // The large-file diff view rereads the patch and has no save; the file
+    // view reopens the file and can save in another encoding.
+    const inDiff = activeTab?.mode === "diff"
+    const current = inDiff
+      ? { encoding: activeBuffer?.diffHead?.encoding ?? "UTF-8", bom: false }
+      : bufferSaveEncoding(activeBuffer)
+    const reopen = (encoding: string) => {
+      if (inDiff && activeTab) reloadDiffAs(activeTab.id, activeTab.path, encoding)
+      else requestReopen(encoding)
+    }
     return (
       <>
         <DropdownMenuSub>
@@ -1254,7 +1272,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 aria-current={
                   choice.encoding === current.encoding ? "true" : undefined
                 }
-                onClick={() => requestReopen(choice.encoding)}
+                onClick={() => reopen(choice.encoding)}
               >
                 <FileType />
                 {choice.label}
@@ -1265,7 +1283,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             ))}
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        {!hardReadOnly && (
+        {!inDiff && !hardReadOnly && (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger disabled={isSaving}>
               <SaveAll />
@@ -2309,7 +2327,7 @@ function DiffContentPane({
     if (diffHead.binary) {
       return (
         <CenteredPane>
-          This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
+          This file is binary, so it can&rsquo;t be diffed here.
         </CenteredPane>
       )
     }

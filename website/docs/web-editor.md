@@ -91,12 +91,15 @@ view toggles, **Save** and **Close**.
 
 A thin status bar runs along the bottom, under both panes, and describes the open file:
 
-- its path, with a dot when it has unsaved edits and a read-only badge where that applies
+- its path, with a dot when it has unsaved edits and a read-only badge where that applies.
+  A long path is cut at the start, so the file name always shows. Click or tap the path to
+  copy it
 - the cursor position (`Ln 12, Col 5`, plus how many characters are selected when you have
   a selection)
 - how many lines the file has
 - its indentation (`Spaces: 2` or `Tabs: 4`), as Monaco detected it from the file
-- its line endings, `LF` or `CRLF`
+- its line endings, `LF` or `CRLF`, or `Mixed` for a file that has both or a lone CR (see
+  [File encodings](#file-encodings))
 - its size on disk, as of the last time the editor read or saved it (unsaved edits do not
   count until you save)
 - its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM`
@@ -205,8 +208,10 @@ by one fixed rule:
   UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
 - A file that is valid UTF-8 opens as UTF-8.
 - Anything else opens as Windows-1252 (the superset of ISO-8859-1, or Latin-1). Every byte
-  has a character there, so nothing is lost and a save writes the same bytes back for
-  everything you did not touch. Files with NUL bytes are still binary and still refused.
+  has a character there, so nothing is lost.
+
+Binary means real binary content, like a picture: a file with NUL bytes or a known binary
+signature. It is the one thing that does not open as text in any encoding.
 
 When a file lands in that last case, an amber notice above the text says it isn't valid
 UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that is really
@@ -226,15 +231,39 @@ menus:
   file follows the encoding you picked.
 - **Save with encoding** saves the file right now in the encoding you pick, which is how
   you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
-  it is recognised the next time it opens. A read-only file has no save, so it has no such
-  menu either.
+  it is recognised the next time it opens. A file that is read-only for any reason other
+  than its encoding has no save, so it has no such menu either.
+
+A save writes back exactly the bytes it read for everything you did not touch, with one
+exception, line endings, below. Where an encoding cannot keep that promise, the file opens
+read-only in it and an amber notice says why, rather than letting a save quietly change
+bytes you never edited. That happens when:
+
+- the encoding spells some of the file's characters two ways and would write them back the
+  other way, or has no way back for them at all (some Shift_JIS, Big5, GBK and GB18030
+  files, and ISO-2022-JP files with half-width katakana, are like this), or
+- the file starts with two byte-order marks, because the editor keeps only one.
+
+It is still text: reopen it in another encoding from the status bar to edit it, or convert
+it with **Save with encoding** (any encoding except the one that cannot write it back).
+
+The editor keeps one line ending style per file. A file whose line endings are mixed, or
+that has a lone carriage return (as old Mac files do), gets an amber notice saying that
+saving writes every line ending as the style named there, and the status bar says `Mixed`.
+Nothing changes until you save.
+
+If you reopened a file in a code page and it is later rewritten as UTF-8 (by an agent,
+say), it is not silently shown as garbled text: an amber notice says it is open in the
+encoding you chose but now looks like valid UTF-8, so you can pick UTF-8 from the status
+bar before you save. A chosen encoding stays with the file when you rename or move it, and
+ends when you close it.
 
 > [!IMPORTANT]
 > A save is refused when the text holds a character the file's encoding cannot represent,
 > such as an emoji or a Chinese character typed into a Windows-1252 file. Nothing is
 > written, your text stays in the tab, and the toast names the first such character and
-> its line and column. Remove it, or use **Save with encoding** to convert the file to
-> UTF-8.
+> its line and column as the editor shows them. Remove it, or use **Save with encoding**
+> to convert the file to UTF-8.
 
 ## When the agent edits a file you have open
 
@@ -409,8 +438,11 @@ your own terms.
 
 Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
 editor, so a change to a Windows-1252 file is a readable diff. A file too large for the
-editor to open is diffed only when it is plain UTF-8; past that size, any other encoding
-(a byte-order mark included) is shown as a binary file.
+editor to open is shown as the start of git's own patch, read by the same rule: UTF-8 when
+it is, Windows-1252 otherwise. The status bar names that encoding there too, and **Reopen
+with encoding** rereads the patch in the one you pick; if the patch is not valid in it, the
+diff stays as it was and a toast says why. Only real binary content, which includes
+UTF-16 for git, is shown as a binary file.
 
 ## Open in your local editor
 

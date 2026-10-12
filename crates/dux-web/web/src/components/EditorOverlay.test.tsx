@@ -160,7 +160,8 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
     // mocked: the image-pane test asserts the exact URL the <img> gets.
     rawUrl: (_root: unknown, path: string) =>
       `/api/v1/sessions/s1/files/raw?path=${encodeURIComponent(path)}`,
-    diff: () => diffMock(),
+    diff: (...a: unknown[]) =>
+      (diffMock as unknown as (...x: unknown[]) => unknown)(...a),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
     createFile: (...a: unknown[]) => createFileMock(...a),
@@ -3238,6 +3239,67 @@ describe("a file that is not plain UTF-8", () => {
     ) as HTMLElement
     expect(notice.textContent).toContain("open as Windows-1252")
     expect(notice.textContent).toContain("the status bar")
+  })
+
+  it("names a large file's diff encoding and rereads the diff in a picked one", async () => {
+    const headAnswer = (text: string, encoding: string) =>
+      ({
+        path: PATH,
+        head: {
+          text,
+          shown_lines: 4,
+          total_lines: 4,
+          truncated: false,
+          total_is_at_least: false,
+          binary: false,
+          encoding,
+          encoding_fallback: encoding === "windows-1252",
+        },
+      }) as unknown as Awaited<ReturnType<typeof diffMock>>
+    diffMock.mockResolvedValue(headAnswer("@@ -1 +1 @@\n+\u0093\u00fa\n", "windows-1252"))
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-head-viewer")
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
+    diffMock.mockResolvedValue(headAnswer("@@ -1 +1 @@\n+\u65e5\n", "Shift_JIS"))
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /reopen with encoding/i }))
+    // A diff has no save, so the menu offers no Save with encoding.
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Shift_JIS/ }))
+    await waitFor(() =>
+      expect((diffMock.mock.calls.at(-1) as unknown[])?.[2]).toBe("Shift_JIS"),
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("diff-head-viewer").getAttribute("data-text"),
+      ).toContain("\u65e5"),
+    )
+    expect((await encodingButton()).textContent).toContain("Shift_JIS")
+  })
+
+  it("keeps the diff as it was when a picked encoding is refused", async () => {
+    diffMock.mockResolvedValue({
+      path: PATH,
+      head: {
+        text: "@@ -1 +1 @@\n+caf\u00e9\n",
+        shown_lines: 2,
+        total_lines: 2,
+        truncated: false,
+        total_is_at_least: false,
+        binary: false,
+        encoding: "windows-1252",
+        encoding_fallback: true,
+      },
+    } as unknown as Awaited<ReturnType<typeof diffMock>>)
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-head-viewer")
+    diffMock.mockRejectedValueOnce(new Error("the diff is not valid UTF-8"))
+    await pick(/reopen with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(screen.getByTestId("diff-head-viewer").getAttribute("data-text")).toContain(
+      "caf\u00e9",
+    )
+    expect((await encodingButton()).textContent).toContain("Windows-1252")
   })
 
   it("names a UTF-16 file in the status bar without calling it a guess", async () => {

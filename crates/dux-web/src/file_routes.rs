@@ -592,7 +592,7 @@ async fn diff_contents(
             // the change, and there is one to show. Every other refusal is still
             // a refusal.
             Err(e) if e.downcast_ref::<dux_core::diff::DiffTooLarge>().is_some() => {
-                match dux_core::diff::diff_head_via_git(&worktree, &path) {
+                match dux_core::diff::diff_head_via_git_as(&worktree, &path, requested) {
                     Ok(head) => Ok(DiffAnswer::Head {
                         path: path.clone(),
                         head,

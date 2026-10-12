@@ -81,6 +81,11 @@ export interface FileDiffHead {
   truncated: boolean
   total_is_at_least: boolean
   binary: boolean
+  /** The encoding the file's lines in the patch were read in; absent from an
+   *  older server, which only ever showed UTF-8. */
+  encoding?: string | null
+  /** windows-1252 as the last resort for content that is not UTF-8. */
+  encoding_fallback?: boolean
 }
 
 export interface FileDiffHeadAnswer {

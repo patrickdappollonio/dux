@@ -568,11 +568,11 @@ mod tests {
     fn the_ordinary_cases_are_writable() {
         for (bytes, requested) in [
             (&b"caf\xe9\n"[..], None),
-            (&"caf\u{e9}\n".as_bytes()[..], None),
+            ("caf\u{e9}\n".as_bytes(), None),
             (&b"\xEF\xBB\xBFhi"[..], None),
             (&[0xFF, 0xFE, b'h', 0][..], None),
             (&[0x93, 0xfa, 0x96, 0x7b][..], Some(encoding_rs::SHIFT_JIS)),
-            (&"caf\u{e9}".as_bytes()[..], Some(WINDOWS_1252)),
+            ("caf\u{e9}".as_bytes(), Some(WINDOWS_1252)),
         ] {
             assert_eq!(
                 text(decode(bytes, requested)).unwritable,

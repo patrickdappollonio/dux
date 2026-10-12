@@ -118,6 +118,9 @@ export interface StatusBarInput {
   encodingLabel: string | null
   // The file's line endings are mixed or include a lone CR.
   mixedEol: boolean
+  // The encoding a large file's diff (the head of git's patch) was read in,
+  // by its label, while that view is on screen; null otherwise.
+  diffHeadEncodingLabel: string | null
   // Why a read-only file is read-only, when it is for a reason of its own
   // (its encoding cannot write it back unchanged); null for the usual ones.
   readOnlyReason: string | null
@@ -175,6 +178,10 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
       path: tab.path,
       dirty: input.dirty,
       language: input.diffEditorShown && input.languageAvailable,
+      // A two-sided diff decodes each side by itself and need not share one
+      // encoding; the head of git's patch is read in one, which can be
+      // corrected here.
+      encoding: input.diffHeadEncodingLabel,
     }
   }
   const editing = input.fileReady && !input.binary && !input.preview
