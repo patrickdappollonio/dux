@@ -587,15 +587,23 @@ fn write_checked_existing(
                     // the target encoding, the conservative way.
                     None => (save.encoding, false),
                 };
+                // Whatever the save is, a read encoding the client states must
+                // decode the bytes on disk: if it cannot, the text being saved
+                // was not read from these bytes in it. (An older client states
+                // none; its target-encoding check below treats bytes that do
+                // not decode as a conversion, the conservative old behaviour.)
+                if (conversion || save.read_as.is_some())
+                    && crate::text_encoding::decode(&existing, Some(judge_in)).is_err()
+                {
+                    anyhow::bail!(
+                        "refusing to save: the file on disk is not valid {}, the encoding \
+                         this save says it was read in, so it was not shown as it is; \
+                         nothing was written. Reopen it and try again",
+                        judge_in.name()
+                    );
+                }
                 if conversion {
-                    if crate::text_encoding::decode(&existing, Some(judge_in)).is_err() {
-                        anyhow::bail!(
-                            "refusing to save: the file on disk is not valid {}, the encoding \
-                             this save says it was read in, so it was not shown as it is; \
-                             nothing was written. Reopen it and try again",
-                            judge_in.name()
-                        );
-                    }
+                    // The old bytes read honestly and are replaced whole.
                 } else if let Some(reason) =
                     crate::text_encoding::would_rewrite_untouched(&existing, judge_in)
                 {
@@ -2876,6 +2884,26 @@ mod tests {
                 std::fs::read(dir.path().join("nec.txt")).unwrap(),
                 [0x87, 0x90]
             );
+        }
+
+        /// An ordinary save (the same encoding read and written) over bytes
+        /// that are not valid in that encoding was never shown those bytes:
+        /// refused, nothing written.
+        #[test]
+        fn an_ordinary_save_over_bytes_its_read_encoding_cannot_decode_is_refused() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "x",
+                save_read_as(encoding_rs::UTF_8, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("l.txt")).unwrap(), b"caf\xe9");
         }
 
         /// A read encoding the bytes on disk are not valid in is not what the
