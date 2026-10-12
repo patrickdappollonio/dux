@@ -2480,6 +2480,7 @@ function FileContentPane({
           onEditorChange={onEditorChange}
           // Only once a read has named one: an older server names none.
           eol={buffer?.eol ?? undefined}
+          reading={buffer?.generation}
           readOnly={(buffer?.readOnly ?? false) || (buffer?.reopening ?? null) !== null}
           readOnlyReason={readOnlyReasonOf(buffer)}
         />
