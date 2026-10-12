@@ -126,7 +126,18 @@ export function useEditorSave({
             )
             return next
           })
-          editorSetTabDirty(root, tabId, false)
+          // Unsaved is whatever the draft holds beyond what this save wrote,
+          // never a blanket "saved": text typed while the save was out is
+          // still only in the tab, and closing it must still ask.
+          const after = baselineSavedBuffer(
+            now,
+            body,
+            { modified: result.modified, size: result.size },
+            "",
+            encoding,
+            result,
+          )
+          editorSetTabDirty(root, tabId, after.draft !== after.loaded)
         }
         if (outcome.tone === "warning") notifyWarning(outcome.message)
         else if (converting)

@@ -753,3 +753,34 @@ describe("a save's answer and the buffer it is about", () => {
     expect(clean.readOnly).toBe(false)
   })
 })
+
+describe("a save whose leading U+FEFF reads back as a mark", () => {
+  it("relabels the file as marked and drops the character from the copy, with no edit", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "﻿a", loaded: "x" })
+    const next = baselineSavedBuffer(
+      prev,
+      "﻿a",
+      { modified: null, size: 4 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+    )
+    expect(next.bom).toBe(true)
+    expect(next.loaded).toBe("a")
+    expect(next.draft).toBe("a")
+  })
+
+  it("keeps what was typed since, which is then still unsaved", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "﻿ab", loaded: "x" })
+    const next = baselineSavedBuffer(
+      prev,
+      "﻿a",
+      { modified: null, size: 4 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+    )
+    expect(next.loaded).toBe("a")
+    expect(next.draft).toBe("﻿ab")
+  })
+})

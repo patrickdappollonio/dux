@@ -215,6 +215,7 @@ function codeEditorStub() {
   return {
     default: ({
       value,
+      path,
       onChange,
       language,
       onReady,
@@ -222,7 +223,8 @@ function codeEditorStub() {
       readOnly,
     }: {
       value: string
-      onChange: (v: string) => void
+      onChange: (v: string, path: string) => void
+      path: string
       language?: string
       onReady?: (mon: unknown) => void
       onEditorChange?: (ed: unknown) => void
@@ -252,7 +254,7 @@ function codeEditorStub() {
         data-language={language ?? ""}
         data-read-only={String(readOnly ?? false)}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange(e.target.value, path)}
       />
       </>
     ),
@@ -3330,6 +3332,32 @@ describe("a file that is not plain UTF-8", () => {
     ).toBe("other\n")
   })
 
+  /// The save took the text as it was when Save was pressed; anything typed
+  /// while it was out is still unsaved, and closing must still ask.
+  for (const kind of ["ordinary", "conversion"] as const) {
+    it(`keeps the tab unsaved when typing went on during a pending ${kind} save`, async () => {
+      const box = await mountDirty()
+      const write = pending<{ modified: string; size: number }>()
+      writeMock.mockReturnValueOnce(write.promise)
+      if (kind === "ordinary") {
+        fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+      } else {
+        await pick(/save with encoding/i, /^UTF-8$/)
+      }
+      await waitFor(() => expect(writeMock).toHaveBeenCalled())
+      expect(writeMock.mock.calls[0][2]).toBe("th\u00e9\n")
+      fireEvent.change(box, { target: { value: "th\u00e9 and more\n" } })
+      await waitFor(() => expect(box.value).toBe("th\u00e9 and more\n"))
+      editorSetTabDirtyMock.mockClear()
+      write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+      await new Promise((r) => setTimeout(r, 300))
+      expect(
+        editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+      ).toEqual([])
+      expect(box.value).toBe("th\u00e9 and more\n")
+    })
+  }
+
   it("converts a mixed file without an edit in the one style the notice named", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,
@@ -3525,6 +3553,34 @@ describe("a file that is not plain UTF-8", () => {
       ]),
     )
     treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  /// A reopen of a clean file replaces its text when the read lands; typing
+  /// before then would be thrown away with no confirm. So the editor takes no
+  /// typing until the reopen answers, either way.
+  it("takes no typing while a reopen is out, and gives it back after", async () => {
+    await mountWithTab(PATH)
+    await loaded("caf\u00e9\n")
+    const read = pending<typeof LATIN1>()
+    readMock.mockReturnValueOnce(read.promise)
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("true"),
+    )
+    read.resolve({ ...LATIN1, content: "\u65e5\n", encoding: "Shift_JIS", encoding_fallback: false })
+    await loaded("\u65e5\n")
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("false"),
+    )
+  })
+
+  it("gives typing back when a reopen is refused", async () => {
+    await mountWithTab(PATH)
+    await loaded("caf\u00e9\n")
+    readMock.mockRejectedValueOnce(new Error("the file is not valid UTF-8"))
+    await pick(/reopen with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("false")
   })
 
   it("asks before a reopen throws away unsaved edits", async () => {

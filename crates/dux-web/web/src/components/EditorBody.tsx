@@ -962,18 +962,22 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // the close-confirm gating read from one place), and promote a preview tab
   // to permanent on its first edit, so an in-progress edit is never silently
   // discarded by a later preview-replace.
-  function handleDraftChange(value: string): void {
-    if (!activeTab) return
+  // `path` is the file the change is the text of. It must be the file the
+  // buffer holds, checked against the LIVE buffer: a preview tab reuses its id
+  // for another file, and a change for one file must never land in another's
+  // draft, whatever order the editor wrapper delivers it in.
+  function handleDraftChange(value: string, path: string): void {
+    if (!activeTab || activeTab.path !== path) return
     const tabId = activeTab.id
     setBuffers((prev) => {
       const cur = prev.get(tabId)
-      if (!cur) return prev
+      if (!cur || cur.path !== path || cur.loadedPath !== path) return prev
       const next = new Map(prev)
       next.set(tabId, { ...cur, draft: value })
       return next
     })
     const cur = buffers.get(tabId)
-    if (cur && !cur.binary && !cur.readOnly) {
+    if (cur && cur.path === path && !cur.binary && !cur.readOnly) {
       const newDirty = value !== cur.loaded
       // Only dispatch when the dirty flag actually flips: `useDux()` is an
       // unselective `useSyncExternalStore`, so a dispatch on every keystroke
@@ -2290,7 +2294,7 @@ interface EditorContentPaneProps {
   renderPreview: (path: string) => React.ReactNode
   onRetryFile: (tabId: string, path: string) => void
   onRetryDiff: (tabId: string, path: string) => void
-  onDraftChange: (value: string) => void
+  onDraftChange: (value: string, path: string) => void
   onSave: () => void
   onMonacoReady: (monaco: MonacoInstance) => void
   onEditorChange: (editor: StatusBarEditor | null) => void
@@ -2435,7 +2439,7 @@ function FileContentPane({
           onEditorChange={onEditorChange}
           // Only once a read has named one: an older server names none.
           eol={buffer?.eol ?? undefined}
-          readOnly={buffer?.readOnly ?? false}
+          readOnly={(buffer?.readOnly ?? false) || (buffer?.reopening ?? null) !== null}
           readOnlyReason={readOnlyReasonOf(buffer)}
         />
       </Suspense>
@@ -2575,6 +2579,9 @@ function PreviewImageFrame({ children }: { children: React.ReactNode }) {
 // What Monaco says when someone types into a read-only buffer: the same two
 // reasons the status bar's read-only label gives.
 function readOnlyReasonOf(buffer: TabBuffer | undefined): string | undefined {
+  if (buffer?.reopening) {
+    return `Reopening as ${buffer.reopening}: the text is replaced when the file has been read again.`
+  }
   if (!buffer?.readOnly) return undefined
   return buffer.unwritable !== null && !buffer.pathReadOnly
     ? "This file is read-only: its encoding can't write it back without changing bytes you didn't touch. Reopen or convert it from the encoding menu in the status bar."

@@ -124,6 +124,10 @@ export interface TabBuffer {
   // place, a reopen), so a save that resolves later can tell whether the
   // buffer it answers is still the one it was sent from.
   generation: number
+  // The encoding a reopen is reading the file in, by its label, while that
+  // read is out; null otherwise. The editor takes no typing meanwhile: the
+  // answer replaces the text, and anything typed would go with it.
+  reopening: string | null
 }
 
 export type BufferEncodingFacts = Pick<
@@ -243,6 +247,7 @@ export function emptyBuffer(path: string): TabBuffer {
     looksLikeUtf8: false,
     pathReadOnly: false,
     generation: 0,
+    reopening: null,
   }
 }
 
@@ -418,6 +423,7 @@ export function reloadedInPlace(
     loading: false,
     loaded: editorTextOf(file),
     generation: freshGeneration(),
+    reopening: null,
     draft: editorTextOf(file),
     binary: file.binary,
     readOnly: file.read_only ?? false,
@@ -454,6 +460,15 @@ export function baselineSavedBuffer(
   // save that states an encoding does); otherwise what the editor sent: one
   // line ending style, nothing new to say about the encoding.
   const unwritable = verdict ? (verdict.unwritable ?? null) : null
+  // A text that began with U+FEFF, saved with no mark asked for, wrote exactly
+  // the bytes of a marked file, and a read now sets that character aside as the
+  // mark. The bytes are what the text implied, so nothing is wrong on disk; the
+  // copy and the label move to what a read says, and nothing becomes unsaved:
+  // the editor's text without the character is that file exactly. Anything
+  // typed since the save stays, and so stays unsaved.
+  const markRead = verdict?.leading_mark_read_as_bom === true
+  const loaded = markRead && body.startsWith("﻿") ? body.slice(1) : body
+  const draft = markRead && prev.draft === body ? loaded : prev.draft
   return {
     ...prev,
     ...encodingAfterSave(
@@ -465,6 +480,8 @@ export function baselineSavedBuffer(
       },
       saved,
     ),
+    ...(verdict?.bom !== undefined ? { bom: verdict.bom } : {}),
+    draft,
     // A conversion is never assumed to have made the file writable: a text
     // that still starts with a second mark is two marks in the new encoding
     // too. Read-only for where the file is never changes.
@@ -473,7 +490,7 @@ export function baselineSavedBuffer(
     unwritable,
     looksLikeUtf8: false,
     readOnly: (prev.pathReadOnly ?? false) || unwritable !== null,
-    loaded: body,
+    loaded,
     fileLoadedSignal: signal,
     stamp,
     diskState: "fresh",

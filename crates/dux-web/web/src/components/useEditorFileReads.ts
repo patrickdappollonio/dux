@@ -193,10 +193,29 @@ export function useEditorFileReads({
     const reopenAs = options.encoding ?? null
     const requested =
       reopenAs ?? buffersRef.current.get(tabId)?.encodingRequested ?? null
+    // A reopen replaces the text when it lands, so until then the editor takes
+    // no typing (see `TabBuffer.reopening`); every way this read ends gives it
+    // back.
+    const setReopening = (label: string | null) =>
+      setBuffers((prev) => {
+        const current = prev.get(tabId)
+        if (!current || isBufferStale(current, path)) return prev
+        if ((current.reopening ?? null) === label) return prev
+        const next = new Map(prev)
+        next.set(tabId, { ...current, reopening: label })
+        return next
+      })
+    if (reopenAs !== null) setReopening(encodingLabel(reopenAs, false))
+    const endReopening = () => {
+      if (reopenAs !== null) setReopening(null)
+    }
     fileApi
       .read(root, path, requested)
       .then((file) => {
-        if (!isCurrentRequest(tabId, token)) return
+        if (!isCurrentRequest(tabId, token)) {
+          endReopening()
+          return
+        }
         if (!asked && saving()) return
         const atResolve = buffersRef.current.get(tabId)
         const dirtyNow =
@@ -239,6 +258,7 @@ export function useEditorFileReads({
         }
       })
       .catch((error) => {
+        endReopening()
         if (!isCurrentRequest(tabId, token)) return
         if (reopenAs !== null) {
           // The buffer is untouched: the file stays open as it was, in the

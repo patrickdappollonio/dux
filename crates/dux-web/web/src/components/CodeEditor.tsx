@@ -20,7 +20,8 @@ interface CodeEditorProps {
   // undefined value, so the effect below owns clearing one.
   language?: string
   value: string
-  onChange: (value: string) => void
+  // Called with the new text and the path of the file it is the text of.
+  onChange: (value: string, path: string) => void
   onSave: () => void
   // Fired once on mount with the `monaco` instance, so the parent, which owns
   // the tab lifecycle, can dispose a closed tab's model by URI. `CodeEditor`
@@ -148,7 +149,21 @@ export default function CodeEditor({
       path={path}
       language={language}
       value={value}
-      onChange={(v) => onChange(v ?? "")}
+      onChange={(v) => {
+        // A change is only ever about the model that produced it. On a tab
+        // switch the wrapper can emit one for the new file's model (its
+        // read-only setValue) through the handler it was given for the old
+        // file, before it swaps the subscription; delivered, that writes one
+        // file's text over another's draft. So a change whose model is not
+        // this render's file is dropped, whatever the order inside the
+        // wrapper.
+        const model = editorRef.current?.getModel()
+        const mon = monacoRef.current
+        if (model && mon && model.uri.toString() !== mon.Uri.parse(path).toString()) {
+          return
+        }
+        onChange(v ?? "", path)
+      }}
       onMount={handleMount}
       options={{
         // 14px matches the app's text-sm body size; 13 read as too small.

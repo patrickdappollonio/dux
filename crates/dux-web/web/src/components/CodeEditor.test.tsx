@@ -3,8 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render } from "@testing-library/react"
 import { useEffect } from "react"
 
+// The path the wrapper's model belongs to right now: the wrapper swaps the
+// model when its `path` prop changes.
+let currentPath = ""
 // A model that keeps one line ending style, the way Monaco's does.
 const model = {
+  get uri() {
+    return { toString: () => currentPath }
+  },
   eol: "\n",
   getEOL() {
     return this.eol
@@ -22,25 +28,60 @@ const fakeMonaco = {
   KeyCode: { KeyS: 0 },
   editor: { EndOfLineSequence: { LF: 0, CRLF: 1 }, setModelLanguage: () => {} },
   languages: { getLanguages: () => [] },
+  Uri: { parse: (p: string) => ({ toString: () => p }) },
 }
 
 vi.mock("@/lib/monacoSetup", () => ({ monaco: fakeMonaco }))
 // The options the wrapper was last handed, so a test can read what Monaco got.
 let lastOptions: Record<string, unknown> = {}
+// Every change handler the wrapper was handed, in render order.
+const handlers: Array<(v: string | undefined) => void> = []
 vi.mock("@monaco-editor/react", () => ({
   Editor: ({
     onMount,
     options,
+    path,
+    onChange,
   }: {
     onMount: (ed: unknown, mon: unknown) => void
     options: Record<string, unknown>
+    path: string
+    onChange: (v: string | undefined) => void
   }) => {
     lastOptions = options
+    currentPath = path
+    handlers.push(onChange)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => onMount(fakeEditor, fakeMonaco), [])
     return null
   },
 }))
+
+describe("a change from the editor", () => {
+  afterEach(() => {
+    cleanup()
+    handlers.length = 0
+  })
+
+  /// The wrapper can emit a change for the NEW file (a read-only setValue on
+  /// a tab switch) through the handler it was given for the OLD one. A change
+  /// is only ever about the model that produced it, so it never lands on the
+  /// other file's draft.
+  it("only reaches the file whose model produced it", async () => {
+    const { default: CodeEditor } = await import("./CodeEditor")
+    const onA = vi.fn()
+    const onB = vi.fn()
+    const props = { value: "x", onSave: () => {} }
+    const view = render(<CodeEditor {...props} path="a.txt" onChange={onA} />)
+    const aHandler = handlers.at(-1)!
+    view.rerender(<CodeEditor {...props} path="b.txt" onChange={onB} readOnly />)
+    aHandler("B's text")
+    expect(onA).not.toHaveBeenCalled()
+    expect(onB).not.toHaveBeenCalled()
+    handlers.at(-1)!("typed into b")
+    expect(onB).toHaveBeenCalledWith("typed into b", "b.txt")
+  })
+})
 
 describe("a read-only file in the code editor", () => {
   afterEach(cleanup)
