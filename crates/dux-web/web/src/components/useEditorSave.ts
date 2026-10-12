@@ -21,7 +21,14 @@ import type {
   TabBuffer,
 } from "@/lib/editorBuffers"
 import { rootKey, type EditorRoot } from "@/lib/editorRoot"
-import { acquireLane, laneBusy, laneKey, laneOpWords } from "@/lib/editorLane"
+import {
+  acquireLane,
+  LaneDeadlineError,
+  laneBusy,
+  laneKey,
+  laneOpWords,
+  withLaneDeadline,
+} from "@/lib/editorLane"
 import {
   encodingLabel,
   unmappableNotice,
@@ -122,16 +129,20 @@ export function useEditorSave({
       next.add(path)
       return next
     })
-    fileApi
-      // The editor holds its text with LF breaks; the file gets its own style.
-      .write(
+    // Bounded: a save the server never answers gives the lane back and says
+    // so, and its answer, if it ever comes, is never applied.
+    withLaneDeadline(
+      fileApi.write(
         root,
         path,
+        // The editor holds its text with LF breaks; the file gets its own style.
         textForSave(from && !isBufferStale(from, path) ? from : undefined, body),
         expected,
         encoding,
         readAs,
-      )
+      ),
+      converting ? "convert" : "save",
+    )
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)
@@ -208,6 +219,12 @@ export function useEditorSave({
             encoding,
             deleted: error.deleted,
           })
+          return
+        }
+        if (error instanceof LaneDeadlineError) {
+          // Sticky (weighed): the file may hold this text or the old one, and
+          // the buffer still calls itself unsaved; the person has to look.
+          notifyError(prose`Saving ${chip(path)}: ${error.message}.`, { sticky: true })
           return
         }
         if (error instanceof FileUnmappableError) {

@@ -88,3 +88,50 @@ export function laneOpWords(op: LaneOp): string {
       return "a reload from disk"
   }
 }
+
+// How long an operation may hold its file's lane waiting for the server. A
+// request can hang with nothing ever coming back (the path swapped for a
+// FIFO, a server wedged mid-answer), and a lane held forever leaves the file
+// with no save, reload or reopen for as long as the page lives, closing the
+// editor included. Generous on purpose: a real save or read of an editable
+// file never comes near it.
+export const LANE_DEADLINE_MS = 60_000
+
+// An operation the server never answered within the deadline. A save's text
+// may still have been written; a read's answer is simply never applied.
+export class LaneDeadlineError extends Error {
+  readonly op: LaneOp
+  constructor(op: LaneOp, ms: number) {
+    const seconds = Math.round(ms / 1000)
+    super(
+      op === "save" || op === "convert"
+        ? `the server didn't answer within ${seconds} seconds, so dux stopped waiting; the save may or may not have been written. Reload the file from disk to see what it holds`
+        : `the server didn't answer within ${seconds} seconds, so dux stopped waiting and applied nothing`,
+    )
+    this.name = "LaneDeadlineError"
+    this.op = op
+  }
+}
+
+// `request`, or a LaneDeadlineError once `ms` passes without an answer. An
+// answer that arrives after that is never seen by whoever awaited this: the
+// operation has already ended, and its lane been given back.
+export function withLaneDeadline<T>(
+  request: Promise<T>,
+  op: LaneOp,
+  ms: number = LANE_DEADLINE_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new LaneDeadlineError(op, ms)), ms)
+    request.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}

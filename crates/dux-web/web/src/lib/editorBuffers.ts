@@ -52,6 +52,10 @@ export interface ChangedRowView {
 
 // One tab's Monaco buffer and diff cache, keyed by tab id. A preview-replace
 // reuses a tab id under a new `path`: check `isBufferStale` before any read.
+// What an asked-for read holding a buffer's typing is doing: reopening the
+// file in another encoding (by that encoding's label), or reloading it.
+export type ReadingLock = { kind: "reopen"; label: string } | { kind: "reload" }
+
 export interface TabBuffer {
   path: string
   // The path whose content is actually held in `loaded`/`draft`, or null
@@ -124,10 +128,11 @@ export interface TabBuffer {
   // place, a reopen), so a save that resolves later can tell whether the
   // buffer it answers is still the one it was sent from.
   generation: number
-  // The encoding a reopen is reading the file in, by its label, while that
-  // read is out; null otherwise. The editor takes no typing meanwhile: the
-  // answer replaces the text, and anything typed would go with it.
-  reopening: string | null
+  // A read the person asked for that replaces the text when it lands (a
+  // reopen in another encoding, or Reload from disk), while it is out; null
+  // otherwise. The editor takes no typing meanwhile: anything typed would be
+  // replaced along with the rest, unsaved, with nothing to say so.
+  readingLock: ReadingLock | null
   // The mark the next save writes. The same as `bom` (the file's) except
   // when a save's answer relabelled the file as marked after the draft had
   // already dropped the character that became the mark: the draft then asks
@@ -309,7 +314,7 @@ export function emptyBuffer(path: string): TabBuffer {
     looksLikeUtf8: false,
     pathReadOnly: false,
     generation: 0,
-    reopening: null,
+    readingLock: null,
     draftBom: false,
   }
 }
@@ -486,7 +491,7 @@ export function reloadedInPlace(
     loading: false,
     loaded: editorTextOf(file),
     generation: freshGeneration(),
-    reopening: null,
+    readingLock: null,
     draft: editorTextOf(file),
     binary: file.binary,
     readOnly: file.read_only ?? false,

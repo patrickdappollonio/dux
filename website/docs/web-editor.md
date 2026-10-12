@@ -238,7 +238,11 @@ menus:
 
 One thing happens to a file at a time. While a save, a conversion, a reopen or a reload
 of it is under way, the others wait: their menu rows and buttons are unavailable until it
-finishes, and the text cannot be typed into while a reopen is reading the file.
+finishes, and the text cannot be typed into while a reopen or **Reload from disk** is
+reading the file, since what it reads replaces the text. If the server has not answered
+after a minute, the editor stops waiting, says so, and frees the file; a save that timed
+out may or may not have been written, so reload the file to see what it holds. The editor
+only opens regular files: a named pipe, socket or device at a file's path is refused.
 
 A save writes back exactly the bytes it read for everything you did not touch, with one
 exception, line endings, below. Where an encoding cannot keep that promise, the file opens

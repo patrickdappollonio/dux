@@ -365,8 +365,14 @@ fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("could not stat {}", path.display())),
     }
-    let file =
-        std::fs::File::open(path).with_context(|| format!("could not read {}", path.display()))?;
+    // Only ever a regular file: a FIFO put at the path would otherwise block
+    // the read until something writes to it.
+    let file = crate::worktree_file::open_regular_nofollow(
+        path,
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+        |e| anyhow::anyhow!("could not read {}: {e}", path.display()),
+    )?;
     let mut buffer = Vec::new();
     file.take(limit as u64)
         .read_to_end(&mut buffer)
@@ -528,7 +534,8 @@ pub fn file_diff_contents_as(
     }
 
     let new_bytes = if working_meta.is_some() {
-        std::fs::read(&working_path)
+        // No-follow and regular files only, like the editor's own read.
+        crate::worktree_file::read_nofollow(&working_path)
             .with_context(|| format!("could not read working copy of {rel_path}"))?
     } else {
         Vec::new()

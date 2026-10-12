@@ -2588,6 +2588,52 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
   })
 
+  /// Reload from disk replaces the text whatever it holds when the read lands,
+  /// so while that read is out the editor takes no typing: anything typed
+  /// meanwhile would be thrown away and the tab marked saved, with no confirm.
+  /// Every ending gives the typing back.
+  it("takes no typing while an asked reload is out, and gives it back however it ends", async () => {
+    const view = await mountOne()
+    selectionActive = true
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    const answer = pending<{ path: string; content: string; binary: boolean }>()
+    readMock.mockReturnValueOnce(answer.promise)
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("true"))
+    // A keystroke that got through anyway is the editor's echo, never an edit.
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    expect(editor().value).toBe(ON_DISK)
+    answer.resolve({ path: PATH, content: AGENT_TEXT, binary: false })
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+    expect(editor().getAttribute("data-read-only")).toBe("false")
+
+  })
+
+  it("gives the typing back when an asked reload fails", async () => {
+    const view = await mountOne()
+    selectionActive = true
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    let fail!: (e: Error) => void
+    readMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        fail = reject
+      }),
+    )
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("true"))
+    fail(new Error("the disk went away"))
+    await waitFor(() => expect(editor().getAttribute("data-read-only")).toBe("false"))
+    expect(editor().value).toBe(ON_DISK)
+  })
+
   // The interleaving: a check goes out against the pre-save stamp, the save
   // lands and re-baselines, and the check's answer arrives describing the
   // file the buffer now holds. Adopting the signal without clearing the state
@@ -3796,6 +3842,30 @@ describe("a file that is not plain UTF-8", () => {
       within(dialog).getByRole("button", { name: /discard & reopen/i }),
     )
     await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("Shift_JIS"))
+  })
+
+  /// A read that never comes back (the path swapped for a FIFO) must not hold
+  /// the file for the life of the page: past the deadline the reopen fails out
+  /// loud, the text takes typing again, and the file takes another operation.
+  it("gives up on a reopen the server never answers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await mountWithTab(PATH)
+      const box = await loaded("café\n")
+      readMock.mockReturnValueOnce(new Promise(() => {}))
+      await pick(/reopen with encoding/i, /^UTF-8$/)
+      await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("true"))
+      vi.advanceTimersByTime(60_000)
+      await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("false"))
+      expect(JSON.stringify(toastError.mock.calls)).toContain("didn't answer")
+      expect(box.value).toBe("café\n")
+      // The lane is free: another reopen starts.
+      readMock.mockClear()
+      await pick(/reopen with encoding/i, /^Windows-1252/)
+      await waitFor(() => expect(readMock).toHaveBeenCalled())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("keeps the buffer as it was when the reopen is refused", async () => {

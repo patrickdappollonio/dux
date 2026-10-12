@@ -18,6 +18,7 @@ import {
 import type {
   ChangesSliceView,
   DiskState,
+  ReadingLock,
   TabBuffer,
 } from "@/lib/editorBuffers"
 import { rootKey, type EditorRoot } from "@/lib/editorRoot"
@@ -26,6 +27,7 @@ import {
   laneBusy,
   laneKey,
   laneOpWords,
+  withLaneDeadline,
   type LaneOp,
 } from "@/lib/editorLane"
 import type { EditorTab } from "@/lib/editorTabs"
@@ -221,23 +223,33 @@ export function useEditorFileReads({
     const ticket = { path, generation: from.generation ?? 0 }
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
     const requested = reopenAs ?? from.encodingRequested ?? null
-    // A reopen replaces the text when it lands, so until then the editor takes
-    // no typing (see `TabBuffer.reopening`); the lane is what keeps a second
-    // reopen from starting meanwhile.
-    const setReopening = (label: string | null) =>
+    // A read somebody asked for (a reopen, Reload from disk) replaces the text
+    // even when it is dirty, so until it lands the editor takes no typing
+    // (see `TabBuffer.readingLock`): anything typed meanwhile would be thrown
+    // away with no confirm. The lane keeps a second operation from starting.
+    // Every ending gives the typing back: an answer replaces the buffer with
+    // a fresh one, and a failure, a refusal or a dropped answer clears it.
+    const setLock = (lock: ReadingLock | null) =>
       setBuffers((prev) => {
         const current = prev.get(tabId)
         if (!current || !answerApplies(ticket, true, current)) return prev
-        if ((current.reopening ?? null) === label) return prev
+        if ((current.readingLock ?? null) === lock) return prev
         const next = new Map(prev)
-        next.set(tabId, { ...current, reopening: label })
+        next.set(tabId, { ...current, readingLock: lock })
         return next
       })
-    if (reopenAs !== null) setReopening(encodingLabel(reopenAs, false))
+    const lock: ReadingLock | null =
+      reopenAs !== null
+        ? { kind: "reopen", label: encodingLabel(reopenAs, false) }
+        : asked
+          ? { kind: "reload" }
+          : null
+    if (lock !== null) setLock(lock)
     const applies = () =>
       answerApplies(ticket, aliveRef.current, buffersRef.current.get(tabId))
-    fileApi
-      .read(root, path, requested)
+    // Bounded: a read that never comes back gives the lane back and is
+    // reported, and its answer, if it ever comes, is never applied.
+    withLaneDeadline(fileApi.read(root, path, requested), op)
       .then((file) => {
         if (!applies()) return
         const atResolve = buffersRef.current.get(tabId)!
@@ -275,7 +287,7 @@ export function useEditorFileReads({
       })
       .catch((error) => {
         if (!applies()) return
-        setReopening(null)
+        setLock(null)
         if (reopenAs !== null) {
           // The buffer is untouched: the file stays open as it was, in the
           // encoding it had, and the toast says why the reopen did not happen.

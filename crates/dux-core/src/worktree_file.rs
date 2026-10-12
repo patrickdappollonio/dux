@@ -281,6 +281,53 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
     read_nofollow_stat(abs_path).map(|(bytes, _)| bytes)
 }
 
+/// Open `abs_path` with `flags | O_NOFOLLOW` for the editor, refusing anything
+/// that is not a regular file before a single byte moves.
+///
+/// The path can be swapped for a FIFO, a socket or a device between any check
+/// and the open, and opening a FIFO with no writer blocks until one appears,
+/// which for the editor is forever. So the open is non-blocking, the
+/// descriptor's own `fstat` decides (a stat of the path would be about
+/// whatever is there by then), and only a regular file goes on, with blocking
+/// I/O restored. `on_open_error` words a failed open for its caller.
+pub(crate) fn open_regular_nofollow(
+    abs_path: &Path,
+    flags: rustix::fs::OFlags,
+    mode: rustix::fs::Mode,
+    on_open_error: impl FnOnce(rustix::io::Errno) -> anyhow::Error,
+) -> anyhow::Result<std::fs::File> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl, open as rustix_open};
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+    let fd = rustix_open(abs_path, flags | OFlags::NOFOLLOW | OFlags::NONBLOCK, mode)
+        .map_err(on_open_error)?;
+    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
+    let f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let kind = f.metadata()?.file_type();
+    if !kind.is_file() {
+        let what = if kind.is_fifo() {
+            "a named pipe (FIFO)"
+        } else if kind.is_socket() {
+            "a socket"
+        } else if kind.is_char_device() || kind.is_block_device() {
+            "a device"
+        } else if kind.is_dir() {
+            "a directory"
+        } else {
+            "a special file"
+        };
+        anyhow::bail!(
+            "not a regular file: {} is {what}, which the editor never reads or writes; \
+             nothing was read or written",
+            abs_path.display()
+        );
+    }
+    let now = fcntl_getfl(&f)?;
+    fcntl_setfl(&f, now - OFlags::NONBLOCK)?;
+    Ok(f)
+}
+
 /// [`read_nofollow`] plus the `fstat` of the descriptor the bytes came from,
 /// taken BEFORE the read.
 ///
@@ -293,18 +340,13 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
 /// which makes a fresh buffer look stale (a wasted re-check) instead of making
 /// a stale buffer look fresh (a lost edit).
 pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::Read;
-    use std::os::unix::io::FromRawFd;
-    use std::os::unix::io::IntoRawFd;
 
-    // O_NOFOLLOW | O_RDONLY. rustix's OFlags::NOFOLLOW is available when the
-    // `fs` feature is enabled (already is; see Cargo.toml workspace dep).
-    let fd = rustix_open(abs_path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())
-        .map_err(|e| anyhow::anyhow!("open {}: {e}", abs_path.display()))?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    // O_NOFOLLOW | O_RDONLY, and only ever a regular file.
+    let mut f = open_regular_nofollow(abs_path, OFlags::RDONLY, Mode::empty(), |e| {
+        anyhow::anyhow!("open {}: {e}", abs_path.display())
+    })?;
     let meta = f.metadata()?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)?;
@@ -436,7 +478,8 @@ pub fn read_file_as(
     })
 }
 
-/// Write `content` to `abs_path` with `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW`,
+/// Write `content` to `abs_path` with `O_WRONLY | O_CREAT | O_NOFOLLOW`, truncating once
+/// the descriptor is known to be a regular file (see [`open_regular_nofollow`]),
 /// the write-side counterpart of [`read_nofollow`]. The single open is what
 /// enforces the no-symlink rule: an ordinary truncating write follows a symlink
 /// at the leaf, so a stat that says "regular file" is worthless by the time the
@@ -459,19 +502,18 @@ pub fn write_nofollow_stamped(abs_path: &Path, content: &str) -> anyhow::Result<
 
 /// [`write_nofollow_stamped`] for text already encoded into bytes.
 fn write_nofollow_bytes_stamped(abs_path: &Path, content: &[u8]) -> anyhow::Result<FileStamp> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::Write;
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
-    let fd = rustix_open(
+    // No O_TRUNC in the open: truncation waits until the descriptor is known
+    // to be a regular file.
+    let mut f = open_regular_nofollow(
         abs_path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW,
+        OFlags::WRONLY | OFlags::CREATE,
         Mode::from_raw_mode(0o666),
-    )
-    .map_err(|e| open_for_writing_error(e, abs_path))?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+        |e| open_for_writing_error(e, abs_path),
+    )?;
+    f.set_len(0)?;
     f.write_all(content)?;
     Ok(stamp_from_meta(&f.metadata()?))
 }
@@ -513,26 +555,21 @@ fn write_checked_existing(
     expected: &FileStamp,
     encoding: Option<SaveEncoding>,
 ) -> anyhow::Result<FileStamp> {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::{Read, Seek, Write};
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
     // Read-write rather than write-only: the bytes about to be replaced are
     // checked through this same descriptor below.
-    let fd =
-        rustix_open(abs_path, OFlags::RDWR | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
-            if e == rustix::io::Errno::NOENT {
-                anyhow::Error::new(WriteConflict {
-                    current: None,
-                    deleted: true,
-                })
-            } else {
-                open_for_writing_error(e, abs_path)
-            }
-        })?;
-
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let mut f = open_regular_nofollow(abs_path, OFlags::RDWR, Mode::empty(), |e| {
+        if e == rustix::io::Errno::NOENT {
+            anyhow::Error::new(WriteConflict {
+                current: None,
+                deleted: true,
+            })
+        } else {
+            open_for_writing_error(e, abs_path)
+        }
+    })?;
     let current = stamp_from_meta(&f.metadata()?);
     if !expected.matches(&current) {
         return Err(anyhow::Error::new(WriteConflict {
@@ -687,9 +724,8 @@ fn leading_mark_from_file(
     rel_path: &str,
     save: SaveEncoding,
 ) -> anyhow::Error {
-    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use rustix::fs::{Mode, OFlags};
     use std::io::Read;
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
     let Some(refused) = err.downcast_ref::<crate::text_encoding::LeadingMarkInText>() else {
         return err;
@@ -700,11 +736,11 @@ fn leading_mark_from_file(
     let Ok(path) = resolve_worktree_path(worktree, rel_path) else {
         return err;
     };
-    let Ok(fd) = rustix_open(&path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty()) else {
+    let Ok(f) = open_regular_nofollow(&path, OFlags::RDONLY, Mode::empty(), |e| {
+        anyhow::anyhow!("open {}: {e}", path.display())
+    }) else {
         return err;
     };
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
     let mut existing = Vec::new();
     if f.take(MAX_EDITABLE_BYTES)
         .read_to_end(&mut existing)
@@ -3032,6 +3068,69 @@ mod tests {
                 .expect("typed refusal");
             assert!(!refused.from_file);
             assert!(err.to_string().contains("Delete that character"), "{err}");
+        }
+
+        /// A path the editor opens can be swapped for a FIFO (or another special
+        /// file) at any moment, and opening a FIFO with no writer blocks until
+        /// one appears: forever, holding the file's operation in the browser.
+        /// Every editor-facing open refuses anything but a regular file
+        /// without waiting for it.
+        #[test]
+        fn a_fifo_is_refused_at_once_by_every_editor_read_and_write() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("p.txt"), "x\n").unwrap();
+            let read = read_file(dir.path(), "p.txt").unwrap();
+            std::fs::remove_file(dir.path().join("p.txt")).unwrap();
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                dir.path().join("p.txt"),
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .unwrap();
+            let root = dir.path().to_path_buf();
+            let stamp = stamp_of(&read);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let read = read_file(&root, "p.txt")
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let as_gb = read_file_as(&root, "p.txt", Some(encoding_rs::GB18030))
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let diff = crate::diff::file_diff_contents(&root, "p.txt")
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                let save = write_file_encoded(
+                    &root,
+                    "p.txt",
+                    "\u{feff}y",
+                    save_read_as(encoding_rs::UTF_8, encoding_rs::GB18030),
+                    Some(&stamp),
+                )
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+                let raw = read_nofollow(&root.join("p.txt"))
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                tx.send((read, as_gb, diff, save, raw)).unwrap();
+            });
+            let (read, as_gb, diff, save, raw) = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("an editor open blocked on a FIFO");
+            for (what, result) in [
+                ("read", read),
+                ("read as", as_gb),
+                ("diff", diff),
+                ("raw", raw),
+            ] {
+                let err = result.expect_err(what);
+                assert!(err.contains("not a regular file"), "{what}: {err}");
+            }
+            // The save is refused too (by its encoding, then its kind); it
+            // only has to come back.
+            assert!(save.is_err());
         }
 
         /// The editor's whole loop for a windows-1252 file: read, change one

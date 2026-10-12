@@ -993,10 +993,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     setBuffers((prev) => {
       const cur = prev.get(tabId)
       if (!cur || cur.path !== path || cur.loadedPath !== path) return prev
-      // Nobody can type into a read-only buffer (nor one a reopen is
-      // reading), so a change here is the editor's own echo and never an
-      // edit; it must not move the text a conversion would write.
-      if (cur.readOnly || cur.reopening) return prev
+      // Nobody can type into a read-only buffer (nor one an asked-for reopen
+      // or reload is reading), so a change here is the editor's own echo and
+      // never an edit; it must not move the text a conversion would write.
+      if (cur.readOnly || cur.readingLock) return prev
       const next = new Map(prev)
       next.set(tabId, { ...cur, draft: value })
       return next
@@ -2482,7 +2482,7 @@ function FileContentPane({
           // A read that names the file's style hands the text over in LF
           // (see `editorTextOf`); an older server names none.
           lfText={(buffer?.eol ?? null) !== null}
-          readOnly={(buffer?.readOnly ?? false) || (buffer?.reopening ?? null) !== null}
+          readOnly={(buffer?.readOnly ?? false) || (buffer?.readingLock ?? null) !== null}
           readOnlyReason={readOnlyReasonOf(buffer)}
         />
       </Suspense>
@@ -2622,8 +2622,12 @@ function PreviewImageFrame({ children }: { children: React.ReactNode }) {
 // What Monaco says when someone types into a read-only buffer: the same two
 // reasons the status bar's read-only label gives.
 function readOnlyReasonOf(buffer: TabBuffer | undefined): string | undefined {
-  if (buffer?.reopening) {
-    return `Reopening as ${buffer.reopening}: the text is replaced when the file has been read again.`
+  const lock = buffer?.readingLock ?? null
+  if (lock?.kind === "reopen") {
+    return `Reopening as ${lock.label}: the text is replaced when the file has been read again.`
+  }
+  if (lock?.kind === "reload") {
+    return "Reloading from disk: the text is replaced when the file has been read again."
   }
   if (!buffer?.readOnly) return undefined
   return buffer.unwritable !== null && !buffer.pathReadOnly
