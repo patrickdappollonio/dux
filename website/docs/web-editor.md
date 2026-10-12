@@ -22,8 +22,11 @@ The editor opens as a full-screen overlay from a few places:
 For a separate browser tab, the agent's `⋯` menu also has **Open editor in new tab**, and
 the editor's header carries a matching icon that opens the current file there
 (middle-click works, it is a real link). That tab is nothing but the editor,
-full-viewport, named at the top by whatever it is rooted at. There is no in-app link back
-to the workspace: your browser's Back button or closing the tab is the way out.
+full-viewport, and its header reads **Editor for** followed by whatever it is rooted at. On
+a computer there is no in-app link back to the workspace: your browser's Back button or
+closing the tab is the way out. On a phone the header starts with a **‹** Back button,
+which takes you to the agent's Changes screen (or, for an editor rooted at a project or
+standalone terminal, to that terminal).
 
 The standalone tab is deliberately quiet: workspace messages and the "needs you" count in
 the tab title belong to the workspace tab. What the editor itself does still tells you
@@ -37,9 +40,11 @@ there, so saves, renames, deletes and uploads confirm in the tab you did them in
 
 The standalone tab works on phones, best-effort. The file explorer starts collapsed so the
 file gets the width (the header's toggle reopens it at a phone-sized width), and the
-editor stays above the soft keyboard. Only the explorer toggle and **Save** sit inline;
-the File/Diff switch, the preview toggle and **Open local editor** fold into one `⋯` menu
-at the end of the row.
+editor stays above the soft keyboard. The header keeps the **‹** Back button, the explorer
+toggle, the name of what the editor is rooted at and **Save**; the File/Diff switch, the
+preview toggle, the syntax language and **Open local editor** fold into one `⋯` menu at the
+end of the row. The status bar at the bottom keeps the file's path, the unsaved-changes
+dot and the cursor position.
 
 ## Editing next to a terminal
 
@@ -77,11 +82,28 @@ returns you to whatever was behind it. Closing it that way loses nothing (see be
 
 ## The layout
 
-The overlay is two panes. On the left, a search box, a header shortcut to create a file at
-the worktree root, and a file tree. On the right, the file itself: the editor, a diff
-view, or a rendered preview, depending on the header toggles. The header also carries the
-file path, a dirty dot for unsaved edits, a read-only badge where it applies, and **Save**
-and **Close**.
+The overlay is two panes. On the left, a search box, a shortcut to create a file at the
+worktree root, and a file tree. On the right, the file itself: the editor, a diff view, or
+a rendered preview, depending on the header toggles. The header names what the editor is
+rooted at (**Editor for** the agent, or the terminal and where it lives) and carries the
+view toggles, **Save** and **Close**.
+
+A thin status bar runs along the bottom, under both panes, and describes the open file:
+
+- its path, with a dot when it has unsaved edits and a read-only badge where that applies
+- the cursor position (`Ln 12, Col 5`, plus how many characters are selected when you have
+  a selection)
+- how many lines the file has
+- its indentation (`Spaces: 2` or `Tabs: 4`), as Monaco detected it from the file
+- its line endings, `LF` or `CRLF`
+- its size on disk, as of the last time the editor read or saved it (unsaved edits do not
+  count until you save)
+- the syntax language picker
+
+Only what applies is shown. The cursor, line count, indentation and line endings appear
+while the text editor itself is on screen, so a preview or a diff leaves them out; a
+binary file shows its path and size; an image shows its path and pixel dimensions. On a
+phone the bar keeps just the path, the unsaved dot and the cursor position.
 
 Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
 end of the header. Your width (in pixels) and collapsed state are remembered in the
@@ -92,7 +114,7 @@ Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and
 renaming, moving and deleting each confirm with a toast naming what happened, or say
 plainly when something went wrong.
 
-The header also shows the file's syntax language as a dropdown. dux lets Monaco guess from
+The status bar also shows the file's syntax language as a dropdown. dux lets Monaco guess from
 the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config
 file with no extension) you can pick the right one from the full list. The choice applies
 to the open file including its diff view, follows a rename or move, and lasts until you
@@ -324,7 +346,7 @@ diff.
 ## Images
 
 Image files (PNG, JPEG, GIF, WebP, and the rest) skip the editor and open as the picture
-itself, centered on the right, with the path and pixel dimensions underneath. There is
+itself, centered on the right, with the path and pixel dimensions in the status bar. There is
 nothing to save, no preview toggle and no diff view: clicking a changed image in the Changes
 pane shows the picture as it is on disk right now.
 
