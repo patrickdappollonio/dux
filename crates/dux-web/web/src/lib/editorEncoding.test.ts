@@ -3,12 +3,13 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   REOPEN_CHOICES,
   SAVE_CHOICES,
-  dismissFallbackNotice,
+  dismissNotice,
+  encodingNotices,
   encodingAfterSave,
   encodingLabel,
-  fallbackNoticeDismissed,
-  resetFallbackNotices,
-  showsFallbackNotice,
+  noticeDismissed,
+  resetEncodingNotices,
+  type NoticeFacts,
 } from "./editorEncoding"
 
 describe("encodingLabel", () => {
@@ -77,20 +78,61 @@ describe("encodingAfterSave", () => {
   })
 })
 
-describe("the fallback notice", () => {
-  afterEach(resetFallbackNotices)
 
-  it("shows only for a fallback that has not been dismissed", () => {
-    expect(showsFallbackNotice({ encodingFallback: true }, false)).toBe(true)
-    expect(showsFallbackNotice({ encodingFallback: true }, true)).toBe(false)
-    expect(showsFallbackNotice({ encodingFallback: false }, false)).toBe(false)
-    expect(showsFallbackNotice(undefined, false)).toBe(false)
+describe("the encoding notices", () => {
+  afterEach(resetEncodingNotices)
+
+  const plain: NoticeFacts = {
+    encoding: "UTF-8",
+    bom: false,
+    encodingFallback: false,
+    unwritable: null,
+    mixedEol: false,
+    eol: "LF",
+    looksLikeUtf8: false,
+  }
+  const kinds = (facts: Partial<NoticeFacts>, dismissed = () => false) =>
+    encodingNotices("a.txt", { ...plain, ...facts }, dismissed).map((n) => n.kind)
+
+  it("says nothing about a plain file", () => {
+    expect(kinds({})).toEqual([])
   })
 
-  it("is dismissed per file and per root", () => {
-    dismissFallbackNotice("agent:1", "a.txt")
-    expect(fallbackNoticeDismissed("agent:1", "a.txt")).toBe(true)
-    expect(fallbackNoticeDismissed("agent:1", "b.txt")).toBe(false)
-    expect(fallbackNoticeDismissed("agent:2", "a.txt")).toBe(false)
+  it("raises each fact that decides what a save would do", () => {
+    expect(kinds({ encoding: "windows-1252", encodingFallback: true })).toEqual(["fallback"])
+    expect(kinds({ unwritable: "round_trip" })).toEqual(["unwritable"])
+    expect(kinds({ unwritable: "doubled_mark" })).toEqual(["unwritable"])
+    expect(kinds({ looksLikeUtf8: true })).toEqual(["looks_utf8"])
+    expect(kinds({ mixedEol: true })).toEqual(["mixed_eol"])
+  })
+
+  it("leaves out the line endings of a file that cannot be saved anyway", () => {
+    expect(kinds({ mixedEol: true, unwritable: "round_trip" })).toEqual(["unwritable"])
+  })
+
+  it("names the file as a chip and the style a save writes", () => {
+    const [notice] = encodingNotices(
+      "a.txt",
+      { ...plain, mixedEol: true, eol: "CRLF" },
+      () => false,
+    )
+    expect(notice.message[0]).toEqual({ name: "a.txt", quoted: false })
+    expect(notice.message.filter((s) => typeof s === "string").join("")).toContain(
+      "as CRLF",
+    )
+  })
+
+  it("can dismiss everything but the read-only reason", () => {
+    expect(kinds({ unwritable: "round_trip", looksLikeUtf8: true }, () => true)).toEqual([
+      "unwritable",
+    ])
+  })
+
+  it("is dismissed per file, per root and per kind", () => {
+    dismissNotice("agent:1", "a.txt", "fallback")
+    expect(noticeDismissed("agent:1", "a.txt", "fallback")).toBe(true)
+    expect(noticeDismissed("agent:1", "a.txt", "mixed_eol")).toBe(false)
+    expect(noticeDismissed("agent:1", "b.txt", "fallback")).toBe(false)
+    expect(noticeDismissed("agent:2", "a.txt", "fallback")).toBe(false)
   })
 })

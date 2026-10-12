@@ -29,6 +29,19 @@ export interface WorktreeFile {
   /** The encoding is windows-1252 as a last resort for bytes that are not
    *  UTF-8, not something the file said about itself. */
   encoding_fallback?: boolean
+  /** Why the text cannot be saved in `encoding` without changing bytes nobody
+   *  edited: `round_trip` (the encoding writes some of them back differently)
+   *  or `doubled_mark` (two byte-order marks, and the editor drops one). The
+   *  file is then `read_only`; another encoding is the way out. */
+  unwritable?: "round_trip" | "doubled_mark" | null
+  /** The line endings are mixed or include a lone CR, so a save writes every
+   *  one as `eol`. */
+  mixed_line_endings?: boolean
+  /** The one line ending style the editor holds and a save writes. */
+  eol?: "LF" | "CRLF" | null
+  /** Read in a code page the person chose, yet the bytes are valid UTF-8 with
+   *  non-ASCII in them: most likely rewritten as UTF-8 since. */
+  looks_like_utf8?: boolean
   /** True when the server opened this file read-only (outside-resolving symlink
    *  or a .git/ path). The editor must not allow saving. */
   read_only?: boolean

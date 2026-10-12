@@ -548,6 +548,10 @@ describe("encodings on a read", () => {
       bom: false,
       encodingFallback: false,
       encodingRequested: null,
+      unwritable: null,
+      mixedEol: false,
+      eol: "LF",
+      looksLikeUtf8: false,
     })
   })
 
@@ -569,6 +573,10 @@ describe("encodings on a read", () => {
       bom: true,
       encodingFallback: false,
       encodingRequested: "UTF-16LE",
+      unwritable: null,
+      mixedEol: false,
+      eol: "LF",
+      looksLikeUtf8: false,
     })
   })
 

@@ -32,6 +32,8 @@ interface UseEditorFileReadsOptions {
   tabsRef: RefObject<readonly EditorTab[]>
   buffersRef: RefObject<Map<string, TabBuffer>>
   sliceRef: RefObject<ChangesSliceView | null>
+  // The encoding chosen per open path, which outlives a buffer across a rename.
+  encodingChoicesRef: RefObject<Map<string, string>>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
   raiseDiskBanner: (
     tabId: string,
@@ -51,6 +53,7 @@ export function useEditorFileReads({
   tabsRef,
   buffersRef,
   sliceRef,
+  encodingChoicesRef,
   setBuffers,
   raiseDiskBanner,
 }: UseEditorFileReadsOptions) {
@@ -69,13 +72,16 @@ export function useEditorFileReads({
   function loadFileBuffer(tabId: string, path: string): void {
     const token = nextToken(tabId)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
-    // A retry of the same file keeps asking for the encoding the person chose;
-    // a different file starts from the automatic rules.
+    // A retry of the same file keeps asking for the encoding the person chose,
+    // and so does a file that was renamed or moved with a choice on it; any
+    // other file starts from the automatic rules.
     const previous = buffersRef.current.get(tabId)
     const requested =
-      previous !== undefined && !isBufferStale(previous, path)
-        ? (previous.encodingRequested ?? null)
-        : null
+      (previous !== undefined && !isBufferStale(previous, path)
+        ? previous.encodingRequested
+        : null) ??
+      encodingChoicesRef.current.get(path) ??
+      null
     setBuffers((prev) => {
       const next = new Map(prev)
       next.set(tabId, fileLoadSeedBuffer(path))

@@ -3047,8 +3047,8 @@ describe("a file that is not plain UTF-8", () => {
     installBootStubs()
     const { clearRootDrafts } = await import("@/lib/editorDrafts")
     clearRootDrafts(rootKey(agentRoot(SESSION)))
-    const { resetFallbackNotices } = await import("@/lib/editorEncoding")
-    resetFallbackNotices()
+    const { resetEncodingNotices } = await import("@/lib/editorEncoding")
+    resetEncodingNotices()
     readMock.mockResolvedValue(LATIN1)
     writeMock.mockResolvedValue({
       modified: "2026-01-01T00:00:00+00:00",
@@ -3117,7 +3117,7 @@ describe("a file that is not plain UTF-8", () => {
     await mountWithTab(PATH)
     await screen.findByText(/isn.t valid UTF-8/)
     fireEvent.click(
-      screen.getByRole("button", { name: /dismiss the encoding notice/i }),
+      screen.getByRole("button", { name: /dismiss this notice/i }),
     )
     expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
     cleanup()
@@ -3177,6 +3177,69 @@ describe("a file that is not plain UTF-8", () => {
     expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
   })
 
+  it("opens text its encoding cannot write back read-only, says why, and still converts it", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u2252\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+    })
+    await mountWithTab(PATH)
+    await loaded("\u2252\n")
+    const notice = (await screen.findByText(/opened read-only/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("Shift_JIS can\u2019t write it back")
+    expect(within(notice).getByText(PATH).getAttribute("data-slot")).toBe("inline-code")
+    // Not binary: it is text, and the status bar still offers the way out.
+    expect(screen.queryByText(/binary/)).toBeNull()
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    // Saving back in the same encoding is the one thing it cannot do.
+    expect(
+      (await screen.findByRole("menuitem", { name: /^Shift_JIS/ })).getAttribute("aria-disabled"),
+    ).toBe("true")
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^UTF-8$/ }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("warns before a save rewrites mixed line endings, and the bar says Mixed", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "a\nb\nc\n",
+      encoding: "UTF-8",
+      encoding_fallback: false,
+      mixed_line_endings: true,
+      eol: "CRLF",
+    })
+    await mountWithTab(PATH)
+    await loaded("a\nb\nc\n")
+    const notice = (await screen.findByText(/mixes line endings/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("writes every line ending as CRLF")
+    expect(await screen.findByText("Mixed")).toBeTruthy()
+    expect(screen.queryByText("LF")).toBeNull()
+  })
+
+  it("says so when a file read in a chosen code page now looks like UTF-8", async () => {
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "caf\u00c3\u00a9\n",
+      encoding_fallback: false,
+      looks_like_utf8: true,
+    })
+    await mountWithTab(PATH)
+    const notice = (await screen.findByText(/looks like valid UTF-8/)).closest(
+      "[role=status]",
+    ) as HTMLElement
+    expect(notice.textContent).toContain("open as Windows-1252")
+    expect(notice.textContent).toContain("the status bar")
+  })
+
   it("names a UTF-16 file in the status bar without calling it a guess", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,
@@ -3215,6 +3278,54 @@ describe("a file that is not plain UTF-8", () => {
     // No longer a guess: the person said what it is.
     expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled())
+  })
+
+  it("keeps the chosen encoding through a rename, the way the language pick does", async () => {
+    treeMock.mockImplementation(async () => ({
+      dir: "",
+      entries: [
+        { name: "big.txt", path: PATH, is_dir: false, is_symlink: false, expandable: false },
+      ],
+    }))
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const view = await mountWithTab(PATH)
+    await loaded("café\n")
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "\u65e5\u672c\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+    })
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await loaded("\u65e5\u672c\n")
+
+    const tree = await screen.findByTestId("file-tree-drop-surface")
+    fireEvent.contextMenu(await within(tree).findByText("big.txt"))
+    fireEvent.click(await screen.findByText(/^Rename…$/))
+    fireEvent.change(await screen.findByDisplayValue("big.txt"), {
+      target: { value: "renamed.txt" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
+    await waitFor(() => expect(renameMock).toHaveBeenCalled())
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            { id: TAB_ID, path: "src/renamed.txt", dirty: false, preview: false, mode: "file" as const },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await waitFor(() =>
+      expect(readMock.mock.calls.at(-1)?.slice(1, 3)).toEqual([
+        "src/renamed.txt",
+        "Shift_JIS",
+      ]),
+    )
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
   })
 
   it("asks before a reopen throws away unsaved edits", async () => {

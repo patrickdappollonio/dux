@@ -20,6 +20,9 @@ import {
   type StatusBarPlan,
 } from "@/lib/editorStatus"
 import { cn } from "@/lib/utils"
+import { copyToClipboard } from "@/lib/clipboard"
+import { notifyError, notifySuccess } from "@/lib/notify"
+import { chip, prose } from "@/lib/prose"
 
 interface Subscription {
   dispose(): void
@@ -65,6 +68,40 @@ function useEditorCursorStatus(
   return editor !== null && reading?.editor === editor ? reading.status : null
 }
 
+// The open file's path, which copies itself when pressed. It ellipsizes at the
+// start, so the file's name always shows. The copy is confirmed in a toast:
+// nothing on screen changes when the clipboard does.
+//
+// Its neighbours are the dirty dot and the read-only label, both plain text,
+// so under a fine pointer it keeps the bar's own height; a finger gets the
+// 40px floor on both axes (the bar grows to match on the vertical one).
+function PathCopyButton({ path }: { path: string }) {
+  function copy(): void {
+    void copyToClipboard(path).then((ok) => {
+      if (ok) notifySuccess(prose`Copied ${chip(path)} to the clipboard.`)
+      else
+        notifyError(
+          prose`Couldn't copy ${chip(path)}: the browser refused the clipboard.`,
+        )
+    })
+  }
+  return (
+    <SimpleTooltip content="Copy path">
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={`Copy path ${path}`}
+        className="flex h-full min-w-0 items-center rounded-sm text-left outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-w-10"
+      >
+        <StartTruncatedText
+          text={path}
+          className="min-w-0 font-mono text-foreground"
+        />
+      </button>
+    </SimpleTooltip>
+  )
+}
+
 // Hidden on a phone, where the bar keeps only the path, the dirty dot, the
 // read-only label, an image's dimensions and the encoding selector: the facts
 // a phone user acts on, and the one control that has no other home there.
@@ -95,10 +132,7 @@ export function EditorStatusBar({
     <div className="flex h-6.5 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground pointer-coarse:h-10">
       {plan.path !== null && (
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <StartTruncatedText
-            text={plan.path}
-            className="min-w-0 font-mono text-foreground"
-          />
+          <PathCopyButton path={plan.path} />
           {plan.dirty && (
             <>
               <SimpleTooltip content="Unsaved changes">
@@ -110,7 +144,12 @@ export function EditorStatusBar({
             </>
           )}
           {plan.readOnly && (
-            <SimpleTooltip content="This file is read-only: it is a symlink to an external file or a .git path">
+            <SimpleTooltip
+              content={
+                plan.readOnlyReason ??
+                "This file is read-only: it is a symlink to an external file or a .git path"
+              }
+            >
               <span className="shrink-0">read-only</span>
             </SimpleTooltip>
           )}
@@ -128,7 +167,13 @@ export function EditorStatusBar({
             <span className={DESKTOP_ONLY}>
               {indentationLabel(status.indentation)}
             </span>
-            <span className={DESKTOP_ONLY}>{status.eol}</span>
+            {plan.mixedEol ? (
+              <SimpleTooltip content={`Mixed line endings: a save writes every one as ${status.eol}`}>
+                <span className={DESKTOP_ONLY}>Mixed</span>
+              </SimpleTooltip>
+            ) : (
+              <span className={DESKTOP_ONLY}>{status.eol}</span>
+            )}
           </>
         )}
         {plan.dimensions !== null && (

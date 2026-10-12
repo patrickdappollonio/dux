@@ -116,6 +116,11 @@ export interface StatusBarInput {
   // The status bar's name for the file's encoding, plain UTF-8 included, or
   // null when no read has said.
   encodingLabel: string | null
+  // The file's line endings are mixed or include a lone CR.
+  mixedEol: boolean
+  // Why a read-only file is read-only, when it is for a reason of its own
+  // (its encoding cannot write it back unchanged); null for the usual ones.
+  readOnlyReason: string | null
 }
 
 export interface StatusBarPlan {
@@ -132,6 +137,10 @@ export interface StatusBarPlan {
   // diff mode, which shows two versions that need not share
   // one, and never for a picture or a binary file, which have no text.
   encoding: string | null
+  // Say "Mixed" in place of the editor's own line ending style, which is
+  // only what a save would write.
+  mixedEol: boolean
+  readOnlyReason: string | null
 }
 
 const EMPTY_PLAN: StatusBarPlan = {
@@ -143,6 +152,8 @@ const EMPTY_PLAN: StatusBarPlan = {
   editing: false,
   language: false,
   encoding: null,
+  mixedEol: false,
+  readOnlyReason: null,
 }
 
 export function planStatusBar(input: StatusBarInput): StatusBarPlan {
@@ -178,5 +189,7 @@ export function planStatusBar(input: StatusBarInput): StatusBarPlan {
     // The preview still shows this file's text, decoded this way, and a save
     // from it still writes it this way, so the item stays with it.
     encoding: input.fileReady && !input.binary ? input.encodingLabel : null,
+    mixedEol: editing && input.mixedEol,
+    readOnlyReason: input.readOnly ? input.readOnlyReason : null,
   }
 }

@@ -155,36 +155,110 @@ export function unmappableNotice(
   return prose`Couldn't save ${chip(path)}: ${chip(refusal.character)}${hex} on line ${refusal.line}, column ${refusal.column} can't be written in ${encodingLabel(refusal.encoding, false)}, so nothing was written. Remove it, or use Save with encoding to convert the file to UTF-8.`
 }
 
-// --- The fallback notice -----------------------------------------------------
+// --- The encoding notices ----------------------------------------------------
 //
-// Dismissed per file for the page session: a dismissal outlives the editor
-// being closed and reopened, the way a draft does, and a reload of the page
-// asks again, since by then the person may have forgotten what they decided.
+// The amber notices above the text: facts about how this file was read that
+// decide what a save would do, told before anything is written. Each one is
+// dismissed per file for the page session (a dismissal outlives the editor
+// being closed and reopened, the way a draft does, and a page reload asks
+// again), except the read-only one, which is the only place the reason a file
+// cannot be saved is spelled out on every screen.
+
+export type EncodingNoticeKind =
+  | "fallback"
+  | "unwritable"
+  | "looks_utf8"
+  | "mixed_eol"
+
+export interface EncodingNotice {
+  kind: EncodingNoticeKind
+  message: Prose
+  dismissable: boolean
+}
+
+// The buffer facts the notices read. Structural, so this module stays free of
+// the buffer model.
+export interface NoticeFacts {
+  encoding: string
+  bom: boolean
+  encodingFallback: boolean
+  unwritable: "round_trip" | "doubled_mark" | null
+  mixedEol: boolean
+  eol: "LF" | "CRLF"
+  looksLikeUtf8: boolean
+}
 
 const dismissedNotices = new Set<string>()
 
-function noticeKey(rootKey: string, path: string): string {
-  return `${rootKey}\u0000${path}`
+function noticeKey(rootKey: string, path: string, kind: EncodingNoticeKind): string {
+  return `${rootKey}\u0000${path}\u0000${kind}`
 }
 
-export function fallbackNoticeDismissed(rootKey: string, path: string): boolean {
-  return dismissedNotices.has(noticeKey(rootKey, path))
+export function noticeDismissed(
+  rootKey: string,
+  path: string,
+  kind: EncodingNoticeKind,
+): boolean {
+  return dismissedNotices.has(noticeKey(rootKey, path, kind))
 }
 
-export function dismissFallbackNotice(rootKey: string, path: string): void {
-  dismissedNotices.add(noticeKey(rootKey, path))
+export function dismissNotice(
+  rootKey: string,
+  path: string,
+  kind: EncodingNoticeKind,
+): void {
+  dismissedNotices.add(noticeKey(rootKey, path, kind))
 }
 
 // For tests only: the set is page-lifetime state.
-export function resetFallbackNotices(): void {
+export function resetEncodingNotices(): void {
   dismissedNotices.clear()
 }
 
-// Whether the notice is up for a buffer: the encoding was the fallback rather
-// than something the file or the person said, and nobody has waved it off.
-export function showsFallbackNotice(
-  buffer: { encodingFallback?: boolean } | undefined,
-  dismissed: boolean,
-): boolean {
-  return (buffer?.encodingFallback ?? false) && !dismissed
+// Every notice the file's facts call for, in reading order, minus the ones the
+// person has waved off. The status bar is named as the way out on every
+// screen, since the encoding selector is on the bar on a phone too.
+export function encodingNotices(
+  path: string,
+  facts: NoticeFacts,
+  dismissed: (kind: EncodingNoticeKind) => boolean,
+): EncodingNotice[] {
+  const label = encodingLabel(facts.encoding, facts.bom)
+  const all: EncodingNotice[] = []
+  if (facts.unwritable === "round_trip") {
+    all.push({
+      kind: "unwritable",
+      dismissable: false,
+      message: prose`${chip(path)} opened read-only: ${label} can’t write it back without changing bytes you didn’t touch. To edit it, reopen it in another encoding from the status bar, or convert it there with Save with encoding.`,
+    })
+  } else if (facts.unwritable === "doubled_mark") {
+    all.push({
+      kind: "unwritable",
+      dismissable: false,
+      message: prose`${chip(path)} opened read-only: it starts with two byte-order marks and the editor keeps only one, so a save would drop the other. To edit it, reopen it in another encoding from the status bar.`,
+    })
+  }
+  if (facts.encodingFallback) {
+    all.push({
+      kind: "fallback",
+      dismissable: true,
+      message: prose`${chip(path)} isn’t valid UTF-8, so it opened as ${label}. If the text looks wrong, pick its encoding from the status bar.`,
+    })
+  }
+  if (facts.looksLikeUtf8) {
+    all.push({
+      kind: "looks_utf8",
+      dismissable: true,
+      message: prose`${chip(path)} is open as ${label}, but it looks like valid UTF-8 now. If the text looks wrong, pick its encoding from the status bar.`,
+    })
+  }
+  // Only where a save is possible: a read-only file writes nothing.
+  if (facts.mixedEol && facts.unwritable === null) {
+    all.push({
+      kind: "mixed_eol",
+      dismissable: true,
+      message: prose`${chip(path)} mixes line endings. Saving it writes every line ending as ${facts.eol}.`,
+    })
+  }
+  return all.filter((n) => !n.dismissable || !dismissed(n.kind))
 }

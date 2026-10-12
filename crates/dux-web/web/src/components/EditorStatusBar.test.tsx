@@ -1,6 +1,24 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
+
+const copyMock = vi.fn(async (_text: string) => true)
+vi.mock("@/lib/clipboard", () => ({
+  copyToClipboard: (text: string) => copyMock(text),
+}))
+const successMock = vi.fn()
+const errorMock = vi.fn()
+vi.mock("@/lib/notify", () => ({
+  notifySuccess: (...a: unknown[]) => successMock(...a),
+  notifyError: (...a: unknown[]) => errorMock(...a),
+}))
 
 import { EditorStatusBar, type StatusBarEditor } from "./EditorStatusBar"
 import type { StatusBarPlan } from "@/lib/editorStatus"
@@ -60,6 +78,8 @@ const FULL: StatusBarPlan = {
   editing: true,
   language: true,
   encoding: null,
+  mixedEol: false,
+  readOnlyReason: null,
 }
 
 function renderBar(plan: StatusBarPlan, editor: StatusBarEditor | null) {
@@ -173,6 +193,8 @@ describe("the editor status bar", () => {
         editing: false,
         language: false,
         encoding: null,
+        mixedEol: false,
+        readOnlyReason: null,
       },
       null,
     )
@@ -204,6 +226,36 @@ describe("the editor status bar", () => {
     expect(screen.queryByText(/lines$/)).toBeNull()
     expect(screen.queryByRole("button", { name: /syntax language/i })).toBeNull()
     expect(screen.getByText("1.5 KiB")).toBeTruthy()
+  })
+
+  it("copies the path when it is pressed, and says so", async () => {
+    renderBar(FULL, null)
+    const button = screen.getByRole("button", { name: "Copy path src/main.rs" })
+    // The path keeps its file name in view: it ellipsizes at the start.
+    expect(button.querySelector("bdi")?.textContent).toBe("src/main.rs")
+    // A control on a touch screen, so it carries the 40px floor.
+    expect(button.className).toContain("pointer-coarse:min-w-10")
+    expect(button.className).toContain("h-full")
+    fireEvent.click(button)
+    await waitFor(() => expect(successMock).toHaveBeenCalled())
+    expect(copyMock).toHaveBeenCalledWith("src/main.rs")
+    expect(successMock.mock.calls[0][0]).toContainEqual({
+      name: "src/main.rs",
+      quoted: false,
+    })
+  })
+
+  it("says so when the browser refuses the copy", async () => {
+    copyMock.mockResolvedValueOnce(false)
+    renderBar(FULL, null)
+    fireEvent.click(screen.getByRole("button", { name: "Copy path src/main.rs" }))
+    await waitFor(() => expect(errorMock).toHaveBeenCalled())
+  })
+
+  it("says Mixed for mixed line endings", () => {
+    renderBar({ ...FULL, mixedEol: true }, fakeEditor().editor)
+    expect(screen.getByText("Mixed")).toBeTruthy()
+    expect(screen.queryByText("LF")).toBeNull()
   })
 
   it("shows the encoding as a menu on every screen, phones included", async () => {

@@ -54,11 +54,11 @@ import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import {
   REOPEN_CHOICES,
   SAVE_CHOICES,
-  dismissFallbackNotice,
+  dismissNotice,
+  encodingNotices,
   encodingLabel,
-  fallbackNoticeDismissed,
+  noticeDismissed,
   sameSaveEncoding,
-  showsFallbackNotice,
   type SaveEncoding,
 } from "@/lib/editorEncoding"
 import {
@@ -122,7 +122,7 @@ import { ConfirmReloadFileDialog } from "@/components/ConfirmReloadFileDialog"
 import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { FileDiskBanner } from "@/components/FileDiskBanner"
-import { EncodingFallbackNotice } from "@/components/EncodingFallbackNotice"
+import { EncodingNotice } from "@/components/EncodingNotice"
 import {
   ConfirmReopenEncodingDialog,
   type ReopenEncodingTarget,
@@ -545,6 +545,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const fileReady = bufferIsFileReady(activeTab, activeBuffer)
   const binary = readyBufferFlag(fileReady, activeBuffer?.binary)
   const readOnly = readyBufferFlag(fileReady, activeBuffer?.readOnly)
+  // Read-only only because the encoding cannot write the file back unchanged:
+  // still text, and converting it to another encoding is the way out. Every
+  // other read-only (a symlink, a .git path) has no save at all.
+  const encodingUnwritable =
+    readOnly && (activeBuffer?.unwritable ?? null) !== null
+  const hardReadOnly = readOnly && !encodingUnwritable
   // File-mode readiness for the preview toggle: a loaded, non-binary buffer.
   // The toggle itself is available in BOTH modes; its diff-mode half needs
   // `diffReady`, declared further down, so `canPreview` lives beside it (one
@@ -596,6 +602,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // prefixes included.
   function retargetOverrides(from: string, to: string): void {
     setLanguageOverrides((prev) => retargetLanguageOverrides(prev, from, to))
+    encodingChoicesRef.current = retargetLanguageOverrides(
+      encodingChoicesRef.current,
+      from,
+      to,
+    )
   }
   function pickLanguage(id: string | null): void {
     if (languageTabPath === null) return
@@ -727,6 +738,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       activeBuffer !== undefined
         ? encodingLabel(activeBuffer.encoding, activeBuffer.bom)
         : null,
+    mixedEol: activeBuffer?.mixedEol ?? false,
+    readOnlyReason: encodingUnwritable
+      ? `This file is read-only: ${encodingLabel(
+          activeBuffer?.encoding ?? "UTF-8",
+          activeBuffer?.bom ?? false,
+        )} can't write it back without changing bytes you didn't touch. Reopen or convert it from the encoding menu.`
+      : null,
   })
 
   // The one preview pane both content arms share (file mode and diff mode),
@@ -792,6 +810,19 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The encoding the person chose for each open path, kept beside the buffers
+  // for the one moment a buffer cannot carry it: a rename, which moves the tab
+  // to a new path and so starts a fresh read. Same lifetime as a language
+  // pick: it follows a rename or move and dies when the file is closed.
+  const encodingChoicesRef = useRef<Map<string, string>>(new Map())
+  useEffect(() => {
+    for (const buffer of buffers.values()) {
+      if (buffer.loadedPath !== null && buffer.encodingRequested) {
+        encodingChoicesRef.current.set(buffer.loadedPath, buffer.encodingRequested)
+      }
+    }
+  }, [buffers])
+
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
     root,
     tabs,
@@ -800,6 +831,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     tabsRef,
     buffersRef,
     sliceRef,
+    encodingChoicesRef,
     setBuffers,
     raiseDiskBanner,
   })
@@ -860,6 +892,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // inherited by a different file that later takes it. Every way a tab leaves
     // ends in `tabs` losing the entry, so this covers all of them.
     setLanguageOverrides((prev) => pruneLanguageOverrides(prev, currentPaths))
+    // The encoding choices die with their tab the same way.
+    const choices = encodingChoicesRef.current
+    for (const path of [...choices.keys()]) {
+      if (!currentPaths.has(path)) choices.delete(path)
+    }
   }, [tabs])
 
   // Dispose every retained model when the body unmounts: @monaco-editor/react
@@ -945,8 +982,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // converting the file is itself the change; a character the encoding cannot
   // hold refuses the whole save and writes nothing.
   function saveWithEncoding(choice: SaveEncoding): void {
-    if (!activeTab || binary || readOnly || isSaving || !fileReady) return
+    if (!activeTab || binary || hardReadOnly || isSaving || !fileReady) return
     const current = bufferSaveEncoding(activeBuffer)
+    if (encodingUnwritable && sameSaveEncoding(choice, current)) return
     writeBuffer(
       activeTab.id,
       activeTab.path,
@@ -1227,7 +1265,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             ))}
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        {!readOnly && (
+        {!hardReadOnly && (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger disabled={isSaving}>
               <SaveAll />
@@ -1240,6 +1278,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   <DropdownMenuItem
                     key={`${choice.encoding}:${choice.bom}`}
                     aria-current={isCurrent ? "true" : undefined}
+                    // A file its encoding cannot write back unchanged can be
+                    // converted, never saved again in that same encoding.
+                    disabled={isCurrent && encodingUnwritable}
                     onClick={() =>
                       saveWithEncoding({
                         encoding: choice.encoding,
@@ -1857,29 +1898,27 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     }}
                   />
                 )}
-              {/* The encoding notice: this file's bytes are not UTF-8 and the
-                  editor read them as its fallback. Beside, never instead of,
-                  the disk banner above: the two are separate facts. */}
+              {/* The encoding notices: how this file was read decides what
+                  a save would do, so it is said before anything is written.
+                  Beside, never instead of, the disk banner above: separate
+                  facts. */}
               {activeTab !== null &&
                 activeTab.mode === "file" &&
                 fileReady &&
                 !binary &&
-                showsFallbackNotice(
-                  activeBuffer,
-                  fallbackNoticeDismissed(key, activeTab.path),
-                ) && (
-                  <EncodingFallbackNotice
-                    path={activeTab.path}
-                    encodingLabel={encodingLabel(
-                      activeBuffer?.encoding ?? "windows-1252",
-                      false,
-                    )}
+                activeBuffer !== undefined &&
+                encodingNotices(activeTab.path, activeBuffer, (kind) =>
+                  noticeDismissed(key, activeTab.path, kind),
+                ).map((notice) => (
+                  <EncodingNotice
+                    key={notice.kind}
+                    notice={notice}
                     onDismiss={() => {
-                      dismissFallbackNotice(key, activeTab.path)
+                      dismissNotice(key, activeTab.path, notice.kind)
                       setNoticeDismissals((n) => n + 1)
                     }}
                   />
-                )}
+                ))}
               <div className="relative min-h-0 flex-1">
                 <EditorContentPane
                   root={root}

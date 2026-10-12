@@ -101,19 +101,44 @@ export interface TabBuffer {
   // reload in place does not quietly go back to the automatic rules. Null
   // while nobody has asked.
   encodingRequested: string | null
+  // Why this text cannot be saved in `encoding` without changing bytes nobody
+  // edited; the buffer is read-only while it is set. See `WorktreeFile`.
+  unwritable: "round_trip" | "doubled_mark" | null
+  // The file's line endings are mixed or include a lone CR, so a save writes
+  // every one as `eol`, the one style the editor holds.
+  mixedEol: boolean
+  eol: "LF" | "CRLF"
+  // Read in a code page the person chose, yet the bytes now look like UTF-8.
+  looksLikeUtf8: boolean
 }
 
+export type BufferEncodingFacts = Pick<
+  TabBuffer,
+  | "encoding"
+  | "bom"
+  | "encodingFallback"
+  | "encodingRequested"
+  | "unwritable"
+  | "mixedEol"
+  | "eol"
+  | "looksLikeUtf8"
+>
+
 // The encoding fields of a fresh read. An older server sends none and only ever
-// served UTF-8, so absence means plain UTF-8.
+// served UTF-8, so absence means plain UTF-8 that writes back unchanged.
 export function encodingFromFile(
   file: WorktreeFile,
   requested: string | null,
-): Pick<TabBuffer, "encoding" | "bom" | "encodingFallback" | "encodingRequested"> {
+): BufferEncodingFacts {
   return {
     encoding: file.encoding ?? "UTF-8",
     bom: file.bom ?? false,
     encodingFallback: file.encoding_fallback ?? false,
     encodingRequested: requested,
+    unwritable: file.unwritable ?? null,
+    mixedEol: file.mixed_line_endings ?? false,
+    eol: file.eol ?? "LF",
+    looksLikeUtf8: file.looks_like_utf8 ?? false,
   }
 }
 
@@ -158,6 +183,10 @@ export function emptyBuffer(path: string): TabBuffer {
     bom: false,
     encodingFallback: false,
     encodingRequested: null,
+    unwritable: null,
+    mixedEol: false,
+    eol: "LF",
+    looksLikeUtf8: false,
   }
 }
 
@@ -374,6 +403,14 @@ export function baselineSavedBuffer(
       },
       saved,
     ),
+    // The file is now exactly what the editor wrote: one line ending style,
+    // in an encoding that writes it back unchanged. A buffer that was
+    // read-only only for its encoding can only have got here by converting,
+    // so it is editable in the new one.
+    mixedEol: false,
+    unwritable: null,
+    looksLikeUtf8: false,
+    readOnly: (prev.unwritable ?? null) !== null ? false : prev.readOnly,
     loaded: body,
     fileLoadedSignal: signal,
     stamp,

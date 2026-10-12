@@ -141,6 +141,8 @@ function input(over: Partial<StatusBarInput>): StatusBarInput {
     size: 2048,
     languageAvailable: true,
     encodingLabel: null,
+    mixedEol: false,
+    readOnlyReason: null,
     ...over,
   }
 }
@@ -156,6 +158,8 @@ describe("what the status bar carries in each state", () => {
       editing: false,
       language: false,
       encoding: null,
+      mixedEol: false,
+      readOnlyReason: null,
     })
   })
 
@@ -169,6 +173,8 @@ describe("what the status bar carries in each state", () => {
       editing: true,
       language: true,
       encoding: null,
+      mixedEol: false,
+      readOnlyReason: null,
     })
   })
 
@@ -196,6 +202,8 @@ describe("what the status bar carries in each state", () => {
       editing: false,
       language: false,
       encoding: null,
+      mixedEol: false,
+      readOnlyReason: null,
     })
   })
 
@@ -245,6 +253,8 @@ describe("what the status bar carries in each state", () => {
       editing: false,
       language: true,
       encoding: null,
+      mixedEol: false,
+      readOnlyReason: null,
     })
   })
 
