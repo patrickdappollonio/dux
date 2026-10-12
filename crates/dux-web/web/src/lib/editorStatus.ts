@@ -113,8 +113,8 @@ export interface StatusBarInput {
   size: number | null
   // The language registry has loaded, so the picker has rows to offer.
   languageAvailable: boolean
-  // The status bar's name for the file's encoding when it is not plain UTF-8
-  // (see `showsEncoding`), null otherwise or when no read has said.
+  // The status bar's name for the file's encoding, plain UTF-8 included, or
+  // null when no read has said.
   encodingLabel: string | null
 }
 
@@ -128,8 +128,8 @@ export interface StatusBarPlan {
   // line endings. Only while it is the thing on screen.
   editing: boolean
   language: boolean
-  // The encoding item, by its label: a file mode text file that is not plain
-  // UTF-8. Never in diff mode, which shows two versions that need not share
+  // The encoding item, by its label: any text file in file mode. Never in
+  // diff mode, which shows two versions that need not share
   // one, and never for a picture or a binary file, which have no text.
   encoding: string | null
 }

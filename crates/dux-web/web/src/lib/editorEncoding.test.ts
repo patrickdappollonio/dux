@@ -8,7 +8,6 @@ import {
   encodingLabel,
   fallbackNoticeDismissed,
   resetFallbackNotices,
-  showsEncoding,
   showsFallbackNotice,
 } from "./editorEncoding"
 
@@ -25,15 +24,6 @@ describe("encodingLabel", () => {
 
   it("falls back to the server's own name for one it does not list", () => {
     expect(encodingLabel("x-mac-cyrillic", false)).toBe("x-mac-cyrillic")
-  })
-})
-
-describe("showsEncoding", () => {
-  it("stays quiet for plain UTF-8 only", () => {
-    expect(showsEncoding("UTF-8", false)).toBe(false)
-    expect(showsEncoding("UTF-8", true)).toBe(true)
-    expect(showsEncoding("windows-1252", false)).toBe(true)
-    expect(showsEncoding("UTF-16LE", true)).toBe(true)
   })
 })
 

@@ -1,6 +1,6 @@
 // The editor's text encodings, as pure decisions: what an encoding is called on
-// screen, which ones the menus offer, when the status bar mentions it at all, and
-// the per-file "this was a guess" notice the person has already dismissed.
+// screen, which ones the menus offer, what a save leaves the buffer in, and the
+// per-file "this was a guess" notice the person has already dismissed.
 //
 // The server decides how a file decodes (a byte-order mark, else UTF-8, else
 // windows-1252 as a flagged fallback) and answers with the WHATWG name it used.
@@ -85,13 +85,6 @@ export function encodingLabel(encoding: string, bom: boolean): string {
   return short
 }
 
-// Whether the status bar mentions the encoding. Plain UTF-8 is what nearly every
-// file is, so saying so on every file is noise; anything else is a fact the
-// person may need, because it decides what a save writes.
-export function showsEncoding(encoding: string, bom: boolean): boolean {
-  return !(encoding === UTF8 && !bom)
-}
-
 export function isUtf16(encoding: string): boolean {
   return encoding === "UTF-16LE" || encoding === "UTF-16BE"
 }
@@ -148,8 +141,8 @@ export function encodingAfterSave(
 // has no bytes for. It names the character as a chip with its code point (the
 // character alone may be invisible, or look like one the encoding does have),
 // says where it is, that nothing was written, and both ways forward. "Save with
-// encoding" is the item's name on every surface: the status bar's encoding menu
-// on a computer and the editor's ⋯ menu on a phone.
+// encoding" is the item's name in the status bar's encoding menu, which every
+// screen carries.
 export function unmappableNotice(
   path: string,
   refusal: { character: string; line: number; column: number; encoding: string },

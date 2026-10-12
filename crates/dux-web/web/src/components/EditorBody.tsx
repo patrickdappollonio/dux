@@ -58,7 +58,6 @@ import {
   encodingLabel,
   fallbackNoticeDismissed,
   sameSaveEncoding,
-  showsEncoding,
   showsFallbackNotice,
   type SaveEncoding,
 } from "@/lib/editorEncoding"
@@ -161,9 +160,7 @@ import { StartTruncatedText } from "@/components/StartTruncatedText"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -724,9 +721,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     diffEditorShown: diffEditorIsShown(activeTab, diffReady, activeBuffer, showPreview),
     size: activeBuffer?.stamp.size ?? null,
     languageAvailable: showLanguagePicker,
+    // Every text file names its encoding, plain UTF-8 included, the way VS
+    // Code does, so any file can be reopened in any encoding from the bar.
     encodingLabel:
-      activeBuffer !== undefined &&
-      showsEncoding(activeBuffer.encoding, activeBuffer.bom)
+      activeBuffer !== undefined
         ? encodingLabel(activeBuffer.encoding, activeBuffer.bom)
         : null,
   })
@@ -1197,14 +1195,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
-  // The encoding menu's rows, shared by the status bar's item on a computer and
-  // the ⋯ menu on a phone so the two cannot drift. Two submenus, not dialogs,
-  // so no trailing ellipsis. Reopen is offered only for a file that is not
-  // plain UTF-8: bytes that are valid UTF-8 are almost never really something
-  // else (a legacy encoding seldom spells valid multi-byte UTF-8 by accident,
-  // and plain ASCII reads the same in every one offered), so the row would
-  // invite the one mistake the automatic rules do not make. Save with is gone
-  // for a read-only file, which has no save at all.
+  // The encoding menu's rows, behind the status bar's encoding selector on
+  // every screen. Two submenus, not dialogs, so no trailing ellipsis. Any file
+  // can be reopened in any encoding: a garbled result is the person's call and
+  // a reopen away from undone, while a decode that would lose bytes is refused
+  // by the server. Save with is gone for a read-only file, which has no save.
   function encodingMenuItems(): React.ReactNode {
     const current = bufferSaveEncoding(activeBuffer)
     return (
@@ -1469,14 +1464,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 {languagePickerItems()}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-          )}
-          {statusPlan.encoding !== null && activeTab.mode === "file" && (
-            // The phone bar holds no controls, so the encoding rows live
-            // here, under a label that says what the file is in now.
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>Encoding: {statusPlan.encoding}</DropdownMenuLabel>
-              {encodingMenuItems()}
-            </DropdownMenuGroup>
           )}
           <DropdownMenuSub>
             <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
@@ -1887,7 +1874,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                       activeBuffer?.encoding ?? "windows-1252",
                       false,
                     )}
-                    phone={isMobile}
                     onDismiss={() => {
                       dismissFallbackNotice(key, activeTab.path)
                       setNoticeDismissals((n) => n + 1)

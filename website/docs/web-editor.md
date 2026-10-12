@@ -99,15 +99,15 @@ A thin status bar runs along the bottom, under both panes, and describes the ope
 - its line endings, `LF` or `CRLF`
 - its size on disk, as of the last time the editor read or saved it (unsaved edits do not
   count until you save)
-- its [encoding](#file-encodings), only when it is something other than plain UTF-8
-  (`Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM` and so on)
+- its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM`
+  and so on), which opens the encoding menu
 - the syntax language picker
 
 Only what applies is shown. The cursor, line count, indentation and line endings appear
 while the text editor itself is on screen, so a preview or a diff leaves them out; a
 binary file shows its path and size; an image shows its path and pixel dimensions. On a
-phone the bar keeps just the path, the unsaved dot, the read-only badge, the cursor
-position and an image's dimensions.
+phone the bar keeps just the path, the unsaved dot, the read-only badge, an image's
+dimensions and the encoding.
 
 Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
 end of the header. Your width (in pixels) and collapsed state are remembered in the
@@ -198,8 +198,8 @@ Two size limits, both generous:
 
 ## File encodings
 
-Most files are UTF-8 and the editor says nothing about it. For the rest, dux does not
-guess. It goes by what the file itself says, and otherwise by one fixed rule:
+dux does not guess a file's encoding. It goes by what the file itself says, and otherwise
+by one fixed rule:
 
 - A file that starts with a byte-order mark opens in the encoding the mark names: UTF-8,
   UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
@@ -213,23 +213,21 @@ UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that
 Shift_JIS or Windows-1251 will look wrong. Dismiss the notice with its `×`, and it stays
 away for that file until you reload the page.
 
-Whenever a file is not plain UTF-8, the status bar names its encoding. Click it for two
-menus (on a phone, both are in the editor's `⋯` menu instead, under a label naming the
-encoding):
+The status bar always names the open file's encoding, on a phone too. Click it for two
+menus:
 
 - **Reopen with encoding** reads the file again in the encoding you pick: UTF-8, UTF-16,
   the Windows and ISO-8859 code pages, Mac Roman, KOI8, Shift_JIS, EUC-JP, GBK, GB18030,
-  Big5, EUC-KR and more. If the bytes are not valid in it, the file stays open as it was
-  and a toast says why; you never get replacement characters that a save would write back.
+  Big5, EUC-KR and more. Any file can be reopened in any of them, plain UTF-8 included; if
+  the text comes out garbled, reopen it in the right one. If the bytes are not valid in the
+  encoding you picked, the file stays open as it was and a toast says why: you never get
+  replacement characters that a save would write back over the real bytes.
   With unsaved edits, dux asks first, because reopening replaces them. The diff view of the
   file follows the encoding you picked.
 - **Save with encoding** saves the file right now in the encoding you pick, which is how
   you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
   it is recognised the next time it opens. A read-only file has no save, so it has no such
   menu either.
-
-A plain UTF-8 file has no encoding item and no reopen: valid UTF-8 is very nearly never
-something else in disguise.
 
 > [!IMPORTANT]
 > A save is refused when the text holds a character the file's encoding cannot represent,

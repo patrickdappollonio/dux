@@ -7,9 +7,6 @@ interface EncodingFallbackNoticeProps {
   path: string
   // The short name the status bar uses, e.g. "Windows-1252".
   encodingLabel: string
-  // On a phone the encoding menu lives in the editor's ⋯ menu, since the phone
-  // status bar holds no controls, so the sentence points there instead.
-  phone: boolean
   onDismiss: () => void
 }
 
@@ -25,7 +22,6 @@ interface EncodingFallbackNoticeProps {
 export function EncodingFallbackNotice({
   path,
   encodingLabel,
-  phone,
   onDismiss,
 }: EncodingFallbackNoticeProps) {
   return (
@@ -37,8 +33,8 @@ export function EncodingFallbackNotice({
       <CircleAlert className="size-4 shrink-0 text-amber-500" />
       <span className="min-w-0 flex-1">
         <InlineCode>{path}</InlineCode> isn&rsquo;t valid UTF-8, so it opened
-        as {encodingLabel}. If the text looks wrong, pick its encoding from{" "}
-        {phone ? "the ⋯ menu" : "the status bar"}.
+        as {encodingLabel}. If the text looks wrong, pick its encoding from the
+        status bar.
       </span>
       {/* Ghost and icon-only: the one control here, with the sentence as its
           only neighbour, so a stray tap lands on text. A finger gets the

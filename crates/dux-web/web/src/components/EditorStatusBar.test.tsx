@@ -206,7 +206,7 @@ describe("the editor status bar", () => {
     expect(screen.getByText("1.5 KiB")).toBeTruthy()
   })
 
-  it("shows the encoding of a file that is not plain UTF-8 as a menu, on a computer only", async () => {
+  it("shows the encoding as a menu on every screen, phones included", async () => {
     render(
       <EditorStatusBar
         plan={{ ...FULL, encoding: "Windows-1252" }}
@@ -220,19 +220,32 @@ describe("the editor status bar", () => {
       name: "File encoding: Windows-1252",
     })
     expect(trigger.textContent).toContain("Windows-1252")
-    expect(trigger.closest(".max-md\\:hidden")).not.toBeNull()
+    expect(trigger.closest(".max-md\\:hidden")).toBeNull()
+    // The bar's one control on a touch screen: it and the bar grow to the
+    // 40px floor under a coarse pointer, at any width.
+    expect(trigger.className).toContain("pointer-coarse:h-10")
     fireEvent.click(trigger)
     expect(await screen.findByText("Reopen with encoding")).toBeTruthy()
   })
 
-  it("keeps only the path, the dirty dot, read-only and the cursor on a phone", () => {
+  it("keeps only the path, the dirty dot, read-only and the encoding on a phone", () => {
     const fake = fakeEditor()
-    renderBar({ ...FULL, dirty: true, readOnly: true }, fake.editor)
+    const { container } = renderBar(
+      { ...FULL, dirty: true, readOnly: true, encoding: "UTF-8" },
+      fake.editor,
+    )
     const phoneHidden = (text: string | RegExp) =>
       screen.getByText(text).closest(".max-md\\:hidden") !== null
     expect(phoneHidden("src/main.rs")).toBe(false)
     expect(phoneHidden("●")).toBe(false)
-    expect(phoneHidden("Ln 1, Col 1")).toBe(false)
+    expect(phoneHidden("Ln 1, Col 1")).toBe(true)
+    expect(
+      screen
+        .getByRole("button", { name: "File encoding: UTF-8" })
+        .closest(".max-md\\:hidden"),
+    ).toBeNull()
+    const bar = container.firstElementChild as HTMLElement
+    expect(bar.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
     // A phone can type into a read-only file too, so it must be told why
     // Save stays disabled.
     expect(phoneHidden("read-only")).toBe(false)

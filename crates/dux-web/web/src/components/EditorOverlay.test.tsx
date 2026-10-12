@@ -3129,7 +3129,7 @@ describe("a file that is not plain UTF-8", () => {
     expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
   })
 
-  it("shows neither the notice nor the item for plain UTF-8", async () => {
+  it("names plain UTF-8 in the status bar too, with no notice, and reopens it in any encoding", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,
       content: "plain\n",
@@ -3138,22 +3138,32 @@ describe("a file that is not plain UTF-8", () => {
     })
     await mountWithTab(PATH)
     await loaded("plain\n")
-    await screen.findByText("Ln 4, Col 2")
-    expect(screen.queryByRole("button", { name: /^file encoding:/i })).toBeNull()
+    expect((await encodingButton()).textContent).toContain("UTF-8")
+    expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
+    // Garbled is the person's call: a lossless decode in another encoding
+    // is asked for and shown, and the server alone refuses a lossy one.
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "plain\n",
+      encoding: "windows-1252",
+      encoding_fallback: false,
+    })
+    await pick(/reopen with encoding/i, /^Windows-1252/)
+    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("windows-1252"))
+    await waitFor(async () =>
+      expect((await encodingButton()).textContent).toContain("Windows-1252"),
+    )
     expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
   })
 
-  it("puts the same rows in the phone's ⋯ menu, under a label naming the encoding", async () => {
+  it("keeps the encoding rows out of the phone's ⋯ menu, since the bar carries them", async () => {
     await mountWithTab(PATH)
     await loaded("café\n")
     fireEvent.click(screen.getByRole("button", { name: "More editor actions" }))
-    expect(await screen.findByText("Encoding: Windows-1252")).toBeTruthy()
-    expect(
-      screen.getByRole("menuitem", { name: /reopen with encoding/i }),
-    ).toBeTruthy()
-    expect(
-      screen.getByRole("menuitem", { name: /save with encoding/i }),
-    ).toBeTruthy()
+    expect(await screen.findByRole("menuitem", { name: /open local editor/i })).toBeTruthy()
+    expect(screen.queryByText(/^Encoding:/)).toBeNull()
+    expect(screen.queryByRole("menuitem", { name: /reopen with encoding/i })).toBeNull()
+    expect(screen.queryByRole("menuitem", { name: /save with encoding/i })).toBeNull()
   })
 
   it("offers no Save with encoding for a read-only file", async () => {
@@ -3231,16 +3241,16 @@ describe("a file that is not plain UTF-8", () => {
     expect((await encodingButton()).textContent).toContain("Windows-1252")
   })
 
-  it("converts the file with Save with encoding, and the item goes once it is plain UTF-8", async () => {
+  it("converts the file with Save with encoding, and the item then says UTF-8", async () => {
     await mountWithTab(PATH)
     await loaded("café\n")
     await pick(/save with encoding/i, /^UTF-8$/)
     await waitFor(() => expect(writeMock).toHaveBeenCalled())
     expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: /^file encoding:/i }),
-      ).toBeNull(),
+    await waitFor(async () =>
+      expect((await encodingButton()).getAttribute("aria-label")).toBe(
+        "File encoding: UTF-8",
+      ),
     )
     expect(screen.queryByText(/isn.t valid UTF-8/)).toBeNull()
   })

@@ -66,8 +66,8 @@ function useEditorCursorStatus(
 }
 
 // Hidden on a phone, where the bar keeps only the path, the dirty dot, the
-// read-only label, the cursor and an image's dimensions, and so holds no touch
-// target at all.
+// read-only label, an image's dimensions and the encoding selector: the facts
+// a phone user acts on, and the one control that has no other home there.
 const DESKTOP_ONLY = "max-md:hidden"
 
 export function EditorStatusBar({
@@ -83,16 +83,16 @@ export function EditorStatusBar({
   // The picker's rows, shared with the phone fold's submenu so the two
   // cannot drift.
   languageItems: React.ReactNode
-  // The encoding menu's rows (reopen, save with), shared with the phone's ⋯
-  // menu the same way. Shown only while the plan names an encoding.
+  // The encoding menu's rows (reopen, save with). Shown while the plan names
+  // an encoding, on every screen: this selector is their only home.
   encodingItems?: React.ReactNode
 }) {
   const status = useEditorCursorStatus(plan.editing ? editor : null)
   return (
     // One fixed height whatever it carries, so the content above it never
-    // jumps as items come and go. A finger at desktop width gets the 40px
-    // floor for the picker; a phone shows no control here at all.
-    <div className="flex h-6.5 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground md:pointer-coarse:h-10">
+    // jumps as items come and go. A finger, at any width, gets the 40px
+    // floor: the encoding selector is on the bar on a phone too.
+    <div className="flex h-6.5 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground pointer-coarse:h-10">
       {plan.path !== null && (
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <StartTruncatedText
@@ -119,7 +119,9 @@ export function EditorStatusBar({
       <div className="ml-auto flex shrink-0 items-center gap-3">
         {status !== null && (
           <>
-            <span className="tabular-nums">{cursorLabel(status)}</span>
+            <span className={cn("tabular-nums", DESKTOP_ONLY)}>
+              {cursorLabel(status)}
+            </span>
             <span className={cn("tabular-nums", DESKTOP_ONLY)}>
               {lineCountLabel(status.lineCount)}
             </span>
@@ -142,17 +144,18 @@ export function EditorStatusBar({
           </SimpleTooltip>
         )}
         {plan.encoding !== null && (
-          // Desktop only, like the language picker: on a phone the same rows
-          // are in the editor's ⋯ menu, under a label that names the
-          // encoding, so the phone bar keeps no control and no extra width.
-          <span className={cn("inline-flex", DESKTOP_ONLY)}>
+          // On every screen, unlike the language picker: on a phone this is
+          // the bar's one control and the encoding menu's only home.
+          <span className="inline-flex">
             <DropdownMenu>
               <SimpleTooltip content={`File encoding: ${plan.encoding}`}>
                 <DropdownMenuTrigger
                   render={
-                    // The language picker's own geometry and the same
-                    // exemption: plain-text neighbours on this bar, and a
-                    // finger at desktop width gets the floor.
+                    // Under the 40px floor on the vertical axis for a fine
+                    // pointer only: its neighbours on this bar are plain
+                    // text. A finger at any width gets the floor (the bar
+                    // grows to match), and the label keeps it wider than
+                    // 40px on the other axis.
                     <Button
                       variant="ghost"
                       size="xs"
