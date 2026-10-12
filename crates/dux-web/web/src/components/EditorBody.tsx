@@ -2012,7 +2012,7 @@ function DiffContentPane({
     if (diffHead.binary) {
       return (
         <CenteredPane>
-          This file is binary and can&rsquo;t be diffed here.
+          This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
         </CenteredPane>
       )
     }
@@ -2030,7 +2030,7 @@ function DiffContentPane({
   if (buffer?.diff?.binary) {
     return (
       <CenteredPane>
-        This file is binary and can&rsquo;t be diffed here.
+        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be diffed here.
       </CenteredPane>
     )
   }
@@ -2080,7 +2080,7 @@ function FileContentPane({
   if (binary) {
     return (
       <CenteredPane>
-        This file is binary and can&rsquo;t be edited here.
+        This file is binary or isn&rsquo;t UTF-8 text, so it can&rsquo;t be edited here.
       </CenteredPane>
     )
   }

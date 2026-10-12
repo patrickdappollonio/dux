@@ -252,7 +252,8 @@ pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::
 }
 
 /// Read a worktree file's working copy as text. A missing file is an error.
-/// Binary content yields `binary: true` with empty `content`.
+/// Binary content, and content that is not valid UTF-8, yields `binary: true`
+/// with empty `content`.
 ///
 /// ANY symlink leaf is read with `read_only: true` regardless of where its
 /// target lives: `write_file` refuses all symlinks so the Save button would
@@ -326,20 +327,19 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     // The stamp of the bytes just read, from the fstat of the descriptor they
     // came from. This is the token a later save sends back.
     let stamp = stamp_from_meta(&read_meta);
-    if !crate::diff::is_renderable_text(&bytes) {
-        return Ok(WorktreeFile {
-            path: rel_path.to_string(),
-            binary: true,
-            content: String::new(),
-            read_only,
-            modified: stamp.modified,
-            size: Some(stamp.size),
-        });
-    }
+    // Anything that is not text the editor can round-trip byte for byte goes
+    // out as binary, which the editor refuses to open. Never fall back to an
+    // empty string here: the editor would show an empty, editable buffer, and
+    // the stamp it carries is a valid one, so a save would replace the file.
+    let text = if crate::diff::is_renderable_text(&bytes) {
+        String::from_utf8(bytes).ok()
+    } else {
+        None
+    };
     Ok(WorktreeFile {
         path: rel_path.to_string(),
-        binary: false,
-        content: String::from_utf8(bytes).unwrap_or_default(),
+        binary: text.is_none(),
+        content: text.unwrap_or_default(),
         read_only,
         modified: stamp.modified,
         size: Some(stamp.size),
@@ -399,9 +399,10 @@ fn open_for_writing_error(e: rustix::io::Errno, abs_path: &Path) -> anyhow::Erro
 /// Everything hangs off one descriptor. Stat-then-[`write_nofollow`] cannot work:
 /// that open truncates, so the other writer's work is gone before anything can be
 /// compared, and a stat is a statement about the path rather than about the file
-/// the write lands on. So: open `O_WRONLY | O_NOFOLLOW` with NEITHER `O_CREAT` nor
-/// `O_TRUNC`, `fstat` that descriptor, compare, and only then `ftruncate` and write
-/// through it.
+/// the write lands on. So: open `O_RDWR | O_NOFOLLOW` with NEITHER `O_CREAT` nor
+/// `O_TRUNC`, `fstat` that descriptor, compare, check that the bytes it holds are
+/// text the editor could have shown, and only then `ftruncate` and write through
+/// it.
 ///
 /// `ENOENT` is a conflict, not a create: with a token in hand the client is saying
 /// "update the file I read", and that file is gone. Resurrecting it would undo a
@@ -417,11 +418,13 @@ fn write_checked_existing(
     expected: &FileStamp,
 ) -> anyhow::Result<FileStamp> {
     use rustix::fs::{Mode, OFlags, open as rustix_open};
-    use std::io::Write;
+    use std::io::{Read, Seek, Write};
     use std::os::unix::io::{FromRawFd, IntoRawFd};
 
+    // Read-write rather than write-only: the bytes about to be replaced are
+    // checked through this same descriptor below.
     let fd =
-        rustix_open(abs_path, OFlags::WRONLY | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
+        rustix_open(abs_path, OFlags::RDWR | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
             if e == rustix::io::Errno::NOENT {
                 anyhow::Error::new(WriteConflict {
                     current: None,
@@ -441,6 +444,27 @@ fn write_checked_existing(
             deleted: false,
         }));
     }
+    // A stamp only proves the client saw this version of the file, not that it
+    // saw its CONTENT: a non-UTF-8 file is served to the editor as binary with
+    // no content, so a buffer holding a stamp for one (a draft from before the
+    // restored from the browser's cache, or a client that ignored the flag) was typed
+    // over nothing. Saving it would replace the real bytes with that.
+    if current.size > MAX_EDITABLE_BYTES {
+        anyhow::bail!(
+            "refusing to save: the file on disk is {} bytes, past the editor's limit of \
+             {MAX_EDITABLE_BYTES}, so the editor never showed its contents; nothing was written",
+            current.size
+        );
+    }
+    let mut existing = Vec::new();
+    (&f).take(MAX_EDITABLE_BYTES).read_to_end(&mut existing)?;
+    if !crate::diff::is_renderable_text(&existing) {
+        anyhow::bail!(
+            "refusing to save: the file on disk is binary or not UTF-8 text, so the editor never \
+             showed its contents and saving would replace them; nothing was written"
+        );
+    }
+    f.rewind()?;
     // Truncate through the same descriptor rather than reopening: the check
     // above is only worth something if nothing between it and the write can
     // point at a different file.
@@ -1184,6 +1208,23 @@ mod tests {
         assert_eq!(f.content, "hi\nthere\n");
         assert_eq!(f.path, "hello.txt");
         assert!(!f.read_only, "normal file must not be read_only");
+    }
+
+    /// A Latin-1 `café` has no NUL and no magic number, so a sniff of the
+    /// first bytes calls it text; it is not UTF-8, so serving it as text would
+    /// mean serving an EMPTY buffer that a save then writes over the original.
+    #[test]
+    fn a_non_utf8_file_is_flagged_not_served_as_empty_editable_text() {
+        let dir = worktree();
+        let latin1 = b"caf\xe9 au lait\n";
+        std::fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
+        let f = read_file(dir.path(), "latin1.txt").unwrap();
+        assert!(
+            f.binary,
+            "a file that is not valid UTF-8 must not open as an editable buffer"
+        );
+        assert!(f.content.is_empty());
+        assert_eq!(f.size, Some(latin1.len() as u64));
     }
 
     #[test]
@@ -2429,6 +2470,38 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "the agent's work\n",
                 "a refused save must not truncate or write a single byte"
+            );
+        }
+
+        /// A buffer that was ever opened over a non-UTF-8 file (a draft kept
+        /// from before the read refused such files, or any client that ignores
+        /// the binary flag) holds a valid stamp for bytes it never saw. The
+        /// guarded save refuses it, so the original bytes survive.
+        #[test]
+        fn a_guarded_save_over_a_non_utf8_file_is_refused_and_the_bytes_survive() {
+            let dir = worktree();
+            let latin1 = b"caf\xe9 au lait\n";
+            std::fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
+            let read = read_file(dir.path(), "latin1.txt").unwrap();
+            let expected = FileStamp {
+                modified: read.modified.clone(),
+                size: read.size.unwrap(),
+            };
+            let err = write_file_checked(
+                dir.path(),
+                "latin1.txt",
+                "typed into an empty buffer",
+                Some(&expected),
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<WriteConflict>().is_none(),
+                "this is a refusal, not a freshness conflict a reload could resolve"
+            );
+            assert!(err.to_string().contains("UTF-8"), "{err}");
+            assert_eq!(
+                std::fs::read(dir.path().join("latin1.txt")).unwrap(),
+                latin1
             );
         }
 
