@@ -401,7 +401,7 @@ fn open_for_writing_error(e: rustix::io::Errno, abs_path: &Path) -> anyhow::Erro
 /// compared, and a stat is a statement about the path rather than about the file
 /// the write lands on. So: open `O_RDWR | O_NOFOLLOW` with NEITHER `O_CREAT` nor
 /// `O_TRUNC`, `fstat` that descriptor, compare, check that the bytes it holds are
-/// text the editor could have shown, and only then `ftruncate` and write through
+/// valid UTF-8 the editor could have shown, and only then `ftruncate` and write through
 /// it.
 ///
 /// `ENOENT` is a conflict, not a create: with a token in hand the client is saying
@@ -444,27 +444,30 @@ fn write_checked_existing(
             deleted: false,
         }));
     }
-    // A stamp only proves the client saw this version of the file, not that it
-    // saw its CONTENT: a non-UTF-8 file is served to the editor as binary with
-    // no content, so a buffer holding a stamp for one (a draft from before the
-    // restored from the browser's cache, or a client that ignored the flag) was typed
-    // over nothing. Saving it would replace the real bytes with that.
-    if current.size > MAX_EDITABLE_BYTES {
-        anyhow::bail!(
-            "refusing to save: the file on disk is {} bytes, past the editor's limit of \
-             {MAX_EDITABLE_BYTES}, so the editor never showed its contents; nothing was written",
-            current.size
-        );
+    // A stamp proves the client holds this version of the file, not that it
+    // was ever shown the content. A file that is not valid UTF-8 is served to
+    // the editor with no content, so a buffer holding a stamp for one (a draft
+    // the browser kept from before such files were refused, or a client that
+    // ignores the flag) was typed over nothing, and saving it would replace
+    // bytes nobody saw.
+    //
+    // The check is deliberately narrow. Only that case is refused: a file
+    // with a NUL or a byte-order mark was always served without content, so it
+    // never had the empty-buffer problem, and content the editor wrote itself
+    // must stay saveable. Past the read cap the file could not have been read
+    // at all, so a matching stamp there can only be one this client got back
+    // from its own save, which the route allows to grow past the cap.
+    if current.size <= MAX_EDITABLE_BYTES {
+        let mut existing = Vec::new();
+        (&f).take(MAX_EDITABLE_BYTES).read_to_end(&mut existing)?;
+        if std::str::from_utf8(&existing).is_err() {
+            anyhow::bail!(
+                "refusing to save: the file on disk is not UTF-8 text, so the editor never \
+                 showed its contents and saving would replace them; nothing was written"
+            );
+        }
+        f.rewind()?;
     }
-    let mut existing = Vec::new();
-    (&f).take(MAX_EDITABLE_BYTES).read_to_end(&mut existing)?;
-    if !crate::diff::is_renderable_text(&existing) {
-        anyhow::bail!(
-            "refusing to save: the file on disk is binary or not UTF-8 text, so the editor never \
-             showed its contents and saving would replace them; nothing was written"
-        );
-    }
-    f.rewind()?;
     // Truncate through the same descriptor rather than reopening: the check
     // above is only worth something if nothing between it and the write can
     // point at a different file.
@@ -2470,6 +2473,46 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "the agent's work\n",
                 "a refused save must not truncate or write a single byte"
+            );
+        }
+
+        /// The save route accepts bodies past the read cap, so the editor can
+        /// grow a file beyond it. The stamp it got back proves it wrote those
+        /// bytes, so the next save in the same tab must go through.
+        #[test]
+        fn a_file_the_editor_grew_past_the_read_cap_can_be_saved_again() {
+            let dir = worktree();
+            let read = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: read.modified.clone(),
+                size: read.size.unwrap(),
+            };
+            let big = "a".repeat(MAX_EDITABLE_BYTES as usize + 1);
+            let grown = write_file_checked(dir.path(), "hello.txt", &big, Some(&expected)).unwrap();
+            assert!(grown.size > MAX_EDITABLE_BYTES);
+            write_file_checked(dir.path(), "hello.txt", "smaller again\n", Some(&grown)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "smaller again\n"
+            );
+        }
+
+        /// A NUL is valid UTF-8. A file holding one reads as binary, but if the
+        /// editor itself wrote it, the stamp it got back must still save.
+        #[test]
+        fn content_the_editor_wrote_with_a_nul_can_be_saved_again() {
+            let dir = worktree();
+            let read = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: read.modified.clone(),
+                size: read.size.unwrap(),
+            };
+            let with_nul =
+                write_file_checked(dir.path(), "hello.txt", "a\0b\n", Some(&expected)).unwrap();
+            write_file_checked(dir.path(), "hello.txt", "clean\n", Some(&with_nul)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "clean\n"
             );
         }
 

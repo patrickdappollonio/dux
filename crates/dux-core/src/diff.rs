@@ -72,6 +72,10 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
     if head_prefix.is_none() && working_prefix.is_none() {
         anyhow::bail!("file not found in the worktree or at HEAD: {rel_path}");
     }
+    // Only the head of each side is checked, so a large file whose first
+    // non-UTF-8 byte sits past the sample is shown as a patch rather than
+    // called binary. This view is read-only, so that costs a garbled line,
+    // never a write.
     let sample_is_text =
         |sample: &Option<Vec<u8>>| sample.as_deref().is_none_or(is_renderable_text_prefix);
     if !sample_is_text(&head_prefix) || !sample_is_text(&working_prefix) {
