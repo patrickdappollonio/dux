@@ -99,6 +99,8 @@ A thin status bar runs along the bottom, under both panes, and describes the ope
 - its line endings, `LF` or `CRLF`
 - its size on disk, as of the last time the editor read or saved it (unsaved edits do not
   count until you save)
+- its [encoding](#file-encodings), only when it is something other than plain UTF-8
+  (`Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM` and so on)
 - the syntax language picker
 
 Only what applies is shown. The cursor, line count, indentation and line endings appear
@@ -173,9 +175,8 @@ Any file inside the worktree is editable. Open it, type, and the dirty dot appea
 writes it to disk.
 
 dux keeps you inside the worktree: files outside it, inside `.git`, or binary blobs come
-back read-only or not at all, with a badge explaining why. A text file saved in an encoding
-other than UTF-8 (Latin-1 or Shift-JIS, say) is treated like a binary blob: the editor
-won't open it, so a save can never replace bytes it couldn't show you.
+back read-only or not at all, with a badge explaining why. Text in an encoding other than
+UTF-8 opens and saves in that encoding; see [File encodings](#file-encodings).
 
 Unsaved edits survive the editor closing. Close it with the button, Escape, or the
 browser's Back, and reopening brings every tab back, dirty dot and typed text included. The
@@ -194,6 +195,48 @@ Two size limits, both generous:
 - A save is refused past roughly **10 MiB**. The refusal names the limit and **your text
   is kept**: the tab stays dirty with everything you typed, so you can trim it down and
   save again, or copy it out.
+
+## File encodings
+
+Most files are UTF-8 and the editor says nothing about it. For the rest, dux does not
+guess. It goes by what the file itself says, and otherwise by one fixed rule:
+
+- A file that starts with a byte-order mark opens in the encoding the mark names: UTF-8,
+  UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
+- A file that is valid UTF-8 opens as UTF-8.
+- Anything else opens as Windows-1252 (the superset of ISO-8859-1, or Latin-1). Every byte
+  has a character there, so nothing is lost and a save writes the same bytes back for
+  everything you did not touch. Files with NUL bytes are still binary and still refused.
+
+When a file lands in that last case, an amber notice above the text says it isn't valid
+UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that is really
+Shift_JIS or Windows-1251 will look wrong. Dismiss the notice with its `×`, and it stays
+away for that file until you reload the page.
+
+Whenever a file is not plain UTF-8, the status bar names its encoding. Click it for two
+menus (on a phone, both are in the editor's `⋯` menu instead, under a label naming the
+encoding):
+
+- **Reopen with encoding** reads the file again in the encoding you pick: UTF-8, UTF-16,
+  the Windows and ISO-8859 code pages, Mac Roman, KOI8, Shift_JIS, EUC-JP, GBK, GB18030,
+  Big5, EUC-KR and more. If the bytes are not valid in it, the file stays open as it was
+  and a toast says why; you never get replacement characters that a save would write back.
+  With unsaved edits, dux asks first, because reopening replaces them. The diff view of the
+  file follows the encoding you picked.
+- **Save with encoding** saves the file right now in the encoding you pick, which is how
+  you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
+  it is recognised the next time it opens. A read-only file has no save, so it has no such
+  menu either.
+
+A plain UTF-8 file has no encoding item and no reopen: valid UTF-8 is very nearly never
+something else in disguise.
+
+> [!IMPORTANT]
+> A save is refused when the text holds a character the file's encoding cannot represent,
+> such as an emoji or a Chinese character typed into a Windows-1252 file. Nothing is
+> written, your text stays in the tab, and the toast names the first such character and
+> its line and column. Remove it, or use **Save with encoding** to convert the file to
+> UTF-8.
 
 ## When the agent edits a file you have open
 
@@ -365,6 +408,11 @@ syntax-highlighted comparison of the file's working copy against its last commit
 shown inline. Added files render as all-insert, deleted files as all-delete. If the file
 changes on disk while you are looking, an amber **Reload** button appears so you refresh on
 your own terms.
+
+Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
+editor, so a change to a Windows-1252 file is a readable diff. A file too large for the
+editor to open is diffed only when it is UTF-8; past that size, any other encoding is shown
+as a binary file.
 
 ## Open in your local editor
 
