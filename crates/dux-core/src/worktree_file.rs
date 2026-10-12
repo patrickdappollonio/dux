@@ -675,6 +675,56 @@ pub struct SaveEncoding {
     pub read_as: Option<(&'static encoding_rs::Encoding, bool)>,
 }
 
+/// Mark a refused leading U+FEFF as the file's own when the file on disk,
+/// read in the encoding the save says it was read in, starts with that
+/// character: the editor opened such a file read-only, so the refusal must not
+/// tell the person to delete a character they cannot reach. Any other error,
+/// or a file that cannot be read for this, is returned as it was; the answer
+/// only chooses the refusal's wording, never whether anything is written.
+fn leading_mark_from_file(
+    err: anyhow::Error,
+    worktree: &Path,
+    rel_path: &str,
+    save: SaveEncoding,
+) -> anyhow::Error {
+    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use std::io::Read;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+    let Some(refused) = err.downcast_ref::<crate::text_encoding::LeadingMarkInText>() else {
+        return err;
+    };
+    let Some((read, _)) = save.read_as else {
+        return err;
+    };
+    let Ok(path) = resolve_worktree_path(worktree, rel_path) else {
+        return err;
+    };
+    let Ok(fd) = rustix_open(&path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty()) else {
+        return err;
+    };
+    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
+    let f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let mut existing = Vec::new();
+    if f.take(MAX_EDITABLE_BYTES)
+        .read_to_end(&mut existing)
+        .is_err()
+    {
+        return err;
+    }
+    let from_file = matches!(
+        crate::text_encoding::decode(&existing, Some(read)),
+        Ok(crate::text_encoding::Decoded::Text(t)) if t.text.starts_with('\u{feff}')
+    );
+    if !from_file {
+        return err;
+    }
+    anyhow::Error::new(crate::text_encoding::LeadingMarkInText {
+        encoding: refused.encoding,
+        from_file: true,
+    })
+}
+
 /// [`write_file_checked`] with the text written in `encoding` rather than as
 /// its own UTF-8.
 ///
@@ -691,7 +741,9 @@ pub fn write_file_encoded(
     expected: Option<&FileStamp>,
 ) -> anyhow::Result<FileStamp> {
     let bytes: std::borrow::Cow<'_, [u8]> = match encoding {
-        Some(save) => crate::text_encoding::encode(content, save.encoding, save.bom)?.into(),
+        Some(save) => crate::text_encoding::encode(content, save.encoding, save.bom)
+            .map_err(|e| leading_mark_from_file(e, worktree, rel_path, save))?
+            .into(),
         None => content.as_bytes().into(),
     };
     if bytes.len() as u64 > MAX_SAVED_BYTES {
@@ -2923,6 +2975,63 @@ mod tests {
             .unwrap_err();
             assert!(err.to_string().contains("nothing was written"), "{err}");
             assert_eq!(std::fs::read(dir.path().join("l.txt")).unwrap(), b"caf\xe9");
+        }
+
+        /// A GB18030 file whose text starts with U+FEFF opens read-only, so
+        /// there is no character the person could delete: a refused
+        /// conversion of it says the file itself starts with one and points
+        /// outside dux, never "delete that character". A U+FEFF the person
+        /// typed into a file that has none is still told to delete it.
+        #[test]
+        fn a_refused_conversion_says_whether_the_mark_character_came_from_the_file() {
+            let dir = worktree();
+            let on_disk = [0x84, 0x31, 0x95, 0x33, b'x'];
+            std::fs::write(dir.path().join("gb.txt"), on_disk).unwrap();
+            let read = read_file_as(dir.path(), "gb.txt", Some(encoding_rs::GB18030)).unwrap();
+            assert_eq!(read.content, "\u{feff}x");
+            for (encoding, bom) in [
+                (encoding_rs::UTF_8, false),
+                (encoding_rs::UTF_8, true),
+                (encoding_rs::UTF_16LE, true),
+            ] {
+                let err = write_file_encoded(
+                    dir.path(),
+                    "gb.txt",
+                    &read.content,
+                    Some(SaveEncoding {
+                        encoding,
+                        bom,
+                        read_as: Some((encoding_rs::GB18030, false)),
+                    }),
+                    Some(&stamp_of(&read)),
+                )
+                .unwrap_err();
+                let refused = err
+                    .downcast_ref::<crate::text_encoding::LeadingMarkInText>()
+                    .expect("typed refusal");
+                assert!(refused.from_file, "{encoding:?}");
+                let message = err.to_string();
+                assert!(!message.contains("Delete that character"), "{message}");
+                assert!(message.contains("edit it outside dux"), "{message}");
+                assert!(message.contains("nothing was written"), "{message}");
+            }
+            assert_eq!(std::fs::read(dir.path().join("gb.txt")).unwrap(), on_disk);
+
+            std::fs::write(dir.path().join("m.txt"), "m\n").unwrap();
+            let read = read_file(dir.path(), "m.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "m.txt",
+                "\u{feff}m\n",
+                save_read_as(encoding_rs::UTF_8, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            let refused = err
+                .downcast_ref::<crate::text_encoding::LeadingMarkInText>()
+                .expect("typed refusal");
+            assert!(!refused.from_file);
+            assert!(err.to_string().contains("Delete that character"), "{err}");
         }
 
         /// The editor's whole loop for a windows-1252 file: read, change one

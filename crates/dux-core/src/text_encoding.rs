@@ -86,10 +86,25 @@ impl Unwritable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeadingMarkInText {
     pub encoding: &'static Encoding,
+    /// The file itself starts with that character, read in the encoding the
+    /// save says it was read in, rather than the person typing it. Such a file
+    /// opens read-only, so there is nothing to delete and the only way to
+    /// change it is outside dux.
+    pub from_file: bool,
 }
 
 impl std::fmt::Display for LeadingMarkInText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.from_file {
+            return write!(
+                f,
+                "refusing to convert: this file starts with the character U+FEFF, which {} can \
+                 only write as a byte-order mark, so the converted file would read back \
+                 without it; nothing was written. dux can't convert this file; edit it outside \
+                 dux",
+                self.encoding.name()
+            );
+        }
         write!(
             f,
             "refusing to save: the text starts with the character U+FEFF, which {} writes as \
@@ -483,7 +498,10 @@ pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Res
         );
     }
     if has_bom(encoding) && text.starts_with('\u{feff}') {
-        return Err(anyhow::Error::new(LeadingMarkInText { encoding }));
+        return Err(anyhow::Error::new(LeadingMarkInText {
+            encoding,
+            from_file: false,
+        }));
     }
     let mut out = Vec::with_capacity(text.len() + 3);
     if bom {
