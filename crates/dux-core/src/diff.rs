@@ -257,6 +257,29 @@ pub fn diff_head_via_git_as(
     })
 }
 
+/// A requested encoding the patch's file lines are not valid in. Its own type,
+/// so a caller can answer with exactly this reason rather than wrap it in the
+/// story of how the diff head came to be asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchNotInEncoding {
+    pub encoding: &'static encoding_rs::Encoding,
+    /// 1-based line of the patch that does not decode.
+    pub line: usize,
+}
+
+impl std::fmt::Display for PatchNotInEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the diff is not valid {}: line {} of the patch is not text in that encoding",
+            self.encoding.name(),
+            self.line
+        )
+    }
+}
+
+impl std::error::Error for PatchNotInEncoding {}
+
 /// Decode a patch's kept lines. Header lines and hunk headers are git's own
 /// (ASCII, with paths as UTF-8); in a hunk, everything after the leading ` `,
 /// `+` or `-` is the file's bytes. Those are read in `requested`, refusing any
@@ -303,11 +326,10 @@ fn decode_patch_lines(
         }
         let Some(body) = encoding.decode_without_bom_handling_and_without_replacement(&line[1..])
         else {
-            anyhow::bail!(
-                "the diff is not valid {}: line {} of the patch is not text in that encoding",
-                encoding.name(),
-                index + 1
-            );
+            return Err(anyhow::Error::new(PatchNotInEncoding {
+                encoding,
+                line: index + 1,
+            }));
         };
         let mut decoded = String::with_capacity(body.len() + 1);
         decoded.push(char::from(line[0]));
@@ -971,6 +993,8 @@ mod tests {
         // replacement characters is refused rather than shown.
         let err = diff_head_via_git_as(repo.path(), "f.txt", Some(encoding_rs::UTF_8)).unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+        // Typed, so the route answers with this reason alone.
+        assert!(err.downcast_ref::<PatchNotInEncoding>().is_some());
     }
 
     /// UTF-16 is full of NULs, and git itself calls it binary.

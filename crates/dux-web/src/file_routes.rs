@@ -597,6 +597,16 @@ async fn diff_contents(
                         path: path.clone(),
                         head,
                     }),
+                    // The person asked for an encoding the patch is not valid
+                    // in: that is the whole answer, and the size story would
+                    // bury it.
+                    Err(fallback)
+                        if fallback
+                            .downcast_ref::<dux_core::diff::PatchNotInEncoding>()
+                            .is_some() =>
+                    {
+                        Err(fallback)
+                    }
                     // The fallback failing does not make the file smaller. The
                     // refusal leads and git's words follow it, so the browser
                     // still learns the first and more useful fact.

@@ -218,7 +218,9 @@ export function useEditorFileReads({
         // label: a file that is all ASCII reads the same in most encodings.
         if (reopenAs !== null) {
           notifySuccess(
-            prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}. A save now writes it in that encoding.`,
+            file.unwritable
+              ? prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}, read-only: the notice above the text says why.`
+              : prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}. A save now writes it in that encoding.`,
           )
         }
       })

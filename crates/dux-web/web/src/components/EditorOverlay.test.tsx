@@ -3207,6 +3207,24 @@ describe("a file that is not plain UTF-8", () => {
     expect(writeMock.mock.calls[0][4]).toEqual({ encoding: "UTF-8", bom: false })
   })
 
+  it("never promises a save when a reopen lands read-only", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    readMock.mockResolvedValue({
+      ...LATIN1,
+      content: "≒\n",
+      encoding: "Shift_JIS",
+      encoding_fallback: false,
+      read_only: true,
+      unwritable: "round_trip",
+    })
+    await pick(/reopen with encoding/i, /^Shift_JIS/)
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled())
+    const said = render(<>{toastSuccess.mock.calls.at(-1)?.[0]}</>).container.textContent
+    expect(said).toContain("read-only")
+    expect(said).not.toContain("A save now writes")
+  })
+
   it("warns before a save rewrites mixed line endings, and the bar says Mixed", async () => {
     readMock.mockResolvedValue({
       ...LATIN1,
