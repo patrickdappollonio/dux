@@ -41,6 +41,7 @@ import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
   bufferSaveEncoding,
+  isBufferDirty,
   changeSignalFor,
   isBufferStale,
   pruneByIds,
@@ -51,6 +52,7 @@ import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
+import { laneKey, useLaneBusy } from "@/lib/editorLane"
 import {
   REOPEN_CHOICES,
   SAVE_CHOICES,
@@ -345,6 +347,18 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   useEffect(() => {
     buffersRef.current = buffers
   })
+
+  // Whether this editor is still mounted. Every asynchronous answer (a
+  // save's, a read's) checks it before touching anything, the tab's unsaved
+  // mark in the global store above all: an editor closed and opened again is
+  // a new one, and the old one's answers belong to nobody.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
 
   // Markdown preview toggle: render the buffer instead of the Monaco editor.
   // Kept per tab id rather than as one shared boolean, so each tab remembers
@@ -688,16 +702,18 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     tabsRef,
     sliceRef,
     buffersRef,
+    aliveRef,
     rereadRef,
     setBuffers,
     raiseDiskBanner,
   })
-  // The tab a save is in flight for, read by the in-place reload, which must
-  // not swap the text under a save that has not answered yet.
-  const savingTabIdRef = useRef<string | null>(null)
-  useEffect(() => {
-    savingTabIdRef.current = savingTabId
-  })
+  // The operation out on the open file, if any (lib/editorLane.ts). While
+  // one is, every control that would start another is unavailable: Save, the
+  // encoding menu's rows, the banner's Reload and the conflict dialog's offers.
+  const laneOp = useLaneBusy(
+    activeTab === null ? null : laneKey(key, activeTab.path),
+  )
+  const fileBusy = laneOp !== undefined
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
@@ -845,7 +861,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   }, [buffers])
 
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
-    savingTabIdRef,
+    aliveRef,
     root,
     tabs,
     activeTab,
@@ -982,7 +998,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     })
     const cur = buffers.get(tabId)
     if (cur && cur.path === path && !cur.binary && !cur.readOnly) {
-      const newDirty = value !== cur.loaded
+      const newDirty = isBufferDirty({ ...cur, draft: value })
       // Only dispatch when the dirty flag actually flips: `useDux()` is an
       // unselective `useSyncExternalStore`, so a dispatch on every keystroke
       // fans out a store-wide re-render to every consumer, not just this
@@ -1002,7 +1018,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // dropping the token is exactly what "yes, I know, do it anyway" means on
   // this route.
   function save(): void {
-    if (!activeTab || binary || isSaving || !dirty) return
+    // A busy file is answered by `writeBuffer`, which says so.
+    if (!activeTab || binary || !dirty) return
     writeBuffer(
       activeTab.id,
       activeTab.path,
@@ -1017,7 +1034,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // converting the file is itself the change; a character the encoding cannot
   // hold refuses the whole save and writes nothing.
   function saveWithEncoding(choice: SaveEncoding): void {
-    if (!activeTab || binary || hardReadOnly || isSaving || !fileReady) return
+    if (!activeTab || binary || hardReadOnly || fileBusy || !fileReady) return
     const current = bufferSaveEncoding(activeBuffer)
     if (encodingUnwritable && sameSaveEncoding(choice, current)) return
     writeBuffer(
@@ -1036,7 +1053,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // server and the buffer stays as it was (see `reloadFileInPlace`).
   function requestReopen(encoding: string): void {
     // A save in flight would answer for whatever text this replaced it with.
-    if (!activeTab || isSaving) return
+    if (!activeTab || fileBusy) return
     const tabId = activeTab.id
     const path = activeTab.path
     const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
@@ -1290,7 +1307,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <DropdownMenuSub>
           {/* Not while this tab is saving: the save's answer is about the text
               it sent, and a reopen would put a different decoding under it. */}
-          <DropdownMenuSubTrigger disabled={isSaving}>
+          <DropdownMenuSubTrigger disabled={fileBusy}>
             <RotateCw />
             Reopen with encoding
           </DropdownMenuSubTrigger>
@@ -1314,7 +1331,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         </DropdownMenuSub>
         {!inDiff && !hardReadOnly && (
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={isSaving}>
+            <DropdownMenuSubTrigger disabled={fileBusy}>
               <SaveAll />
               Save with encoding
             </DropdownMenuSubTrigger>
@@ -1327,7 +1344,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     aria-current={isCurrent ? "true" : undefined}
                     // A file its encoding cannot write back unchanged can be
                     // converted, never saved again in that same encoding.
-                    disabled={isCurrent && encodingUnwritable}
+                    // The current encoding and mark is never a row to act
+                    // on: it is not a conversion, and not an edit either, so
+                    // a save from it would only rewrite untouched bytes (the
+                    // line endings, say) for nothing.
+                    disabled={isCurrent}
                     onClick={() =>
                       saveWithEncoding({
                         encoding: choice.encoding,
@@ -1483,7 +1504,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       <Button
         variant="default"
         className={cn(HEADER_CONTROL, "max-md:h-10")}
-        disabled={!dirty || isSaving || readOnly}
+        disabled={!dirty || fileBusy || readOnly}
         aria-busy={isSaving}
         onClick={save}
       >
@@ -1927,6 +1948,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 activeTab.mode === "file" &&
                 !isBufferStale(activeBuffer, activeTab.path) && (
                   <FileDiskBanner
+                    busy={fileBusy}
                     state={activeBuffer?.diskState ?? "fresh"}
                     path={activeTab.path}
                     dirty={dirty}
@@ -2071,6 +2093,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           resolve a conflict that is waiting on an answer), so the guard is a
           plain tab lookup rather than the shared hook's two-value form. */}
       <SaveConflictDialog
+        busy={fileBusy}
         target={
           saveConflict !== null &&
           tabs.some((t) => t.id === saveConflict.tabId)

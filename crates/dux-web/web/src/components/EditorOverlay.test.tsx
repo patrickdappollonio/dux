@@ -3055,6 +3055,9 @@ describe("a file that is not plain UTF-8", () => {
     clearRootDrafts(rootKey(agentRoot(SESSION)))
     const { resetEncodingNotices } = await import("@/lib/editorEncoding")
     resetEncodingNotices()
+    // A test that leaves a request pending leaves its file's lane held.
+    const { resetLanes } = await import("@/lib/editorLane")
+    resetLanes()
     readMock.mockResolvedValue(LATIN1)
     writeMock.mockResolvedValue({
       modified: "2026-01-01T00:00:00+00:00",
@@ -3497,23 +3500,92 @@ describe("a file that is not plain UTF-8", () => {
 
   /// Two reopens out at once: only the later one's answer may touch the
   /// buffer, and typing stays locked until it lands.
-  it("lets only the latest of two overlapping reopens apply or unlock typing", async () => {
+  /// An editor closed and opened again is a new one. A save the old one
+  /// sent must not touch the new one's tab when it answers: not its unsaved
+  /// mark (or the typing done since closes without a confirm), not a
+  /// conflict dialog offering to overwrite with the old text.
+  for (const answer of ["success", "conflict"] as const) {
+    it(`lets a save from a closed editor reach nothing when it answers (${answer})`, async () => {
+      await mountDirty()
+      let settle!: { ok: (v: unknown) => void; fail: (e: unknown) => void }
+      writeMock.mockReturnValueOnce(
+        new Promise((ok, fail) => {
+          settle = { ok, fail }
+        }) as never,
+      )
+      fireEvent.click(screen.getByRole("button", { name: /^save/i }))
+      await waitFor(() => expect(writeMock).toHaveBeenCalled())
+      cleanup()
+      // Opened again: the draft comes back from the cache, still unsaved.
+      const { EditorOverlay } = await import("@/components/EditorOverlay")
+      render(<EditorOverlay />)
+      const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+      await waitFor(() => expect(box.value).toBe("thé\n"))
+      fireEvent.change(box, { target: { value: "typed in the new editor\n" } })
+      editorSetTabDirtyMock.mockClear()
+      if (answer === "success") {
+        settle.ok({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+      } else {
+        const { FileConflictError } = await import("@/lib/fileApi")
+        settle.fail(new FileConflictError({ modified: null, size: 1, deleted: false }))
+      }
+      await new Promise((r) => setTimeout(r, 300))
+      expect(
+        editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+      ).toEqual([])
+      expect(screen.queryByText(/changed after you opened it/i)).toBeNull()
+    })
+  }
+
+  it("starts no reopen while a save or conversion of the file is out", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    fireEvent.click(await encodingButton())
+    expect(
+      (await screen.findByRole("menuitem", { name: /reopen with encoding/i })).getAttribute(
+        "aria-disabled",
+      ),
+    ).toBe("true")
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+  })
+
+  /// Saving in the encoding and mark the file already has is neither an edit
+  /// nor a conversion; the row is shown as current and does nothing.
+  it("offers the current encoding as current, never as a save", async () => {
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    fireEvent.click(await encodingButton())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /save with encoding/i }))
+    const current = await screen.findByRole("menuitem", { name: /^Windows-1252/ })
+    expect(current.getAttribute("aria-disabled")).toBe("true")
+    expect(current.getAttribute("aria-current")).toBe("true")
+    fireEvent.click(current)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(writeMock).not.toHaveBeenCalled()
+  })
+
+  /// One operation per file: while a reopen is out, no second reopen, save
+  /// or conversion can start, so no two answers can race on one buffer.
+  it("starts nothing else on a file while a reopen of it is out", async () => {
     await mountWithTab(PATH)
     await loaded("café\n")
     const first = pending<typeof LATIN1>()
-    const second = pending<typeof LATIN1>()
-    readMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    readMock.mockReturnValueOnce(first.promise)
     await pick(/reopen with encoding/i, /^Windows-1252/)
     await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("windows-1252"))
-    await pick(/reopen with encoding/i, /^ISO-8859-15/)
-    await waitFor(() => expect(readMock.mock.calls.at(-1)?.[2]).toBe("ISO-8859-15"))
+    fireEvent.click(await encodingButton())
+    for (const row of [/reopen with encoding/i, /save with encoding/i]) {
+      expect(
+        (await screen.findByRole("menuitem", { name: row })).getAttribute("aria-disabled"),
+      ).toBe("true")
+    }
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
     first.resolve({ ...LATIN1, content: "first\n", encoding_fallback: false })
-    await new Promise((r) => setTimeout(r, 200))
-    const box = screen.getByTestId("code-editor") as HTMLTextAreaElement
-    expect(box.getAttribute("data-read-only")).toBe("true")
-    expect(box.value).toBe("café\n")
-    second.resolve({ ...LATIN1, content: "second\n", encoding: "ISO-8859-15", encoding_fallback: false })
-    await loaded("second\n")
+    const box = await loaded("first\n")
     await waitFor(() => expect(box.getAttribute("data-read-only")).toBe("false"))
   })
 
@@ -3716,10 +3788,10 @@ describe("a file that is not plain UTF-8", () => {
         encoding: "windows-1252",
       }),
     )
-    await mountWithTab(PATH)
-    const box = await loaded("café\n")
-    fireEvent.change(box, { target: { value: "café ☃\n" } })
-    await pick(/save with encoding/i, /^Windows-1252/)
+    // Dirty, so Save is offered.
+    const box = await mountDirty()
+    fireEvent.change(box, { target: { value: "caf\u00e9 \u2603\n" } })
+    fireEvent.click(screen.getByRole("button", { name: /^save/i }))
     await waitFor(() => expect(toastError).toHaveBeenCalled())
     const shown = render(<>{toastError.mock.calls[0][0]}</>)
     expect(shown.container.textContent).toContain("U+2603")

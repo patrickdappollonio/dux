@@ -233,7 +233,12 @@ menus:
 - **Save with encoding** saves the file right now in the encoding you pick, which is how
   you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
   it is recognised the next time it opens. A file that is read-only for any reason other
-  than its encoding has no save, so it has no such menu either.
+  than its encoding has no save, so it has no such menu either. The encoding the file is
+  already in is shown as current there, not offered: saving in it is just **Save**.
+
+One thing happens to a file at a time. While a save, a conversion, a reopen or a reload
+of it is under way, the others wait: their menu rows and buttons are unavailable until it
+finishes, and the text cannot be typed into while a reopen is reading the file.
 
 A save writes back exactly the bytes it read for everything you did not touch, with one
 exception, line endings, below. Where an encoding cannot keep that promise, the file opens

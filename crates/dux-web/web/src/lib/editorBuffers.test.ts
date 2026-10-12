@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
+  answerApplies,
   bufferSaveEncoding,
+  isBufferDirty,
   editorTextOf,
   normalizeEol,
-  saveLandsOn,
   encodingFromFile,
   changeSignalFor,
   diskFactKey,
@@ -555,6 +556,7 @@ describe("encodings on a read", () => {
       mixedEol: false,
       eol: null,
       pathReadOnly: false,
+      draftBom: false,
       looksLikeUtf8: false,
     })
   })
@@ -581,12 +583,13 @@ describe("encodings on a read", () => {
       mixedEol: false,
       eol: null,
       pathReadOnly: false,
+      draftBom: true,
       looksLikeUtf8: false,
     })
   })
 
   it("an ordinary save writes what the buffer was read in", () => {
-    expect(bufferSaveEncoding(loadedBuffer({ encoding: "UTF-8", bom: true }))).toEqual({
+    expect(bufferSaveEncoding(loadedBuffer({ encoding: "UTF-8", bom: true, draftBom: true }))).toEqual({
       encoding: "UTF-8",
       bom: true,
     })
@@ -700,9 +703,9 @@ describe("what the editor holds is what a save writes", () => {
 
   it("lets a save's answer land only on the buffer it was sent from", () => {
     const sent = loadedBuffer()
-    expect(saveLandsOn(sent, sent.generation)).toBe(true)
+    expect(answerApplies({ path: "a.ts", generation: sent.generation }, true, sent)).toBe(true)
     const reread = reloadedInPlace(sent, "a.ts", { path: "a.ts", binary: false, content: "z" }, "")
-    expect(saveLandsOn(reread, sent.generation)).toBe(false)
+    expect(answerApplies({ path: "a.ts", generation: sent.generation }, true, reread)).toBe(false)
   })
 
   it("leaves a converted mixed file truthfully uniform, since what was sent was", () => {
@@ -719,7 +722,7 @@ describe("a save's answer and the buffer it is about", () => {
     const b = reloadedInPlace(emptyBuffer("b.ts"), "b.ts", { ...file, path: "b.ts" }, "")
     expect(a.generation).not.toBe(b.generation)
     // A preview replacement reuses the tab id, so the path is part of it too.
-    expect(saveLandsOn(b, a.generation)).toBe(false)
+    expect(answerApplies({ path: "a.ts", generation: a.generation }, true, b)).toBe(false)
   })
 
   it("takes a conversion's writability from the server's verdict, never assumes it", () => {
@@ -731,7 +734,7 @@ describe("a save's answer and the buffer it is about", () => {
     })
     const next = baselineSavedBuffer(
       prev,
-      "﻿x",
+      "\ufeffx",
       { modified: null, size: 6 },
       "",
       { encoding: "UTF-16LE", bom: true },
@@ -756,10 +759,10 @@ describe("a save's answer and the buffer it is about", () => {
 
 describe("a save whose leading U+FEFF reads back as a mark", () => {
   it("relabels the file as marked and drops the character from the copy, with no edit", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "﻿a", loaded: "x" })
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "\ufeffa", loaded: "x" })
     const next = baselineSavedBuffer(
       prev,
-      "﻿a",
+      "\ufeffa",
       { modified: null, size: 4 },
       "",
       { encoding: "UTF-8", bom: false },
@@ -771,10 +774,10 @@ describe("a save whose leading U+FEFF reads back as a mark", () => {
   })
 
   it("keeps what was typed since, unsaved, but not the character the mark now carries", () => {
-    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "﻿ab", loaded: "x" })
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draft: "\ufeffab", loaded: "x" })
     const next = baselineSavedBuffer(
       prev,
-      "﻿a",
+      "\ufeffa",
       { modified: null, size: 4 },
       "",
       { encoding: "UTF-8", bom: false },
@@ -784,5 +787,62 @@ describe("a save whose leading U+FEFF reads back as a mark", () => {
     // The mark is the label now; leaving the character in the draft would
     // make the next save write it a second time.
     expect(next.draft).toBe("ab")
+  })
+})
+
+describe("unsaved means text or mark", () => {
+  it("is unsaved when the text differs or the mark the next save writes differs", () => {
+    expect(isBufferDirty(loadedBuffer())).toBe(false)
+    expect(isBufferDirty(loadedBuffer({ draft: "typed\n" }))).toBe(true)
+    expect(isBufferDirty(loadedBuffer({ bom: true, draftBom: false }))).toBe(true)
+  })
+
+  it("keeps an undone leading U+FEFF unsaved: the disk has a mark the text no longer asks for", () => {
+    // Saved "\ufeffx" (a read takes the character as the mark), but the
+    // insertion was undone before the answer came: the draft is "x".
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "x" })
+    const next = baselineSavedBuffer(
+      prev,
+      "\ufeffx",
+      { modified: null, size: 4 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+    )
+    expect(next.loaded).toBe("x")
+    expect(next.bom).toBe(true)
+    expect(next.draftBom).toBe(false)
+    expect(isBufferDirty(next)).toBe(true)
+    // Its next save writes no mark.
+    expect(bufferSaveEncoding(next)).toEqual({ encoding: "UTF-8", bom: false })
+  })
+
+  it("is clean after the relabel when the draft still carried the character", () => {
+    const prev = loadedBuffer({ encoding: "UTF-8", bom: false, draftBom: false, draft: "\ufeffx" })
+    const next = baselineSavedBuffer(
+      prev,
+      "\ufeffx",
+      { modified: null, size: 4 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, bom: true, leading_mark_read_as_bom: true, eol: "LF" },
+    )
+    expect(next.draft).toBe("x")
+    expect(next.draftBom).toBe(true)
+    expect(isBufferDirty(next)).toBe(false)
+  })
+})
+
+describe("one gate for every answer", () => {
+  it("applies an answer only to a live editor holding the same reading of the same file", () => {
+    const buffer = loadedBuffer()
+    const ticket = { path: "a.ts", generation: buffer.generation }
+    expect(answerApplies(ticket, true, buffer)).toBe(true)
+    // The editor that sent it has gone.
+    expect(answerApplies(ticket, false, buffer)).toBe(false)
+    // Another file in the tab, or another reading of this one.
+    expect(answerApplies({ ...ticket, path: "b.ts" }, true, buffer)).toBe(false)
+    expect(answerApplies({ ...ticket, generation: ticket.generation + 1 }, true, buffer)).toBe(false)
+    expect(answerApplies(ticket, true, undefined)).toBe(false)
   })
 })

@@ -128,6 +128,11 @@ export interface TabBuffer {
   // read is out; null otherwise. The editor takes no typing meanwhile: the
   // answer replaces the text, and anything typed would go with it.
   reopening: string | null
+  // The mark the next save writes. The same as `bom` (the file's) except
+  // when a save's answer relabelled the file as marked after the draft had
+  // already dropped the character that became the mark: the draft then asks
+  // for no mark, and is unsaved until it is written that way.
+  draftBom: boolean
 }
 
 export type BufferEncodingFacts = Pick<
@@ -141,6 +146,7 @@ export type BufferEncodingFacts = Pick<
   | "eol"
   | "looksLikeUtf8"
   | "pathReadOnly"
+  | "draftBom"
 >
 
 // The encoding fields of a fresh read. An older server sends none and only ever
@@ -162,6 +168,7 @@ export function encodingFromFile(
     looksLikeUtf8: file.looks_like_utf8 ?? false,
     pathReadOnly:
       file.path_read_only ?? ((file.read_only ?? false) && unwritable === null),
+    draftBom: file.bom ?? false,
   }
 }
 
@@ -189,22 +196,61 @@ export function freshGeneration(): number {
   return lastGeneration
 }
 
-// Whether a save's answer may be applied to `buffer`: only when nothing has
-// replaced its text from disk since the save was sent. Otherwise the answer
-// describes bytes the buffer no longer holds, and relabelling it (say, as the
-// encoding a conversion wrote) would misdescribe a different decoding.
-export function saveLandsOn(
-  buffer: { generation?: number },
-  sentGeneration: number,
-): boolean {
-  return (buffer.generation ?? 0) === sentGeneration
+// The identity an asynchronous answer (a save's, a read's) is about: the file
+// and the reading of it the request was sent from.
+export interface AnswerTicket {
+  path: string
+  generation: number
 }
 
-// What a save of this buffer writes, unless the person picked a conversion.
+// The ONE gate every asynchronous answer passes before it touches anything: the
+// buffer, the tab's unsaved mark, a banner, a dialog. It applies only while the
+// editor that sent it is still mounted (`alive`; a closed and reopened editor
+// is a new one, and the old one's answers must not reach the new one's tabs)
+// and the tab still holds the same reading of the same file.
+export function answerApplies(
+  ticket: AnswerTicket,
+  alive: boolean,
+  buffer: { path: string; generation?: number } | undefined,
+): boolean {
+  return (
+    alive &&
+    buffer !== undefined &&
+    buffer.path === ticket.path &&
+    (buffer.generation ?? 0) === ticket.generation
+  )
+}
+
+// What a save of this buffer writes, unless the person picked a conversion:
+// the encoding it was read in, and the mark its DRAFT asks for (which can
+// differ from the file's, see `draftBom`).
 export function bufferSaveEncoding(
-  buffer: Pick<TabBuffer, "encoding" | "bom"> | undefined,
+  buffer: Pick<TabBuffer, "encoding" | "bom"> & { draftBom?: boolean } | undefined,
 ): { encoding: string; bom: boolean } {
-  return { encoding: buffer?.encoding ?? "UTF-8", bom: buffer?.bom ?? false }
+  return {
+    encoding: buffer?.encoding ?? "UTF-8",
+    bom: buffer?.draftBom ?? buffer?.bom ?? false,
+  }
+}
+
+// What the file the buffer was read from is in: the encoding and the mark on
+// disk, which a save states as what its text was read in.
+export function bufferReadEncoding(
+  buffer: Pick<TabBuffer, "encoding" | "bom">,
+): { encoding: string; bom: boolean } {
+  return { encoding: buffer.encoding ?? "UTF-8", bom: buffer.bom ?? false }
+}
+
+// Whether the tab holds anything a save has not written: the text, or the mark.
+// The mark is content: a draft whose next save would write a different mark
+// than the file has is as unsaved as one with different text.
+export function isBufferDirty(
+  buffer: Pick<TabBuffer, "draft" | "loaded" | "bom"> & { draftBom?: boolean },
+): boolean {
+  return (
+    buffer.draft !== buffer.loaded ||
+    (buffer.draftBom ?? buffer.bom ?? false) !== (buffer.bom ?? false)
+  )
 }
 
 // A disk fact flattened to one comparable string, or "deleted" when no file is
@@ -248,6 +294,7 @@ export function emptyBuffer(path: string): TabBuffer {
     pathReadOnly: false,
     generation: 0,
     reopening: null,
+    draftBom: false,
   }
 }
 
@@ -471,8 +518,14 @@ export function baselineSavedBuffer(
   // The label carries the mark now, so the character leaves the draft too,
   // typing since or not: left there, the next save would write it a second
   // time.
-  const draft =
-    markRead && prev.draft.startsWith("\ufeff") ? prev.draft.slice(1) : prev.draft
+  const stripped = markRead && prev.draft.startsWith("\ufeff")
+  const draft = stripped ? prev.draft.slice(1) : prev.draft
+  // The file's mark is what was written; the mark the draft asks for follows
+  // the save, except where the draft had already dropped the character that a
+  // read now takes as the mark (an undo while the save was out): that draft
+  // asks for none, and stays unsaved until it is written so.
+  const bom = verdict?.bom ?? saved.bom
+  const draftBom = markRead ? stripped : saved.bom
   return {
     ...prev,
     ...encodingAfterSave(
@@ -484,7 +537,8 @@ export function baselineSavedBuffer(
       },
       saved,
     ),
-    ...(verdict?.bom !== undefined ? { bom: verdict.bom } : {}),
+    bom,
+    draftBom,
     draft,
     // A conversion is never assumed to have made the file writable: a text
     // that still starts with a second mark is two marks in the new encoding

@@ -1,13 +1,15 @@
 import { useEffect, useRef } from "react"
 import type { Dispatch, RefObject, SetStateAction } from "react"
-import { fileApi } from "@/lib/fileApi"
+import { fileApi, type WorktreeFile } from "@/lib/fileApi"
 import {
+  answerApplies,
   changeSignalFor,
   diskFactKey,
   editorTextOf,
   encodingFromFile,
   freshGeneration,
   fileLoadSeedBuffer,
+  isBufferDirty,
   isBufferStale,
   pruneByIds,
   reloadedInPlace,
@@ -18,12 +20,19 @@ import type {
   DiskState,
   TabBuffer,
 } from "@/lib/editorBuffers"
-import type { EditorRoot } from "@/lib/editorRoot"
+import { rootKey, type EditorRoot } from "@/lib/editorRoot"
+import {
+  acquireLane,
+  laneBusy,
+  laneKey,
+  laneOpWords,
+  type LaneOp,
+} from "@/lib/editorLane"
 import type { EditorTab } from "@/lib/editorTabs"
 import { isImagePreviewPath } from "@/lib/editorPreview"
 import { encodingLabel } from "@/lib/editorEncoding"
-import { notifyError, notifySuccess } from "@/lib/notify"
-import { chip, prose } from "@/lib/prose"
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify"
+import { chip, prose, type Prose } from "@/lib/prose"
 import { editorSetTabDirty } from "@/lib/store"
 
 interface UseEditorFileReadsOptions {
@@ -34,8 +43,9 @@ interface UseEditorFileReadsOptions {
   tabsRef: RefObject<readonly EditorTab[]>
   buffersRef: RefObject<Map<string, TabBuffer>>
   sliceRef: RefObject<ChangesSliceView | null>
-  // The tab a save is in flight for, if any.
-  savingTabIdRef: RefObject<string | null>
+  // False once the editor component that owns these buffers has unmounted: an
+  // answer arriving after that belongs to nobody (see `answerApplies`).
+  aliveRef: RefObject<boolean>
   // The encoding chosen per open path, which outlives a buffer across a rename.
   encodingChoicesRef: RefObject<Map<string, string>>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
@@ -57,7 +67,7 @@ export function useEditorFileReads({
   tabsRef,
   buffersRef,
   sliceRef,
-  savingTabIdRef,
+  aliveRef,
   encodingChoicesRef,
   setBuffers,
   raiseDiskBanner,
@@ -174,62 +184,66 @@ export function useEditorFileReads({
   // `asked` is an explicit request (the banner's Reload, a confirm, a reopen),
   // which replaces the text even when it is dirty. `options.encoding` reopens
   // the file in that encoding; without it the buffer's own requested encoding,
-  // if any, is asked for again.
+  // if any, is asked for again. `options.afterSave` is a save's own re-read of
+  // a file whose answer no longer described the buffer.
+  //
+  // Every reload is an operation on the file's lane (lib/editorLane.ts): none
+  // starts while another (a save, a conversion, another reopen or reload) is
+  // out. A reload nobody asked for just does not start; one somebody asked for
+  // says the file is busy. Its answer passes the one gate (`answerApplies`):
+  // this editor still mounted, the tab still holding the reading it was asked
+  // from.
   function reloadFileInPlace(
     tabId: string,
     path: string,
     asked = false,
     options: { encoding?: string; afterSave?: boolean } = {},
   ): void {
-    // A save in flight for this tab answers for the text it sent; replacing
-    // that text underneath it (with a reading the save's answer would then
-    // relabel) is how a conversion double-encodes. A reload nobody asked for
-    // waits: once the save lands, its stamp is the baseline the next check
-    // compares against. The save's own re-read is the exception.
-    const saving = () => !options.afterSave && savingTabIdRef.current === tabId
-    if (!asked && saving()) return
-    // Likewise a reopen that is out: a reload nobody asked for would take the
-    // latest-request slot from the read the person did ask for, and apply a
-    // reading in the encoding they were leaving. The reopen's answer is the
-    // fresh read anyway.
-    if (!asked && buffersRef.current.get(tabId)?.reopening) return
-    const token = nextToken(tabId)
-    const signalAtRequest = changeSignalFor(sliceRef.current, path)
     const reopenAs = options.encoding ?? null
-    const requested =
-      reopenAs ?? buffersRef.current.get(tabId)?.encodingRequested ?? null
+    const op: LaneOp =
+      reopenAs !== null ? "reopen" : asked || options.afterSave ? "reload" : "freshness"
+    const lane = laneKey(rootKey(root), path)
+    const release = acquireLane(lane, op)
+    if (release === null) {
+      if (asked) {
+        const busy = laneBusy(lane)
+        notifyInfo(
+          prose`${chip(path)} is busy with ${busy ? laneOpWords(busy) : "another operation"}; try again when it finishes.`,
+        )
+      }
+      return
+    }
+    const from = buffersRef.current.get(tabId)
+    if (from === undefined || isBufferStale(from, path)) {
+      release()
+      return
+    }
+    const ticket = { path, generation: from.generation ?? 0 }
+    const signalAtRequest = changeSignalFor(sliceRef.current, path)
+    const requested = reopenAs ?? from.encodingRequested ?? null
     // A reopen replaces the text when it lands, so until then the editor takes
-    // no typing (see `TabBuffer.reopening`). Only the LATEST read of this tab
-    // may give it back, however it ends: an earlier answer arriving late is
-    // dropped whole, lock included, or it would unlock typing that the later
-    // reopen's answer then replaces.
+    // no typing (see `TabBuffer.reopening`); the lane is what keeps a second
+    // reopen from starting meanwhile.
     const setReopening = (label: string | null) =>
       setBuffers((prev) => {
         const current = prev.get(tabId)
-        if (!current || isBufferStale(current, path)) return prev
+        if (!current || !answerApplies(ticket, true, current)) return prev
         if ((current.reopening ?? null) === label) return prev
         const next = new Map(prev)
         next.set(tabId, { ...current, reopening: label })
         return next
       })
     if (reopenAs !== null) setReopening(encodingLabel(reopenAs, false))
-    const settle = () => {
-      if (isCurrentRequest(tabId, token)) setReopening(null)
-    }
+    const applies = () =>
+      answerApplies(ticket, aliveRef.current, buffersRef.current.get(tabId))
     fileApi
       .read(root, path, requested)
       .then((file) => {
-        if (!isCurrentRequest(tabId, token)) return
-        if (!asked && saving()) {
-          settle()
-          return
-        }
-        const atResolve = buffersRef.current.get(tabId)
+        if (!applies()) return
+        const atResolve = buffersRef.current.get(tabId)!
         const dirtyNow =
           !asked &&
-          ((atResolve !== undefined &&
-            !isBufferStale(atResolve, path) &&
-            atResolve.draft !== atResolve.loaded) ||
+          (isBufferDirty(atResolve) ||
             (tabsRef.current.find((tab) => tab.id === tabId)?.dirty ?? false))
         if (dirtyNow) {
           raiseDiskBanner(
@@ -241,12 +255,11 @@ export function useEditorFileReads({
               size: file.size ?? null,
             }),
           )
-          settle()
           return
         }
         setBuffers((prev) => {
           const current = prev.get(tabId)
-          if (!current || isBufferStale(current, path)) return prev
+          if (!current || !answerApplies(ticket, true, current)) return prev
           const next = new Map(prev)
           next.set(
             tabId,
@@ -254,20 +267,15 @@ export function useEditorFileReads({
           )
           return next
         })
+        // A fresh reading is its own baseline: nothing in the tab is unsaved.
         editorSetTabDirty(root, tabId, false)
         // Confirmed, because the only sign on screen may be the status bar's
         // label: a file that is all ASCII reads the same in most encodings.
-        if (reopenAs !== null) {
-          notifySuccess(
-            file.unwritable
-              ? prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}, read-only: the notice above the text says why.`
-              : prose`Reopened ${chip(path)} as ${encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)}. A save now writes it in that encoding.`,
-          )
-        }
+        if (reopenAs !== null) notifySuccess(reopenedNotice(path, reopenAs, file))
       })
       .catch((error) => {
-        if (!isCurrentRequest(tabId, token)) return
-        settle()
+        if (!applies()) return
+        setReopening(null)
         if (reopenAs !== null) {
           // The buffer is untouched: the file stays open as it was, in the
           // encoding it had, and the toast says why the reopen did not happen.
@@ -278,13 +286,33 @@ export function useEditorFileReads({
           )
           return
         }
+        if (!asked) return
         notifyError(
           error instanceof Error
             ? `could not reload from disk: ${error.message}`
             : "could not reload from disk",
         )
       })
+      .finally(release)
   }
 
   return { loadFileBuffer, reloadFileInPlace }
+}
+
+// What a reopen says it did, truthfully: a file read-only for where it lives
+// stays so in any encoding, and one its new encoding cannot write back is
+// read-only in it; only otherwise does a save now write in that encoding.
+export function reopenedNotice(
+  path: string,
+  reopenAs: string,
+  file: WorktreeFile,
+): Prose {
+  const label = encodingLabel(file.encoding ?? reopenAs, file.bom ?? false)
+  if (file.path_read_only) {
+    return prose`Reopened ${chip(path)} as ${label}. It stays read-only: it is a symlink or a .git path, which the editor never saves.`
+  }
+  if (file.unwritable) {
+    return prose`Reopened ${chip(path)} as ${label}, read-only: the notice above the text says why.`
+  }
+  return prose`Reopened ${chip(path)} as ${label}. A save now writes it in that encoding.`
 }
