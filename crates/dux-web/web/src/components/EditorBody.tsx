@@ -1403,7 +1403,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               {named.name}
             </InlineCode>
             {named.detail !== null && (
-              <span className="min-w-0 shrink truncate text-xs text-muted-foreground">
+              // Gives way faster than the chip, so a narrow header keeps the
+              // name and loses the owner text first.
+              <span className="min-w-0 shrink-[4] truncate text-xs text-muted-foreground">
                 {named.detail}
               </span>
             )}
