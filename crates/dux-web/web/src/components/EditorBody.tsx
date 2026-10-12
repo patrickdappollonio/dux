@@ -2435,6 +2435,8 @@ function FileContentPane({
           onEditorChange={onEditorChange}
           // Only once a read has named one: an older server names none.
           eol={buffer?.eol ?? undefined}
+          readOnly={buffer?.readOnly ?? false}
+          readOnlyReason={readOnlyReasonOf(buffer)}
         />
       </Suspense>
     </ChunkBoundary>
@@ -2568,4 +2570,13 @@ function PreviewImageFrame({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   )
+}
+
+// What Monaco says when someone types into a read-only buffer: the same two
+// reasons the status bar's read-only label gives.
+function readOnlyReasonOf(buffer: TabBuffer | undefined): string | undefined {
+  if (!buffer?.readOnly) return undefined
+  return buffer.unwritable !== null && !buffer.pathReadOnly
+    ? "This file is read-only: its encoding can't write it back without changing bytes you didn't touch. Reopen or convert it from the encoding menu in the status bar."
+    : "This file is read-only: it is a symlink to an external file or a .git path."
 }

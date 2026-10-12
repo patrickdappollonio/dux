@@ -63,9 +63,18 @@ export interface WorktreeFile {
 
 // What a successful save reports back: the file's stamp after the write, which
 // the editor re-baselines on so its own save is not read as somebody else's.
-export interface WriteResult {
+export interface WriteResult extends SaveVerdict {
   modified: string | null
   size: number
+}
+
+// The server's verdict on what a save wrote, judged the way a read would be:
+// sent for every save that states an encoding, absent otherwise (and from an
+// older server).
+export interface SaveVerdict {
+  unwritable?: UnwritableReason | null
+  mixed_line_endings?: boolean
+  eol?: "LF" | "CRLF"
 }
 
 

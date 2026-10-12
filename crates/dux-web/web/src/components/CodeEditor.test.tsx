@@ -25,13 +25,53 @@ const fakeMonaco = {
 }
 
 vi.mock("@/lib/monacoSetup", () => ({ monaco: fakeMonaco }))
+// The options the wrapper was last handed, so a test can read what Monaco got.
+let lastOptions: Record<string, unknown> = {}
 vi.mock("@monaco-editor/react", () => ({
-  Editor: ({ onMount }: { onMount: (ed: unknown, mon: unknown) => void }) => {
+  Editor: ({
+    onMount,
+    options,
+  }: {
+    onMount: (ed: unknown, mon: unknown) => void
+    options: Record<string, unknown>
+  }) => {
+    lastOptions = options
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => onMount(fakeEditor, fakeMonaco), [])
     return null
   },
 }))
+
+describe("a read-only file in the code editor", () => {
+  afterEach(cleanup)
+
+  /// Typing into a read-only buffer would be kept nowhere: it is not tracked
+  /// as an edit, and closing the tab drops it without asking. Monaco itself
+  /// must refuse the keystrokes, and say why.
+  it("is read-only in Monaco, with the reason as its message", async () => {
+    const { default: CodeEditor } = await import("./CodeEditor")
+    render(
+      <CodeEditor
+        path="a.txt"
+        value="x"
+        onChange={() => {}}
+        onSave={() => {}}
+        readOnly
+        readOnlyReason="Shift_JIS can't write this file back unchanged."
+      />,
+    )
+    expect(lastOptions.readOnly).toBe(true)
+    expect(lastOptions.readOnlyMessage).toEqual({
+      value: "Shift_JIS can't write this file back unchanged.",
+    })
+  })
+
+  it("is editable otherwise", async () => {
+    const { default: CodeEditor } = await import("./CodeEditor")
+    render(<CodeEditor path="a.txt" value="x" onChange={() => {}} onSave={() => {}} />)
+    expect(lastOptions.readOnly).toBe(false)
+  })
+})
 
 describe("the code editor's line ending style", () => {
   afterEach(() => {

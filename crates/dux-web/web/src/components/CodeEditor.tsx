@@ -33,6 +33,13 @@ interface CodeEditorProps {
   // The one line ending style the read named for this file, which the model
   // is held to. Undefined leaves Monaco's own pick alone.
   eol?: "LF" | "CRLF"
+  // The buffer cannot be saved (a symlink, a .git path, or an encoding that
+  // cannot write the file back unchanged). Monaco then refuses keystrokes
+  // outright: typed text would be kept nowhere, and closing the tab would
+  // drop it without asking. `readOnlyReason` is what Monaco says when
+  // someone tries.
+  readOnly?: boolean
+  readOnlyReason?: string
 }
 
 // Hold the model to `eol`. Monaco rewrites text pushed into an existing model
@@ -64,6 +71,8 @@ export default function CodeEditor({
   onReady,
   onEditorChange,
   eol,
+  readOnly = false,
+  readOnlyReason,
 }: CodeEditorProps) {
   // The live editor + the monaco instance, captured at onMount. Needed for the
   // Auto revert below, which the wrapper cannot do for us.
@@ -157,6 +166,10 @@ export default function CodeEditor({
         automaticLayout: true,
         tabSize: 2,
         renderWhitespace: "selection",
+        readOnly,
+        ...(readOnly && readOnlyReason
+          ? { readOnlyMessage: { value: readOnlyReason } }
+          : {}),
       }}
     />
   )

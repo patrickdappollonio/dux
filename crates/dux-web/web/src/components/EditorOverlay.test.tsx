@@ -219,12 +219,14 @@ function codeEditorStub() {
       language,
       onReady,
       onEditorChange,
+      readOnly,
     }: {
       value: string
       onChange: (v: string) => void
       language?: string
       onReady?: (mon: unknown) => void
       onEditorChange?: (ed: unknown) => void
+      readOnly?: boolean
     }) => (
       <>
       <StubEditorLifecycle onEditorChange={onEditorChange} />
@@ -248,6 +250,7 @@ function codeEditorStub() {
         // picker tests can read what was actually handed to Monaco. Empty
         // means no override, which is "let Monaco infer from the URI".
         data-language={language ?? ""}
+        data-read-only={String(readOnly ?? false)}
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -3194,6 +3197,8 @@ describe("a file that is not plain UTF-8", () => {
     ) as HTMLElement
     expect(notice.textContent).toContain("Shift_JIS can\u2019t write it back")
     expect(within(notice).getByText(PATH).getAttribute("data-slot")).toBe("inline-code")
+    // The editor itself refuses typing, which would otherwise be kept nowhere.
+    expect(screen.getByTestId("code-editor").getAttribute("data-read-only")).toBe("true")
     // Not binary: it is text, and the status bar still offers the way out.
     expect(screen.queryByText(/binary/)).toBeNull()
     fireEvent.click(await encodingButton())
@@ -3285,6 +3290,44 @@ describe("a file that is not plain UTF-8", () => {
         "File encoding: UTF-8",
       ),
     )
+  })
+
+  /// A preview tab reuses its id for the next file. A save of the first file
+  /// answering late must not touch the second: not its text, and above all
+  /// not its unsaved mark, or its edits close without a confirm.
+  it("never lets a late save's answer clear another file's unsaved mark", async () => {
+    const view = await mountWithTab(PATH)
+    await loaded("café\n")
+    const write = pending<{ modified: string; size: number }>()
+    writeMock.mockReturnValueOnce(write.promise)
+    await pick(/save with encoding/i, /^UTF-8$/)
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+
+    readMock.mockResolvedValue({ ...LATIN1, path: "src/other.txt", content: "other\n" })
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            { id: TAB_ID, path: "src/other.txt", dirty: true, preview: true, mode: "file" as const },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await loaded("other\n")
+    editorSetTabDirtyMock.mockClear()
+
+    write.resolve({ modified: "2027-01-01T00:00:00+00:00", size: 5 })
+    await new Promise((r) => setTimeout(r, 300))
+    expect(
+      editorSetTabDirtyMock.mock.calls.filter((c) => c[1] === TAB_ID && c[2] === false),
+    ).toEqual([])
+    expect(
+      (screen.getByTestId("code-editor") as HTMLTextAreaElement).value,
+    ).toBe("other\n")
   })
 
   it("converts a mixed file without an edit in the one style the notice named", async () => {

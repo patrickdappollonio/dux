@@ -1,6 +1,7 @@
 import type {
   FileDiffContents,
   FileDiffHead,
+  SaveVerdict,
   UnwritableReason,
   WorktreeFile,
 } from "./fileApi"
@@ -172,6 +173,16 @@ export function normalizeEol(text: string, eol: "LF" | "CRLF"): string {
 // check and the bytes a save sends all agree.
 export function editorTextOf(file: WorktreeFile): string {
   return file.eol ? normalizeEol(file.content, file.eol) : file.content
+}
+
+// One counter for every buffer, so a generation names one reading of one file
+// for the life of the page. Per-buffer counters all start at 1, and a preview
+// tab that swaps files under one tab id would then match a save of the first
+// file against the first reading of the second.
+let lastGeneration = 0
+export function freshGeneration(): number {
+  lastGeneration += 1
+  return lastGeneration
 }
 
 // Whether a save's answer may be applied to `buffer`: only when nothing has
@@ -406,7 +417,7 @@ export function reloadedInPlace(
     loadedPath: path,
     loading: false,
     loaded: editorTextOf(file),
-    generation: (prev.generation ?? 0) + 1,
+    generation: freshGeneration(),
     draft: editorTextOf(file),
     binary: file.binary,
     readOnly: file.read_only ?? false,
@@ -437,7 +448,12 @@ export function baselineSavedBuffer(
   stamp: FileStamp,
   signal: string,
   saved: SaveEncoding = bufferSaveEncoding(prev),
+  verdict?: SaveVerdict,
 ): TabBuffer {
+  // The server's own judgement of what it wrote, when it gave one (every
+  // save that states an encoding does); otherwise what the editor sent: one
+  // line ending style, nothing new to say about the encoding.
+  const unwritable = verdict ? (verdict.unwritable ?? null) : null
   return {
     ...prev,
     ...encodingAfterSave(
@@ -449,14 +465,14 @@ export function baselineSavedBuffer(
       },
       saved,
     ),
-    // The file is now exactly what the editor wrote: one line ending style,
-    // in an encoding that writes it back unchanged. A buffer that was
-    // read-only only for its encoding can only have got here by converting,
-    // so it is editable in the new one.
-    mixedEol: false,
-    unwritable: null,
+    // A conversion is never assumed to have made the file writable: a text
+    // that still starts with a second mark is two marks in the new encoding
+    // too. Read-only for where the file is never changes.
+    mixedEol: verdict?.mixed_line_endings ?? false,
+    eol: verdict?.eol ?? prev.eol,
+    unwritable,
     looksLikeUtf8: false,
-    readOnly: (prev.unwritable ?? null) !== null ? false : prev.readOnly,
+    readOnly: (prev.pathReadOnly ?? false) || unwritable !== null,
     loaded: body,
     fileLoadedSignal: signal,
     stamp,

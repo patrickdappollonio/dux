@@ -667,7 +667,7 @@ describe("what the editor holds is what a save writes", () => {
     )
     expect(next.loaded).toBe("x\r\ny\r\n")
     expect(next.draft).toBe("x\r\ny\r\n")
-    expect(next.generation).toBe(prev.generation + 1)
+    expect(next.generation).not.toBe(prev.generation)
   })
 
   it("tells path read-only from encoding read-only", () => {
@@ -709,5 +709,47 @@ describe("what the editor holds is what a save writes", () => {
     const prev = loadedBuffer({ mixedEol: true, eol: "CRLF" })
     const next = baselineSavedBuffer(prev, "a\r\nb\r\n", { modified: null, size: 6 }, "")
     expect(next.mixedEol).toBe(false)
+  })
+})
+
+describe("a save's answer and the buffer it is about", () => {
+  it("never gives two readings the same generation, even in different buffers", () => {
+    const file = { path: "a.ts", binary: false, content: "x" }
+    const a = reloadedInPlace(emptyBuffer("a.ts"), "a.ts", file, "")
+    const b = reloadedInPlace(emptyBuffer("b.ts"), "b.ts", { ...file, path: "b.ts" }, "")
+    expect(a.generation).not.toBe(b.generation)
+    // A preview replacement reuses the tab id, so the path is part of it too.
+    expect(saveLandsOn(b, a.generation)).toBe(false)
+  })
+
+  it("takes a conversion's writability from the server's verdict, never assumes it", () => {
+    const prev = loadedBuffer({
+      readOnly: true,
+      unwritable: "doubled_mark",
+      encoding: "UTF-8",
+      bom: true,
+    })
+    const next = baselineSavedBuffer(
+      prev,
+      "﻿x",
+      { modified: null, size: 6 },
+      "",
+      { encoding: "UTF-16LE", bom: true },
+      { unwritable: "doubled_mark", mixed_line_endings: false, eol: "LF" },
+    )
+    expect(next.encoding).toBe("UTF-16LE")
+    expect(next.unwritable).toBe("doubled_mark")
+    expect(next.readOnly).toBe(true)
+
+    const clean = baselineSavedBuffer(
+      prev,
+      "x",
+      { modified: null, size: 1 },
+      "",
+      { encoding: "UTF-8", bom: false },
+      { unwritable: null, mixed_line_endings: false, eol: "LF" },
+    )
+    expect(clean.unwritable).toBeNull()
+    expect(clean.readOnly).toBe(false)
   })
 })

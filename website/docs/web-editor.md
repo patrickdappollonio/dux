@@ -261,7 +261,9 @@ ends when you close it.
 
 > [!IMPORTANT]
 > A save is refused when the text holds a character the file's encoding cannot represent,
-> such as an emoji or a Chinese character typed into a Windows-1252 file. Nothing is
+> such as an emoji or a Chinese character typed into a Windows-1252 file, or one it would
+> only write as a look-alike that reads back differently (Shift_JIS writes `¥` as a
+> backslash). Nothing is
 > written, your text stays in the tab, and the toast names the first such character and
 > its line and column as the editor shows them. Remove it, or use **Save with encoding**
 > to convert the file to UTF-8.

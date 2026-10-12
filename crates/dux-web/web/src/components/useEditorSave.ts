@@ -91,13 +91,19 @@ export function useEditorSave({
       .then((result) => {
         const tabStillOpen = tabsRef.current.some((tab) => tab.id === tabId)
         const outcome = saveResolutionOutcome(path, tabStillOpen)
+        // Every effect on the tab (its text, its encoding, its unsaved mark)
+        // waits on the same question: is the tab still holding the reading
+        // this save was sent from? A preview tab may hold another file by
+        // now, and clearing that file's unsaved mark would let its edits close
+        // without a confirm.
         const now = buffersRef.current.get(tabId)
-        const lands = now === undefined || saveLandsOn(now, sentGeneration)
-        if (tabStillOpen && !lands) {
+        const samePath = now !== undefined && !isBufferStale(now, path)
+        const lands = samePath && saveLandsOn(now, sentGeneration)
+        if (tabStillOpen && samePath && !lands) {
           // The file was written, but the buffer now holds a different
           // reading of it; read the file again rather than misdescribe it.
           rereadRef.current?.(tabId, path)
-        } else if (tabStillOpen) {
+        } else if (tabStillOpen && lands) {
           setBuffers((prev) => {
             const current = prev.get(tabId)
             if (
@@ -115,6 +121,7 @@ export function useEditorSave({
                 { modified: result.modified, size: result.size },
                 changeSignalFor(sliceRef.current, path),
                 encoding,
+                result,
               ),
             )
             return next
@@ -140,6 +147,13 @@ export function useEditorSave({
                 : { modified: error.modified, size: error.size },
             ),
           )
+          // The conflict dialog offers to overwrite or reload this tab, which
+          // only makes sense while it still holds the file that was refused.
+          const holder = buffersRef.current.get(tabId)
+          if (holder === undefined || isBufferStale(holder, path)) {
+            notifyError(error.message)
+            return
+          }
           setSaveConflict({
             tabId,
             path,
