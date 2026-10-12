@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useLayoutEffect, useRef } from "react"
 import { Editor } from "@monaco-editor/react"
 import type { editor } from "monaco-editor"
 // Shared self-host bootstrap (workers + bundled monaco). Importing it runs the
@@ -32,8 +32,10 @@ interface CodeEditorProps {
   // knowing the bar exists.
   onEditorChange?: (ed: editor.IStandaloneCodeEditor | null) => void
   // The text is held with LF breaks (a read named the file's style, which the
-  // buffer keeps apart and a save applies). The model is then made in LF and
-  // its style is never changed again; see `madeInLf`.
+  // buffer keeps apart and a save applies). The model's text is then read as
+  // LF whatever style it reports, so a model on a Windows browser can never
+  // turn its breaks into an edit. Every model is made in LF anyway (see
+  // `holdNewModelsInLf`); this is the second line of that defence.
   lfText?: boolean
   // The buffer cannot be saved (a symlink, a .git path, or an encoding that
   // cannot write the file back unchanged). Monaco then refuses keystrokes
@@ -44,27 +46,14 @@ interface CodeEditorProps {
   readOnlyReason?: string
 }
 
-// Make sure a model that has just been made holds LF, the style the editor's
-// text is always in (see `editorTextOf`).
-//
-// A model's line-ending style is never changed once it has an edit history:
-// Monaco's undo replays text offsets in whatever style the model is in when the
-// undo runs, so a style change between an edit and its undo (or redo) puts the
-// text out by a character per line. Text is therefore always handed over in
-// LF, and Monaco keeps a model made from such text in LF. The one exception it
-// makes is a text with no line break at all, which it gives the browser's
-// platform style (CRLF on Windows); such a model is caught here while it is
-// still brand new (version 1, nothing to undo) and set to LF once.
-function madeInLf(
-  ed: editor.IStandaloneCodeEditor | null,
-  mon: typeof monaco | null,
-  path: string,
-): void {
-  const model = ed?.getModel()
-  if (!model || !mon) return
-  if (model.uri.toString() !== mon.Uri.parse(path).toString()) return
-  if (model.getVersionId() !== 1 || model.getEOL() === "\n") return
-  model.setEOL(mon.editor.EndOfLineSequence.LF)
+// The model's text as the buffer holds it: LF when the buffer's text is LF,
+// whatever style the model itself reports.
+function modelText(
+  model: editor.ITextModel,
+  mon: typeof monaco,
+  lfText: boolean,
+): string {
+  return lfText ? model.getValue(mon.editor.EndOfLinePreference.LF) : model.getValue()
 }
 
 export default function CodeEditor({
@@ -108,11 +97,54 @@ export default function CodeEditor({
     if (revertTo !== null) mon.editor.setModelLanguage(model, revertTo)
   }, [language, path])
 
-  // A model the wrapper makes for another file (on a file switch, in its own
-  // passive effect, which runs before this one) is brought to LF here.
+  // Raised while this component edits the model itself, so that edit is never
+  // taken for a keystroke.
+  const programmaticRef = useRef(false)
+
+  // The buffer is the truth, and the model on screen holds its text. Monaco
+  // keeps a model per file after its tab is left, and the wrapper pushes
+  // `value` only when the prop itself changes, so a model can come back on
+  // screen holding an older reading: a reopen or reload that landed while its
+  // tab was in the background, returning with text equal to the tab it
+  // replaces, or a remount onto a retained model. Every time a model is put on
+  // screen or the buffer's text changes, it is brought to the buffer's text
+  // here, as one undo step of its own, before anyone can read or save it.
+  //
+  // It reads the latest render's buffer through a ref: the wrapper calls the
+  // mount handler it was given on its FIRST render, which may be a buffer or
+  // two old by the time Monaco has loaded.
+  const bufferRef = useRef({ path, value, lfText })
+  useLayoutEffect(() => {
+    bufferRef.current = { path, value, lfText }
+  })
+  function bringModelToBuffer(
+    ed: editor.IStandaloneCodeEditor | null,
+    mon: typeof monaco | null,
+  ): void {
+    const { path, value, lfText } = bufferRef.current
+    const model = ed?.getModel()
+    if (!model || !mon) return
+    if (model.uri.toString() !== mon.Uri.parse(path).toString()) return
+    if (modelText(model, mon, lfText) === value) return
+    programmaticRef.current = true
+    try {
+      model.pushStackElement()
+      model.pushEditOperations(
+        [],
+        [{ range: model.getFullModelRange(), text: value, forceMoveMarkers: true }],
+        () => null,
+      )
+      model.pushStackElement()
+    } finally {
+      programmaticRef.current = false
+    }
+  }
+
+  // The wrapper's own effects (a model swap on a new path, its push of a new
+  // value) run first, being a child's; this one checks what they left.
   useEffect(() => {
-    if (lfText) madeInLf(editorRef.current, monacoRef.current, path)
-  }, [path, lfText])
+    bringModelToBuffer(editorRef.current, monacoRef.current)
+  }, [path, value])
 
   // The save chord is bound once on mount while `onSave` is a fresh closure each
   // render, so the binding goes through a ref or it saves old content. The ref
@@ -141,7 +173,7 @@ export default function CodeEditor({
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
     onReady?.(mon)
     editorChangeRef.current?.(ed)
-    if (lfText) madeInLf(ed, mon, path)
+    bringModelToBuffer(ed, mon)
   }
 
   return (
@@ -161,6 +193,8 @@ export default function CodeEditor({
         // The wrapper pushes into a writable editor with its change events
         // held back, so those never arrive here at all.
         if (ev?.isFlush) return
+        // Nor this component's own edit bringing the model to the buffer.
+        if (programmaticRef.current) return
         // A change is only ever about the model that produced it. On a tab
         // switch the wrapper can emit one for the new file's model (its
         // read-only setValue) through the handler it was given for the old
@@ -173,7 +207,7 @@ export default function CodeEditor({
         if (model && mon && model.uri.toString() !== mon.Uri.parse(path).toString()) {
           return
         }
-        onChange(v ?? "", path)
+        onChange(lfText && model && mon ? modelText(model, mon, true) : (v ?? ""), path)
       }}
       onMount={handleMount}
       options={{
