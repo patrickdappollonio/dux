@@ -3081,14 +3081,12 @@ mod tests {
             std::fs::write(dir.path().join("p.txt"), "x\n").unwrap();
             let read = read_file(dir.path(), "p.txt").unwrap();
             std::fs::remove_file(dir.path().join("p.txt")).unwrap();
-            rustix::fs::mknodat(
-                rustix::fs::CWD,
-                dir.path().join("p.txt"),
-                rustix::fs::FileType::Fifo,
-                rustix::fs::Mode::from_raw_mode(0o600),
-                0,
-            )
-            .unwrap();
+            // mkfifo(1) rather than rustix's mknodat, which macOS lacks.
+            let made = std::process::Command::new("mkfifo")
+                .arg(dir.path().join("p.txt"))
+                .status()
+                .unwrap();
+            assert!(made.success(), "mkfifo failed");
             let root = dir.path().to_path_buf();
             let stamp = stamp_of(&read);
             let (tx, rx) = std::sync::mpsc::channel();
