@@ -575,12 +575,33 @@ fn write_checked_existing(
                  showed its contents and saving would replace them; nothing was written"
             ),
             Some(save) => {
-                if let Some(reason) =
-                    crate::text_encoding::would_rewrite_untouched(&existing, save.encoding)
+                // Whose round trip matters depends on what the save is. In the
+                // encoding the file was read in, it rewrites those same bytes,
+                // which must come back unchanged. In another one it is a
+                // conversion: the old bytes are replaced whole, so only their
+                // reading has to be honest, and the new text answers for
+                // itself (the encoder's own exactness check).
+                let (judge_in, conversion) = match save.read_as {
+                    Some((read, read_bom)) => (read, (read, read_bom) != (save.encoding, save.bom)),
+                    // An older client says nothing about its read: judged in
+                    // the target encoding, the conservative way.
+                    None => (save.encoding, false),
+                };
+                if conversion {
+                    if crate::text_encoding::decode(&existing, Some(judge_in)).is_err() {
+                        anyhow::bail!(
+                            "refusing to save: the file on disk is not valid {}, the encoding \
+                             this save says it was read in, so it was not shown as it is; \
+                             nothing was written. Reopen it and try again",
+                            judge_in.name()
+                        );
+                    }
+                } else if let Some(reason) =
+                    crate::text_encoding::would_rewrite_untouched(&existing, judge_in)
                 {
                     return Err(anyhow::Error::new(
                         crate::text_encoding::WouldRewriteUntouched {
-                            encoding: save.encoding,
+                            encoding: judge_in,
                             reason,
                         },
                     ));
@@ -640,6 +661,10 @@ pub fn write_file_checked(
 pub struct SaveEncoding {
     pub encoding: &'static encoding_rs::Encoding,
     pub bom: bool,
+    /// The encoding (and mark) the client read the file in, which tells an
+    /// ordinary save (the same pair) from a conversion (any other). `None`
+    /// from an older client, which is held to the conservative check.
+    pub read_as: Option<(&'static encoding_rs::Encoding, bool)>,
 }
 
 /// [`write_file_checked`] with the text written in `encoding` rather than as
@@ -2793,7 +2818,83 @@ mod tests {
         }
 
         fn save_as(encoding: &'static encoding_rs::Encoding, bom: bool) -> Option<SaveEncoding> {
-            Some(SaveEncoding { encoding, bom })
+            Some(SaveEncoding {
+                encoding,
+                bom,
+                read_as: None,
+            })
+        }
+
+        fn save_read_as(
+            encoding: &'static encoding_rs::Encoding,
+            read: &'static encoding_rs::Encoding,
+        ) -> Option<SaveEncoding> {
+            Some(SaveEncoding {
+                encoding,
+                bom: false,
+                read_as: Some((read, false)),
+            })
+        }
+
+        /// A conversion is judged by the encoding the file was READ in: UTF-8
+        /// `あ燐` has an exact Shift_JIS form, though its UTF-8 bytes, misread
+        /// as Shift_JIS, hold the `87 90` that does not round-trip.
+        #[test]
+        fn a_conversion_is_judged_by_the_encoding_the_file_was_read_in() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("j.txt"), "\u{3042}\u{71d0}").unwrap();
+            let read = read_file(dir.path(), "j.txt").unwrap();
+            write_file_encoded(
+                dir.path(),
+                "j.txt",
+                &read.content,
+                save_read_as(encoding_rs::SHIFT_JIS, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap();
+            let written = std::fs::read(dir.path().join("j.txt")).unwrap();
+            let (back, _, _) = encoding_rs::SHIFT_JIS.decode(&written);
+            assert_eq!(back, "\u{3042}\u{71d0}");
+        }
+
+        #[test]
+        fn a_save_in_the_encoding_it_was_read_in_is_still_held_to_writing_back() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("nec.txt"), [0x87, 0x90]).unwrap();
+            let read = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+            assert!(
+                write_file_encoded(
+                    dir.path(),
+                    "nec.txt",
+                    &read.content,
+                    save_read_as(encoding_rs::SHIFT_JIS, encoding_rs::SHIFT_JIS),
+                    Some(&stamp_of(&read)),
+                )
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("nec.txt")).unwrap(),
+                [0x87, 0x90]
+            );
+        }
+
+        /// A read encoding the bytes on disk are not valid in is not what the
+        /// file was read in; the save is refused.
+        #[test]
+        fn a_read_encoding_the_bytes_do_not_decode_in_is_refused() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("l.txt"), b"caf\xe9").unwrap();
+            let read = read_file(dir.path(), "l.txt").unwrap();
+            let err = write_file_encoded(
+                dir.path(),
+                "l.txt",
+                "x",
+                save_read_as(encoding_rs::WINDOWS_1252, encoding_rs::UTF_8),
+                Some(&stamp_of(&read)),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(std::fs::read(dir.path().join("l.txt")).unwrap(), b"caf\xe9");
         }
 
         /// The editor's whole loop for a windows-1252 file: read, change one

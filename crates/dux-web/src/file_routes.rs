@@ -100,6 +100,14 @@ struct WriteOp {
     /// `encoding`, and refused for an encoding that has none.
     #[serde(default)]
     bom: bool,
+    /// The encoding (a WHATWG label) and mark the client read the file in. The
+    /// same as `encoding` and `bom` for an ordinary save, different for a
+    /// conversion, and absent from an older client, which is then judged the
+    /// conservative way (see `write_checked_existing`).
+    #[serde(default)]
+    read_encoding: Option<String>,
+    #[serde(default)]
+    read_bom: bool,
 }
 
 /// A save refused (422) because the text holds a character the chosen encoding
@@ -806,10 +814,15 @@ async fn write_file<R: EditorRoot>(
             modified: Some(modified),
             size,
         });
+    let read_as = match requested_encoding(op.read_encoding.as_deref()) {
+        Ok(read) => read.map(|read| (read, op.read_bom)),
+        Err(unknown) => return (StatusCode::BAD_REQUEST, unknown).into_response(),
+    };
     let encoding = match requested_encoding(op.encoding.as_deref()) {
         Ok(encoding) => encoding.map(|encoding| dux_core::worktree_file::SaveEncoding {
             encoding,
             bom: op.bom,
+            read_as,
         }),
         Err(unknown) => return (StatusCode::BAD_REQUEST, unknown).into_response(),
     };
@@ -2398,6 +2411,40 @@ mod tests {
             .unwrap();
             assert!(body.contains("on disk") && body.contains("10 MB"), "{body}");
             assert!(!wt.join("huge.txt").exists());
+        }
+
+        #[tokio::test]
+        async fn a_conversion_states_the_encoding_it_was_read_in() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("j.txt"), "\u{3042}\u{71d0}").unwrap();
+            let read =
+                body_json(read_json(&app, serde_json::json!({ "path": "j.txt" })).await).await;
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "j.txt",
+                        "content": read["content"],
+                        "expected_modified": read["modified"],
+                        "expected_size": read["size"],
+                        "encoding": "Shift_JIS",
+                        "read_encoding": "UTF-8",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let back = body_json(
+                read_json(
+                    &app,
+                    serde_json::json!({ "path": "j.txt", "encoding": "Shift_JIS" }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(back["content"], "\u{3042}\u{71d0}");
+            assert!(back["unwritable"].is_null());
         }
 
         #[tokio::test]
