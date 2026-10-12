@@ -16,6 +16,10 @@ anyhow.workspace = true
 chrono.workspace = true
 compact_str = "0.9"
 content_inspector.workspace = true
+# Decodes and encodes the web editor's non-UTF-8 files (dux_core::text_encoding):
+# the WHATWG encodings, byte-order-mark sniffing, and an encoder that reports a
+# character the target encoding cannot hold instead of replacing it.
+encoding_rs = "0.8.42"
 home.workspace = true
 indexmap.workspace = true
 petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }

@@ -1,0 +1,536 @@
+//! Text encodings for the web editor: turning a file's bytes into the text the
+//! editor shows, and the edited text back into bytes in the same encoding.
+//!
+//! There is no guessing beyond a byte-order mark. A file with a mark is read in
+//! the encoding the mark names; a file without one that is valid UTF-8 is UTF-8;
+//! anything else is read as windows-1252 (the WHATWG name ISO-8859-1 resolves
+//! to), which maps every byte to a character and so loses nothing, and the
+//! answer says that it was a fallback rather than a finding. The person reading
+//! the file is the one who can tell it is really Shift_JIS, so a client may ask
+//! for a specific encoding instead, and then exactly that one is used: a file
+//! that does not decode cleanly in it is refused, because replacement
+//! characters on screen would be written back over the real bytes by a save.
+//!
+//! Saving runs the other way and refuses just as plainly: a character the
+//! target encoding cannot hold stops the save before anything is written, and
+//! the refusal names the character and where it is.
+
+use encoding_rs::{DecoderResult, EncoderResult, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+
+/// Re-exported so the web routes name the type without a dependency of their own.
+pub use encoding_rs::Encoding;
+
+/// What a file's bytes are as editor text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decoded {
+    Text(DecodedText),
+    /// Not text in any sense the editor can round-trip: a NUL, a known binary
+    /// signature, or a byte-order mark whose promise the bytes do not keep and
+    /// that then fails the ordinary rules too.
+    Binary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedText {
+    pub text: String,
+    pub encoding: &'static Encoding,
+    /// The file began with a byte-order mark for `encoding`, which is not part
+    /// of `text` and has to be written back by a save.
+    pub bom: bool,
+    /// The encoding is the last resort for bytes that are not UTF-8, not
+    /// something the file said about itself.
+    pub fallback: bool,
+}
+
+/// A requested encoding the file does not decode in. Reported rather than
+/// papered over with replacement characters, which a save would write back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeRefused {
+    pub encoding: &'static Encoding,
+    /// Byte offset of the first sequence that is not valid in `encoding`, or of
+    /// the first NUL, which no text file in an ASCII-compatible encoding holds.
+    pub offset: usize,
+    pub nul: bool,
+}
+
+impl std::fmt::Display for DecodeRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.nul {
+            write!(
+                f,
+                "this file holds a NUL character at byte {} when read as {}, so it is not \
+                 text in that encoding; it was not reopened",
+                self.offset,
+                self.encoding.name()
+            )
+        } else {
+            write!(
+                f,
+                "this file is not valid {}: the bytes at offset {} are not a character in \
+                 that encoding, so it was not reopened",
+                self.encoding.name(),
+                self.offset
+            )
+        }
+    }
+}
+
+impl std::error::Error for DecodeRefused {}
+
+/// A save refused because the text holds a character the target encoding has
+/// no bytes for. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unmappable {
+    pub encoding: &'static Encoding,
+    pub character: char,
+    /// 1-based line of the character in the text being saved.
+    pub line: usize,
+    /// 1-based column, counted in characters.
+    pub column: usize,
+}
+
+impl std::fmt::Display for Unmappable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to save: the character \u{201c}{}\u{201d} (U+{:04X}) on line {}, column {} \
+             cannot be written in {}; nothing was written. Remove it, or save the file as UTF-8 \
+             instead",
+            self.character,
+            u32::from(self.character),
+            self.line,
+            self.column,
+            self.encoding.name()
+        )
+    }
+}
+
+impl std::error::Error for Unmappable {}
+
+/// Resolve a client's encoding name to an encoding the editor can round-trip.
+///
+/// Any WHATWG label is accepted, so `iso-8859-1` names windows-1252 exactly as
+/// a browser would. The `replacement` encoding is refused: it decodes every
+/// file to a single replacement character and was made to neutralise content,
+/// not to edit it.
+pub fn encoding_for_label(label: &str) -> anyhow::Result<&'static Encoding> {
+    match Encoding::for_label(label.trim().as_bytes()) {
+        Some(encoding) if encoding != encoding_rs::REPLACEMENT => Ok(encoding),
+        _ => anyhow::bail!("unknown text encoding: {label}"),
+    }
+}
+
+/// Whether `encoding` has a byte-order mark at all.
+pub fn has_bom(encoding: &'static Encoding) -> bool {
+    encoding == UTF_8 || encoding == UTF_16LE || encoding == UTF_16BE
+}
+
+fn bom_bytes(encoding: &'static Encoding) -> &'static [u8] {
+    if encoding == UTF_8 {
+        b"\xEF\xBB\xBF"
+    } else if encoding == UTF_16LE {
+        b"\xFF\xFE"
+    } else if encoding == UTF_16BE {
+        b"\xFE\xFF"
+    } else {
+        b""
+    }
+}
+
+/// Decode a file's bytes for the editor.
+///
+/// With no `requested` encoding the rules are, in order: a byte-order mark
+/// names the encoding (and a mark whose bytes do not decode is ignored, so
+/// the rest of the rules apply to the whole file, mark included); valid UTF-8
+/// that sniffs as text is UTF-8; a NUL or a binary signature is binary; the
+/// rest is windows-1252, flagged as a fallback.
+///
+/// The NUL test runs on the DECODED text after a mark, because UTF-16 is full
+/// of zero bytes by design, and on the raw bytes otherwise, where a zero byte
+/// in an ASCII-compatible encoding is a NUL character.
+///
+/// With `requested`, exactly that encoding is used. A leading mark for that
+/// same encoding is set aside and remembered; any other leading bytes are part
+/// of the text. Bytes that do not decode, or that decode to a NUL, are refused.
+pub fn decode(
+    bytes: &[u8],
+    requested: Option<&'static Encoding>,
+) -> Result<Decoded, DecodeRefused> {
+    match requested {
+        Some(encoding) => decode_exactly(bytes, encoding).map(Decoded::Text),
+        None => Ok(decode_auto(bytes)),
+    }
+}
+
+fn decode_auto(bytes: &[u8]) -> Decoded {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes)
+        && let Some(text) = strict_decode(&bytes[bom_len..], encoding)
+        && !text.contains('\0')
+    {
+        return Decoded::Text(DecodedText {
+            text,
+            encoding,
+            bom: true,
+            fallback: false,
+        });
+    }
+    if crate::diff::is_renderable_text(bytes) {
+        return Decoded::Text(DecodedText {
+            // `is_renderable_text` has just proved the bytes are UTF-8.
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            encoding: UTF_8,
+            bom: false,
+            fallback: false,
+        });
+    }
+    if bytes.contains(&0)
+        || content_inspector::inspect(bytes) == content_inspector::ContentType::BINARY
+    {
+        return Decoded::Binary;
+    }
+    match strict_decode(bytes, WINDOWS_1252) {
+        Some(text) => Decoded::Text(DecodedText {
+            text,
+            encoding: WINDOWS_1252,
+            bom: false,
+            fallback: true,
+        }),
+        // windows-1252 assigns every byte, so this is unreachable in practice;
+        // binary is the answer that can never lead to a lossy save.
+        None => Decoded::Binary,
+    }
+}
+
+fn decode_exactly(bytes: &[u8], encoding: &'static Encoding) -> Result<DecodedText, DecodeRefused> {
+    let mark = bom_bytes(encoding);
+    let bom = !mark.is_empty() && bytes.starts_with(mark);
+    let body = if bom { &bytes[mark.len()..] } else { bytes };
+    let start = bytes.len() - body.len();
+    let text = decode_reporting(body, encoding).map_err(|offset| DecodeRefused {
+        encoding,
+        offset: start + offset,
+        nul: false,
+    })?;
+    if let Some(index) = text.find('\0') {
+        // The offset of the NUL in the text is a byte offset into the decoded
+        // UTF-8, not the file; for the ASCII-compatible encodings the first NUL
+        // byte in the file is the same character, and UTF-16 reports where the
+        // zero code unit starts.
+        let offset = if encoding == UTF_16LE || encoding == UTF_16BE {
+            start + text[..index].encode_utf16().count() * 2
+        } else {
+            body.iter()
+                .position(|b| *b == 0)
+                .map_or(start, |p| start + p)
+        };
+        return Err(DecodeRefused {
+            encoding,
+            offset,
+            nul: true,
+        });
+    }
+    Ok(DecodedText {
+        text,
+        encoding,
+        bom,
+        fallback: false,
+    })
+}
+
+fn strict_decode(bytes: &[u8], encoding: &'static Encoding) -> Option<String> {
+    decode_reporting(bytes, encoding).ok()
+}
+
+/// Decode without replacement and without BOM handling, answering the byte
+/// offset of the first malformed sequence on failure.
+fn decode_reporting(bytes: &[u8], encoding: &'static Encoding) -> Result<String, usize> {
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let capacity = decoder
+        .max_utf8_buffer_length_without_replacement(bytes.len())
+        .unwrap_or(bytes.len().saturating_mul(3));
+    let mut text = String::with_capacity(capacity);
+    let (result, read) = decoder.decode_to_string_without_replacement(bytes, &mut text, true);
+    match result {
+        DecoderResult::InputEmpty => Ok(text),
+        DecoderResult::Malformed(bad, extra) => {
+            Err(read.saturating_sub(usize::from(bad) + usize::from(extra)))
+        }
+        // The buffer was sized by the decoder's own worst case, so this means
+        // the input could not be decoded in one pass; call it malformed at the
+        // point decoding stopped rather than return a truncated text.
+        DecoderResult::OutputFull => Err(read),
+    }
+}
+
+/// Encode editor text into `encoding`, with the byte-order mark when `bom`.
+///
+/// UTF-16 is encoded by hand: encoding_rs's encoder writes UTF-8 for it, the
+/// way a browser submits a form, which is right for the web and wrong for a
+/// file. Line endings are whatever the text holds; nothing is normalised.
+pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Result<Vec<u8>> {
+    if bom && !has_bom(encoding) {
+        anyhow::bail!(
+            "{} has no byte-order mark, so a save cannot write one",
+            encoding.name()
+        );
+    }
+    let mut out = Vec::with_capacity(text.len() + 3);
+    if bom {
+        out.extend_from_slice(bom_bytes(encoding));
+    }
+    if encoding == UTF_8 {
+        out.extend_from_slice(text.as_bytes());
+        return Ok(out);
+    }
+    if encoding == UTF_16LE || encoding == UTF_16BE {
+        let little = encoding == UTF_16LE;
+        out.reserve(text.len() * 2);
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&if little {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        return Ok(out);
+    }
+    let mut encoder = encoding.new_encoder();
+    let mut rest = text;
+    loop {
+        let needed = encoder
+            .max_buffer_length_from_utf8_without_replacement(rest.len())
+            .unwrap_or(rest.len().saturating_mul(4))
+            .max(16);
+        out.reserve(needed);
+        let (result, read) =
+            encoder.encode_from_utf8_to_vec_without_replacement(rest, &mut out, true);
+        match result {
+            EncoderResult::InputEmpty => return Ok(out),
+            EncoderResult::OutputFull => rest = &rest[read..],
+            EncoderResult::Unmappable(character) => {
+                // `read` counts the unmappable character itself.
+                let offset = text.len() - rest.len() + read - character.len_utf8();
+                let before = &text[..offset];
+                let line = before.matches('\n').count() + 1;
+                let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+                let column = before[line_start..].chars().count() + 1;
+                return Err(anyhow::Error::new(Unmappable {
+                    encoding,
+                    character,
+                    line,
+                    column,
+                }));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(decoded: Result<Decoded, DecodeRefused>) -> DecodedText {
+        match decoded.expect("decodes") {
+            Decoded::Text(t) => t,
+            Decoded::Binary => panic!("expected text, got binary"),
+        }
+    }
+
+    #[test]
+    fn utf8_without_a_mark_is_plain_utf8() {
+        let t = text(decode("caf\u{e9}\n".as_bytes(), None));
+        assert_eq!(t.text, "caf\u{e9}\n");
+        assert_eq!(t.encoding, UTF_8);
+        assert!(!t.bom && !t.fallback);
+    }
+
+    #[test]
+    fn an_empty_file_is_plain_utf8() {
+        let t = text(decode(b"", None));
+        assert_eq!(t.encoding, UTF_8);
+        assert_eq!(t.text, "");
+    }
+
+    #[test]
+    fn a_utf8_mark_is_set_aside_and_remembered() {
+        let t = text(decode(b"\xEF\xBB\xBFhello\n", None));
+        assert_eq!(t.text, "hello\n");
+        assert_eq!(t.encoding, UTF_8);
+        assert!(t.bom && !t.fallback);
+    }
+
+    #[test]
+    fn utf16_with_a_mark_opens_in_both_byte_orders() {
+        let le = [0xFF, 0xFE, b'h', 0, b'i', 0, b'\n', 0];
+        let t = text(decode(&le, None));
+        assert_eq!(
+            (t.text.as_str(), t.encoding, t.bom),
+            ("hi\n", UTF_16LE, true)
+        );
+        let be = [0xFE, 0xFF, 0, b'h', 0, b'i', 0, b'\n'];
+        let t = text(decode(&be, None));
+        assert_eq!(
+            (t.text.as_str(), t.encoding, t.bom),
+            ("hi\n", UTF_16BE, true)
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_fall_back_to_windows_1252_and_say_so() {
+        let t = text(decode(b"caf\xe9 \x80\n", None));
+        assert_eq!(t.text, "caf\u{e9} \u{20ac}\n");
+        assert_eq!(t.encoding, WINDOWS_1252);
+        assert!(t.fallback && !t.bom);
+    }
+
+    #[test]
+    fn a_nul_without_a_mark_is_binary_however_late_it_comes() {
+        let mut late = b"caf\xe9".to_vec();
+        late.extend(std::iter::repeat_n(b'a', 4096));
+        late.push(0);
+        assert_eq!(decode(&late, None).unwrap(), Decoded::Binary);
+        assert_eq!(decode(b"valid\0utf8", None).unwrap(), Decoded::Binary);
+    }
+
+    #[test]
+    fn a_binary_signature_is_binary_even_without_a_nul() {
+        // A PNG header has no NUL in its first bytes here and is not UTF-8.
+        assert_eq!(
+            decode(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a], None).unwrap(),
+            Decoded::Binary
+        );
+    }
+
+    #[test]
+    fn a_utf16_mark_on_bytes_that_decode_to_nuls_is_binary() {
+        // A binary that happens to start with FF FE: four zero bytes in a row
+        // decode to U+0000 twice, which is no text file.
+        let bytes = [0xFF, 0xFE, 0, 0, 0, 0, 0x12, 0x34];
+        assert_eq!(decode(&bytes, None).unwrap(), Decoded::Binary);
+    }
+
+    #[test]
+    fn a_requested_encoding_is_used_exactly() {
+        // Shift_JIS for "nihongo", which the automatic rules would call windows-1252.
+        let sjis = [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea];
+        assert!(text(decode(&sjis, None)).fallback);
+        let t = text(decode(&sjis, Some(encoding_rs::SHIFT_JIS)));
+        assert_eq!(t.text, "\u{65e5}\u{672c}\u{8a9e}");
+        assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
+        assert!(!t.fallback && !t.bom);
+    }
+
+    #[test]
+    fn a_requested_encoding_the_bytes_are_not_is_refused_with_where() {
+        let refused = decode(b"ok \xff\xfe more", Some(UTF_8)).unwrap_err();
+        assert_eq!(refused.encoding, UTF_8);
+        assert_eq!(refused.offset, 3);
+        assert!(!refused.nul);
+        assert!(refused.to_string().contains("not valid UTF-8"));
+        // An odd byte count is no UTF-16.
+        assert!(decode(b"\xFF\xFEa\x00b", Some(UTF_16LE)).is_err());
+    }
+
+    #[test]
+    fn a_requested_encoding_that_reads_a_nul_is_refused() {
+        let utf16 = [0xFF, 0xFE, b'h', 0, b'i', 0];
+        let refused = decode(&utf16, Some(WINDOWS_1252)).unwrap_err();
+        assert!(refused.nul);
+        assert_eq!(refused.offset, 3);
+    }
+
+    #[test]
+    fn a_requested_encoding_sets_aside_only_its_own_mark() {
+        let t = text(decode(b"\xEF\xBB\xBFhi", Some(UTF_8)));
+        assert_eq!((t.text.as_str(), t.bom), ("hi", true));
+        // Asked for windows-1252, a UTF-8 mark is three characters of text.
+        let t = text(decode(b"\xEF\xBB\xBFhi", Some(WINDOWS_1252)));
+        assert_eq!((t.text.as_str(), t.bom), ("\u{ef}\u{bb}\u{bf}hi", false));
+        // UTF-16 asked for without a mark in the file reads the whole file.
+        let t = text(decode(&[b'h', 0, b'i', 0], Some(UTF_16LE)));
+        assert_eq!((t.text.as_str(), t.bom), ("hi", false));
+    }
+
+    #[test]
+    fn latin1_round_trips_byte_for_byte() {
+        let mut every: Vec<u8> = (0x20..=0xFF).collect();
+        every.extend_from_slice(b"\r\nline two\r\n");
+        let t = text(decode(&every, None));
+        assert!(t.fallback);
+        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), every);
+    }
+
+    #[test]
+    fn utf16_with_a_mark_round_trips_byte_for_byte_in_both_orders() {
+        for (encoding, bom) in [(UTF_16LE, [0xFF, 0xFE]), (UTF_16BE, [0xFE, 0xFF])] {
+            let content = "caf\u{e9} \u{1f600}\r\nzwei\r\n";
+            let mut bytes = bom.to_vec();
+            for unit in content.encode_utf16() {
+                bytes.extend_from_slice(&if encoding == UTF_16LE {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            let t = text(decode(&bytes, None));
+            assert_eq!(t.encoding, encoding);
+            assert_eq!(t.text, content);
+            assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn utf8_with_a_mark_round_trips_and_crlf_is_kept() {
+        let bytes = b"\xEF\xBB\xBFone\r\ntwo\r\n";
+        let t = text(decode(bytes, None));
+        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), bytes);
+        assert_eq!(
+            encode("a\r\nb\n", WINDOWS_1252, false).unwrap(),
+            b"a\r\nb\n"
+        );
+    }
+
+    #[test]
+    fn shift_jis_round_trips() {
+        let sjis = [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, b'\n'];
+        let t = text(decode(&sjis, Some(encoding_rs::SHIFT_JIS)));
+        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), sjis);
+    }
+
+    #[test]
+    fn a_character_the_encoding_cannot_hold_is_refused_with_where() {
+        let err = encode("caf\u{e9}\nok \u{65e5}\n", WINDOWS_1252, false).unwrap_err();
+        let unmappable = err.downcast_ref::<Unmappable>().expect("typed refusal");
+        assert_eq!(unmappable.character, '\u{65e5}');
+        assert_eq!((unmappable.line, unmappable.column), (2, 4));
+        assert!(err.to_string().contains("U+65E5"));
+        assert!(err.to_string().contains("nothing was written"));
+    }
+
+    #[test]
+    fn an_unmappable_character_deep_in_a_long_text_is_still_found() {
+        let mut long = "a".repeat(100_000);
+        long.push('\u{2603}');
+        let err = encode(&long, encoding_rs::ISO_8859_15, false).unwrap_err();
+        let unmappable = err.downcast_ref::<Unmappable>().unwrap();
+        assert_eq!((unmappable.line, unmappable.column), (1, 100_001));
+    }
+
+    #[test]
+    fn a_mark_is_refused_for_an_encoding_that_has_none() {
+        assert!(encode("x", WINDOWS_1252, true).is_err());
+    }
+
+    #[test]
+    fn labels_resolve_the_whatwg_way_and_replacement_is_refused() {
+        assert_eq!(encoding_for_label("iso-8859-1").unwrap(), WINDOWS_1252);
+        assert_eq!(encoding_for_label("UTF-16LE").unwrap(), UTF_16LE);
+        assert_eq!(
+            encoding_for_label("Shift_JIS").unwrap(),
+            encoding_rs::SHIFT_JIS
+        );
+        assert!(encoding_for_label("replacement").is_err());
+        assert!(encoding_for_label("iso-2022-kr").is_err());
+        assert!(encoding_for_label("klingon").is_err());
+    }
+}

@@ -53,6 +53,24 @@ const MAX_RAW_BYTES: u64 = 25 * 1024 * 1024;
 #[derive(Deserialize)]
 struct ReadOp {
     path: String,
+    /// Read in exactly this encoding (a WHATWG label) instead of by the
+    /// automatic rules: the person's answer to a fallback that read the file
+    /// wrong. Absent for an ordinary read, and from every older client.
+    #[serde(default)]
+    encoding: Option<String>,
+}
+
+/// Resolve an optional client encoding label. An unknown one is answered 400 by
+/// the caller rather than the file being read or written some other way.
+fn requested_encoding(
+    label: Option<&str>,
+) -> Result<Option<&'static dux_core::text_encoding::Encoding>, String> {
+    match label {
+        None => Ok(None),
+        Some(label) => dux_core::text_encoding::encoding_for_label(label)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -72,6 +90,29 @@ struct WriteOp {
     expected_modified: Option<String>,
     #[serde(default)]
     expected_size: Option<u64>,
+    /// The encoding to write the text in (a WHATWG label): the one the read
+    /// reported, or a conversion the person chose. Absent means the text's own
+    /// UTF-8, which is what every older client and the upload route send, and
+    /// such a save is still refused over a file that is not UTF-8.
+    #[serde(default)]
+    encoding: Option<String>,
+    /// Start the file with the encoding's byte-order mark. Only meaningful with
+    /// `encoding`, and refused for an encoding that has none.
+    #[serde(default)]
+    bom: bool,
+}
+
+/// A save refused (422) because the text holds a character the chosen encoding
+/// has no bytes for. Structured so the browser can name the character and
+/// where it is, and point at converting the file, in its own words.
+#[derive(Serialize)]
+struct UnmappableBody {
+    error: &'static str,
+    message: String,
+    character: String,
+    line: usize,
+    column: usize,
+    encoding: &'static str,
 }
 
 /// A save's success body: the file's stamp AFTER the write. The client
@@ -482,8 +523,14 @@ async fn list_tree<R: EditorRoot>(
 async fn read_file<R: EditorRoot>(root: R, Json(op): Json<ReadOp>) -> Response {
     let worktree = root.path().to_path_buf();
     let path = op.path;
-    match tokio::task::spawn_blocking(move || dux_core::worktree_file::read_file(&worktree, &path))
-        .await
+    let requested = match requested_encoding(op.encoding.as_deref()) {
+        Ok(requested) => requested,
+        Err(unknown) => return (StatusCode::BAD_REQUEST, unknown).into_response(),
+    };
+    match tokio::task::spawn_blocking(move || {
+        dux_core::worktree_file::read_file_as(&worktree, &path, requested)
+    })
+    .await
     {
         Ok(Ok(file)) => Json(file).into_response(),
         // read_file's errors are path/containment/binary/size: client conditions.
@@ -533,8 +580,12 @@ async fn diff_contents(
         Err(r) => return r.into_response(),
     };
     let path = op.path;
+    let requested = match requested_encoding(op.encoding.as_deref()) {
+        Ok(requested) => requested,
+        Err(unknown) => return (StatusCode::BAD_REQUEST, unknown).into_response(),
+    };
     match tokio::task::spawn_blocking(move || {
-        match dux_core::diff::file_diff_contents(&worktree, &path) {
+        match dux_core::diff::file_diff_contents_as(&worktree, &path, requested) {
             Ok(contents) => Ok(DiffAnswer::Contents(contents)),
             // A version past the editor's size ceiling is answered with the head
             // of git's own patch rather than an error: the reader wanted to see
@@ -722,6 +773,13 @@ async fn write_file<R: EditorRoot>(
             modified: Some(modified),
             size,
         });
+    let encoding = match requested_encoding(op.encoding.as_deref()) {
+        Ok(encoding) => encoding.map(|encoding| dux_core::worktree_file::SaveEncoding {
+            encoding,
+            bom: op.bom,
+        }),
+        Err(unknown) => return (StatusCode::BAD_REQUEST, unknown).into_response(),
+    };
     // write_file's errors are path/containment validation, all client conditions, so
     // map them to 400. The one exception is a freshness conflict, which is a
     // 409 carrying the file's CURRENT stamp so the browser can offer a choice
@@ -738,7 +796,13 @@ async fn write_file<R: EditorRoot>(
     };
     let stamp = match tokio::task::spawn_blocking(move || {
         let _hold = hold;
-        dux_core::worktree_file::write_file_checked(&wt, &path, &content, expected.as_ref())
+        dux_core::worktree_file::write_file_encoded(
+            &wt,
+            &path,
+            &content,
+            encoding,
+            expected.as_ref(),
+        )
     })
     .await
     {
@@ -751,6 +815,20 @@ async fn write_file<R: EditorRoot>(
                         modified: conflict.current.as_ref().and_then(|s| s.modified.clone()),
                         size: conflict.current.as_ref().map(|s| s.size),
                         deleted: conflict.deleted,
+                    }),
+                )
+                    .into_response();
+            }
+            if let Some(refused) = e.downcast_ref::<dux_core::text_encoding::Unmappable>() {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(UnmappableBody {
+                        error: "unmappable",
+                        message: refused.to_string(),
+                        character: refused.character.to_string(),
+                        line: refused.line,
+                        column: refused.column,
+                        encoding: refused.encoding.name(),
                     }),
                 )
                     .into_response();
@@ -1750,6 +1828,147 @@ mod tests {
         async fn body_json(resp: axum::response::Response) -> serde_json::Value {
             let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             serde_json::from_slice(&bytes).expect("a JSON body")
+        }
+
+        async fn read_json(
+            app: &axum::Router,
+            body: serde_json::Value,
+        ) -> axum::response::Response {
+            app.clone()
+                .oneshot(json_req("/api/v1/sessions/s1/files/read", body))
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn read_reports_the_encoding_and_whether_it_was_a_fallback() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let plain =
+                body_json(read_json(&app, serde_json::json!({ "path": "hello.txt" })).await).await;
+            assert_eq!(plain["encoding"], "UTF-8");
+            assert_eq!(plain["bom"], false);
+            assert_eq!(plain["encoding_fallback"], false);
+
+            std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
+            let latin1 =
+                body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
+            assert_eq!(latin1["binary"], false);
+            assert_eq!(latin1["content"], "caf\u{e9}\n");
+            assert_eq!(latin1["encoding"], "windows-1252");
+            assert_eq!(latin1["encoding_fallback"], true);
+        }
+
+        #[tokio::test]
+        async fn read_in_a_requested_encoding_or_refuse_it() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("jp.txt"), [0x93, 0xfa, 0x96, 0x7b]).unwrap();
+            let resp = read_json(
+                &app,
+                serde_json::json!({ "path": "jp.txt", "encoding": "shift_jis" }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert_eq!(body["content"], "\u{65e5}\u{672c}");
+            assert_eq!(body["encoding"], "Shift_JIS");
+            assert_eq!(body["encoding_fallback"], false);
+
+            // Bytes that are not valid in the requested encoding are refused,
+            // never shown with replacement characters.
+            let resp = read_json(
+                &app,
+                serde_json::json!({ "path": "jp.txt", "encoding": "utf-8" }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let text = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert!(String::from_utf8_lossy(&text).contains("not valid UTF-8"));
+
+            let resp = read_json(
+                &app,
+                serde_json::json!({ "path": "jp.txt", "encoding": "klingon" }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn a_save_in_the_read_encoding_writes_those_bytes() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("latin1.txt"), b"caf\xe9\r\n").unwrap();
+            let stamp =
+                body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "latin1.txt",
+                        "content": "th\u{e9}\r\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                        "encoding": "windows-1252",
+                        "bom": false,
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(std::fs::read(wt.join("latin1.txt")).unwrap(), b"th\xe9\r\n");
+        }
+
+        /// A character the encoding cannot hold is a 422 that names it and
+        /// where it is, and the file is left exactly as it was.
+        #[tokio::test]
+        async fn an_unmappable_character_is_422_with_its_details() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
+            let stamp =
+                body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "latin1.txt",
+                        "content": "caf\u{e9}\n\u{20ac}\u{65e5}\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                        "encoding": "windows-1252",
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = body_json(resp).await;
+            assert_eq!(body["error"], "unmappable");
+            assert_eq!(body["character"], "\u{65e5}");
+            assert_eq!(body["line"], 2);
+            assert_eq!(body["column"], 2);
+            assert_eq!(body["encoding"], "windows-1252");
+            assert_eq!(std::fs::read(wt.join("latin1.txt")).unwrap(), b"caf\xe9\n");
+        }
+
+        /// A page that predates encodings sends no encoding, and its guarded
+        /// save over bytes that are not UTF-8 is still refused.
+        #[tokio::test]
+        async fn a_save_with_no_encoding_over_a_non_utf8_file_is_still_refused() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
+            let stamp =
+                body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "latin1.txt",
+                        "content": "typed over nothing\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(std::fs::read(wt.join("latin1.txt")).unwrap(), b"caf\xe9\n");
         }
 
         /// The read route must hand the editor the token a later save sends

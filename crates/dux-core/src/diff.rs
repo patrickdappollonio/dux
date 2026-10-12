@@ -1,7 +1,8 @@
 //! Headless, serializable diff source shared by web clients. Returns the two raw
 //! sides of a single file (its content at HEAD and its working-copy content) as
-//! whole UTF-8 text, leaving the actual diff rendering to the client. The web UI
-//! runs Monaco's DiffEditor over these two sides; non-UTF-8/binary content is
+//! whole text, decoded by the editor's encoding rules (`text_encoding`), leaving the
+//! actual diff rendering to the client. The web UI
+//! runs Monaco's DiffEditor over these two sides; binary content is
 //! reported as `binary: true` with empty sides. No syntax highlighting, no
 //! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
 //! in `dux-tui/src/diff.rs`.
@@ -282,7 +283,7 @@ pub struct DiffContents {
     /// Working-copy content on disk. Empty when the path was deleted from the
     /// working tree; the client then renders an all-delete diff.
     pub modified: String,
-    /// True when either side is non-UTF-8/binary. `original` and `modified` are
+    /// True when either side is binary. `original` and `modified` are
     /// then empty and the client should refuse to render a text diff.
     pub binary: bool,
 }
@@ -342,13 +343,25 @@ fn sniffs_as_utf8(bytes: &[u8]) -> bool {
 
 /// Read the two sides of a single file's working-tree-vs-HEAD diff as whole
 /// text: `original` is the file at HEAD, `modified` the working copy on disk. A
-/// path absent on one side yields an empty string there. Non-UTF-8 content on
+/// path absent on one side yields an empty string there. Each side is decoded by
+/// the editor's encoding rules (see [`decode_diff_side`]); binary content on
 /// either side yields `binary: true` with empty sides.
 ///
 /// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any `..`,
 /// root or prefix component, and symlinks that escape the worktree are rejected,
 /// since the web passes client-supplied paths here.
 pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffContents> {
+    file_diff_contents_as(worktree, rel_path, None)
+}
+
+/// [`file_diff_contents`] reading both sides in `encoding` where they decode in
+/// it: the encoding the person reopened the file in, so the diff and the
+/// editor tab show the same characters.
+pub fn file_diff_contents_as(
+    worktree: &Path,
+    rel_path: &str,
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> anyhow::Result<DiffContents> {
     // Reject absolute paths, `..`/root components, the `.git` dir, and symlinks
     // that escape the worktree.
     let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
@@ -408,21 +421,45 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
     };
     let old_bytes = crate::git::file_bytes_at_head(worktree, rel_path)?.unwrap_or_default();
 
-    if !is_renderable_text(&old_bytes) || !is_renderable_text(&new_bytes) {
-        return Ok(DiffContents {
+    match (
+        decode_diff_side(&old_bytes, encoding),
+        decode_diff_side(&new_bytes, encoding),
+    ) {
+        (Some(original), Some(modified)) => Ok(DiffContents {
+            path: rel_path.to_string(),
+            original,
+            modified,
+            binary: false,
+        }),
+        _ => Ok(DiffContents {
             path: rel_path.to_string(),
             original: String::new(),
             modified: String::new(),
             binary: true,
-        });
+        }),
     }
+}
 
-    Ok(DiffContents {
-        path: rel_path.to_string(),
-        original: String::from_utf8(old_bytes).unwrap_or_default(),
-        modified: String::from_utf8(new_bytes).unwrap_or_default(),
-        binary: false,
-    })
+/// One side of a diff as text, by the editor's own rules: the encoding the
+/// editor tab was reopened in when the side decodes cleanly in it, otherwise
+/// the automatic ones (a byte-order mark, UTF-8, else windows-1252). The second
+/// chance is deliberate and safe only because a diff is read-only: a file
+/// converted between encodings has a HEAD side in the old one, and refusing the
+/// whole diff over it would hide the change rather than protect anything.
+fn decode_diff_side(
+    bytes: &[u8],
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> Option<String> {
+    use crate::text_encoding::{Decoded, decode};
+    if let Some(encoding) = encoding
+        && let Ok(Decoded::Text(t)) = decode(bytes, Some(encoding))
+    {
+        return Some(t.text);
+    }
+    match decode(bytes, None) {
+        Ok(Decoded::Text(t)) => Some(t.text),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +630,35 @@ mod tests {
         assert!(c.binary);
         assert_eq!(c.original, "");
         assert_eq!(c.modified, "");
+    }
+
+    /// A windows-1252 change is a readable diff, decoded the way the editor
+    /// opens the file, rather than a refusal.
+    #[test]
+    fn a_windows_1252_change_is_diffed_as_text() {
+        let repo = init_repo();
+        commit_file_bytes(repo.path(), "f.txt", b"caf\xe9\n");
+        std::fs::write(repo.path().join("f.txt"), b"th\xe9\n").expect("overwrite");
+        let c = file_diff_contents(repo.path(), "f.txt").expect("contents");
+        assert!(!c.binary);
+        assert_eq!(c.original, "caf\u{e9}\n");
+        assert_eq!(c.modified, "th\u{e9}\n");
+    }
+
+    /// The tab's chosen encoding reads both sides where it can, and a side it
+    /// cannot read (the old encoding of a converted file) still shows by the
+    /// automatic rules rather than hiding the whole change.
+    #[test]
+    fn a_requested_encoding_reads_the_sides_it_can() {
+        let repo = init_repo();
+        let sjis = [0x93, 0xfa, 0x96, 0x7b, b'\n'];
+        commit_file_bytes(repo.path(), "f.txt", &sjis);
+        std::fs::write(repo.path().join("f.txt"), "\u{65e5}\u{672c}\u{8a9e}\n").expect("overwrite");
+        let c = file_diff_contents_as(repo.path(), "f.txt", Some(encoding_rs::SHIFT_JIS))
+            .expect("contents");
+        assert!(!c.binary);
+        assert_eq!(c.original, "\u{65e5}\u{672c}\n");
+        assert_eq!(c.modified, "\u{65e5}\u{672c}\u{8a9e}\n");
     }
 
     /// A UTF-8 byte stream that nonetheless contains a NUL must be treated as
