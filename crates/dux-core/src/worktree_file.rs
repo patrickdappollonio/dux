@@ -35,6 +35,21 @@ pub struct WorktreeFile {
     /// which reads every byte), not something the file said about itself; the
     /// editor tells the person so, since only they can know the real one.
     pub encoding_fallback: bool,
+    /// Why the text cannot be saved in `encoding` without changing bytes nobody
+    /// edited (`round_trip` or `doubled_mark`, see
+    /// [`crate::text_encoding::Unwritable`]). The file is then `read_only`, and
+    /// the way out is another encoding.
+    pub unwritable: Option<&'static str>,
+    /// The line endings are mixed or include a lone CR. The editor holds one
+    /// style per file, so a save writes every break as `eol`.
+    pub mixed_line_endings: bool,
+    /// The line ending style the editor holds and a save writes, `LF` or
+    /// `CRLF`. `None` for binary.
+    pub eol: Option<&'static str>,
+    /// The file was read in an encoding the person chose, other than UTF-8 or
+    /// UTF-16, yet its bytes are valid UTF-8 with non-ASCII in them: most
+    /// likely it was rewritten as UTF-8 since that choice was made.
+    pub looks_like_utf8: bool,
     /// True when the file was opened read-only: an outside-resolving symlink
     /// or a `.git/` path. The UI must grey out Save and ignore the dirty guard.
     #[serde(default)]
@@ -349,28 +364,37 @@ pub fn read_file_as(
     // The stamp of the bytes just read, from the fstat of the descriptor they
     // came from. This is the token a later save sends back.
     let stamp = stamp_from_meta(&read_meta);
-    // Anything that is not text the editor can round-trip byte for byte goes
-    // out as binary, which the editor refuses to open. Never fall back to an
-    // empty string here: the editor would show an empty, editable buffer, and
-    // the stamp it carries is a valid one, so a save would replace the file.
+    // Binary content goes out as binary, which the editor refuses to open.
+    // Never fall back to an empty string here: the editor would show an empty,
+    // editable buffer, and the stamp it carries is a valid one, so a save would
+    // replace the file. Text that cannot be written back unchanged in its
+    // encoding is still text, and goes out read-only instead.
     let decoded = crate::text_encoding::decode(&bytes, requested).map_err(anyhow::Error::new)?;
-    let (content, encoding, bom, encoding_fallback) = match decoded {
-        crate::text_encoding::Decoded::Text(t) => (
-            Some(t.text),
-            Some(t.encoding.name().to_string()),
-            t.bom,
-            t.fallback,
-        ),
-        crate::text_encoding::Decoded::Binary => (None, None, false, false),
+    let looks_like_utf8 = requested.is_some_and(|e| {
+        e != encoding_rs::UTF_8 && e != encoding_rs::UTF_16LE && e != encoding_rs::UTF_16BE
+    }) && crate::text_encoding::looks_like_utf8(&bytes);
+    let text = match decoded {
+        crate::text_encoding::Decoded::Text(t) => Some(t),
+        crate::text_encoding::Decoded::Binary => None,
     };
+    let endings = text
+        .as_ref()
+        .map(|t| crate::text_encoding::line_endings(&t.text));
+    let unwritable = text.as_ref().and_then(|t| t.unwritable).map(|u| u.as_str());
     Ok(WorktreeFile {
         path: rel_path.to_string(),
-        binary: content.is_none(),
-        content: content.unwrap_or_default(),
-        encoding,
-        bom,
-        encoding_fallback,
-        read_only,
+        binary: text.is_none(),
+        encoding: text.as_ref().map(|t| t.encoding.name().to_string()),
+        bom: text.as_ref().is_some_and(|t| t.bom),
+        encoding_fallback: text.as_ref().is_some_and(|t| t.fallback),
+        unwritable,
+        mixed_line_endings: endings.is_some_and(|e| e.mixed),
+        eol: endings.map(|e| e.saves_as.label()),
+        looks_like_utf8,
+        content: text.map(|t| t.text).unwrap_or_default(),
+        // A text the encoding cannot write back unchanged is shown, never
+        // saved in it: the same read-only the editor gives a symlink.
+        read_only: read_only || unwritable.is_some(),
         modified: stamp.modified,
         size: Some(stamp.size),
     })
@@ -1329,6 +1353,64 @@ mod tests {
         assert_eq!(f.content, "hi\r\n");
         assert_eq!(f.encoding.as_deref(), Some("UTF-16LE"));
         assert!(f.bom && !f.encoding_fallback);
+    }
+
+    /// A file whose bytes this encoding cannot write back unchanged is text,
+    /// shown read-only with the reason, never binary.
+    #[test]
+    fn a_file_the_encoding_cannot_write_back_opens_read_only_with_the_reason() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("nec.txt"), [b'a', 0x87, 0x90, b'\n']).unwrap();
+        let f = read_file_as(dir.path(), "nec.txt", Some(encoding_rs::SHIFT_JIS)).unwrap();
+        assert!(!f.binary);
+        assert!(f.read_only);
+        assert_eq!(f.unwritable, Some("round_trip"));
+        assert_eq!(f.content, "a\u{2252}\n");
+
+        std::fs::write(dir.path().join("two.txt"), b"\xEF\xBB\xBF\xEF\xBB\xBFx").unwrap();
+        let f = read_file(dir.path(), "two.txt").unwrap();
+        assert!(f.read_only);
+        assert_eq!(f.unwritable, Some("doubled_mark"));
+
+        let f = read_file(dir.path(), "hello.txt").unwrap();
+        assert!(!f.read_only);
+        assert_eq!(f.unwritable, None);
+    }
+
+    #[test]
+    fn mixed_line_endings_are_reported_with_what_a_save_writes() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("mixed.txt"), "a\r\nb\r\nc\n").unwrap();
+        let f = read_file(dir.path(), "mixed.txt").unwrap();
+        assert!(f.mixed_line_endings);
+        assert_eq!(f.eol, Some("CRLF"));
+        std::fs::write(dir.path().join("mac.txt"), b"a\rb\r").unwrap();
+        let f = read_file(dir.path(), "mac.txt").unwrap();
+        assert!(f.mixed_line_endings);
+        let f = read_file(dir.path(), "hello.txt").unwrap();
+        assert!(!f.mixed_line_endings);
+        assert_eq!(f.eol, Some("LF"));
+    }
+
+    /// A file the person reopened in a code page, since rewritten as UTF-8, is
+    /// flagged rather than silently read as mojibake in the old choice.
+    #[test]
+    fn utf8_read_in_a_chosen_code_page_says_it_looks_like_utf8() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("u.txt"), "caf\u{e9}\n").unwrap();
+        let f = read_file_as(dir.path(), "u.txt", Some(encoding_rs::WINDOWS_1252)).unwrap();
+        assert!(f.looks_like_utf8);
+        assert!(
+            !read_file_as(dir.path(), "u.txt", Some(encoding_rs::UTF_8))
+                .unwrap()
+                .looks_like_utf8
+        );
+        assert!(!read_file(dir.path(), "u.txt").unwrap().looks_like_utf8);
+        let f = read_file_as(dir.path(), "hello.txt", Some(encoding_rs::WINDOWS_1252)).unwrap();
+        assert!(
+            !f.looks_like_utf8,
+            "plain ASCII reads the same in every one"
+        );
     }
 
     #[test]

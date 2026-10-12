@@ -11,6 +11,12 @@
 //! that does not decode cleanly in it is refused, because replacement
 //! characters on screen would be written back over the real bytes by a save.
 //!
+//! A decode is only half the promise. Some encodings do not write back what
+//! they read (Shift_JIS spells some characters two ways, ISO-2022-JP moves its
+//! escapes), so every text answer is checked by encoding it again, and a file
+//! that would not come back byte for byte is marked unwritable in that encoding:
+//! the editor shows it read-only, and another encoding is the way out.
+//!
 //! Saving runs the other way and refuses just as plainly: a character the
 //! target encoding cannot hold stops the save before anything is written, and
 //! the refusal names the character and where it is.
@@ -40,6 +46,31 @@ pub struct DecodedText {
     /// The encoding is the last resort for bytes that are not UTF-8, not
     /// something the file said about itself.
     pub fallback: bool,
+    /// Why a save in this encoding could not write the file back as it is, so
+    /// the editor must show it read-only. `None` for the ordinary case.
+    pub unwritable: Option<Unwritable>,
+}
+
+/// Why a file that reads as text in an encoding still cannot be saved in it
+/// without changing bytes nobody edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unwritable {
+    /// Encoding the decoded text gives different bytes from the file's: some
+    /// sequences have two spellings in this encoding, or none to go back to.
+    RoundTrip,
+    /// The text starts with a second byte-order mark, which the editor drops
+    /// from what it holds, so a save would write one mark fewer.
+    DoubledMark,
+}
+
+impl Unwritable {
+    /// The wire name of the reason.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unwritable::RoundTrip => "round_trip",
+            Unwritable::DoubledMark => "doubled_mark",
+        }
+    }
 }
 
 /// A requested encoding the file does not decode in. Reported rather than
@@ -47,32 +78,92 @@ pub struct DecodedText {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeRefused {
     pub encoding: &'static Encoding,
-    /// Byte offset of the first sequence that is not valid in `encoding`, or of
-    /// the first NUL, which no text file in an ASCII-compatible encoding holds.
+    /// Byte offset of the first sequence that is not valid in `encoding`.
     pub offset: usize,
-    pub nul: bool,
 }
 
 impl std::fmt::Display for DecodeRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.nul {
-            write!(
-                f,
-                "the file holds a NUL character at byte {} when read as {}, so it is not \
-                 text in that encoding",
-                self.offset,
-                self.encoding.name()
-            )
-        } else {
-            write!(
-                f,
-                "the file is not valid {}: the bytes at offset {} are not a character in \
-                 that encoding",
-                self.encoding.name(),
-                self.offset
-            )
+        write!(
+            f,
+            "the file is not valid {}: the bytes at offset {} are not a character in \
+             that encoding",
+            self.encoding.name(),
+            self.offset
+        )
+    }
+}
+
+/// A line ending style, as the editor writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eol {
+    Lf,
+    Crlf,
+}
+
+impl Eol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Eol::Lf => "LF",
+            Eol::Crlf => "CRLF",
         }
     }
+}
+
+/// What a text's line endings are, and what the editor will write them as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineEndings {
+    /// More than one style, or a lone CR: the editor holds one style per
+    /// file, so a save rewrites the ones that differ.
+    pub mixed: bool,
+    /// The one style the editor keeps and a save writes.
+    pub saves_as: Eol,
+}
+
+/// Classify `text`'s line endings the way the browser's editor (Monaco) does
+/// when it loads a file: a lone CR and a CRLF both count as carriage returns,
+/// and CRLF wins only when more than half of all breaks carry one. A text with
+/// no breaks at all is written as LF, the editor's default.
+pub fn line_endings(text: &str) -> LineEndings {
+    let bytes = text.as_bytes();
+    let (mut lf, mut crlf, mut cr) = (0usize, 0usize, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                crlf += 1;
+                i += 1;
+            }
+            b'\r' => cr += 1,
+            b'\n' => lf += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    let total = lf + crlf + cr;
+    let saves_as = if total > 0 && (cr + crlf) * 2 > total {
+        Eol::Crlf
+    } else {
+        Eol::Lf
+    };
+    LineEndings {
+        mixed: cr > 0 || (lf > 0 && crlf > 0),
+        saves_as,
+    }
+}
+
+/// Whether `bytes` are valid UTF-8 holding something beyond ASCII: the bytes a
+/// file rewritten as UTF-8 would have, which no legacy encoding spells by
+/// accident at any length.
+pub fn looks_like_utf8(bytes: &[u8]) -> bool {
+    !bytes.is_ascii() && std::str::from_utf8(bytes).is_ok()
+}
+
+/// The 1-based column the editor shows for the character after `line_prefix`.
+/// Monaco counts UTF-16 code units, so a character outside the Basic
+/// Multilingual Plane is two columns.
+fn editor_column(line_prefix: &str) -> usize {
+    line_prefix.encode_utf16().count() + 1
 }
 
 impl std::error::Error for DecodeRefused {}
@@ -85,7 +176,7 @@ pub struct Unmappable {
     pub character: char,
     /// 1-based line of the character in the text being saved.
     pub line: usize,
-    /// 1-based column, counted in characters.
+    /// 1-based column as the editor shows it (UTF-16 code units).
     pub column: usize,
 }
 
@@ -151,14 +242,37 @@ fn bom_bytes(encoding: &'static Encoding) -> &'static [u8] {
 ///
 /// With `requested`, exactly that encoding is used. A leading mark for that
 /// same encoding is set aside and remembered; any other leading bytes are part
-/// of the text. Bytes that do not decode, or that decode to a NUL, are refused.
+/// of the text. Bytes that do not decode are refused. Anything that does decode
+/// is text, however garbled: that is the person's call, and nothing is lost.
+///
+/// Every text answer is then checked against the one promise a save makes:
+/// encoding the text back gives exactly the file's bytes. Where it does not
+/// (see [`Unwritable`]), the text still opens, but `unwritable` says why it
+/// must not be saved in this encoding.
 pub fn decode(
     bytes: &[u8],
     requested: Option<&'static Encoding>,
 ) -> Result<Decoded, DecodeRefused> {
-    match requested {
-        Some(encoding) => decode_exactly(bytes, encoding).map(Decoded::Text),
-        None => Ok(decode_auto(bytes)),
+    let decoded = match requested {
+        Some(encoding) => Decoded::Text(decode_exactly(bytes, encoding)?),
+        None => decode_auto(bytes),
+    };
+    Ok(match decoded {
+        Decoded::Text(mut t) => {
+            t.unwritable = unwritable(bytes, &t);
+            Decoded::Text(t)
+        }
+        Decoded::Binary => Decoded::Binary,
+    })
+}
+
+fn unwritable(bytes: &[u8], t: &DecodedText) -> Option<Unwritable> {
+    if t.text.starts_with('\u{FEFF}') {
+        return Some(Unwritable::DoubledMark);
+    }
+    match encode(&t.text, t.encoding, t.bom) {
+        Ok(back) if back == bytes => None,
+        _ => Some(Unwritable::RoundTrip),
     }
 }
 
@@ -172,6 +286,7 @@ fn decode_auto(bytes: &[u8]) -> Decoded {
             encoding,
             bom: true,
             fallback: false,
+            unwritable: None,
         });
     }
     if crate::diff::is_renderable_text(bytes) {
@@ -181,6 +296,7 @@ fn decode_auto(bytes: &[u8]) -> Decoded {
             encoding: UTF_8,
             bom: false,
             fallback: false,
+            unwritable: None,
         });
     }
     if bytes.contains(&0)
@@ -194,6 +310,7 @@ fn decode_auto(bytes: &[u8]) -> Decoded {
             encoding: WINDOWS_1252,
             bom: false,
             fallback: true,
+            unwritable: None,
         }),
         // windows-1252 assigns every byte, so this is unreachable in practice;
         // binary is the answer that can never lead to a lossy save.
@@ -209,31 +326,13 @@ fn decode_exactly(bytes: &[u8], encoding: &'static Encoding) -> Result<DecodedTe
     let text = decode_reporting(body, encoding).map_err(|offset| DecodeRefused {
         encoding,
         offset: start + offset,
-        nul: false,
     })?;
-    if let Some(index) = text.find('\0') {
-        // The offset of the NUL in the text is a byte offset into the decoded
-        // UTF-8, not the file; for the ASCII-compatible encodings the first NUL
-        // byte in the file is the same character, and UTF-16 reports where the
-        // zero code unit starts.
-        let offset = if encoding == UTF_16LE || encoding == UTF_16BE {
-            start + text[..index].encode_utf16().count() * 2
-        } else {
-            body.iter()
-                .position(|b| *b == 0)
-                .map_or(start, |p| start + p)
-        };
-        return Err(DecodeRefused {
-            encoding,
-            offset,
-            nul: true,
-        });
-    }
     Ok(DecodedText {
         text,
         encoding,
         bom,
         fallback: false,
+        unwritable: None,
     })
 }
 
@@ -313,7 +412,7 @@ pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Res
                 let before = &text[..offset];
                 let line = before.matches('\n').count() + 1;
                 let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-                let column = before[line_start..].chars().count() + 1;
+                let column = editor_column(&before[line_start..]);
                 return Err(anyhow::Error::new(Unmappable {
                     encoding,
                     character,
@@ -425,18 +524,139 @@ mod tests {
         let refused = decode(b"ok \xff\xfe more", Some(UTF_8)).unwrap_err();
         assert_eq!(refused.encoding, UTF_8);
         assert_eq!(refused.offset, 3);
-        assert!(!refused.nul);
         assert!(refused.to_string().contains("not valid UTF-8"));
         // An odd byte count is no UTF-16.
         assert!(decode(b"\xFF\xFEa\x00b", Some(UTF_16LE)).is_err());
     }
 
     #[test]
-    fn a_requested_encoding_that_reads_a_nul_is_refused() {
+    fn a_requested_encoding_that_reads_a_nul_is_still_text() {
+        // Garbled but lossless is the person's call: UTF-16 read as
+        // windows-1252 is text full of NULs, and it writes back unchanged.
         let utf16 = [0xFF, 0xFE, b'h', 0, b'i', 0];
-        let refused = decode(&utf16, Some(WINDOWS_1252)).unwrap_err();
-        assert!(refused.nul);
-        assert_eq!(refused.offset, 3);
+        let t = text(decode(&utf16, Some(WINDOWS_1252)));
+        assert_eq!(t.text, "\u{ff}\u{fe}h\0i\0");
+        assert_eq!(t.unwritable, None);
+    }
+
+    /// encoding_rs decodes some sequences to a character it encodes back as
+    /// different bytes (NEC row 13 "≒" 87 90 comes back as 81 E0), and some it
+    /// cannot encode at all (the user-defined rows from F0). A save of such a
+    /// file would change bytes nobody touched, so it opens read-only.
+    #[test]
+    fn a_decode_that_would_not_write_back_the_same_bytes_is_not_writable() {
+        for bytes in [
+            &[0x87, 0x90, b'\n'][..],
+            &[0xF0, 0x40, b'\n'][..],
+            &[0xED, 0x40, b'\n'][..],
+        ] {
+            let t = text(decode(bytes, Some(encoding_rs::SHIFT_JIS)));
+            assert_eq!(t.unwritable, Some(Unwritable::RoundTrip), "{bytes:x?}");
+        }
+        // Half-width katakana in ISO-2022-JP come back full-width.
+        let katakana = b"\x1b(I1\x1b(B\n";
+        let t = text(decode(katakana, Some(encoding_rs::ISO_2022_JP)));
+        assert_eq!(t.unwritable, Some(Unwritable::RoundTrip));
+        // Big5 and gb18030 have their own.
+        let t = text(decode(&[0x8E, 0x69], Some(encoding_rs::BIG5)));
+        assert_eq!(t.unwritable, Some(Unwritable::RoundTrip));
+        let t = text(decode(&[0x80], Some(encoding_rs::GB18030)));
+        assert_eq!(t.unwritable, Some(Unwritable::RoundTrip));
+    }
+
+    #[test]
+    fn the_ordinary_cases_are_writable() {
+        for (bytes, requested) in [
+            (&b"caf\xe9\n"[..], None),
+            (&"caf\u{e9}\n".as_bytes()[..], None),
+            (&b"\xEF\xBB\xBFhi"[..], None),
+            (&[0xFF, 0xFE, b'h', 0][..], None),
+            (&[0x93, 0xfa, 0x96, 0x7b][..], Some(encoding_rs::SHIFT_JIS)),
+            (&"caf\u{e9}".as_bytes()[..], Some(WINDOWS_1252)),
+        ] {
+            assert_eq!(
+                text(decode(bytes, requested)).unwritable,
+                None,
+                "{bytes:x?}"
+            );
+        }
+    }
+
+    /// The editor drops a leading U+FEFF from its text, so a file with two marks
+    /// would lose one on its first save.
+    #[test]
+    fn a_doubled_mark_opens_but_is_not_writable() {
+        let t = text(decode(b"\xEF\xBB\xBF\xEF\xBB\xBFhi", None));
+        assert!(t.bom);
+        assert_eq!(t.unwritable, Some(Unwritable::DoubledMark));
+        let t = text(decode(&[0xFF, 0xFE, 0xFF, 0xFE, b'h', 0], None));
+        assert_eq!(t.unwritable, Some(Unwritable::DoubledMark));
+        let t = text(decode(b"\xEF\xBB\xBF\xEF\xBB\xBFhi", Some(UTF_8)));
+        assert_eq!(t.unwritable, Some(Unwritable::DoubledMark));
+    }
+
+    #[test]
+    fn line_endings_are_uniform_or_mixed_and_a_save_writes_monacos_pick() {
+        let le = |s: &str| line_endings(s);
+        assert_eq!(
+            le("a\nb\n"),
+            LineEndings {
+                mixed: false,
+                saves_as: Eol::Lf
+            }
+        );
+        assert_eq!(
+            le("a\r\nb\r\n"),
+            LineEndings {
+                mixed: false,
+                saves_as: Eol::Crlf
+            }
+        );
+        assert_eq!(
+            le("no break"),
+            LineEndings {
+                mixed: false,
+                saves_as: Eol::Lf
+            }
+        );
+        // Mixed: the majority wins, a tie goes to LF.
+        assert_eq!(
+            le("a\r\nb\r\nc\n"),
+            LineEndings {
+                mixed: true,
+                saves_as: Eol::Crlf
+            }
+        );
+        assert_eq!(
+            le("a\r\nb\n"),
+            LineEndings {
+                mixed: true,
+                saves_as: Eol::Lf
+            }
+        );
+        // A lone CR is a line break of its own and counts with CRLF.
+        assert_eq!(
+            le("a\rb\rc\n"),
+            LineEndings {
+                mixed: true,
+                saves_as: Eol::Crlf
+            }
+        );
+        assert_eq!(
+            le("a\rb"),
+            LineEndings {
+                mixed: true,
+                saves_as: Eol::Crlf
+            }
+        );
+    }
+
+    /// The editor counts columns in UTF-16 units, so an astral character before
+    /// the refused one on its line counts twice.
+    #[test]
+    fn a_refusal_reports_the_column_the_editor_shows() {
+        assert_eq!(editor_column("ab"), 3);
+        assert_eq!(editor_column("\u{1F600}a"), 4);
     }
 
     #[test]

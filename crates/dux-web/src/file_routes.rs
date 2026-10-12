@@ -1848,6 +1848,25 @@ mod tests {
             assert_eq!(plain["encoding"], "UTF-8");
             assert_eq!(plain["bom"], false);
             assert_eq!(plain["encoding_fallback"], false);
+            assert!(plain["unwritable"].is_null());
+            assert_eq!(plain["mixed_line_endings"], false);
+            assert_eq!(plain["eol"], "LF");
+            assert_eq!(plain["looks_like_utf8"], false);
+
+            // Text this encoding cannot write back unchanged opens read-only
+            // with the reason on the wire, never as binary.
+            std::fs::write(wt.join("nec.txt"), [0x87, 0x90]).unwrap();
+            let nec = body_json(
+                read_json(
+                    &app,
+                    serde_json::json!({ "path": "nec.txt", "encoding": "shift_jis" }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(nec["binary"], false);
+            assert_eq!(nec["read_only"], true);
+            assert_eq!(nec["unwritable"], "round_trip");
 
             std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
             let latin1 =
