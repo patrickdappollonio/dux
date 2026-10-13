@@ -193,6 +193,12 @@ pub struct Theme {
     /// `the_modal_refusal_flash_is_visible_in_every_loadable_theme` pins it.
     pub overlay_border_refused: Color,
     pub overlay_bg: Color,
+    /// The surface of an in-pane card (the quiet changes message, the dormant
+    /// tab's card): the fill inside its border ring. A pane card is not a modal,
+    /// so it does not take `overlay_bg`, which would draw a dialog where none
+    /// exists; it defaults to `app_bg`, the pane's own surface, and a theme may
+    /// set it explicitly to make the card stand off the pane.
+    pub pane_card_bg: Color,
     pub overlay_dim_bg: Color,
     pub prompt_cursor: Color,
     pub provider_label_fg: Color,
@@ -414,6 +420,10 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.overlay_border", border_focused);
     theme.register_default_token("dux.overlay_border_refused", error);
     theme.register_default_token("dux.overlay_bg", bg_panel);
+    // Read back rather than `bg_base`, so a theme that sets `dux.app_bg` itself
+    // gets pane cards on that surface too.
+    let app_bg = theme.color("dux.app_bg");
+    theme.register_default_token("dux.pane_card_bg", app_bg);
     theme.register_default_token("dux.overlay_dim_bg", bg_base);
     theme.register_default_token("dux.overlay_dim_fg", text_dim);
     theme.register_default_token("dux.prompt_cursor", accent_primary);
@@ -571,6 +581,7 @@ impl Theme {
             overlay_border: pick("dux.overlay_border"),
             overlay_border_refused: pick("dux.overlay_border_refused"),
             overlay_bg: pick("dux.overlay_bg"),
+            pane_card_bg: pick("dux.pane_card_bg"),
             overlay_dim_bg: pick("dux.overlay_dim_bg"),
             prompt_cursor: pick("dux.prompt_cursor"),
             provider_label_fg: pick("dux.provider_label_fg"),
@@ -679,6 +690,14 @@ impl Theme {
     /// color rather than the host terminal's default foreground.
     pub fn overlay_surface_style(&self) -> Style {
         Style::default().fg(self.text_fg).bg(self.overlay_bg)
+    }
+
+    /// The pane card surface as a style: the body text (`text_fg`) on
+    /// `pane_card_bg`. The card shares a modal's ring and title, but it is part
+    /// of the pane it sits in, so it is filled with the pane's surface rather
+    /// than the modal one.
+    pub fn pane_card_surface_style(&self) -> Style {
+        Style::default().fg(self.text_fg).bg(self.pane_card_bg)
     }
 
     /// The style of a name chip: the dialog body's own colors swapped, the
@@ -1032,6 +1051,7 @@ mod tests {
             overlay_border: Color::Cyan,
             overlay_border_refused: Color::Red,
             overlay_bg: Color::Rgb(20, 20, 20),
+            pane_card_bg: Color::Rgb(20, 20, 20),
             overlay_dim_bg: Color::Rgb(10, 10, 10),
             prompt_cursor: Color::Cyan,
             provider_label_fg: Color::Rgb(100, 100, 100),
@@ -1141,6 +1161,7 @@ mod tests {
         assert_field!(overlay_border);
         assert_field!(overlay_border_refused);
         assert_field!(overlay_bg);
+        assert_field!(pane_card_bg);
         assert_field!(overlay_dim_bg);
         assert_field!(prompt_cursor);
         assert_field!(provider_label_fg);
@@ -1339,6 +1360,38 @@ variant = "dark"
         let nord = Theme::from_opaline(&nord);
         // Derived from Nord's accent.secondary, not the FALLBACK gray.
         assert_ne!(nord.session_typing, Color::Rgb(128, 128, 128));
+    }
+
+    /// A pane card sits on the pane's own surface unless the theme says
+    /// otherwise: `dux.pane_card_bg` follows `dux.app_bg` (the theme's own, when
+    /// it sets one, not merely `bg.base`), never the modal surface, and a theme
+    /// that sets the token gets exactly what it set.
+    #[test]
+    fn the_pane_card_surface_follows_the_app_surface_unless_a_theme_sets_it() {
+        // flexoki_dark is a theme whose modal surface differs from its base, so
+        // there the default is a real choice rather than a coincidence.
+        let mut flexoki = opaline::load_by_name("flexoki-dark").expect("flexoki-dark built-in");
+        register_dux_defaults(&mut flexoki);
+        let flexoki = Theme::from_opaline(&flexoki);
+        assert_ne!(flexoki.overlay_bg, flexoki.app_bg);
+        assert_eq!(flexoki.pane_card_bg, flexoki.app_bg);
+
+        let app_bg_only = DUX_DARK_TOML.replace(
+            "\"dux.app_bg\"               = \"#141414\"",
+            "\"dux.app_bg\"               = \"#202530\"",
+        );
+        assert_ne!(app_bg_only, DUX_DARK_TOML, "the replacement must land");
+        let theme = load_from_str(&app_bg_only).expect("parses");
+        assert_eq!(theme.pane_card_bg, Color::Rgb(0x20, 0x25, 0x30));
+
+        let overridden = DUX_DARK_TOML.replace(
+            "[tokens]\n",
+            "[tokens]\n\"dux.pane_card_bg\" = \"#334455\"\n",
+        );
+        assert_ne!(overridden, DUX_DARK_TOML, "the replacement must land");
+        let theme = load_from_str(&overridden).expect("parses");
+        assert_eq!(theme.pane_card_bg, Color::Rgb(0x33, 0x44, 0x55));
+        assert_eq!(theme.app_bg, Color::Rgb(20, 20, 20));
     }
 
     /// The standalone agent's identity tone must resolve in every theme dux can

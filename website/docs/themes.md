@@ -119,5 +119,10 @@ chips in your dialog's own colors, swapped: the dialog background (`dux.overlay_
 on the dialog text color (`dux.text_fg`). A chip is therefore exactly as readable as
 the sentence around it, and there is nothing extra to set.
 
+The cards that show up inside a pane, like the note in the changes pane when a
+folder has no repository or a tab that isn't running, are not dialogs, so they sit on
+the pane's own background (`dux.app_bg`) with just their border to frame them. Want
+them to stand out? Set `dux.pane_card_bg` and they get a fill of their own.
+
 Save the file and open the theme picker: your theme is listed alongside the built-ins,
 labeled as user-authored, with the same live preview. Tweak, save, re-pick, repeat.

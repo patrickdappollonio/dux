@@ -3165,10 +3165,7 @@ impl App {
         if let Some(ring) = plan.ring {
             // Centred title, unlike a dialog's: the card names a state of the
             // pane rather than the dialog it is not.
-            let block = self
-                .themed_overlay_block(title)
-                .title_alignment(ratatui::layout::Alignment::Center);
-            block.render(ring, frame.buffer_mut());
+            self.pane_card_block(title).render(ring, frame.buffer_mut());
         }
 
         let mut button_rect = None;
@@ -12043,6 +12040,31 @@ impl App {
     }
 
     fn overlay_block_titled<'a>(&self, title: Line<'a>) -> Block<'a> {
+        // Modals are presented after a `Clear.render(..)` which resets the
+        // popup cells to `Color::Reset`. Filling the block with overlay_bg
+        // means the modal interior (borders, surrounding chrome, the gap
+        // around the inner widgets) tracks the active theme instead of
+        // reading terminal-default behind the border ring. The body text
+        // color rides along, so prose with no color of its own is drawn
+        // in `text_fg`, never the host terminal's default foreground.
+        self.ring_block_titled(title, self.theme.overlay_surface_style())
+    }
+
+    /// A pane card's ring: the modal's ring and centred title, filled with the
+    /// pane-card surface (`pane_card_bg`, the pane's own background unless the
+    /// theme sets it) instead of the modal one. A pane card is part of the pane
+    /// it sits in, so a modal fill would draw a dialog where none exists.
+    fn pane_card_block<'a>(&self, title: &'a str) -> Block<'a> {
+        self.ring_block_titled(
+            Line::from(Span::styled(title, self.overlay_title_style())),
+            self.theme.pane_card_surface_style(),
+        )
+        .title_alignment(ratatui::layout::Alignment::Center)
+    }
+
+    /// The rounded, titled ring modals and pane cards share, filled with
+    /// `surface`.
+    fn ring_block_titled<'a>(&self, title: Line<'a>, surface: Style) -> Block<'a> {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -12059,14 +12081,7 @@ impl App {
             } else {
                 Style::default().fg(self.theme.overlay_border)
             })
-            // Modals are presented after a `Clear.render(..)` which resets the
-            // popup cells to `Color::Reset`. Filling the block with overlay_bg
-            // means the modal interior (borders, surrounding chrome, the gap
-            // around the inner widgets) tracks the active theme instead of
-            // reading terminal-default behind the border ring. The body text
-            // color rides along, so prose with no color of its own is drawn
-            // in `text_fg`, never the host terminal's default foreground.
-            .style(self.theme.overlay_surface_style())
+            .style(surface)
     }
 
     /// Lay out and paint the scrollable message pane the error dialogs share, and
@@ -14179,6 +14194,113 @@ mod tests {
         );
     }
 
+    /// Give `app` a theme whose pane, modal and pane-card surfaces are three
+    /// different colors, so a card painted in the wrong one shows. The shipped
+    /// default happens to use one shade for the pane and the modal, which would
+    /// let either answer pass.
+    fn with_distinct_surfaces(app: &mut App) {
+        use ratatui::style::Color;
+        app.theme.app_bg = Color::Rgb(0x10, 0x0f, 0x0f);
+        app.theme.overlay_bg = Color::Rgb(0x1c, 0x1b, 0x1a);
+        app.theme.pane_card_bg = app.theme.app_bg;
+    }
+
+    /// The rect of the first rounded border ring whose top-left corner is at or
+    /// after `from` in reading order: the card's ring, found by its corners.
+    fn rounded_ring_from(buf: &ratatui::buffer::Buffer, from: (u16, u16)) -> Rect {
+        let area = buf.area;
+        let (x, y) = (from.1..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| (y > from.1 || x >= from.0) && buf[(x, y)].symbol() == "\u{256d}")
+            .expect("a rounded ring");
+        let right = (x..area.width)
+            .find(|&rx| buf[(rx, y)].symbol() == "\u{256e}")
+            .expect("the ring's top-right corner");
+        let bottom = (y..area.height)
+            .find(|&by| buf[(x, by)].symbol() == "\u{2570}")
+            .expect("the ring's bottom-left corner");
+        Rect::new(x, y, right - x + 1, bottom - y + 1)
+    }
+
+    /// Every cell of `ring`, border and interior alike, whose background is not
+    /// `expected`, as (x, y, bg) for the failure message.
+    fn cells_off_surface(
+        buf: &ratatui::buffer::Buffer,
+        ring: Rect,
+        expected: ratatui::style::Color,
+    ) -> Vec<(u16, u16, ratatui::style::Color)> {
+        (ring.y..ring.bottom())
+            .flat_map(|y| (ring.x..ring.right()).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].bg != expected)
+            .map(|(x, y)| (x, y, buf[(x, y)].bg))
+            .collect()
+    }
+
+    /// The quiet changes card is part of the pane, not a dialog over it: its
+    /// ring and everything inside it sit on the pane-card surface, which is the
+    /// pane's own background by default, never the modal surface. A theme whose
+    /// modal surface is lighter than its base otherwise draws a filled box in
+    /// the pane that reads as a dialog nobody opened.
+    #[test]
+    fn the_quiet_changes_card_sits_on_the_pane_card_surface() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+
+        let reason = format!(
+            "{}\n\n/home/someone/notes",
+            dux_core::git::FolderRepoStatus::NoRepo.quiet_reason()
+        );
+        let paint = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(46, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    app.render_quiet_changes(frame, area, &reason);
+                })
+                .expect("render frame");
+            terminal.backend().buffer().clone()
+        };
+
+        let mut app = test_app(default_bindings());
+        with_distinct_surfaces(&mut app);
+        let buf = paint(&mut app);
+        // Past the pane's own frame, whose corner is at the origin.
+        let ring = rounded_ring_from(&buf, (1, 1));
+        let off = cells_off_surface(&buf, ring, app.theme.app_bg);
+        assert!(
+            off.is_empty(),
+            "every cell of the card must carry the pane's background {:?}, not the modal's \
+             {:?}; off-surface cells: {off:?}",
+            app.theme.app_bg,
+            app.theme.overlay_bg
+        );
+
+        // A theme that sets the card surface gets it, ring and interior alike.
+        app.theme.pane_card_bg = Color::Rgb(0x33, 0x44, 0x55);
+        let buf = paint(&mut app);
+        let ring = rounded_ring_from(&buf, (1, 1));
+        let off = cells_off_surface(&buf, ring, Color::Rgb(0x33, 0x44, 0x55));
+        assert!(
+            off.is_empty(),
+            "a theme's own pane_card_bg must fill the card; off-surface cells: {off:?}"
+        );
+        // And the text keeps its tone over that surface.
+        let rows = buffer_rows(&buf);
+        let (row, line) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains("This"))
+            .expect("the reason is drawn");
+        let x = u16::try_from(line[..line.find("This").expect("column")].chars().count())
+            .expect("fits");
+        let cell = &buf[(x, u16::try_from(row).expect("fits"))];
+        assert_eq!(
+            (cell.fg, cell.bg),
+            (app.theme.hint_desc_fg, Color::Rgb(0x33, 0x44, 0x55))
+        );
+    }
+
     /// The rename modal for a standalone agent has NO branch checkbox: there is
     /// no branch to rename, and a checkbox that cannot do anything is worse than
     /// none. Rendered rather than reasoned about, because the modal's height is
@@ -16267,6 +16389,84 @@ mod tests {
         assert!(
             tight.contains("Start session"),
             "the way out is the last thing standing; got:\n{tight}"
+        );
+    }
+
+    /// The dormant tab's card is a pane card too: ring, title, prose and the
+    /// button's surroundings all sit on the pane-card surface, never the modal
+    /// one.
+    #[test]
+    fn dormant_tab_card_sits_on_the_pane_card_surface() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        with_distinct_surfaces(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_dormant_extra_tab(frame, area, None);
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let ring = rounded_ring_from(buf, (0, 0));
+        assert!(
+            ring.width > 20,
+            "the ring found must be the card's, not the button's: {ring:?}"
+        );
+        let off = cells_off_surface(buf, ring, app.theme.pane_card_bg);
+        assert!(
+            off.is_empty(),
+            "every cell of the dormant card must carry the pane-card background {:?}; \
+             off-surface cells: {off:?}",
+            app.theme.pane_card_bg
+        );
+    }
+
+    /// Guard: pane cards moving off the modal surface leaves real modals and the
+    /// take-over cover on it. A dialog keeps `overlay_bg` across its ring, and
+    /// the take-over card (a full-pane cover, not a card in the pane) still
+    /// covers every cell of the pane in it.
+    #[test]
+    fn modals_and_the_takeover_cover_keep_the_modal_surface() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        with_distinct_surfaces(&mut app);
+        let (width, height) = (60u16, 16u16);
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_takeover_card(
+                    frame,
+                    area,
+                    &crate::app::pty_ownership::PtyTakeoverCard::Free,
+                );
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let off = cells_off_surface(buf, buf.area, app.theme.overlay_bg);
+        assert!(
+            off.is_empty(),
+            "the take-over cover paints the whole pane in the modal surface; off: {off:?}"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.themed_overlay_block("Dialog")
+                    .render(Rect::new(2, 2, 30, 8), frame.buffer_mut());
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let off = cells_off_surface(buf, Rect::new(2, 2, 30, 8), app.theme.overlay_bg);
+        assert!(
+            off.is_empty(),
+            "a dialog's chrome stays on the modal surface; off: {off:?}"
         );
     }
 

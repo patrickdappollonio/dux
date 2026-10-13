@@ -120,6 +120,10 @@ ansi_darkgray = "#808080"
 # because it is holding unsaved work. Must contrast with dux.overlay_border.
 "dux.overlay_border_refused" = "ansi_red"
 "dux.overlay_bg"           = "#141414"
+# In-pane cards (the quiet changes message, a tab that is not running) are
+# part of the pane, not dialogs, so they sit on dux.app_bg by default. Set
+# this to give them a fill of their own:
+# "dux.pane_card_bg"       = "#141414"
 "dux.overlay_dim_bg"       = "#0a0a0a"
 "dux.overlay_dim_fg"       = "ansi_darkgray"
 "dux.prompt_cursor"        = "ansi_cyan"

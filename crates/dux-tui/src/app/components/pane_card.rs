@@ -4,7 +4,10 @@
 //!
 //! It is not a modal: no [`crate::app::PromptState`], no entry in the modal
 //! registry, and no rect in the click-outside dismissal engine, so pane and tab
-//! navigation keep working over it.
+//! navigation keep working over it. For the same reason it is filled with the
+//! pane-card surface (`Theme::pane_card_bg`, the pane's own background unless a
+//! theme sets it), never the modal one: it shares a dialog's ring and title, not
+//! its fill.
 //!
 //! Degradation, as the pane shrinks, in order:
 //!
