@@ -41,6 +41,30 @@ There are far more: Catppuccin's four flavors, Tokyo Night's variants, Solarized
 Rose Pine, Everforest, Kanagawa, One Dark, and others. The picker is the list that
 never goes stale.
 
+## Nerd Font icons
+
+Running a [Nerd Font](https://www.nerdfonts.com) in your terminal? dux can trade its
+plain icons for proper ones: a folder for the project, a star for standalone rows, the
+pull-request and warning marks, the disclosure chevrons, and the serving and terminals
+chips in the header. Out of the box dux draws the plain set every screenshot in these
+docs shows, so it looks right in any font:
+
+![The terminal UI sidebar: three active agents, one of them running three tabs, and a collapsed Inactive tail.](/screens/tui-agent-list-two-line.png)
+
+Flip it with the `toggle-nerd-font-icons` command in the terminal UI's command palette.
+It takes effect on the spot and is saved for next time. You can also find it as **Nerd
+Font icons** in the web UI's Preferences dialog, or set it by hand:
+
+```toml
+[ui]
+nerd_font_icons = true   # off by default
+```
+
+> [!IMPORTANT]
+> This needs a Nerd Font (a patched font) set as your terminal's font. Without one the
+> icons come out as empty boxes; flip the setting back and the plain set returns. It
+> changes the terminal UI only: the web UI draws its own icons either way.
+
 ## How a theme name is resolved
 
 When you set `theme = "<name>"`, dux looks in this order:

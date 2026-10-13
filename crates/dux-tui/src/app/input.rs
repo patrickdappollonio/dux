@@ -10950,6 +10950,28 @@ impl App {
         ));
     }
 
+    /// Flip `ui.nerd_font_icons` and persist it to `config.toml`. Rendering
+    /// reads the value from `engine.config` on every frame, so the next frame
+    /// already draws the other icon set; nothing caches the glyphs.
+    pub(crate) fn toggle_nerd_font_icons(&mut self) {
+        let next = !self.engine.config.ui.nerd_font_icons;
+        self.engine.config.ui.nerd_font_icons = next;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        let message = if next {
+            format!(
+                "Nerd Font icons enabled and saved to config.toml. They need a Nerd Font set as your terminal's font; if you see empty boxes, press {palette_key} and run toggle-nerd-font-icons to go back to the plain icons."
+            )
+        } else {
+            format!(
+                "Nerd Font icons disabled and saved to config.toml; the plain icons are back. Press {palette_key} and run toggle-nerd-font-icons to switch again."
+            )
+        };
+        self.set_info(message);
+    }
+
     /// Flip `ui.tab_reaches_agent` and persist it to `config.toml`. Shared by the
     /// TUI and web command surfaces (the web toggles the same field via
     /// `WireCommand::ToggleTabReachesAgent`), and every reader consults

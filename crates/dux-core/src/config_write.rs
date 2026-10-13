@@ -1967,6 +1967,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "ui", "agent_sort", &config.ui.agent_sort);
     patch_table_str(doc, "ui", "theme", &config.ui.theme);
+    patch_table_bool(doc, "ui", "nerd_font_icons", config.ui.nerd_font_icons);
 
     // --- [capabilities] ---
     patch_table_str(

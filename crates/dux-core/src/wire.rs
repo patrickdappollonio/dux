@@ -713,6 +713,10 @@ pub struct SettingsPatch {
     /// and Shift-Tab to the agent. A plain field write the TUI reads live, so it
     /// rides the generic settings path even though nothing in the web reads it.
     pub tab_reaches_agent: Option<bool>,
+    /// `ui.nerd_font_icons`: whether the TUI draws its icons from a Nerd Font.
+    /// A plain field write the TUI reads on every frame, so it rides the
+    /// generic settings path even though the web draws its own icons.
+    pub nerd_font_icons: Option<bool>,
     pub status_clear_seconds: Option<u16>,
     pub attention_grace_seconds: Option<u64>,
     pub attention_indicator: Option<bool>,
@@ -1653,6 +1657,7 @@ struct SettingsUiDisplayPatch {
     disable_release_notes: Option<bool>,
     terminal_font_family: Option<String>,
     terminal_font_size: Option<u16>,
+    nerd_font_icons: Option<bool>,
 }
 
 impl SettingsUiDisplayPatch {
@@ -1686,6 +1691,9 @@ impl SettingsUiDisplayPatch {
         }
         if let Some(value) = self.terminal_font_size {
             config.ui.terminal_font_size = crate::config::normalized_terminal_font_size(value);
+        }
+        if let Some(value) = self.nerd_font_icons {
+            config.ui.nerd_font_icons = value;
         }
     }
 }
@@ -2235,6 +2243,7 @@ impl Engine {
             web_notifications,
             always_show_tab_strip,
             tab_reaches_agent,
+            nerd_font_icons,
             status_clear_seconds,
             attention_grace_seconds,
             attention_indicator,
@@ -2272,6 +2281,7 @@ impl Engine {
             disable_release_notes,
             terminal_font_family,
             terminal_font_size,
+            nerd_font_icons,
         }
         .apply_to(&mut candidate);
         SettingsDefaultsPatch {
@@ -14426,6 +14436,13 @@ mod tests {
                 expect: "true",
             },
             SettingsFieldRow {
+                key: "nerd_font_icons",
+                seed: |c| c.ui.nerd_font_icons = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.nerd_font_icons.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
                 key: "status_clear_seconds",
                 seed: |c| c.ui.status_clear_seconds = 6,
                 sent: serde_json::json!(11),
@@ -14527,7 +14544,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            22,
+            23,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -14583,6 +14600,7 @@ mod tests {
             web_notifications: Some(!before.capabilities.web_notifications),
             always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
             tab_reaches_agent: Some(!before.ui.tab_reaches_agent),
+            nerd_font_icons: Some(!before.ui.nerd_font_icons),
             status_clear_seconds: Some(before.ui.status_clear_seconds + 1),
             attention_grace_seconds: Some(before.ui.attention_grace_seconds + 1),
             attention_indicator: Some(!before.ui.attention_indicator),
@@ -14631,6 +14649,7 @@ mod tests {
             !before.ui.always_show_tab_strip
         );
         assert_eq!(after.ui.tab_reaches_agent, !before.ui.tab_reaches_agent);
+        assert_eq!(after.ui.nerd_font_icons, !before.ui.nerd_font_icons);
         assert_eq!(
             after.ui.status_clear_seconds,
             before.ui.status_clear_seconds + 1

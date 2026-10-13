@@ -848,6 +848,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Str(c.ui.theme.clone()),
         },
+        ConfigEntry::Field {
+            key: "nerd_font_icons",
+            comment: Some(CommentSource::Static(
+                "# Draw the terminal UI's icons from a Nerd Font instead of the plain\n# Unicode set: the project folder, the standalone star, the pull-request\n# mark, warnings, disclosure chevrons and the header chips. Default false.\n# It needs a Nerd Font (a patched font, see nerdfonts.com) set as your\n# terminal's font; without one the icons render as empty boxes. The web UI\n# draws its own icons and is unaffected. Toggle it at runtime from the TUI\n# command palette (`toggle-nerd-font-icons`), or the web UI's Preferences\n# dialog.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.nerd_font_icons),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("capabilities"),
         ConfigEntry::Comment(

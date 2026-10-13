@@ -483,6 +483,8 @@ sidebar:
   `↳` arrow and their owner, so the sidebar search finds it by path. The star always means
   the same thing: this one lives in your folder, not a working copy dux manages.
 
+![A standalone agent in the sidebar wearing the star over the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
+
 Every terminal row's `⋯` menu also carries **Open editor here** and **Open editor in new
 tab**, rooted at the directory that terminal opened in. A terminal that belongs to an
 agent opens that agent's editor instead. See [The code editor](/docs/web-editor).

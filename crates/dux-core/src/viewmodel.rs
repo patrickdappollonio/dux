@@ -248,6 +248,11 @@ pub struct BootstrapView {
     /// change it; nothing in the web UI reads it for its own behavior. Older
     /// servers omit it, so the web treats a missing value as `false`.
     pub tab_reaches_agent: bool,
+    /// Mirrors `config.ui.nerd_font_icons`: whether the TUI draws its icons
+    /// from a Nerd Font. Projected only so the web's Preferences dialog can
+    /// show and change it; the web draws its own icons. Older servers omit it,
+    /// so the web treats a missing value as `false`.
+    pub nerd_font_icons: bool,
     /// Mirrors `config.ui.attention_indicator`: whether an attention
     /// glyph/dot/tab-title/favicon cue is shown at all when an agent asks for
     /// attention (default true). The settings modal's "Both surfaces" group
@@ -1583,6 +1588,7 @@ impl Engine {
             agent_tabs_max: self.agent_tabs_max(),
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
             tab_reaches_agent: self.config.ui.tab_reaches_agent,
+            nerd_font_icons: self.config.ui.nerd_font_icons,
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
             global_default_provider: self.config.defaults.provider.clone(),
@@ -2829,6 +2835,17 @@ mod tests {
     }
 
     #[test]
+    fn nerd_font_icons_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default ships off: the plain icon set.
+        assert!(!engine.bootstrap().nerd_font_icons);
+
+        engine.config.ui.nerd_font_icons = true;
+        assert!(engine.bootstrap().nerd_font_icons);
+    }
+
+    #[test]
     fn tab_reaches_agent_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -3425,6 +3442,7 @@ mod tests {
             "status_clear_seconds",
             "always_show_tab_strip",
             "tab_reaches_agent",
+            "nerd_font_icons",
             "attention_indicator",
             "attention_on_bell",
             "global_default_provider",

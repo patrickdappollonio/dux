@@ -546,6 +546,9 @@ struct UiSettingsPatch {
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
     tab_reaches_agent: Option<bool>,
+    /// Whether the TUI draws its icons from a Nerd Font. TUI-only, carried so
+    /// the Preferences dialog can change it from a browser.
+    nerd_font_icons: Option<bool>,
     status_clear_seconds: Option<u16>,
     attention_grace_seconds: Option<u64>,
     attention_indicator: Option<bool>,
@@ -641,6 +644,7 @@ async fn set_settings(
             web_notifications: body.capabilities.web_notifications,
             always_show_tab_strip: body.ui.always_show_tab_strip,
             tab_reaches_agent: body.ui.tab_reaches_agent,
+            nerd_font_icons: body.ui.nerd_font_icons,
             status_clear_seconds: body.ui.status_clear_seconds,
             attention_grace_seconds: body.ui.attention_grace_seconds,
             attention_indicator: body.ui.attention_indicator,
@@ -1905,6 +1909,7 @@ mod tests {
                         "auto_reopen_agents": true,
                         "always_show_tab_strip": true,
                         "tab_reaches_agent": true,
+                        "nerd_font_icons": true,
                         "status_clear_seconds": 42,
                         "attention_grace_seconds": 11,
                         "attention_indicator": false,
@@ -1942,6 +1947,7 @@ mod tests {
             "auto_reopen_agents = true",
             "always_show_tab_strip = true",
             "tab_reaches_agent = true",
+            "nerd_font_icons = true",
             "status_clear_seconds = 42",
             "attention_grace_seconds = 11",
             "attention_indicator = false",

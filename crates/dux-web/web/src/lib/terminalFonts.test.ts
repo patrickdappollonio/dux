@@ -320,12 +320,16 @@ describe("Dux Mono Fill subset contents", () => {
     }
   })
 
-  it("carries the terminal UI's project folder glyph", () => {
-    // The TUI marks a managed agent's project with a bare U+1F5C0 FOLDER
-    // (theme::PROJECT_GLYPH). Few system fonts carry it, so the web terminal
-    // and the screenshot tool draw it from this face; a recut that drops it
-    // puts tofu on every agent row the browser shows.
-    expect(coverage.has(0x1f5c0), "U+1F5C0").toBe(true)
+  it("carries the terminal UI's default project and standalone marks", () => {
+    // The TUI's default icon set (theme::Glyphs::PLAIN) marks a managed
+    // agent's project with U+203B REFERENCE MARK and a standalone row with
+    // U+2737. The web terminal and the screenshot tool draw them from this
+    // face when the system font lacks them; a recut that drops one puts tofu
+    // on every agent row the browser shows. The opt-in Nerd Font set is not
+    // carried here: it needs the user's own patched font.
+    for (const cp of [0x203b, 0x2737]) {
+      expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)
+    }
   })
 
   it("carries every frame of the UI's glyph spinner", () => {

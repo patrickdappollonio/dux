@@ -114,6 +114,10 @@ export interface Bootstrap {
    * pane sends Tab and Shift-Tab to the agent instead of cycling panes. Nothing in
    * the web UI acts on it; Preferences shows and changes it. Falls back to false. */
   tab_reaches_agent?: boolean
+  /** Mirrors `config.ui.nerd_font_icons`: when true the terminal UI draws its
+   * icons from a Nerd Font. Nothing in the web UI acts on it (the web draws its
+   * own icons); Preferences shows and changes it. Falls back to false. */
+  nerd_font_icons?: boolean
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
   /** The version of `global_env`, sent back on its dialog's save for the same

@@ -470,11 +470,6 @@ fn capitalize(s: &str) -> String {
 /// (and the Inactive rule) sit evenly between two matching margins.
 const LEFT_PANE_GUTTER: u16 = 1;
 
-/// Badge glyph marking a pull request on the agent row, standing in for the
-/// letters "PR" to save a column. U+2387 (ALTERNATIVE KEY SYMBOL) renders as a
-/// branch fork in most terminals and is width-1; the `#<number>` follows it.
-const PR_BADGE_GLYPH: &str = "⎇";
-
 /// Lay a line out with `left` packed to the left and `right` flush to the right
 /// edge of `total_w`, separated by at least `min_gap` blank cells. The left
 /// group is ellipsized to whatever space remains after the right group and the
@@ -885,8 +880,9 @@ const RESOURCE_MONITOR_NAME_MIN_WIDTH: u16 = 16;
 /// ratatui's `Table` default `column_spacing` between adjacent columns.
 const RESOURCE_MONITOR_COLUMN_SPACING: u16 = 1;
 
-/// The expand affordance a resource-monitor row carries: ▼ while expanded,
-/// ▶ while collapsed, and blank where there is nothing to reveal.
+/// The expand affordance a resource-monitor row carries: the set's expanded
+/// marker while expanded, its collapsed one while collapsed, and blank where
+/// there is nothing to reveal.
 ///
 /// Gated on `has_breakdown()`, core's rule, NOT on `children` being non-empty:
 /// `children` always contains the root itself, so an is-empty test marks every
@@ -894,14 +890,15 @@ const RESOURCE_MONITOR_COLUMN_SPACING: u16 = 1;
 fn resource_row_expand_indicator(
     stat: &ResourceStats,
     expanded: &std::collections::HashSet<u32>,
-) -> &'static str {
+    glyphs: &crate::theme::Glyphs,
+) -> String {
     let Some(pid) = stat.pid.filter(|_| stat.has_breakdown()) else {
-        return "  ";
+        return "  ".to_string();
     };
     if expanded.contains(&pid) {
-        "▼ "
+        format!("{} ", glyphs.monitor_expanded)
     } else {
-        "▶ "
+        format!("{} ", glyphs.monitor_collapsed)
     }
 }
 
@@ -1836,8 +1833,19 @@ impl App {
     fn running_terminals_chip(&self) -> Option<String> {
         match self.running_companion_terminal_count() {
             0 => None,
-            count => Some(format!("● {}", count_of(count, "terminal"))),
+            count => Some(format!(
+                "{} {}",
+                self.glyphs().terminals,
+                count_of(count, "terminal")
+            )),
         }
+    }
+
+    /// The icon set the live `[ui] nerd_font_icons` value selects. Read from
+    /// the engine's config on every call so a palette toggle or a config
+    /// reload takes effect on the next frame.
+    pub(crate) fn glyphs(&self) -> &'static crate::theme::Glyphs {
+        crate::theme::Glyphs::for_config(self.engine.config.ui.nerd_font_icons)
     }
 
     fn agent_row_cues(&self, session: &AgentSession) -> AgentRowCues {
@@ -1900,6 +1908,7 @@ impl App {
         project: Option<&Project>,
         muted: Color,
     ) -> (MetaMarker, Option<Span<'static>>) {
+        let glyphs = self.glyphs();
         match agent_row_owner_tag(
             session,
             project,
@@ -1907,7 +1916,7 @@ impl App {
         ) {
             AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
                 MetaMarker::name(Span::styled(
-                    format!("  {} ", crate::theme::PROJECT_GLYPH),
+                    format!("  {} ", glyphs.project),
                     Style::default().fg(muted),
                 )),
                 Some(Span::styled(project_name, Style::default().fg(muted))),
@@ -1915,20 +1924,27 @@ impl App {
             AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => {
                 let color = self.theme.project_missing_fg;
                 (
-                    MetaMarker::name(Span::styled("  ⚠ ", Style::default().fg(color))),
+                    MetaMarker::name(Span::styled(
+                        format!("  {} ", glyphs.warning),
+                        Style::default().fg(color),
+                    )),
                     Some(Span::styled(project_name, Style::default().fg(color))),
                 )
             }
             AgentRowOwnerTag::Project(ProjectTagKind::Orphan, _) => (
                 MetaMarker::name(Span::styled(
-                    "  ⚠ removed project",
+                    format!("  {} removed project", glyphs.warning),
                     Style::default().fg(self.theme.project_missing_fg),
                 )),
                 None,
             ),
             AgentRowOwnerTag::WorkingCopyMissing => (
                 MetaMarker::name(Span::styled(
-                    format!("  ⚠ {}", dux_core::working_copy::MISSING_WORKING_COPY_LABEL),
+                    format!(
+                        "  {} {}",
+                        glyphs.warning,
+                        dux_core::working_copy::MISSING_WORKING_COPY_LABEL
+                    ),
                     Style::default().fg(self.theme.project_missing_fg),
                 )),
                 None,
@@ -1938,7 +1954,7 @@ impl App {
                 // The label is a path, cut from its start.
                 (
                     MetaMarker::path(Span::styled(
-                        format!("  {} ", crate::theme::STANDALONE_GLYPH),
+                        format!("  {} ", glyphs.standalone),
                         Style::default().fg(color),
                     )),
                     Some(Span::styled(label, Style::default().fg(color))),
@@ -2029,7 +2045,7 @@ impl App {
                 crate::model::PrState::Open => self.theme.pr_open_label,
             };
             Span::styled(
-                format!("{PR_BADGE_GLYPH}#{}", pr.number),
+                format!("{}#{}", self.glyphs().pull_request, pr.number),
                 Style::default().fg(pr_color),
             )
         });
@@ -2044,8 +2060,8 @@ impl App {
         let found = session
             .project_id()
             .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id));
-        // The project is marked with the folder glyph (`theme::PROJECT_GLYPH`,
-        // the web's folder icon) rather than a word, indented so the
+        // The project is marked with the project glyph (`Glyphs::project`; the
+        // web draws a folder icon there) rather than a word, indented so the
         // glyph column lines up with the name on line one. The marker span
         // includes that indent; the project name is a separate, truncatable span.
         //
@@ -2397,7 +2413,7 @@ impl App {
                         ) | AgentRowOwnerTag::WorkingCopyMissing
                     ) {
                         spans.push(Span::styled(
-                            "⚠",
+                            self.glyphs().warning,
                             Style::default().fg(self.theme.project_missing_fg),
                         ));
                     }
@@ -2504,9 +2520,9 @@ impl App {
             .map(|item| match item {
                 LeftItem::InactiveToggle => {
                     let icon = if self.inactive_collapsed {
-                        "▸"
+                        self.glyphs().collapsed
                     } else {
-                        "▾"
+                        self.glyphs().expanded
                     };
                     let label = Line::from(Span::styled(
                         format!("{icon} Inactive ({})", self.visible_inactive_count()),
@@ -2741,6 +2757,7 @@ impl App {
                 let working = self.engine.terminal_is_working(&row.id);
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
+                    self.glyphs(),
                     typing,
                     working,
                     spinner,
@@ -3382,7 +3399,9 @@ impl App {
                 .iter()
                 .filter_map(|t| t.tui)
                 .collect();
-            let tip_text = tui_tips[self.welcome_tip_index % tui_tips.len()](&resolve);
+            let tip_context =
+                dux_core::welcome::TuiTipContext::new(&resolve, self.glyphs().standalone);
+            let tip_text = tui_tips[self.welcome_tip_index % tui_tips.len()](&tip_context);
 
             let pill_span = Span::styled(
                 " Tip ",
@@ -5013,13 +5032,19 @@ impl App {
                 // blank columns so a file lines up with its sibling folders).
                 let indent = "  ".repeat(depth);
                 let marker = if file.is_expandable() {
-                    if expanded { "\u{25be} " } else { "\u{25b8} " }
+                    let glyphs = self.glyphs();
+                    let glyph = if expanded {
+                        glyphs.expanded
+                    } else {
+                        glyphs.collapsed
+                    };
+                    format!("{glyph} ")
                 } else if depth > 0 {
-                    "  "
+                    "  ".to_string()
                 } else {
-                    ""
+                    String::new()
                 };
-                let prefix_width = 3 + display_width(&indent) + display_width(marker);
+                let prefix_width = 3 + display_width(&indent) + display_width(&marker);
                 // Leave 1 char gap between path and stats.
                 let path_budget = content_width
                     .saturating_sub(prefix_width)
@@ -5566,21 +5591,21 @@ impl App {
                 match self.engine.gh_status {
                     GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
                     GhStatus::NotInstalled => (
-                        "⚠",
+                        self.glyphs().warning,
                         "gh CLI not found: install from https://cli.github.com".to_string(),
                     ),
                     GhStatus::NotAuthenticated => (
-                        "⚠",
+                        self.glyphs().warning,
                         "gh CLI not authenticated, so run: gh auth login".to_string(),
                     ),
                     GhStatus::Unreachable => (
-                        "⚠",
+                        self.glyphs().warning,
                         "gh CLI could not be reached, so dux is retrying periodically".to_string(),
                     ),
                     GhStatus::Available => {
                         let count = self.engine.pr_statuses.len();
                         (
-                            "✓",
+                            self.glyphs().check,
                             format!("Active: tracking PRs for {}", count_of(count, "session")),
                         )
                     }
@@ -5875,7 +5900,7 @@ impl App {
                     dux_core::config::TailscaleMode::No => "never bind it and stop looking",
                 };
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme),
+                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
                     Span::styled(
                         name,
                         Style::default()
@@ -6292,7 +6317,7 @@ impl App {
                     prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current;
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(is_no_op, &self.theme),
+                    active_provider_marker_span(is_no_op, &self.theme, self.glyphs()),
                     Span::styled(
                         name,
                         Style::default()
@@ -6375,7 +6400,7 @@ impl App {
                 };
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme),
+                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
                     Span::styled(
                         name,
                         Style::default()
@@ -6491,7 +6516,7 @@ impl App {
                 };
                 let name = pad_to_width(&name, provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme),
+                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
                     Span::styled(
                         name,
                         Style::default()
@@ -7166,7 +7191,10 @@ impl App {
             .filter_map(|i| entries.get(*i))
             .map(|entry| {
                 let warn = if entry.path_missing {
-                    Span::styled("⚠", Style::default().fg(self.theme.warning_fg))
+                    Span::styled(
+                        self.glyphs().warning,
+                        Style::default().fg(self.theme.warning_fg),
+                    )
                 } else {
                     Span::raw(" ")
                 };
@@ -7248,7 +7276,7 @@ impl App {
                         ];
                         if project.path_missing {
                             folder.push(Span::styled(
-                                "  ⚠ missing",
+                                format!("  {} missing", self.glyphs().warning),
                                 Style::default().fg(self.theme.warning_fg),
                             ));
                         }
@@ -7457,7 +7485,7 @@ impl App {
             .max()
             .unwrap_or(8)
             .clamp(8, 32);
-        let marker_width = ACTIVE_PROVIDER_MARKER.chars().count() + 2;
+        let marker_width = display_width(self.glyphs().check) + 2;
         let note_col = (list_inner.width as usize).saturating_sub(marker_width + name_col + 3);
         let items = visible
             .iter()
@@ -7502,7 +7530,7 @@ impl App {
                     (None, dux_core::git::BranchLocation::Local) => Vec::new(),
                 };
                 let mut spans = vec![
-                    active_provider_marker_span(is_base, &self.theme),
+                    active_provider_marker_span(is_base, &self.theme, self.glyphs()),
                     Span::styled(
                         pad_to_width(&ellipsize_middle(&branch.name, name_col), name_col),
                         name_style,
@@ -12284,7 +12312,7 @@ impl App {
                         Style::default()
                     };
 
-                    let indicator = resource_row_expand_indicator(stat, expanded);
+                    let indicator = resource_row_expand_indicator(stat, expanded, self.glyphs());
                     let label = ellipsize_end(&format!("{indicator}{}", stat.label), name_w);
 
                     let mut cells = vec![Cell::from(label)];
@@ -12477,6 +12505,7 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
+    glyphs: &crate::theme::Glyphs,
     typing: bool,
     working: bool,
     spinner: char,
@@ -12555,17 +12584,17 @@ fn terminal_row_lines(
         (word.to_string(), muted)
     };
     // A two-space indent aligns the owner marker under the label column,
-    // echoing the agent row's project marker (`theme::PROJECT_GLYPH`). An
+    // echoing the agent row's project marker (`Glyphs::project`). An
     // owned terminal wears the muted return arrow ("owned by"); a standalone
     // terminal wears the standalone star and its directory in the standalone
     // identity tone, the one indicator every standalone row shares.
     let (marker, marker_fg) = if standalone {
         (
-            format!("  {} ", crate::theme::STANDALONE_GLYPH),
+            format!("  {} ", glyphs.standalone),
             theme.standalone_location_fg,
         )
     } else {
-        ("  ↳ ".to_string(), muted)
+        (format!("  {} ", glyphs.owned_by), muted)
     };
     // A standalone terminal's label is its spawn directory, a path cut from its
     // start; an owned terminal's is its owner's name, cut from its end.
@@ -12864,24 +12893,26 @@ impl App {
 /// The leading marker column every provider row carries: the marker itself on
 /// the row that is already in effect, and blanks of the SAME WIDTH on the rest
 /// so the provider names still line up.
-fn active_provider_marker_span(is_active: bool, theme: &Theme) -> Span<'static> {
+///
+/// The marker (`Glyphs::check`) flags the row that is ALREADY in effect, so
+/// picking it would do nothing. There is no Apply button to grey out (a picker
+/// confirms by picking), so the cue lives on the row. It is a marker in the
+/// text rather than a dimmed style, because the cue matters most when that row
+/// is highlighted and `Theme::selection_style` patches away any style the row
+/// set for itself. A glyph in the string survives. The blanks are measured in
+/// display columns, so either icon set lines the names up.
+fn active_provider_marker_span(
+    is_active: bool,
+    theme: &Theme,
+    glyphs: &crate::theme::Glyphs,
+) -> Span<'static> {
     let marker = if is_active {
-        format!(" {ACTIVE_PROVIDER_MARKER} ")
+        format!(" {} ", glyphs.check)
     } else {
-        " ".repeat(ACTIVE_PROVIDER_MARKER.chars().count() + 2)
+        " ".repeat(display_width(glyphs.check) + 2)
     };
     Span::styled(marker, Style::default().fg(theme.hint_desc_fg))
 }
-
-/// Marks the provider row that is ALREADY in effect, so picking it would do
-/// nothing.
-///
-/// There is no Apply button to grey out (a picker confirms by picking), so the
-/// cue lives on the row. It is a marker in the text rather than a dimmed style,
-/// because the cue matters most when that row is highlighted and
-/// `Theme::selection_style` patches away any style the row set for itself. A
-/// glyph in the string survives.
-pub(crate) const ACTIVE_PROVIDER_MARKER: &str = "\u{2713}";
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
@@ -13174,7 +13205,12 @@ impl App {
         // Build the pill content as a single string.
         // With title:    " ⎇ owner/repo#1234 ▸ PR title here… "
         // Without title: " ⎇ owner/repo#1234 "
-        let prefix = format!(" \u{2387} {}#{}", pr.owner_repo, pr.number);
+        let prefix = format!(
+            " {} {}#{}",
+            self.glyphs().pull_request,
+            pr.owner_repo,
+            pr.number
+        );
         let title_trimmed = pr.title.trim();
         let has_title = !title_trimmed.is_empty();
 
@@ -14527,7 +14563,7 @@ mod tests {
         };
 
         // The star glyph and the folder path share the identity tone.
-        let (hx, hy) = cell_at(crate::theme::STANDALONE_GLYPH);
+        let (hx, hy) = cell_at(crate::theme::Glyphs::PLAIN.standalone);
         assert_eq!(
             buf[(hx, hy)].fg,
             app.theme.standalone_location_fg,
@@ -14552,7 +14588,7 @@ mod tests {
 
         // The managed row is untouched: the project marker and name keep the
         // muted provider-label color they always had.
-        let (mx, my) = cell_at(crate::theme::PROJECT_GLYPH);
+        let (mx, my) = cell_at(crate::theme::Glyphs::PLAIN.project);
         assert_eq!(
             buf[(mx, my)].fg,
             app.theme.provider_label_fg,
@@ -14570,8 +14606,8 @@ mod tests {
         );
     }
 
-    /// The project folder glyph must hold exactly one column in the rendered
-    /// row, not merely in isolation: it sits under the name on line one (the
+    /// The project glyph, in either icon set, must hold exactly one column in
+    /// the rendered row, not merely in isolation: it sits under the name on line one (the
     /// indent the marker exists for), the project name follows two cells
     /// later, the state word after its separator lands at the column the
     /// widths add up to, and a standalone row's star and folder share the
@@ -14579,10 +14615,18 @@ mod tests {
     /// these one column right.
     #[test]
     fn the_project_glyph_keeps_the_agent_rows_columns_in_line() {
+        for nerd_font_icons in [false, true] {
+            assert_agent_row_columns_line_up(nerd_font_icons);
+        }
+    }
+
+    fn assert_agent_row_columns_line_up(nerd_font_icons: bool) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
+        let glyphs = crate::theme::Glyphs::for_config(nerd_font_icons);
         let mut app = test_app(default_bindings());
+        app.engine.config.ui.nerd_font_icons = nerd_font_icons;
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
@@ -14609,7 +14653,7 @@ mod tests {
             (x..x + len).map(|cx| buf[(cx, y)].symbol()).collect()
         };
 
-        let (mx, my) = cell_at(crate::theme::PROJECT_GLYPH);
+        let (mx, my) = cell_at(glyphs.project);
         assert_eq!(
             buf[(mx + 1, my)].symbol(),
             " ",
@@ -14632,11 +14676,53 @@ mod tests {
             "the state word stays at the column the row's widths add up to"
         );
 
-        let (hx, _) = cell_at(crate::theme::STANDALONE_GLYPH);
+        let (hx, _) = cell_at(glyphs.standalone);
         assert_eq!(
             hx, mx,
             "the project glyph and the standalone star share one column"
         );
+    }
+
+    /// The palette toggle flips the saved preference and the very next frame
+    /// draws the other icon set: rendering reads the live config, so nothing
+    /// cached can keep the old glyphs on screen. The default draws the plain
+    /// reference mark, never the Nerd folder.
+    #[test]
+    fn toggling_nerd_font_icons_redraws_the_sidebar_with_the_other_set() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+        let rendered = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+        let plain = crate::theme::Glyphs::PLAIN.project;
+        let nerd = crate::theme::Glyphs::NERD.project;
+
+        assert!(!app.engine.config.ui.nerd_font_icons, "off by default");
+        let before = rendered(&mut app);
+        assert!(before.contains(plain) && !before.contains(nerd), "{before}");
+
+        app.toggle_nerd_font_icons();
+        assert!(app.engine.config.ui.nerd_font_icons);
+        let after = rendered(&mut app);
+        assert!(after.contains(nerd) && !after.contains(plain), "{after}");
+
+        app.toggle_nerd_font_icons();
+        assert!(!app.engine.config.ui.nerd_font_icons);
+        assert!(rendered(&mut app).contains(plain));
     }
 
     /// The branch segment is CONDITIONAL on the row already, so an agent with
@@ -14727,6 +14813,7 @@ mod tests {
                     + dux_core::working_cue::ELLIPSIS_STEP_MS as u128 / 2;
                 let (_, line2) = terminal_row_lines(
                     &theme,
+                    &crate::theme::Glyphs::PLAIN,
                     false,
                     true,
                     '◠',
@@ -14801,6 +14888,7 @@ mod tests {
         // content lines; the trailing spacer is added by `framed_row_item`.
         let (idle0, idle1) = terminal_row_lines(
             &theme,
+            &crate::theme::Glyphs::PLAIN,
             false,
             false,
             '◜',
@@ -14833,6 +14921,7 @@ mod tests {
         // not animate), and the "Running" word carries the working cue.
         let (working0, working1) = terminal_row_lines(
             &theme,
+            &crate::theme::Glyphs::PLAIN,
             false,
             true,
             '◠',
@@ -14869,6 +14958,7 @@ mod tests {
         // neutral; only the "Typing" word carries the session_typing color.
         let (typing0, typing1) = terminal_row_lines(
             &theme,
+            &crate::theme::Glyphs::PLAIN,
             true,
             true,
             '◝',
@@ -14893,12 +14983,22 @@ mod tests {
     fn a_standalone_terminal_row_wears_the_standalone_star_in_the_identity_tone() {
         let theme = crate::theme::Theme::default_dark();
         let (_, line2) = terminal_row_lines(
-            &theme, false, false, '◜', None, "~/notes", true, 40, 0, None,
+            &theme,
+            &crate::theme::Glyphs::PLAIN,
+            false,
+            false,
+            '◜',
+            None,
+            "~/notes",
+            true,
+            40,
+            0,
+            None,
         );
         let marker = &line2.spans[0];
         assert_eq!(
             marker.content.as_ref(),
-            format!("  {} ", crate::theme::STANDALONE_GLYPH),
+            format!("  {} ", crate::theme::Glyphs::PLAIN.standalone),
             "the standalone terminal's marker must be the standalone star"
         );
         assert_eq!(
@@ -15013,7 +15113,7 @@ mod tests {
                         .map(|x| buf[(x, y)].symbol().to_string())
                         .collect::<String>()
                 })
-                .find(|line| line.contains(crate::theme::PROJECT_GLYPH))
+                .find(|line| line.contains(crate::theme::Glyphs::PLAIN.project))
                 .expect("the agent row's line two is on screen")
         };
 
@@ -20158,7 +20258,10 @@ mod tests {
     fn fit_agent_meta_line_fits_without_truncation() {
         let out = fit_agent_meta_line(
             80,
-            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!(
+                "  {} ",
+                crate::theme::Glyphs::PLAIN.project
+            ))),
             Some(Span::raw("proj".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -20170,7 +20273,7 @@ mod tests {
         );
         assert_eq!(
             spans_text(&out),
-            format!("  {} proj · Idle", crate::theme::PROJECT_GLYPH)
+            format!("  {} proj · Idle", crate::theme::Glyphs::PLAIN.project)
         );
         assert!(!spans_text(&out).contains('…'));
     }
@@ -20179,7 +20282,10 @@ mod tests {
     fn fit_agent_meta_line_truncates_name_keeps_state_and_tabs() {
         let out = fit_agent_meta_line(
             30,
-            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!(
+                "  {} ",
+                crate::theme::Glyphs::PLAIN.project
+            ))),
             Some(Span::raw("a-very-long-project-name".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -20195,7 +20301,7 @@ mod tests {
         assert!(spans_width(&out) <= 30, "never overflows the width");
         let text = spans_text(&out);
         assert!(
-            text.starts_with(&format!("  {} ", crate::theme::PROJECT_GLYPH)),
+            text.starts_with(&format!("  {} ", crate::theme::Glyphs::PLAIN.project)),
             "marker stays: {text:?}"
         );
         assert!(text.contains("Idle"), "state word stays fixed: {text:?}");
@@ -20210,7 +20316,10 @@ mod tests {
     fn fit_agent_meta_line_shares_budget_between_name_and_branch() {
         let out = fit_agent_meta_line(
             34,
-            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!(
+                "  {} ",
+                crate::theme::Glyphs::PLAIN.project
+            ))),
             Some(Span::raw("longproject".to_string())),
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
@@ -20274,7 +20383,7 @@ mod tests {
     /// place, or, when `name` is empty, the glyph alone with no separator after
     /// it; then the idle word and `tail`.
     fn folder_line(name: &str, tail: &str) -> String {
-        let glyph = crate::theme::PROJECT_GLYPH;
+        let glyph = crate::theme::Glyphs::PLAIN.project;
         if name.is_empty() {
             format!("  {glyph} Idle{tail}")
         } else {
@@ -20373,7 +20482,10 @@ mod tests {
     fn fit_counts_line(width: u16, word: &str, branch: Option<&str>) -> String {
         spans_text(&fit_agent_meta_line(
             width,
-            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!(
+                "  {} ",
+                crate::theme::Glyphs::PLAIN.project
+            ))),
             Some(Span::raw("demo-api".to_string())),
             Span::raw(word.to_string()),
             branch.map(|b| Span::raw(b.to_string())),
@@ -20441,7 +20553,7 @@ mod tests {
     /// and the whole count do not fit.
     #[test]
     fn the_remote_count_keeps_its_number_at_every_width_with_a_branch_and_a_name() {
-        let glyph = crate::theme::PROJECT_GLYPH;
+        let glyph = crate::theme::Glyphs::PLAIN.project;
         for (width, word, want) in [
             (46, "Idle", "demo-api · Idle · age… · 3 tabs · 1 remote"),
             (33, "Idle", "d… · Idle · 3 tabs · 1 remote"),
@@ -20488,10 +20600,10 @@ mod tests {
                 }
                 out
             })
-            .find(|line| line.contains(crate::theme::PROJECT_GLYPH))
+            .find(|line| line.contains(crate::theme::Glyphs::PLAIN.project))
             .expect("the agent row's line two is on screen");
         line.split('│')
-            .find(|part| part.contains(crate::theme::PROJECT_GLYPH))
+            .find(|part| part.contains(crate::theme::Glyphs::PLAIN.project))
             .expect("the sidebar segment")
             .trim()
             .to_string()
@@ -20502,7 +20614,7 @@ mod tests {
         let mut app = with_three_tabs(narrow_row_app("demo-api"));
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
-            format!("{} demo-api · Idle", crate::theme::PROJECT_GLYPH)
+            format!("{} demo-api · Idle", crate::theme::Glyphs::PLAIN.project)
         );
     }
 
@@ -20553,7 +20665,7 @@ mod tests {
             );
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
-            format!("{} Working... · 1 …", crate::theme::PROJECT_GLYPH)
+            format!("{} Working... · 1 …", crate::theme::Glyphs::PLAIN.project)
         );
     }
 
@@ -20565,7 +20677,10 @@ mod tests {
         let fit = |width: u16| {
             spans_text(&fit_agent_meta_line(
                 width,
-                MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+                MetaMarker::name(Span::raw(format!(
+                    "  {} ",
+                    crate::theme::Glyphs::PLAIN.project
+                ))),
                 Some(Span::raw("demo-api".to_string())),
                 Span::raw("Working...".to_string()),
                 None,
@@ -20601,7 +20716,7 @@ mod tests {
         let _viewer = watched_by_one(&mut app);
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
-            format!("{} Idle · 1 remote", crate::theme::PROJECT_GLYPH)
+            format!("{} Idle · 1 remote", crate::theme::Glyphs::PLAIN.project)
         );
     }
 
@@ -20633,7 +20748,7 @@ mod tests {
                 folder_path: "/srv/notes-archive".to_string(),
             });
         app.engine.projects.clear();
-        let star = crate::theme::STANDALONE_GLYPH;
+        let star = crate::theme::Glyphs::PLAIN.standalone;
         assert_eq!(
             narrow_line_two(&app, 40),
             format!("  {star} /srv/notes-archive · Idle")
@@ -20647,14 +20762,23 @@ mod tests {
 
     #[test]
     fn a_terminal_rows_owner_label_shortens_the_same_way() {
+        // Both icon sets: every marker is one cell, so the columns the
+        // shortening lands on are the same whichever set draws them.
+        for glyphs in [&crate::theme::Glyphs::PLAIN, &crate::theme::Glyphs::NERD] {
+            assert_terminal_owner_label_shortens(glyphs);
+        }
+    }
+
+    fn assert_terminal_owner_label_shortens(glyphs: &crate::theme::Glyphs) {
         let theme = crate::theme::Theme::default_dark();
         let line_two = |owner: &str, standalone: bool, width: u16| {
             let (_, line2) = terminal_row_lines(
-                &theme, false, false, '◜', None, owner, standalone, width, 0, None,
+                &theme, glyphs, false, false, '◜', None, owner, standalone, width, 0, None,
             );
             line_text(&line2)
         };
-        let star = crate::theme::STANDALONE_GLYPH;
+        let star = glyphs.standalone;
+        let arrow = glyphs.owned_by;
         assert_eq!(
             line_two("~/notes", true, 40),
             format!("  {star} ~/notes · Idle")
@@ -20674,8 +20798,11 @@ mod tests {
         // An owner's name is cut from its end, and the arrow stays when the
         // name goes, so the row still reads as owned and the word keeps its
         // column.
-        assert_eq!(line_two("demo-api", false, 13), "  ↳ d… · Idle");
-        assert_eq!(line_two("demo-api", false, 12), "  ↳ Idle");
+        assert_eq!(
+            line_two("demo-api", false, 13),
+            format!("  {arrow} d… · Idle")
+        );
+        assert_eq!(line_two("demo-api", false, 12), format!("  {arrow} Idle"));
     }
 
     // --- fit_agent_meta_line search-hit highlighting ---
@@ -20824,17 +20951,24 @@ mod tests {
         // The totals row aggregates every target and belongs to no process.
         let pidless = stat(None, vec![process(44, true), process(45, false)]);
 
-        assert_eq!(super::resource_row_expand_indicator(&leaf, &expanded), "  ");
         assert_eq!(
-            super::resource_row_expand_indicator(&tree, &expanded),
+            super::resource_row_expand_indicator(&leaf, &expanded, &crate::theme::Glyphs::PLAIN),
+            "  "
+        );
+        assert_eq!(
+            super::resource_row_expand_indicator(&tree, &expanded, &crate::theme::Glyphs::PLAIN),
             "\u{25bc} "
         );
         assert_eq!(
-            super::resource_row_expand_indicator(&collapsed, &expanded),
+            super::resource_row_expand_indicator(
+                &collapsed,
+                &expanded,
+                &crate::theme::Glyphs::PLAIN
+            ),
             "\u{25b6} "
         );
         assert_eq!(
-            super::resource_row_expand_indicator(&pidless, &expanded),
+            super::resource_row_expand_indicator(&pidless, &expanded, &crate::theme::Glyphs::PLAIN),
             "  "
         );
     }
@@ -24399,11 +24533,11 @@ mod tests {
             let active = row_text(&buf, list, 0);
             let other = row_text(&buf, list, 1);
             assert!(
-                active.contains(super::ACTIVE_PROVIDER_MARKER),
+                active.contains(crate::theme::Glyphs::PLAIN.check),
                 "{name}: the already-active row must carry the no-op marker, got {active:?}"
             );
             assert!(
-                !other.contains(super::ACTIVE_PROVIDER_MARKER),
+                !other.contains(crate::theme::Glyphs::PLAIN.check),
                 "{name}: a row that would really change the provider must not be marked, \
                  got {other:?}"
             );
@@ -24426,7 +24560,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("auto")));
         assert!(
             rows.iter()
-                .any(|row| row.contains(super::ACTIVE_PROVIDER_MARKER))
+                .any(|row| row.contains(crate::theme::Glyphs::PLAIN.check))
         );
     }
 

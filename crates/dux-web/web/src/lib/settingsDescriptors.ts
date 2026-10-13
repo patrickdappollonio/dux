@@ -483,6 +483,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
         writeTarget: "settings",
         read: (b) => b.tab_reaches_agent ?? false,
       },
+      {
+        key: "ui.nerd_font_icons",
+        label: "Nerd Font icons",
+        description:
+          "In the terminal app, draw icons (the project mark, the standalone star, the pull-request mark, warnings, the header chips) from a Nerd Font instead of plain Unicode. Off by default. It needs a Nerd Font set as your terminal's font, or the icons show as empty boxes. The web UI draws its own icons and is unaffected.",
+        surface: "tui",
+        control: { kind: "bool" },
+        default: false,
+        writeTarget: "settings",
+        read: (b) => b.nerd_font_icons ?? false,
+      },
     ],
   },
 ]

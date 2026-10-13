@@ -5827,6 +5827,10 @@ impl App {
                 self.toggle_tab_reaches_agent();
                 Ok(())
             }
+            "toggle-nerd-font-icons" => {
+                self.toggle_nerd_font_icons();
+                Ok(())
+            }
             "help" => {
                 self.help_scroll = Some(0);
                 Ok(())

@@ -1865,6 +1865,13 @@ pub struct UiConfig {
     /// the modes and displays whatever value the other one set.
     pub agent_sort: String,
     pub theme: String,
+    /// Draw the terminal UI's icons from a Nerd Font (the project folder, the
+    /// standalone star, the pull-request mark, warnings, disclosure chevrons,
+    /// the header chips) instead of the plain Unicode set. Default false: the
+    /// glyphs only render in a terminal whose font is Nerd Font patched. The
+    /// web UI draws its own icons and is unaffected. Toggling it from the TUI's
+    /// command palette or the web's Preferences dialog persists it here.
+    pub nerd_font_icons: bool,
 }
 
 /// Terminal capability controls: what identity dux presents to an agent, and
@@ -2339,6 +2346,7 @@ impl Default for UiConfig {
             pr_banner_position: "bottom".to_string(),
             agent_sort: "active".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
+            nerd_font_icons: false,
         }
     }
 }
@@ -2993,6 +3001,7 @@ impl Default for Config {
                 pr_banner_position: "bottom".to_string(),
                 agent_sort: "active".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
+                nerd_font_icons: false,
             },
             capabilities: CapabilitiesConfig::default(),
             editor: EditorConfig::default(),

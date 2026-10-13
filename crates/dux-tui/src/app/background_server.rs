@@ -129,6 +129,7 @@ impl App {
             return None;
         }
         Some(serving_chip_label(
+            self.glyphs().serving,
             serving_port_label(&companion.urls()).as_deref(),
             companion.connections(),
         ))
@@ -1014,15 +1015,15 @@ fn serving_port_label(urls: &[String]) -> Option<String> {
 /// nothing here can honestly tell that they are the same laptop. Zero says only
 /// that a listener exists, because "0 connected" is a number nobody needs and the
 /// chip is already carrying that fact by being there at all.
-fn serving_chip_label(port: Option<&str>, connections: usize) -> String {
+fn serving_chip_label(glyph: &str, port: Option<&str>, connections: usize) -> String {
     let where_at = match port {
         Some(port) => format!("serving {port}"),
         None => "serving".to_string(),
     };
     if connections == 0 {
-        format!("● {where_at}")
+        format!("{glyph} {where_at}")
     } else {
-        format!("● {where_at} · {connections} connected")
+        format!("{glyph} {where_at} · {connections} connected")
     }
 }
 
@@ -2960,7 +2961,7 @@ pub(crate) mod tests {
             "an address with no port must not report the host as one"
         );
         assert_eq!(
-            serving_chip_label(None, 2),
+            serving_chip_label(crate::theme::DOT_GLYPH, None, 2),
             "● serving · 2 connected",
             "an unreadable port drops the address, never the count"
         );

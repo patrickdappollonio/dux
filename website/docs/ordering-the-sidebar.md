@@ -19,8 +19,8 @@ are two panes; on the web they are two labelled groups, and the Terminals group 
 collapsible. Dormant agents fold away into a collapsible "Inactive" tail. On the web the
 Terminals group sits above that tail; in the terminal UI the tail closes the Agents pane
 and Terminals is its own pane below. Every row is two lines: the name, then who it
-belongs to and what it is doing. The terminal UI looks like this (the spinner glyph
-animates while an agent works):
+belongs to and what it is doing. The terminal UI looks like this (the `※` before a
+project name marks the project, and the spinner glyph animates while an agent works):
 
 ![The terminal UI sidebar: three active agents, one of them running three tabs, and a collapsed Inactive tail.](/screens/tui-agent-list-two-line.png)
 
@@ -40,6 +40,8 @@ picked out, and the pane title counts what survived.
 > [standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have)
 > wears it over its folder and a standalone terminal wears it over its directory.
 > Anything owned keeps the `↳` arrow pointing at its owner.
+
+![The terminal UI with a standalone agent selected: its row carries a star over the folder path, and the changes panel says the folder has no git repository.](/screens/tui-standalone-star.png)
 
 ## Sorting
 

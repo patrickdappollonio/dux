@@ -36,6 +36,7 @@ const sampleBootstrap: Bootstrap = {
   agent_tabs_max: 20,
   always_show_tab_strip: true,
   tab_reaches_agent: true,
+  nerd_font_icons: true,
   attention_indicator: false,
   attention_on_bell: false,
   global_default_provider: "codex",
@@ -89,6 +90,7 @@ describe("settingsDescriptors", () => {
         "ui.attention_on_bell",
         "ui.always_show_tab_strip",
         "ui.tab_reaches_agent",
+        "ui.nerd_font_icons",
         "ui.pr_banner_position",
         "capabilities.hyperlinks",
         "ui.github_integration",
@@ -153,6 +155,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.attention_on_bell"]).toBe(false)
     expect(byKey["ui.always_show_tab_strip"]).toBe(true)
     expect(byKey["ui.tab_reaches_agent"]).toBe(true)
+    expect(byKey["ui.nerd_font_icons"]).toBe(true)
     expect(byKey["ui.pr_banner_position"]).toBe("top")
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
     expect(byKey["ui.github_integration"]).toBe(false)
@@ -289,6 +292,7 @@ describe("settingsDescriptors", () => {
       "ui.disable_automated_welcome_screen",
       "ui.disable_release_notes",
       "ui.mobile_accessory_bar",
+      "ui.nerd_font_icons",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
       "ui.tab_reaches_agent",

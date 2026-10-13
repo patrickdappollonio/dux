@@ -1433,6 +1433,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ToggleNerdFontIcons,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ToggleRandomizedPetNameDefault,
         default_keys: &[],
         scopes: &[],
@@ -3416,6 +3423,7 @@ mod tests {
             "toggle-diff-line-numbers",
             "toggle-git-pane",
             "toggle-github-integration",
+            "toggle-nerd-font-icons",
             "toggle-pr-banner-position",
             "toggle-project",
             "toggle-project-auto-reopen-agents",

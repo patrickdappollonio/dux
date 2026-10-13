@@ -79,25 +79,142 @@ pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 /// from the round status and attention dots and from the arc spinner.
 pub const TYPING_GLYPH: &str = "▍";
 
-/// The standalone identity glyph, worn (in `standalone_location_fg`) by every
-/// row whose subject lives in the user's own folder rather than a dux-managed
-/// working copy. Its rendered width is pinned to one cell by a test against the
-/// same `CellWidth` machinery the row layout measures with; do not swap the
-/// glyph without re-pinning.
-pub const STANDALONE_GLYPH: &str = "✷";
-
-/// The project glyph, worn (in the row's muted tone) ahead of the project name
-/// on a managed agent row's second line. It is U+1F5C0 FOLDER, mirroring the
-/// folder icon the web UI draws in the same place, so one picture means
-/// "project" on both surfaces.
+/// The terminal UI's icon set: every icon that has a sensible Nerd Font
+/// counterpart, in one place, so a row never names a literal glyph.
 ///
-/// The codepoint has East Asian Width "N" and no default emoji presentation,
-/// so the `CellWidth` machinery the row layout measures with counts it as one
-/// cell; a test pins that, and the bare codepoint, because an emoji variation
-/// selector would ask the host terminal for a two-cell colour emoji and shear
-/// the row. A terminal font that lacks the glyph falls back to another font
-/// for it, which is the same risk the standalone star already carries.
-pub const PROJECT_GLYPH: &str = "\u{1F5C0}";
+/// Two sets exist. `PLAIN` is the default and is what the docs and their
+/// screenshots show; it uses only ordinary Unicode a stock terminal font
+/// carries. `NERD` is the opt-in add-on (`[ui] nerd_font_icons`), drawn from
+/// Nerd Fonts v3 codepoints and only legible in a terminal whose font is Nerd
+/// Font patched. Rendering picks the set from the live config on every frame
+/// through [`Glyphs::for_config`], so a toggle or a reload takes effect on the
+/// next frame with no cached copy to refresh.
+///
+/// Every glyph in both sets is a single codepoint that the `CellWidth`
+/// machinery the row layout advances columns with measures as exactly one
+/// cell; a test loops over both sets. The Nerd codepoints all sit in the
+/// Private Use Areas, whose East Asian Width is ambiguous, which that
+/// machinery (like the plain set's own `※`) counts as one.
+///
+/// Deliberately NOT here, because they are the same in both sets: the
+/// working spinner, the status and attention dots, the typing caret, scroll
+/// markers, the ellipsis and box drawing. Those are state cues whose shape
+/// the working-cue and attention tenets pin, not icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Glyphs {
+    /// Ahead of the project name on a managed agent row's second line.
+    pub project: &'static str,
+    /// The standalone identity mark, worn (in `standalone_location_fg`) by
+    /// every row whose subject lives in the user's own folder rather than a
+    /// dux-managed working copy.
+    pub standalone: &'static str,
+    /// The "owned by" mark on a session- or project-owned terminal row.
+    pub owned_by: &'static str,
+    /// The pull-request mark: the sidebar badge and the PR banner.
+    pub pull_request: &'static str,
+    /// A warning: a missing project path, a removed project, a missing
+    /// working copy, an unavailable `gh`.
+    pub warning: &'static str,
+    /// A success check: the provider already in effect, a working `gh`.
+    pub check: &'static str,
+    /// A disclosure control that is closed (the Inactive divider, a folder in
+    /// the Changes tree, a resource-monitor row with a breakdown).
+    pub collapsed: &'static str,
+    /// The same disclosure control, open.
+    pub expanded: &'static str,
+    /// The resource monitor's row disclosure, closed. A heavier shape than
+    /// `collapsed` in the plain set, because it heads a table row.
+    pub monitor_collapsed: &'static str,
+    /// The resource monitor's row disclosure, open.
+    pub monitor_expanded: &'static str,
+    /// The header's serving chip.
+    pub serving: &'static str,
+    /// The header's running-terminals chip.
+    pub terminals: &'static str,
+}
+
+impl Glyphs {
+    /// The default set: plain Unicode a stock terminal font carries.
+    pub const PLAIN: Glyphs = Glyphs {
+        // U+203B REFERENCE MARK. The folder emoji (U+1F5C0) it replaced is
+        // missing from the stock macOS terminal fonts.
+        project: "\u{203B}",
+        // U+2737 EIGHT POINTED RECTILINEAR BLACK STAR.
+        standalone: "\u{2737}",
+        // U+21B3 DOWNWARDS ARROW WITH TIP RIGHTWARDS.
+        owned_by: "\u{21B3}",
+        // U+2387 ALTERNATIVE KEY SYMBOL: reads as a branch fork and stays one
+        // cell, where the letters "PR" would cost two.
+        pull_request: "\u{2387}",
+        // U+26A0 WARNING SIGN, bare (no emoji variation selector).
+        warning: "\u{26A0}",
+        // U+2713 CHECK MARK.
+        check: "\u{2713}",
+        // U+25B8 / U+25BE small right- and down-pointing triangles.
+        collapsed: "\u{25B8}",
+        expanded: "\u{25BE}",
+        // U+25B6 / U+25BC full-size triangles.
+        monitor_collapsed: "\u{25B6}",
+        monitor_expanded: "\u{25BC}",
+        serving: DOT_GLYPH,
+        terminals: DOT_GLYPH,
+    };
+
+    /// The opt-in Nerd Font set (Nerd Fonts v3). Each codepoint is named after
+    /// its entry in the official `glyphnames.json`; none sits in the
+    /// U+F500-U+FD46 range v3 retired.
+    pub const NERD: Glyphs = Glyphs {
+        // nf-fa-folder
+        project: "\u{F07B}",
+        // nf-fa-star
+        standalone: "\u{F005}",
+        // nf-md-subdirectory_arrow_right
+        owned_by: "\u{F060D}",
+        // nf-oct-git_pull_request
+        pull_request: "\u{F407}",
+        // nf-fa-triangle_exclamation (alias nf-fa-exclamation_triangle)
+        warning: "\u{F071}",
+        // nf-fa-check
+        check: "\u{F00C}",
+        // nf-oct-chevron_right / nf-oct-chevron_down
+        collapsed: "\u{F460}",
+        expanded: "\u{F47C}",
+        // The same chevrons: the Nerd set has one disclosure picture.
+        monitor_collapsed: "\u{F460}",
+        monitor_expanded: "\u{F47C}",
+        // nf-fa-server
+        serving: "\u{F233}",
+        // nf-oct-terminal
+        terminals: "\u{F489}",
+    };
+
+    /// The set the live `[ui] nerd_font_icons` value selects.
+    pub fn for_config(nerd_font_icons: bool) -> &'static Glyphs {
+        if nerd_font_icons {
+            &Self::NERD
+        } else {
+            &Self::PLAIN
+        }
+    }
+
+    /// Every glyph in the set, labelled, for tests that must cover them all.
+    pub fn all(&self) -> [(&'static str, &'static str); 12] {
+        [
+            ("project", self.project),
+            ("standalone", self.standalone),
+            ("owned_by", self.owned_by),
+            ("pull_request", self.pull_request),
+            ("warning", self.warning),
+            ("check", self.check),
+            ("collapsed", self.collapsed),
+            ("expanded", self.expanded),
+            ("monitor_collapsed", self.monitor_collapsed),
+            ("monitor_expanded", self.monitor_expanded),
+            ("serving", self.serving),
+            ("terminals", self.terminals),
+        ]
+    }
+}
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
@@ -865,36 +982,60 @@ mod tests {
         );
     }
 
-    /// The standalone star must occupy exactly one terminal cell, measured
-    /// through the same `CellWidth` trait the row layout advances columns
-    /// with (ratatui-core over unicode-width), not through an assumption
-    /// about the codepoint. A wide or ambiguous-wide glyph would shear every
-    /// row that carries it; this pin is the gate for ever changing the glyph.
+    /// Every icon in BOTH sets must be a single bare codepoint that occupies
+    /// exactly one terminal cell, measured through the same `CellWidth` trait
+    /// the row layout advances columns with (ratatui-core over unicode-width),
+    /// not through an assumption about the codepoint. A wide glyph, or a
+    /// variation selector asking the host for a two-cell emoji, would shear
+    /// every row that carries it; this pin is the gate for changing any glyph.
     #[test]
-    fn the_standalone_glyph_measures_one_cell_wide() {
+    fn every_glyph_in_both_sets_is_one_bare_codepoint_one_cell_wide() {
         use ratatui::buffer::CellWidth;
-        assert_eq!(
-            STANDALONE_GLYPH.cell_width(),
-            1,
-            "the standalone glyph must be one cell wide in the width machinery the rows trust"
-        );
+        for (set_name, set) in [("plain", Glyphs::PLAIN), ("nerd", Glyphs::NERD)] {
+            for (name, glyph) in set.all() {
+                assert_eq!(
+                    glyph.chars().count(),
+                    1,
+                    "{set_name} {name} must be one bare codepoint: {glyph:?}"
+                );
+                assert_eq!(
+                    glyph.cell_width(),
+                    1,
+                    "{set_name} {name} must be one cell wide in the width machinery the rows trust"
+                );
+            }
+        }
     }
 
-    /// The project folder glyph is pinned the same way as the standalone
-    /// star: one cell in the `CellWidth` machinery the row layout advances
-    /// columns with. It must also be the bare codepoint, U+1F5C0 alone: an
-    /// emoji variation selector would ask the host terminal for a two-cell
-    /// colour emoji the width machinery still counts as one.
+    /// The plain set is the default the docs describe, so its identity marks
+    /// are pinned by codepoint: the reference mark for a project (the folder
+    /// emoji it replaced does not render in the stock macOS fonts) and the
+    /// eight-pointed star for a standalone row.
     #[test]
-    fn the_project_glyph_is_a_bare_folder_that_measures_one_cell_wide() {
-        use ratatui::buffer::CellWidth;
-        assert_eq!(PROJECT_GLYPH, "\u{1F5C0}", "the bare FOLDER codepoint");
-        assert_eq!(PROJECT_GLYPH.chars().count(), 1, "no variation selector");
-        assert_eq!(
-            PROJECT_GLYPH.cell_width(),
-            1,
-            "the project glyph must be one cell wide in the width machinery the rows trust"
-        );
+    fn the_plain_set_marks_a_project_with_the_reference_mark() {
+        assert_eq!(Glyphs::PLAIN.project, "\u{203B}");
+        assert_eq!(Glyphs::PLAIN.standalone, "\u{2737}");
+        assert_eq!(Glyphs::for_config(false), &Glyphs::PLAIN);
+    }
+
+    /// The Nerd set is pinned against the official glyph names, must stay
+    /// clear of U+F500-U+FD46 (the Material Design range Nerd Fonts v3
+    /// retired, which draws nothing in a current font), and must differ from
+    /// the plain set glyph for glyph, or that icon does not belong in the set.
+    #[test]
+    fn the_nerd_set_uses_current_nerd_font_codepoints() {
+        assert_eq!(Glyphs::NERD.project, "\u{F07B}", "nf-fa-folder");
+        assert_eq!(Glyphs::NERD.standalone, "\u{F005}", "nf-fa-star");
+        assert_eq!(Glyphs::for_config(true), &Glyphs::NERD);
+        let plain = Glyphs::PLAIN.all();
+        for (index, (name, glyph)) in Glyphs::NERD.all().into_iter().enumerate() {
+            let cp = glyph.chars().next().unwrap() as u32;
+            assert!(
+                !(0xF500..=0xFD46).contains(&cp),
+                "nerd {name} uses retired codepoint U+{cp:X}"
+            );
+            assert_ne!(glyph, plain[index].1, "nerd {name} matches the plain glyph");
+        }
     }
 
     /// A modal that refuses an outside click flashes its border ring from

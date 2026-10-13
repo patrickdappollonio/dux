@@ -608,6 +608,15 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // value; the row is there so it can be changed from a browser.
     },
     PaletteCommand {
+        action: Action::ToggleNerdFontIcons,
+        name: "toggle-nerd-font-icons",
+        description: "Toggle Nerd Font icons (needs a patched Nerd Font)",
+        // TUI-only: the web draws its own icons, so the web app menu gets no
+        // entry. The web exposes the value as a PREFERENCE row
+        // (ui.nerd_font_icons in the Preferences dialog's terminal-UI group) so
+        // it can still be changed from a browser.
+    },
+    PaletteCommand {
         action: Action::ToggleRandomizedPetNameDefault,
         name: "toggle-randomized-pet-name-default",
         description: "Toggle whether new agent prompts start with a random pet name",
