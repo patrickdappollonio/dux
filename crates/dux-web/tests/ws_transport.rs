@@ -1215,6 +1215,41 @@ async fn tabs_of_one_browser_count_once_but_still_block_each_other() {
     assert_eq!(status, 409, "the other tab is in the way: {refused}");
 }
 
+/// A terminal socket the server cannot link to its tab's events connection (it
+/// named none, as one opened before the tab's id arrived does) still counts as
+/// the browser it names, so the tab and its terminal are one browser; one that
+/// names no browser counts as a browser of its own.
+#[tokio::test]
+async fn an_unlinked_terminal_socket_counts_as_the_browser_it_names() {
+    let (addr, _tmp) = boot().await;
+    let laptop = "0123456789abcdef0123456789abcdef";
+    let (_events, _tab) =
+        connect_events_at(addr, &format!("/ws/events?browser={laptop}"), "dux-ua").await;
+    let _pty = connect_pty_as(
+        addr,
+        &format!("/ws/sessions/s1/pty?browser={laptop}"),
+        "dux-ua",
+    )
+    .await;
+    let remote_viewers = || async {
+        let sessions: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/sessions"))
+            .await
+            .expect("GET sessions")
+            .json()
+            .await
+            .unwrap();
+        sessions
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == "s1"))
+            .expect("s1 is listed")["remote_viewers"]
+            .clone()
+    };
+    assert_eq!(remote_viewers().await, 1, "the tab and its terminal are one browser");
+
+    let _anonymous = connect_pty_as(addr, "/ws/sessions/s1/pty", "dux-ua").await;
+    assert_eq!(remote_viewers().await, 2, "a socket naming no browser is its own");
+}
+
 /// A phone whose terminal socket was lost while its owner was looking at it
 /// (the last beat said so) still protects that agent for the grace, even once
 /// its events socket is reaped too; one whose page was not being looked at

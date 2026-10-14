@@ -11,6 +11,7 @@ import {
   terminalSocketUrl,
 } from "./ptySocket"
 import { setAppSocketGivenUp } from "./appSocketGiveUp"
+import { browserId } from "./browserId"
 import { noteConnectionIdPending, setConnectionId } from "./connection"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import type { ConnState } from "./types"
@@ -161,8 +162,23 @@ describe("PtySocket", () => {
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()
     const ws = last()
-    expect(ws.url).toBe("ws://x/ws/sessions/s1/pty")
+    expect(ws.url).toBe(`ws://x/ws/sessions/s1/pty?browser=${encodeURIComponent(browserId())}`)
     expect(ws.binaryType).toBe("arraybuffer")
+  })
+
+  it("names this browser on every open, linked to the tab's events connection or not", () => {
+    vi.useFakeTimers()
+    const browser = encodeURIComponent(browserId())
+    setConnectionId(null)
+    const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
+    sock.connect()
+    expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?browser=${browser}`)
+    last().open()
+    setConnectionId("e1")
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(600)
+    expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?events=e1&browser=${browser}`)
+    setConnectionId(null)
   })
 
   it("names this tab's events connection on every open, the one it has at that moment", () => {
@@ -170,12 +186,13 @@ describe("PtySocket", () => {
     setConnectionId("e/1")
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()
-    expect(last().url).toBe("ws://x/ws/sessions/s1/pty?events=e%2F1")
+    const browser = `browser=${encodeURIComponent(browserId())}`
+    expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?events=e%2F1&${browser}`)
     last().open()
     setConnectionId("e2")
     last().triggerClose(1006)
     vi.advanceTimersByTime(600)
-    expect(last().url).toBe("ws://x/ws/sessions/s1/pty?events=e2")
+    expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?events=e2&${browser}`)
     setConnectionId(null)
   })
 
@@ -183,11 +200,12 @@ describe("PtySocket", () => {
     vi.useFakeTimers()
     setConnectionId(null)
     noteConnectionIdPending()
+    const browser = `browser=${encodeURIComponent(browserId())}`
     const first = new PtySocket("ws://x/ws/sessions/s1/pty")
     first.connect()
     expect(FakeWS.instances.length).toBe(0)
     setConnectionId("e7")
-    expect(last().url).toBe("ws://x/ws/sessions/s1/pty?events=e7")
+    expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?events=e7&${browser}`)
 
     setConnectionId(null)
     noteConnectionIdPending()
@@ -196,7 +214,7 @@ describe("PtySocket", () => {
     vi.advanceTimersByTime(999)
     expect(FakeWS.instances.length).toBe(1)
     vi.advanceTimersByTime(1)
-    expect(last().url).toBe("ws://x/ws/sessions/s2/pty")
+    expect(last().url).toBe(`ws://x/ws/sessions/s2/pty?${browser}`)
   })
 
   it("records connection id and replay generation from the connected frame", () => {

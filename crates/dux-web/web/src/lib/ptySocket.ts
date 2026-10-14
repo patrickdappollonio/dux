@@ -17,7 +17,9 @@
 //     and is the only frame this client sends while it knows it is not the owner.
 //   - Close = detach.
 //   - Every open names this tab's events connection as `?events=<id>`, waiting up to
-//     `CONNECTION_ID_WAIT_MS` for one, so the tab is never in its own way.
+//     `CONNECTION_ID_WAIT_MS` for one, so the tab is never in its own way, and
+//     this browser as `?browser=<id>`, so a socket the server cannot link to the
+//     tab (none yet, or one it no longer knows) still counts as this browser.
 //
 // Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at
@@ -32,6 +34,7 @@
 import { assertNever } from "./assertNever"
 import { wsUrl } from "./apiBase"
 import { authPaused } from "./authGate"
+import { browserId } from "./browserId"
 import { awaitingConnectionId, getConnectionId, onConnectionIdSettled } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { appSocketGivenUp } from "./appSocketGiveUp"
@@ -167,13 +170,16 @@ export class PtySocket extends ReconnectingSocket {
     }
   }
 
-  // Names this tab's events connection (see the protocol notes above). None
-  // yet, or none right now, and the socket opens as a connection of its own.
+  // Names this tab's events connection and this browser (see the protocol
+  // notes above). No events id yet, or none right now, and the socket opens as a
+  // connection of its own, still counted as this browser.
   protected override openUrl(): string {
+    const params: string[] = []
     const events = getConnectionId()
-    if (events === null) return this.url
+    if (events !== null) params.push(`events=${encodeURIComponent(events)}`)
+    params.push(`browser=${encodeURIComponent(browserId())}`)
     const separator = this.url.includes("?") ? "&" : "?"
-    return `${this.url}${separator}events=${encodeURIComponent(events)}`
+    return `${this.url}${separator}${params.join("&")}`
   }
 
   // A lifecycle close (`pagehide`) keeps the gate subscription, as it keeps the
