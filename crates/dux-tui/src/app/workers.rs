@@ -117,6 +117,7 @@ impl App {
         // `StatusOpCompleted`), so fold it in on the same tick.
         self.drain_notes_fetch();
         self.drain_unpushed_count();
+        self.drain_rename_pushed_probe();
         self.drain_branch_listing();
         self.drain_pending_diff();
         self.drain_changes_tree_work();

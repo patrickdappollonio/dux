@@ -9062,11 +9062,13 @@ impl App {
 
     fn render_rename_session_prompt(&mut self, frame: &mut Frame) {
         let PromptState::RenameSession {
+            session_id,
             input,
             rename_branch,
             focus,
             branch_named,
-            ..
+            open_pr,
+            pushed,
         } = &self.prompt
         else {
             return;
@@ -9081,6 +9083,35 @@ impl App {
             .state(checkbox_state);
         let dialog_width = 62.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
+        // The line under the box says what ticking it does, warns when the
+        // branch has an open pull request or a pushed copy that would stay on
+        // the old name, and, with the box ticked and the name empty, says why
+        // the dialog will not confirm.
+        let note = if *branch_named {
+            let branch = self
+                .engine
+                .sessions
+                .iter()
+                .find(|s| s.id == *session_id)
+                .and_then(|s| s.branch_name())
+                .unwrap_or_default();
+            let (prose, warns) = if *rename_branch && input.text.trim().is_empty() {
+                (Prose::new().text(RENAME_BRANCH_NEEDS_A_NAME), true)
+            } else {
+                (
+                    dux_core::engine::rename_branch_note_prose(branch, *open_pr, *pushed),
+                    open_pr.is_some() || *pushed,
+                )
+            };
+            let style = Style::default().fg(if warns {
+                self.theme.warning_fg
+            } else {
+                self.theme.hint_desc_fg
+            });
+            self.hanging_prose_lines(&prose, style, Checkbox::indent(), inner_width)
+        } else {
+            Vec::new()
+        };
         // A standalone agent has no branch, so the checkbox is ABSENT
         // rather than present-and-inert, and the modal shrinks to the
         // one control it really has.
@@ -9092,7 +9123,7 @@ impl App {
                     checkbox.label_style(Style::default()),
                 )
                 .height
-                .saturating_add(1)
+                .saturating_add(note.len() as u16)
         } else {
             0
         };
@@ -9119,7 +9150,11 @@ impl App {
             .areas(inner);
 
         Paragraph::new(Line::from(Span::styled(
-            " Enter a new name (empty to reset):",
+            if *branch_named {
+                " Name (leave empty to show the branch name):"
+            } else {
+                " Name (leave empty to show the folder's name):"
+            },
             Style::default().fg(self.theme.input_label_fg),
         )))
         .render(label_area, frame.buffer_mut());
@@ -9134,7 +9169,7 @@ impl App {
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
         let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_field(
+        let mut field = render_single_line_field(
             " ",
             &input.text,
             input.cursor,
@@ -9142,25 +9177,36 @@ impl App {
             self.theme.input_cursor_bg,
             input_focused,
             input_inner.width,
-        ))
-        .block(input_block)
-        .render(input_area, frame.buffer_mut());
+        );
+        // What an empty name falls back to, shown where the name would be.
+        if input.text.is_empty()
+            && let Some(placeholder) = input.placeholder()
+        {
+            field.spans.push(Span::styled(
+                placeholder.to_string(),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+        Paragraph::new(field)
+            .block(input_block)
+            .render(input_area, frame.buffer_mut());
 
         let checkbox_rect = if *branch_named {
-            let (rect, _) = self.render_overlay_checkbox(
+            let (rect, height) = self.render_overlay_checkbox(
                 frame,
                 checkbox_area,
                 "Also rename the git branch",
                 *rename_branch,
                 checkbox_state,
-                Some(Line::from(Span::styled(
-                    format!(
-                        "{}Open PRs will still reference the old branch name",
-                        Checkbox::indent()
-                    ),
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ))),
+                None,
             );
+            let note_area = Rect {
+                y: checkbox_area.y.saturating_add(height),
+                height: checkbox_area.height.saturating_sub(height),
+                ..checkbox_area
+            }
+            .intersection(frame.area());
+            Paragraph::new(note).render(note_area, frame.buffer_mut());
             Some(rect)
         } else {
             None
@@ -13013,6 +13059,12 @@ pub(super) fn single_line_scroll(
 /// The single-line field renderer for a field `width` cells wide: the text is
 /// drawn from [`single_line_scroll`], so a caret at the end of a long line is
 /// still on screen. Every single-line field draws through this.
+/// Why the rename dialog will not confirm with the branch box ticked and the
+/// name empty: an empty name resets the label, and no branch can be renamed to
+/// nothing.
+const RENAME_BRANCH_NEEDS_A_NAME: &str =
+    "Type a name to rename the branch to. An empty name only resets the agent's name.";
+
 fn render_single_line_field(
     prefix: &str,
     text: &str,
@@ -14410,6 +14462,80 @@ mod tests {
         assert!(
             rendered.contains("Also rename the git branch"),
             "a managed agent's rename still offers the branch checkbox; got:\n{rendered}"
+        );
+    }
+
+    /// An empty standalone name shows the folder's name as what it falls back
+    /// to, and the field label says so.
+    #[test]
+    fn the_standalone_rename_modal_shows_the_folder_name_an_empty_name_resets_to() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.engine.sessions[0].title = None;
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/My Notes".to_string(),
+            });
+        app.open_rename_session().expect("open the rename modal");
+        let rows = rename_modal_rows(&mut app);
+        assert!(
+            rows.contains("leave empty to show the folder's name"),
+            "{rows}"
+        );
+        assert!(rows.contains("My Notes"), "the placeholder: {rows}");
+    }
+
+    /// Paint the screen with the rename modal up and return it as one string.
+    fn rename_modal_rows(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        buffer_rows(terminal.backend().buffer()).join("\n")
+    }
+
+    /// The row under the branch box: a neutral description normally, a warning
+    /// naming what stays on the old name when the branch has an open pull
+    /// request or a pushed copy, and the reason the dialog will not confirm when
+    /// the box is ticked with an empty name.
+    #[test]
+    fn the_rename_modal_warns_about_what_a_branch_rename_leaves_behind() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.open_rename_session().expect("open the rename modal");
+        let rows = rename_modal_rows(&mut app);
+        assert!(rows.contains("agent-branch"), "{rows}");
+        assert!(rows.contains("to the new name."), "neutral: {rows}");
+        assert!(!rows.contains("old name"), "no warning: {rows}");
+
+        let set = |app: &mut App, pr: Option<u64>, was_pushed: bool| {
+            if let PromptState::RenameSession {
+                open_pr, pushed, ..
+            } = &mut app.prompt
+            {
+                *open_pr = pr;
+                *pushed = was_pushed;
+            }
+        };
+        set(&mut app, Some(42), false);
+        let rows = rename_modal_rows(&mut app);
+        assert!(rows.contains("#42"), "{rows}");
+        assert!(rows.contains("stays on the old name."), "{rows}");
+
+        set(&mut app, None, true);
+        let rows = rename_modal_rows(&mut app);
+        assert!(rows.contains("keeps the old name."), "{rows}");
+        assert!(!rows.contains("#42"), "{rows}");
+
+        if let PromptState::RenameSession { rename_branch, .. } = &mut app.prompt {
+            *rename_branch = true;
+        }
+        let rows = rename_modal_rows(&mut app);
+        assert!(
+            rows.contains("Type a name to rename the branch to."),
+            "an empty name with the box ticked says why it cannot confirm: {rows}"
         );
     }
 
@@ -23220,6 +23346,8 @@ mod tests {
                 rename_branch,
                 focus: RenameSessionFocus::RenameBranchCheckbox,
                 branch_named: true,
+                open_pr: None,
+                pushed: false,
             },
             other => panic!("expected RenameSession, got {other:?}"),
         };
@@ -23652,6 +23780,8 @@ mod tests {
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         }
     }
 
@@ -23989,6 +24119,8 @@ mod tests {
             rename_branch: false,
             focus,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         }
     }
 
@@ -25685,6 +25817,8 @@ mod tests {
             rename_branch: false,
             focus: RenameSessionFocus::RenameBranchCheckbox,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         let screen = rendered_screen(&mut app);
         assert!(

@@ -1179,6 +1179,8 @@ pub(super) mod tests {
                     rename_branch: false,
                     focus: RenameSessionFocus::Input,
                     branch_named: true,
+                    open_pr: None,
+                    pushed: false,
                 },
             ),
             (
@@ -1700,6 +1702,8 @@ pub(super) mod tests {
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         let (width, height) = (80, 30);
         let baseline = painted_buffer(&mut app, PromptState::None, width, height);

@@ -170,7 +170,12 @@ import type {
   StartupLogEntry,
   TerminalView,
 } from "./types"
-import { workspaceProjectId } from "@/lib/agentWorkspace"
+import { supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
+import {
+  renameBlockedReason,
+  renameDraftValue,
+  renamePayload,
+} from "@/lib/renameAgent"
 
 // Who a companion terminal belongs to, defined in `lib/terminalOwner.ts`
 // alongside the exhaustive switches that consume it and re-exported here for
@@ -609,6 +614,8 @@ export interface DuxState {
   // title (or empty, so the placeholder shows the branch name).
   renameTarget: string | null
   renameDraft: string
+  // The dialog's "Also rename the git branch" box, unticked on every open.
+  renameBranch: boolean
   // The session pending a provider swap, or null. The dialog pre-selects the
   // session's current provider; the swap takes effect on the next launch
   // (mirroring the TUI's `change-agent-provider`, which never kills a running
@@ -1101,6 +1108,7 @@ let state: DuxState = {
   createAgentTarget: null,
   renameTarget: null,
   renameDraft: "",
+  renameBranch: false,
   changeProviderTarget: null,
   attachPullRequestTarget: null,
   attachPullRequestDraft: "",
@@ -5221,33 +5229,46 @@ export function deleteSession(
 }
 
 // Open the rename dialog for a session, pre-filling the current custom title
-// (empty when none, so the placeholder shows the branch name).
+// (empty when none, so the placeholder shows the branch or folder name).
 export function openRename(sessionId: string): void {
   const session = state.spine?.sessions.find((s) => s.id === sessionId)
-  setState({ renameTarget: sessionId, renameDraft: session?.title ?? "" })
+  setState({
+    renameTarget: sessionId,
+    renameDraft: session?.title ?? "",
+    renameBranch: false,
+  })
 }
 
 export function closeRename(): void {
-  setState({ renameTarget: null, renameDraft: "" })
+  setState({ renameTarget: null, renameDraft: "", renameBranch: false })
+}
+
+// Whether the agent being renamed has a branch its name can become. An agent
+// the spine no longer has is treated as having one, the stricter reading.
+function renameTargetBranchNamed(): boolean {
+  const session = state.spine?.sessions.find((s) => s.id === state.renameTarget)
+  return session ? supportsBranchGit(session.workspace) : true
 }
 
 export function setRenameDraft(raw: string): void {
-  // Sanitize like the new-agent input: a custom title is validated as an agent
-  // name server-side, so keep the dialog from accepting characters the server
-  // would reject. Empty stays empty (clears the title back to the branch name).
-  setState({ renameDraft: sanitizeAgentName(raw) })
+  setState({ renameDraft: renameDraftValue(raw, renameTargetBranchNamed()) })
 }
 
-// Ask the server to set a session's display title. An empty title clears it
-// back to the branch name; a non-empty title is validated server-side. Resolves
-// `true` on success, `false` (after toasting) on failure, so the rename dialog can
-// stay open and preserve the user's input when the PATCH is rejected.
+export function setRenameBranch(renameBranch: boolean): void {
+  setState({ renameBranch })
+}
+
+// Ask the server to rename an agent, and its git branch when `renameBranch`. An
+// empty title clears the custom name. Resolves `true` on success, `false` (after
+// toasting the server's refusal) on failure, so the dialog can stay open and keep
+// what the user typed. A branch rename's outcome arrives later as a status.
 export async function renameSession(
   sessionId: string,
   title: string,
+  renameBranch = false,
 ): Promise<boolean> {
   try {
-    await sessionsApi.patch(sessionId, { title })
+    await sessionsApi.patch(sessionId, { title, rename_branch: renameBranch })
     return true
   } catch (e) {
     notifyError(e instanceof Error ? e.message : "Could not rename the session.")
@@ -5261,7 +5282,10 @@ export async function renameSession(
 export async function submitRename(): Promise<void> {
   const id = state.renameTarget
   if (!id) return
-  if (await renameSession(id, state.renameDraft.trim())) closeRename()
+  const branchNamed = renameTargetBranchNamed()
+  if (renameBlockedReason(state.renameDraft, state.renameBranch, branchNamed)) return
+  const body = renamePayload(state.renameDraft, state.renameBranch, branchNamed)
+  if (await renameSession(id, body.title, body.rename_branch)) closeRename()
 }
 
 // Open the attach-pull-request dialog for a session with an empty draft. The

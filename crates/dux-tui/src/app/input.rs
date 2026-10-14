@@ -5416,6 +5416,7 @@ impl App {
                     session_id,
                     input,
                     rename_branch,
+                    branch_named,
                     ..
                 } = &self.prompt
                 else {
@@ -5423,7 +5424,15 @@ impl App {
                 };
                 let id = session_id.clone();
                 let new_name = input.text.clone();
-                let also_rename_branch = *rename_branch;
+                let also_rename_branch = *rename_branch && *branch_named;
+                // The dialog stays up, and says why, rather than closing on a
+                // refusal the user would then have to open it again to fix.
+                if also_rename_branch && new_name.trim().is_empty() {
+                    self.set_error(dux_core::engine::branch_rename_refusal(
+                        &dux_core::engine::BranchRenameRejection::EmptyName,
+                    ));
+                    return Some(false);
+                }
                 self.prompt = PromptState::None;
                 self.apply_rename_session(&id, new_name, also_rename_branch);
             }
@@ -14505,6 +14514,8 @@ not_a_real_action = ["x"]
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         app.input_target = InputTarget::Agent;
 
@@ -14529,6 +14540,8 @@ not_a_real_action = ["x"]
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
@@ -14552,6 +14565,8 @@ not_a_real_action = ["x"]
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -15176,6 +15191,8 @@ not_a_real_action = ["x"]
             rename_branch: true,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         // Tab moves focus onto the checkbox, leaving its value alone.
@@ -15238,6 +15255,8 @@ not_a_real_action = ["x"]
             rename_branch: true,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -15273,6 +15292,8 @@ not_a_real_action = ["x"]
             rename_branch: true,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
@@ -15309,6 +15330,8 @@ not_a_real_action = ["x"]
                 rename_branch: true,
                 focus: RenameSessionFocus::RenameBranchCheckbox,
                 branch_named: true,
+                open_pr: None,
+                pushed: false,
             };
 
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -15343,6 +15366,8 @@ not_a_real_action = ["x"]
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         install_rename_overlay(&mut app);
 
@@ -15386,6 +15411,8 @@ not_a_real_action = ["x"]
             rename_branch: true,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
@@ -15434,6 +15461,8 @@ not_a_real_action = ["x"]
             rename_branch: true,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
 
         for c in ['h', 'l'] {
@@ -15454,18 +15483,135 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// The dialog opens with the branch box UNTICKED, the field holding the
+    /// custom name (empty when there is none) and the branch name as the
+    /// placeholder an empty name falls back to.
     #[test]
-    fn open_rename_session_initializes_rename_branch_true() {
+    fn open_rename_session_starts_unticked_with_the_custom_name() {
         let mut app = test_app(default_bindings());
 
         app.open_rename_session().unwrap();
-
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => {
-                assert!(*rename_branch, "rename_branch should default to true");
+            PromptState::RenameSession {
+                rename_branch,
+                input,
+                ..
+            } => {
+                assert!(!*rename_branch, "the branch box starts unticked");
+                assert_eq!(input.text, "", "no custom name, so nothing to edit");
+                assert_eq!(input.placeholder(), Some("agent-branch"));
             }
             other => panic!("expected RenameSession, got {other:?}"),
         }
+
+        app.engine.sessions[0].title = Some("shiny".to_string());
+        app.open_rename_session().unwrap();
+        match &app.prompt {
+            PromptState::RenameSession { input, .. } => assert_eq!(input.text, "shiny"),
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    /// An empty name confirms as a reset: the custom name is cleared and the
+    /// label is the branch name again.
+    #[test]
+    fn an_empty_rename_resets_the_label_to_the_branch() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].title = Some("shiny".to_string());
+        app.open_rename_session().unwrap();
+        if let PromptState::RenameSession { input, .. } = &mut app.prompt {
+            *input = TextInput::with_text(String::new());
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None), "the dialog closed");
+        assert_eq!(app.engine.sessions[0].title, None);
+        assert_eq!(app.engine.sessions[0].display_label(), "agent-branch");
+        assert!(
+            app.status.text().contains("branch name \"agent-branch\""),
+            "the status names what the label fell back to: {}",
+            app.status.text()
+        );
+    }
+
+    /// With the branch box ticked an empty name cannot confirm: the dialog
+    /// stays up and the status line says why, and nothing is renamed.
+    #[test]
+    fn an_empty_name_with_the_branch_box_ticked_keeps_the_dialog_open() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].title = Some("shiny".to_string());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text(String::new()),
+            rename_branch: true,
+            focus: RenameSessionFocus::Input,
+            branch_named: true,
+            open_pr: None,
+            pushed: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(
+            matches!(app.prompt, PromptState::RenameSession { .. }),
+            "the dialog stays open"
+        );
+        assert_eq!(
+            app.status.text(),
+            dux_core::engine::branch_rename_refusal(
+                &dux_core::engine::BranchRenameRejection::EmptyName
+            )
+        );
+        assert_eq!(app.engine.sessions[0].title.as_deref(), Some("shiny"));
+    }
+
+    /// The dialog knows the open pull request from the sync dux already runs,
+    /// and folds in the background answer about a pushed copy only for the
+    /// agent it asked about.
+    #[test]
+    fn the_rename_dialog_learns_the_open_pull_request_and_the_pushed_answer() {
+        let mut app = test_app(default_bindings());
+        app.engine.pr_statuses.insert(
+            "session-1".to_string(),
+            dux_core::model::PrInfo {
+                number: 42,
+                state: dux_core::model::PrState::Open,
+                title: "Login".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                url: "https://github.com/o/r/pull/42".to_string(),
+            },
+        );
+        app.open_rename_session().unwrap();
+        assert!(matches!(
+            app.prompt,
+            PromptState::RenameSession {
+                open_pr: Some(42),
+                ..
+            }
+        ));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.rename_pushed_rx = Some(rx);
+        tx.send(("someone-else".to_string(), true)).unwrap();
+        app.drain_rename_pushed_probe();
+        assert!(matches!(
+            app.prompt,
+            PromptState::RenameSession { pushed: false, .. }
+        ));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.rename_pushed_rx = Some(rx);
+        tx.send(("session-1".to_string(), true)).unwrap();
+        app.drain_rename_pushed_probe();
+        assert!(matches!(
+            app.prompt,
+            PromptState::RenameSession { pushed: true, .. }
+        ));
+        assert!(app.rename_pushed_rx.is_none(), "one answer, then done");
     }
 
     #[test]
@@ -28585,6 +28731,8 @@ cyan = "#00ffff"
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         install_rename_overlay(&mut app);
 
@@ -28608,6 +28756,8 @@ cyan = "#00ffff"
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         install_rename_overlay(&mut app);
 
@@ -35069,6 +35219,8 @@ cyan = "#00ffff"
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         app.handle_paste("new name");
         if let PromptState::RenameSession { input, .. } = &app.prompt {
@@ -36841,6 +36993,8 @@ cyan = "#00ffff"
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         };
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");

@@ -295,6 +295,9 @@ pub struct App {
     /// when the dialog opens on branches its warning would say something about,
     /// cleared by `drain_unpushed_count` when the answer lands.
     pub(crate) unpushed_count_rx: Option<mpsc::Receiver<UnpushedCountAnswer>>,
+    /// The rename dialog's pending "was this branch pushed?" answer, tagged
+    /// with the agent it was asked for. One-shot, like the count above.
+    pub(crate) rename_pushed_rx: Option<mpsc::Receiver<(String, bool)>>,
     /// Payload channel for the in-flight release-notes worker. The keyed
     /// busy→final status rides the engine's own worker channel; only the notes
     /// themselves come back here. `Some` means a fetch is in flight, which is
@@ -2960,6 +2963,12 @@ pub(crate) enum PromptState {
         /// verbatim instead of through the refname char map, because the label
         /// dux itself derived from the folder may legally contain a space.
         branch_named: bool,
+        /// The open pull request dux knows for the branch, which a branch
+        /// rename leaves on the old name.
+        open_pr: Option<u64>,
+        /// Whether the branch has a pushed copy, which a branch rename also
+        /// leaves on the old name. False until the background probe answers.
+        pushed: bool,
     },
     PullRequestInput {
         /// `None` when the modal was opened from the global command: the
@@ -4557,6 +4566,7 @@ impl App {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            rename_pushed_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),
@@ -7061,30 +7071,88 @@ impl App {
                 );
                 return Ok(());
             }
-            let current_name = session.display_label();
             let branch_named = session.supports_branch_git();
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
+            // The field holds the custom name, empty when there is none, and
+            // shows what an empty name falls back to (the branch, or a
+            // standalone agent's folder) as its placeholder, so clearing it is
+            // visibly the way back.
+            let fallback = {
+                let mut bare = session.clone();
+                bare.title = None;
+                bare.display_label()
+            };
+            let current = session.title.clone().unwrap_or_default();
             // The refname char map is applied only where the name becomes a
             // branch. For a standalone agent it would rewrite the space in the
             // label dux itself derived from the folder, so the pre-filled name
             // could not be re-submitted as typed.
             let input = if branch_named {
-                TextInput::with_text(current_name).with_char_map(crate::git::agent_name_char_map)
+                TextInput::with_text(current).with_char_map(crate::git::agent_name_char_map)
             } else {
-                TextInput::with_text(current_name)
-            };
+                TextInput::with_text(current)
+            }
+            .with_placeholder(fallback);
             self.prompt = PromptState::RenameSession {
-                session_id: session.id,
+                open_pr: self.engine.rename_open_pull_request(&session.id),
+                session_id: session.id.clone(),
                 input,
-                rename_branch: branch_named,
+                rename_branch: false,
                 focus: RenameSessionFocus::Input,
                 branch_named,
+                pushed: false,
             };
+            if branch_named {
+                self.spawn_rename_pushed_probe(&session.id);
+            }
         } else {
             self.set_error("No agent session selected.");
         }
         Ok(())
+    }
+
+    /// Ask, off the UI thread, whether the agent's branch has a pushed copy, so
+    /// the rename dialog can warn that a branch rename leaves it on the old
+    /// name. One-shot rather than a stored fact: it is rendered only by the
+    /// dialog that asked.
+    fn spawn_rename_pushed_probe(&mut self, session_id: &str) {
+        let Some((worktree, branch)) = self.engine.rename_pushed_probe(session_id) else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.rename_pushed_rx = Some(rx);
+        let session_id = session_id.to_string();
+        std::thread::spawn(move || {
+            if let Ok(pushed) = dux_core::git::branch_is_pushed(Path::new(&worktree), &branch) {
+                let _ = tx.send((session_id, pushed));
+            }
+        });
+    }
+
+    /// Fold a landed pushed-branch answer into the rename dialog that asked for
+    /// it, dropping one that belongs to a dialog since closed for another agent.
+    pub(crate) fn drain_rename_pushed_probe(&mut self) {
+        let Some(rx) = self.rename_pushed_rx.as_ref() else {
+            return;
+        };
+        let answer = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.rename_pushed_rx = None;
+                return;
+            }
+        };
+        self.rename_pushed_rx = None;
+        if let PromptState::RenameSession {
+            session_id, pushed, ..
+        } = &mut self.prompt
+            && *session_id == answer.0
+        {
+            *pushed = answer.1;
+            self.mark_frame_dirty();
+        }
     }
 
     pub(crate) fn apply_rename_session(
