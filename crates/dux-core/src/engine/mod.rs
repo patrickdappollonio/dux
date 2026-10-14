@@ -1027,11 +1027,16 @@ pub struct RecreateOutcome {
 }
 
 /// A recreate waiting for its checkout: the status op its outcome resolves,
-/// and whether the confirmation asked for the tabs that cannot follow the
-/// folder to be restarted once the checkout lands.
+/// and, when the confirmation asked for the tabs that cannot follow the folder
+/// to be restarted once the checkout lands, which tabs those were when it
+/// asked.
 pub struct PendingRecreate {
     pub op: HandlerStatusOp<RecreateOutcome>,
-    pub restart_tabs: bool,
+    /// The tabs to restart, captured with the request: exactly the set the
+    /// attachment guard reserved, so a tab that comes up during the checkout,
+    /// which nothing reserved and somebody may have attached to since, is
+    /// never stopped. `None` when no restart was asked for.
+    pub restart_targets: Option<Vec<TabId>>,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see

@@ -275,9 +275,13 @@ where it would normally name the project.
 > once the working copy is back, dux asks those tabs to shut down, gives them the
 > configured shutdown wait, closes any that are still there, and starts each one again so
 > it picks its conversation back up in the recreated folder. Only one tab per CLI can get
-> its conversation back, so with two Codex tabs the second starts a fresh one, and the
-> message afterwards says which tabs continued and which started fresh. Nothing is
-> restarted if the recreate fails, and nothing at all when the box is unticked.
+> its conversation back, so with two Codex tabs the second starts a fresh one. Each tab
+> comes back with the CLI it was running, even if you picked a different one for its next
+> start, because the conversation belongs to that CLI. The message afterwards waits until
+> every restarted tab has actually started, then says which continued, which started
+> fresh, and which could not be started and why. A tab that only started after you
+> confirmed is left running, and the message says so. Nothing is restarted if the
+> recreate fails, and nothing at all when the box is unticked.
 >
 > A CLI that cannot pick a conversation back up, such as Copilot, is never restarted,
 > because that would lose its conversation: the confirmation says it is left running.

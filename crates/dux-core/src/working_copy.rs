@@ -475,6 +475,11 @@ pub struct TabRestartReport {
     /// Not started again: closed, already running again, or refused by the
     /// time its old process had gone.
     pub not_restarted: Vec<String>,
+    /// Started again, but the launch failed: the provider and why.
+    pub failed: Vec<(String, String)>,
+    /// Restartable tabs that came up while the copy was being recreated, after
+    /// the restart was asked for, and so were left running.
+    pub came_up_later: Vec<String>,
     /// The wait the old processes were given, when any of them outlasted it and
     /// was force-closed.
     pub forced_after_seconds: Option<u64>,
@@ -544,6 +549,24 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
              it yourself if you still want it running.",
         )
     });
+    let failed = report.failed.iter().map(|(provider, error)| {
+        the_tabs("dux could not start the ", std::slice::from_ref(provider)).text(format!(
+            " again: {}. Start it yourself once that is fixed.",
+            error.trim_end_matches('.')
+        ))
+    });
+    let came_up_later = (!report.came_up_later.is_empty()).then(|| {
+        let one = one(&report.came_up_later);
+        the_tabs("The ", &report.came_up_later).text(if one {
+            " that started while the copy was being recreated was left running, because it \
+             started after the restart was asked for; restart it yourself to continue its \
+             conversation in the recreated copy."
+        } else {
+            " that started while the copy was being recreated were left running, because they \
+             started after the restart was asked for; restart them yourself to continue their \
+             conversations in the recreated copy."
+        })
+    });
     let forced = report.forced_after_seconds.map(|seconds| {
         Prose::new().text(format!(
             "An old process did not exit within {seconds} seconds and was force-closed first."
@@ -552,16 +575,15 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
     let left_running =
         (!live.left_running.is_empty()).then(|| left_running_prose(&live.left_running));
     sentences(
-        [
-            follows,
-            continued,
-            fresh,
-            not_restarted,
-            forced,
-            left_running,
-        ]
-        .into_iter()
-        .flatten(),
+        [follows, continued, fresh]
+            .into_iter()
+            .flatten()
+            .chain(failed)
+            .chain(
+                [not_restarted, came_up_later, forced, left_running]
+                    .into_iter()
+                    .flatten(),
+            ),
     )
 }
 
@@ -1185,6 +1207,7 @@ mod tests {
             fresh: strings(&["codex"]),
             not_restarted: Vec::new(),
             forced_after_seconds: None,
+            ..Default::default()
         };
         let message = recreate_success_message(
             "v0",
@@ -1212,6 +1235,7 @@ mod tests {
             fresh: Vec::new(),
             not_restarted: strings(&["opencode"]),
             forced_after_seconds: Some(30),
+            ..Default::default()
         };
         let message = recreate_success_message(
             "v0",

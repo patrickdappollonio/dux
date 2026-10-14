@@ -4531,14 +4531,19 @@ impl Engine {
                 message,
             } => self.process_create_agent_failed(status_op_id, message),
             WorkerEvent::AgentLaunchReady(boxed) => {
+                let tab_id = boxed.request.tab_id.clone();
                 let (outcome, create_final) = self.process_agent_launch_ready(*boxed);
+                self.note_restart_launch_answer(&tab_id, None);
                 Self::launch_view_with_final(
                     EventReaction::AgentLaunchReadyView(Box::new(outcome)),
                     create_final,
                 )
             }
             WorkerEvent::AgentLaunchFailed(boxed) => {
+                let tab_id = boxed.request.tab_id.clone();
+                let error = boxed.message.clone();
                 let (outcome, create_final) = self.process_agent_launch_failed(*boxed);
+                self.note_restart_launch_answer(&tab_id, Some(&error));
                 Self::launch_view_with_final(
                     EventReaction::AgentLaunchFailedView(Box::new(outcome)),
                     create_final,

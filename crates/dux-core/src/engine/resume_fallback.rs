@@ -185,13 +185,26 @@ impl Engine {
     ) -> Option<AgentLaunchRequest> {
         // Transport-facing (the web relaunches a dormant tab by id): named here.
         let tab_id = TabIdRef::new(tab_id);
+        let provider = self.agent_tabs.get(tab_id)?.provider.clone();
+        self.dormant_tab_launch_request_as(tab_id, &provider, pty_size)
+    }
+
+    /// [`Engine::dormant_tab_launch_request`] launching `provider` rather than
+    /// the provider the tab is set to: a tab restarted to continue the
+    /// conversation its process was running keeps that process's provider.
+    pub(crate) fn dormant_tab_launch_request_as(
+        &self,
+        tab_id: &TabIdRef,
+        provider: &ProviderKind,
+        pty_size: (u16, u16),
+    ) -> Option<AgentLaunchRequest> {
         let tab = self.agent_tabs.get(tab_id)?;
         let session = self
             .sessions
             .iter()
             .find(|s| s.id == tab.session_id)?
             .clone();
-        let provider = tab.provider.clone();
+        let provider = provider.clone();
         let resume = self.tab_resume_decision(&session, tab_id, &provider, true);
         let status_message = if resume {
             format!(
