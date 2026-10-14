@@ -6975,7 +6975,12 @@ export function runMacro(name: string, target: SelectedTarget): MacroDestination
     pane.compose.insert(macro.text)
     return "compose"
   }
-  pane.send(macroPayloadBytes(macro.text))
+  if (!pane.send(macroPayloadBytes(macro.text))) {
+    notifyWarning(
+      "The macro was not sent: this terminal is reconnecting, and nothing was sent to it. Pick the macro again once it is back.",
+    )
+    return "none"
+  }
   return "pty"
 }
 

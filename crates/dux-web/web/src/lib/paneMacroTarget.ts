@@ -26,7 +26,9 @@ export interface PaneMacroTarget {
   /// the input owner. Null rather than a gated function, because a write from a
   /// non-owner is either dropped by the server or, against a pty nobody drives,
   /// claims it, and a macro must never be the thing that takes a terminal over.
-  send: ((bytes: Uint8Array) => void) | null
+  /// Returns whether the bytes went on the wire: false while the socket is
+  /// reconnecting, when they are dropped.
+  send: ((bytes: Uint8Array) => boolean) | null
   /// The compose draft, or null while the compose bar is not the typing surface.
   compose: ComposeInsertSink | null
   /// This pane's typing surface, resolved at call time: the compose box while it

@@ -423,11 +423,15 @@ export class PtySocket extends ReconnectingSocket {
   // Nothing at all goes out while the page is signed out: the app stays
   // mounted under the login page, and a keystroke, a resize or a "viewed" beat
   // from a page nobody signed in to must not reach the PTY.
-  sendInput(bytes: Uint8Array): void {
-    if (authPaused()) return
+  // Returns whether the bytes went on the wire, so a caller that cannot let a
+  // write vanish (a macro) can say it did not.
+  sendInput(bytes: Uint8Array): boolean {
+    if (authPaused()) return false
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(bytes.slice().buffer)
+      return true
     }
+    return false
   }
 
   // Send a resize control frame as Text. The server parses `{rows, cols}` (u16)

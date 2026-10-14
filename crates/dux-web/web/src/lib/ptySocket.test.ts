@@ -569,7 +569,7 @@ describe("PtySocket", () => {
     sock.connect()
     const ws = last()
     ws.open()
-    sock.sendInput(new Uint8Array([1, 2, 3]))
+    expect(sock.sendInput(new Uint8Array([1, 2, 3]))).toBe(true)
     expect(ws.sent).toHaveLength(1)
     const frame = ws.sent[0]
     expect(frame).toBeInstanceOf(ArrayBuffer)
@@ -579,8 +579,8 @@ describe("PtySocket", () => {
   it("does not send stdin before the socket is open", () => {
     const sock = new PtySocket("ws://x/pty")
     sock.connect()
-    // Not opened yet (readyState 0): the send guard drops it.
-    sock.sendInput(new Uint8Array([9]))
+    // Not opened yet (readyState 0): the send guard drops it, and says so.
+    expect(sock.sendInput(new Uint8Array([9]))).toBe(false)
     expect(last().sent).toHaveLength(0)
   })
 

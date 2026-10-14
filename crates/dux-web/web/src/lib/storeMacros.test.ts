@@ -231,7 +231,7 @@ describe("store macros commands", () => {
   // different, unobserved module instance.
   async function fakePane(
     ptyId: string,
-    opts: { owner?: boolean; compose?: boolean } = {},
+    opts: { owner?: boolean; compose?: boolean; reconnecting?: boolean } = {},
   ): Promise<{ sent: Uint8Array[]; inserted: string[] }> {
     const sent: Uint8Array[] = []
     const inserted: string[] = []
@@ -239,7 +239,13 @@ describe("store macros commands", () => {
     const { registerPaneMacroTarget } = await import("./paneMacroTarget")
     registerPaneMacroTarget(ptyId, {
       takeoverCard: !owner,
-      send: owner ? (b) => sent.push(b) : null,
+      send: owner
+        ? (b) => {
+            if (opts.reconnecting) return false
+            sent.push(b)
+            return true
+          }
+        : null,
       compose: opts.compose
         ? { insert: (text) => inserted.push(text), target: () => null }
         : null,
@@ -293,6 +299,19 @@ describe("store macros commands", () => {
     expect(owner.sent).toHaveLength(0)
     expect(toast.warning).toHaveBeenCalledWith(
       "The macro was not sent: this page is not driving this terminal. Take over to send macros.",
+      expect.anything(),
+    )
+  })
+
+  it("runMacro refuses out loud when its pane's socket is reconnecting", async () => {
+    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
+    const mod = await loadStore()
+    const pane = await fakePane("s1", { reconnecting: true })
+    const { toast } = await import("sonner")
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("none")
+    expect(pane.sent).toHaveLength(0)
+    expect(toast.warning).toHaveBeenCalledWith(
+      "The macro was not sent: this terminal is reconnecting, and nothing was sent to it. Pick the macro again once it is back.",
       expect.anything(),
     )
   })

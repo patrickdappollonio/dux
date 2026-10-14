@@ -54,7 +54,7 @@ const target: SelectedTarget = {
 function ownerPane(over: Partial<PaneMacroTarget> = {}): PaneMacroTarget {
   return {
     takeoverCard: false,
-    send: () => {},
+    send: () => true,
     compose: null,
     typingSurface: () => null,
     ...over,

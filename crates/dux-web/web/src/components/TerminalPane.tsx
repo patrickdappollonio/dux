@@ -529,7 +529,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     () =>
       registerPaneMacroTarget(id, {
         takeoverCard,
-        send: isOwner ? (bytes) => ptyRef.current?.sendInput(bytes) : null,
+        send: isOwner ? (bytes) => ptyRef.current?.sendInput(bytes) ?? false : null,
         compose: composeSinkLive
           ? {
               insert: input.insertComposeText,
