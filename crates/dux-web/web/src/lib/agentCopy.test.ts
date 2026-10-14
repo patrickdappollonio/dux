@@ -277,6 +277,32 @@ describe("the blocked-copy toast", () => {
     expect(agentCopy.shownCopyText()).toEqual({ source: "fix-login", text: "secret text" })
   })
 
+  it("an older Copy press finishing late leaves a newer blocked copy's toast alone", async () => {
+    const { doc } = fakeDocument({ hasFocus: true, execCommand: false })
+    vi.stubGlobal("document", doc)
+    let finish = () => {}
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    )
+    vi.stubGlobal("navigator", { clipboard: { writeText } })
+    agentCopy.reportBlockedCopy("p1", "fix-login", "first")
+    pressAction(toast.warning)
+    agentCopy.reportBlockedCopy("p1", "fix-login", "second")
+    finish()
+    await settle()
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+    // The newer toast's own Copy still works and still reports on its id.
+    pressAction(toast.warning)
+    finish()
+    await settle()
+    expect(writeText).toHaveBeenLastCalledWith("second")
+    expect(lastCall(toast.success)[1].id).toBe(blockedCopyToastId("p1"))
+  })
+
   it("a newer blocked copy from the same pane replaces the older toast", () => {
     agentCopy.reportBlockedCopy("p1", "fix-login", "first")
     agentCopy.reportBlockedCopy("p1", "fix-login", "second")

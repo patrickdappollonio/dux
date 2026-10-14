@@ -60,17 +60,35 @@ function refusedMessage(source: string): Prose {
 /// toast is dismissed.
 export function reportBlockedCopy(paneTag: string, source: string, text: string): void {
   const id = blockedCopyToastId(paneTag)
+  const generation = (blockedGenerations.get(paneTag) ?? 0) + 1
+  blockedGenerations.set(paneTag, generation)
   // Sticky: the program already counts the text as copied, so once this toast
   // goes the text is somewhere only a copy from inside the program can reach.
   notifyWarning(blockedMessage(source, text), {
     id,
     sticky: true,
-    action: { label: "Copy", onClick: () => void retryBlockedCopy(id, source, text) },
+    action: {
+      label: "Copy",
+      onClick: () => void retryBlockedCopy(paneTag, generation, source, text),
+    },
   })
 }
 
-async function retryBlockedCopy(id: string, source: string, text: string): Promise<void> {
-  if (await copyKeepingFocus(text)) {
+/// The latest blocked copy per pane. A Copy press awaits the clipboard, and a
+/// newer blocked copy can take the pane's toast meanwhile; the older press's
+/// outcome must not replace that toast, or the newer text is lost with it.
+const blockedGenerations = new Map<string, number>()
+
+async function retryBlockedCopy(
+  paneTag: string,
+  generation: number,
+  source: string,
+  text: string,
+): Promise<void> {
+  const id = blockedCopyToastId(paneTag)
+  const copied = await copyKeepingFocus(text)
+  if (blockedGenerations.get(paneTag) !== generation) return
+  if (copied) {
     notifySuccess(prose`Copied the text from ${chip(source)} to your clipboard.`, { id })
     return
   }
