@@ -413,8 +413,11 @@ it, and browsers switch off a handful of APIs there:
 - **Copying still works.** Select-to-copy, press-and-hold selection on a phone, the copy
   chords, and "copy local path" all fall back to the legacy copy path inside your click or
   touch.
-- **An agent writing your clipboard (`OSC 52`) silently does nothing.** The
-  `clipboard_passthrough` setting still reads as enabled and no error appears.
+- **An agent writing your clipboard (`OSC 52`) needs a recent click or key press.** dux
+  falls back to the legacy copy path, which the browser allows only within about 5 seconds
+  of your last key press or click in the page. A copy that arrives later is not lost: a
+  message shows the start of the text with a **Copy** button that puts it on your
+  clipboard. The same window applies over HTTPS.
 - **Desktop notifications are unavailable.** The **Enable browser notifications** row hides
   itself when the browser exposes no notification API, and nothing fires. The **Desktop
   notifications** preference stays visible and toggleable regardless, so it can look armed

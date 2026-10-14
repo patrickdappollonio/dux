@@ -123,6 +123,7 @@ The full documentation lives at **[getdux.app/docs](https://getdux.app/docs)**. 
 - **The web password**: who is asked for it, failed sign-ins and blocked addresses, reverse proxies, Tailscale Funnel, and what a password cannot protect against.
 - **The command line**: every command and flag, the output forms, the exit codes, and reaching a dux on another machine.
 - **Hosting dux on the public internet**: TLS in front, with the dux password or oauth2-proxy and GitHub sign-in as the gate.
+- **Known issues**: the things that look broken until you know why, such as signing in to an agent CLI from another device, and what to do about each.
 
 ## How It Works
 

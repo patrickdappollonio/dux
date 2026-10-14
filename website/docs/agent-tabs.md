@@ -16,9 +16,12 @@ it from the first tab on.
 
 > [!NOTE]
 > The browser's [theater mode](/docs/web-workspace#theater-mode-one-pane-no-chrome) takes
-> the strip away along with the rest of the chrome. The tabs are still running; what
-> they are doing is in the agents list, and one that needs you says so with a
-> notification. Leaving theater brings the strip back where you left it.
+> the strip away along with the rest of the chrome. The tabs are still running. A tab that
+> needs you shows it in the agents list and on its pill in the strip, both of which come
+> back when you leave theater, and a desktop notification arrives only if you turned them
+> on and the dux window is in the background. On a computer the browser tab's title and
+> favicon still count it; on a phone in theater, nothing says so until you leave the
+> mode. Leaving theater brings the strip back where you left it.
 
 ## Every tab is equal
 

@@ -6,7 +6,8 @@ order: 100
 ---
 
 Short questions, short answers. When a topic deserves more, the answer links to the
-page that covers it in full.
+page that covers it in full. Something that looks broken may already be on
+[Known issues](/docs/known-issues), with the reason and what to do.
 
 ## Installing & platforms
 

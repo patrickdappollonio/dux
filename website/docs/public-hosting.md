@@ -374,8 +374,10 @@ firewall is the only thing between the internet and your workspace.
 ## What each piece is doing
 
 **Caddy** terminates TLS. Without it you get the sign-in redirect loop below, and the
-browser refuses dux a few APIs off a secure context: right-click paste, `OSC 52` clipboard
-writes from an agent, desktop notifications, and PWA install.
+browser refuses dux a few APIs off a secure context: right-click paste, desktop
+notifications, and PWA install. An agent's `OSC 52` clipboard write falls back to the
+legacy copy path, which works within about 5 seconds of your last key press or click and
+otherwise shows a message with a **Copy** button.
 [The Tailscale page lists the exact set](/docs/tailscale#plain-http-costs-you-a-few-browser-features),
 and it is the same set here.
 

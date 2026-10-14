@@ -16,10 +16,11 @@ narrows a long list by path. Every row leads with its status icon, then the file
 the green and red line counts. Each group heading, and the pane's own header, adds those
 counts up for the rows below it, so you can see at a glance how much has moved; binary
 files have no lines to count, so they are tallied separately as a quiet "bin" marker. A
-file your repository marks `-diff` in a `.gitattributes` has no counts either, because git
-will not diff it, and it gets its own quiet "Excl" marker and its own "excl" tally so it is
-never mistaken for a binary: the file is ordinary text and clicking the row still opens the
-diff. A
+tracked file your repository marks `-diff` in a `.gitattributes` has no counts either,
+because git will not diff it, and it gets its own quiet "Excl" marker and its own "excl"
+tally so it is never mistaken for a binary: the file is ordinary text and clicking the row
+still opens the diff. A new, untracked file is counted line by line whatever
+`.gitattributes` says, so it shows counts until git tracks it. A
 summed-up figure of a thousand lines or more is shortened to read in thousands, rounded
 down so it never overstates: 1,300 lines reads "1.3k" and 12,345 reads "12.3k". Only these
 sums shorten; the counts on the rows themselves always show every digit. The figures follow

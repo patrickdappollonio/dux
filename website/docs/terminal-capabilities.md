@@ -98,7 +98,8 @@ clipboard_passthrough = "focused"
   `"focused"` (only the agent tab you are looking at can write your clipboard, the safe
   default), `"always"` (any agent, background ones included), or `"off"` (never). It
   needs `passthrough = true`, and in the browser the write additionally only happens
-  while the tab has focus.
+  while the tab has focus (and lands only near a key press or click, as described
+  [below](#browser-notifications-web-ui)).
 
 > [!IMPORTANT]
 > `passthrough` does **not** switch off browser desktop notifications. `web_notifications`
@@ -142,7 +143,9 @@ them, and it has no effect on the terminal UI. Two things gate them, on purpose:
 
 Clipboard writes work here too, under the same `clipboard_passthrough` switch: at
 `"focused"` or `"always"` with the tab focused, an agent's write lands on **your**
-browser's clipboard, not the server's.
+browser's clipboard, not the server's. The browser accepts a write only within about 5
+seconds of your last key press or click in the page; a later one shows a message with a
+**Copy** button that puts the text on your clipboard.
 
 ## Clickable hyperlinks
 

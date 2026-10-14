@@ -443,7 +443,11 @@ fixes.
 
 Your agent can also write your clipboard directly through an `OSC 52` escape sequence, and
 that write lands on **your** browser's clipboard, not the server's, governed by the
-`clipboard_passthrough` capability. See
+`clipboard_passthrough` capability. The browser accepts it only within about 5 seconds of
+your last key press or click in the page. A copy that arrives later shows a message with
+the start of the text and a **Copy** button; press it and the whole text lands on your
+clipboard. If the browser refuses even that, the message offers **Show text**, which opens
+the text already selected so you can copy it yourself. See
 [Terminal capabilities](/docs/terminal-capabilities).
 
 ### Drag a file in, or paste one
