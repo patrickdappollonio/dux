@@ -6403,6 +6403,14 @@ mod tests {
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
         app.engine.sessions[0].provider = dux_core::model::ProviderKind::new("claude");
+        // The CLI is told by its command; this one is never started.
+        app.engine
+            .config
+            .providers
+            .commands
+            .get_mut("claude")
+            .expect("claude is configured")
+            .command = "/nowhere/claude".to_string();
         app.engine
             .folder_repo_statuses
             .insert(id.clone(), dux_core::git::FolderRepoStatus::Missing);

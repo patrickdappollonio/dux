@@ -562,6 +562,7 @@ async fn branch_pushed_reads_the_clones_remote_tracking_refs() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["pushed"], false, "{body}");
 
+    git(&f.repo, &["remote", "add", "origin", "/nowhere"]);
     git(
         &f.repo,
         &["update-ref", "refs/remotes/origin/dux/made-this", "HEAD"],
