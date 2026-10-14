@@ -14632,7 +14632,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(bindings_with_overrides(&[(Action::Confirm, &["tab"])]));
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
-            input: TextInput::with_text("agent-branch".to_string()),
+            input: TextInput::with_text("agent-label".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
@@ -14646,7 +14646,7 @@ not_a_real_action = ["x"]
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(
             app.engine.sessions[0].title.as_deref(),
-            Some("agent-branch"),
+            Some("agent-label"),
             "custom confirm binding should apply the rename"
         );
     }
@@ -15726,6 +15726,34 @@ not_a_real_action = ["x"]
         assert!(
             !app.engine.rename_expected.contains_key(&sid),
             "no second worker's expected-branch stash should be recorded"
+        );
+    }
+
+    #[test]
+    fn apply_rename_session_says_so_when_the_name_cannot_be_saved() {
+        let mut app = test_app(default_bindings());
+        let sid = app.engine.sessions[0].id.clone();
+        let original_title = app.engine.sessions[0].title.clone();
+        app.engine
+            .session_store
+            .upsert_session(&app.engine.sessions[0])
+            .unwrap();
+        rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
+            .unwrap()
+            .execute_batch(
+                "create trigger refuse_session_update before update on agent_sessions \
+                 begin select raise(abort, 'disk is full'); end",
+            )
+            .unwrap();
+
+        app.apply_rename_session(&sid, "brand-new-name".to_string(), false);
+
+        assert_eq!(app.engine.sessions[0].title, original_title);
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("disk is full"),
+            "{}",
+            app.status.text()
         );
     }
 

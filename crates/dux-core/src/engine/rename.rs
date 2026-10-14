@@ -124,6 +124,9 @@ impl Engine {
                 anyhow::bail!(branch_rename_refusal(&rejection))
             }
             BranchRenamePlan::Noop => return Ok(EventReaction::RebuildLeftItems),
+            BranchRenamePlan::NotSaved(err) => {
+                anyhow::bail!("Could not save the agent's new name, so it keeps its old one: {err}")
+            }
             BranchRenamePlan::RenameBranch(dispatch) => {
                 return self.dispatch_branch_rename(dispatch);
             }
@@ -470,6 +473,68 @@ mod tests {
         );
         assert_eq!(engine.sessions[0].title, None);
         assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+    }
+
+    /// Unticked, a name equal to the branch still leaves the label following
+    /// the branch rather than pinned to a copy of its name, in memory and in
+    /// the database, exactly as the ticked box does.
+    #[test]
+    fn a_name_equal_to_the_branch_stores_no_title_whichever_way_the_box_is() {
+        for rename_branch in [false, true] {
+            let (mut engine, _tmp) = test_engine();
+            let session = sample_session("s1", "p1", "feat");
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+
+            let status = only_status(&engine.rename_agent("s1", "feat", rename_branch).unwrap());
+            assert_eq!(status.tone, StatusTone::Info, "{rename_branch}");
+            assert_eq!(engine.sessions[0].title, None, "{rename_branch}");
+            let stored = engine.session_store.load_sessions().unwrap();
+            assert_eq!(stored[0].title, None, "persisted, {rename_branch}");
+        }
+    }
+
+    /// A name the database refuses to keep is not reported as a rename: the
+    /// agent keeps its old name in memory too, and the refusal says why, for
+    /// the title-only rename and for the branch rename alike.
+    #[test]
+    fn a_name_the_database_cannot_keep_is_refused_and_put_back() {
+        for rename_branch in [false, true] {
+            let (mut engine, _tmp) = test_engine();
+            let session = sample_session("s1", "p1", "feat");
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+            rusqlite::Connection::open(&engine.paths.sessions_db_path)
+                .unwrap()
+                .execute_batch(
+                    "create trigger refuse_session_update before update on agent_sessions \
+                     begin select raise(abort, 'disk is full'); end",
+                )
+                .unwrap();
+
+            let err = engine
+                .rename_agent("s1", "renamed", rename_branch)
+                .err()
+                .expect("refused");
+            assert!(
+                err.to_string().contains("disk is full"),
+                "{rename_branch}: {err}"
+            );
+            assert_eq!(
+                engine.sessions[0].title.as_deref(),
+                Some("s1-title"),
+                "{rename_branch}"
+            );
+            assert!(engine.rename_expected.is_empty(), "{rename_branch}");
+            assert!(
+                !engine.is_in_flight(&InFlightKey::BranchRename("s1".into())),
+                "{rename_branch}"
+            );
+            assert!(
+                engine.worktree_ops().holders("/tmp/s1-worktree").is_empty(),
+                "the worktree is not left held, {rename_branch}"
+            );
+        }
     }
 
     /// A worker that never starts leaves nothing behind: the title is put back

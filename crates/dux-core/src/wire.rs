@@ -12604,6 +12604,33 @@ mod tests {
         );
     }
 
+    /// A title the database cannot keep is an error on the wire, not a
+    /// success, and the agent keeps its old name.
+    #[test]
+    fn apply_wire_rename_session_reports_a_title_that_could_not_be_saved() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        rusqlite::Connection::open(&engine.paths.sessions_db_path)
+            .unwrap()
+            .execute_batch(
+                "create trigger refuse_session_update before update on agent_sessions \
+                 begin select raise(abort, 'disk is full'); end",
+            )
+            .unwrap();
+        let err = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "renamed".to_string(),
+                rename_branch: false,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("disk is full"), "{err}");
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("s1-title"));
+    }
+
     /// The branch flag is optional on the wire and means "title only" when
     /// absent, so a client that never sends it renames exactly as before.
     #[test]

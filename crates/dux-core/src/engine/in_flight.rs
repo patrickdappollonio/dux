@@ -218,6 +218,9 @@ pub enum BranchRenamePlan {
     /// The target session vanished before the rename could be prepared, so the
     /// optimistic title write found nothing either. The surface stays silent.
     Noop,
+    /// The new title could not be saved, so the old one was put back and
+    /// nothing was renamed; carries the storage error to report.
+    NotSaved(String),
 }
 
 #[cfg(test)]

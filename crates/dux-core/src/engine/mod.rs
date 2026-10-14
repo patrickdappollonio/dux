@@ -4851,11 +4851,23 @@ impl Engine {
 
         // Always update the display title immediately (optimistic write). An
         // empty name stores no custom title, so the label follows the branch
-        // (or folder) again.
+        // (or folder) again, and so does the branch's own name, whichever way
+        // the box is: a title that only copies the branch name would stop
+        // following it the next time the branch moves.
         if !self.sessions.iter().any(|s| s.id == session_id) {
             return BranchRenamePlan::Noop;
         }
-        self.write_session_title(session_id, (!name.is_empty()).then(|| name.clone()));
+        let names_the_branch = managed.as_ref().is_some_and(|m| m.branch_name == name);
+        let title = (!name.is_empty() && !names_the_branch).then(|| name.clone());
+        if let Err(err) = self.write_session_title(session_id, title) {
+            // Nothing was renamed: put the old name back and let go of the
+            // worktree held for a branch rename that will not run.
+            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                session.title = previous_title;
+            }
+            self.clear_in_flight(&InFlightKey::BranchRename(session_id.to_string()));
+            return BranchRenamePlan::NotSaved(format!("{err:#}"));
+        }
 
         if name.is_empty() {
             return BranchRenamePlan::TitleCleared;
@@ -4885,12 +4897,10 @@ impl Engine {
             };
         };
         let old_branch = managed.branch_name.clone();
-        if name == old_branch {
+        if names_the_branch {
             // The branch already carries this name, so there is nothing to
-            // rename and nothing to sync. The label is left following the
-            // branch rather than pinned to a copy of its name, exactly as a
-            // completed branch rename leaves it.
-            self.write_session_title(session_id, None);
+            // rename and nothing to sync; the write above left the label
+            // following the branch, exactly as a completed rename leaves it.
             return BranchRenamePlan::TitleWritten {
                 name,
                 sync_branches: false,
@@ -4922,18 +4932,21 @@ impl Engine {
     }
 
     /// Set (or, with `None`, clear) a session's custom title and persist it.
-    pub(crate) fn write_session_title(&mut self, session_id: &str, title: Option<String>) {
+    /// A failed write is the caller's to answer: the memory already holds the
+    /// new title, and only the caller knows what to put back.
+    pub(crate) fn write_session_title(
+        &mut self,
+        session_id: &str,
+        title: Option<String>,
+    ) -> anyhow::Result<()> {
         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
             session.title = title;
             session.updated_at = Utc::now();
         }
-        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id)
-            && let Err(err) = self.session_store.upsert_session(session)
-        {
-            crate::logger::error(&format!(
-                "failed to persist the new name of {session_id}: {err}"
-            ));
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+            self.session_store.upsert_session(session)?;
         }
+        Ok(())
     }
 
     /// Roll back the optimistic state that a rename call site set up before
