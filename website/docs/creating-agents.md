@@ -64,6 +64,29 @@ generated name filled in:
 
 ![The terminal UI naming prompt for a new agent, with a generated pet name in the field, a ticked pet-name checkbox, and a ticked checkbox for copying uncommitted changes.](/screens/tui-name-new-agent.png)
 
+### Renaming an agent
+
+Rename an agent from its `⋯` menu in the browser, or with `rename-agent` in the terminal
+UI. Both open the same dialog and follow the same rules.
+
+- **The name is what the agent shows.** The field holds the custom name you gave it, empty
+  when there is none, with the name it falls back to shown faintly behind it.
+- **Leave it empty to go back.** An agent with a branch shows its branch name again; a
+  standalone agent shows its folder's name.
+- **Also rename the git branch** is a checkbox under the field, unticked by default, for
+  agents that have a branch. Tick it and dux renames the branch to the new name as well.
+  The name then follows the same rules as a branch name, and it can't be empty, because
+  a branch can't be renamed to nothing. Once the branch carries the new name the agent
+  simply shows its branch name, so a later branch rename carries the label along too.
+
+> [!WARNING]
+> Renaming the branch only renames it on this machine. When the branch has an open pull
+> request, or a copy pushed to a remote, both stay on the old name, and the checkbox says
+> so before you tick it. Push the renamed branch and update the pull request yourself.
+
+A standalone agent has no branch, so its dialog has no checkbox, and any name you type is
+kept exactly as written.
+
 ## Creating a new agent from scratch
 
 In the browser, open a project's `⋯` menu and pick **New agent…**. In the terminal UI,

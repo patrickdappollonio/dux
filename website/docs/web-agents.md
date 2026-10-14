@@ -167,8 +167,8 @@ drive the same rules.
 
 ## Managing an agent
 
-An agent's `⋯` menu is where the rest lives: rename it (a display title, the branch keeps
-its own name), change its provider, view its info, inspect its project's environment and
+An agent's `⋯` menu is where the rest lives: [rename it](/docs/creating-agents#renaming-an-agent)
+(and, if you tick the box, its git branch too, exactly as in the terminal UI), change its provider, view its info, inspect its project's environment and
 [startup command](/docs/startup-commands), and read startup-command logs. It opens with the
 **Input** group (**Attach a file…**, and the way back to the typing bar when you have turned
 it off), which is the same group the pane's own `⋯` carries, then the agent's actions below
