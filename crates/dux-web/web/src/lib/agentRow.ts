@@ -46,7 +46,7 @@ export function agentRowVisual(
 // cyan treatment the Bot icon and the favicon dot use.
 const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   active: "text-green-500",
-  detached: "text-amber-500",
+  detached: "text-dux-detached",
   exited: "text-muted-foreground",
 }
 

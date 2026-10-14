@@ -1,8 +1,10 @@
 // A warning is painted in the theme's `dux-warning` token, never in a Tailwind
-// palette amber or yellow, so the tone lives in one place in index.css. This
-// guard reads every source file under components/ and lib/ and fails on a
-// palette amber or yellow utility outside the allowlist below, whose entries
-// are STATE colors rather than warnings and keep their own hue on purpose.
+// palette amber or yellow, so the tone lives in one place in index.css. The
+// amber STATE colors (a detached agent, a connection still being made, a
+// modified file) are not warnings, and each has a semantic token of its own for
+// the same reason. This guard reads every source file under components/ and
+// lib/ and fails on a palette amber or yellow utility outside the allowlist
+// below, which carries a reason for every entry.
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -19,29 +21,29 @@ function walk(dir: string): string[] {
 
 const PALETTE_AMBER = /\b[a-z-]+-(?:amber|yellow)-\d{2,3}\b/g
 
-// File and exact class, with why it is not a warning.
-const ALLOWED: Record<string, { classes: string[]; why: string }> = {
-  "components/StatusBadge.tsx": {
-    classes: ["text-amber-500"],
-    why: "the detached session state, not a warning",
+// File and exact class, with why it cannot be a token.
+const ALLOWED: Record<string, { classes: string[]; why: string }> = {}
+
+// The amber state tokens, each with the classes that paint it and the files
+// that must use them.
+const STATE_TOKENS: { token: string; uses: Record<string, string> }[] = [
+  {
+    token: "dux-detached",
+    uses: {
+      "components/StatusBadge.tsx": "text-dux-detached",
+      "lib/agentRow.ts": "text-dux-detached",
+      "lib/flatList.ts": "text-dux-detached",
+    },
   },
-  "lib/agentRow.ts": {
-    classes: ["text-amber-500"],
-    why: "the detached state word's color, not a warning",
+  {
+    token: "dux-connecting",
+    uses: { "components/ConnDot.tsx": "bg-dux-connecting" },
   },
-  "lib/flatList.ts": {
-    classes: ["text-amber-500"],
-    why: "the detached state word's color, not a warning",
+  {
+    token: "dux-git-modified",
+    uses: { "components/FileStatusIcon.tsx": "text-dux-git-modified" },
   },
-  "components/ConnDot.tsx": {
-    classes: ["bg-amber-500"],
-    why: "the connecting/reconnecting connection state dot",
-  },
-  "components/FileStatusIcon.tsx": {
-    classes: ["text-amber-500"],
-    why: "the git status hue for a modified or type-changed file",
-  },
-}
+]
 
 describe("warning tone", () => {
   it("defines the dux-warning token in the theme", () => {
@@ -65,6 +67,19 @@ describe("warning tone", () => {
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it.each(STATE_TOKENS)("defines the $token state token in the theme", ({ token }) => {
+    const css = readFileSync(join(srcDir, "index.css"), "utf-8")
+    expect(css).toMatch(new RegExp(`--color-${token}:\\s*var\\(--${token}\\)`))
+    expect(css.match(new RegExp(`--${token}:`, "g"))?.length).toBe(2)
+  })
+
+  it.each(STATE_TOKENS)("paints the $token state with its token", ({ uses }) => {
+    for (const [name, cls] of Object.entries(uses)) {
+      const source = readFileSync(join(srcDir, name), "utf-8")
+      expect(source, name).toContain(cls)
+    }
   })
 
   it.each([

@@ -194,7 +194,7 @@ export function stateWord(session: SessionView): StateWord {
     return { label: "Idle", className: "text-muted-foreground" }
   }
   if (session.status === "detached") {
-    return { label: "Detached", className: "text-amber-500" }
+    return { label: "Detached", className: "text-dux-detached" }
   }
   return { label: "Exited", className: "text-muted-foreground" }
 }

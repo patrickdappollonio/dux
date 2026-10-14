@@ -160,6 +160,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        is used, so color is never the only signal. Its value lives in
        :root/.dark below. */
     --color-dux-warning: var(--dux-warning);
+    /* The amber STATE colors, each its own token because each is a state and
+       not a warning: a detached agent (the state word, the badge and the status
+       dot), the connection indicator while a socket is being made or remade,
+       and the git marker for a modified or type-changed file. They share the
+       warning's amber today; a theme may part them. Their values live in
+       :root/.dark below. */
+    --color-dux-detached: var(--dux-detached);
+    --color-dux-connecting: var(--dux-connecting);
+    --color-dux-git-modified: var(--dux-git-modified);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -403,6 +412,12 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        (Tailwind's amber-500), which reads clearly on the dark background.
        Constant across light/dark since the web app is dark-only. */
     --dux-warning: oklch(0.769 0.188 70.08);
+    /* The amber state colors (see the theme block above), Tailwind's amber-500
+       as they have always been drawn, matching the TUI's detached yellow.
+       Constant across light/dark since the web app is dark-only. */
+    --dux-detached: oklch(0.769 0.188 70.08);
+    --dux-connecting: oklch(0.769 0.188 70.08);
+    --dux-git-modified: oklch(0.769 0.188 70.08);
     /* The phone action flap's OPAQUE body color: the tab strip's translucent
        `bg-muted/30` composited over the app background, written out as one
        opaque value. The flap grows out of the strip, so the two have to be the
@@ -451,6 +466,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-diff-excluded: #8c8c8c;
     /* Warning tone (see :root above). */
     --dux-warning: oklch(0.769 0.188 70.08);
+    /* The amber state colors (see :root above). */
+    --dux-detached: oklch(0.769 0.188 70.08);
+    --dux-connecting: oklch(0.769 0.188 70.08);
+    --dux-git-modified: oklch(0.769 0.188 70.08);
     /* The phone action flap's opaque body color (see :root above). */
     --dux-flap-bg: color-mix(in srgb, var(--muted) 30%, var(--background));
 }

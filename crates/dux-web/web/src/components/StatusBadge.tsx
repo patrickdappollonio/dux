@@ -25,7 +25,7 @@ const STATUS: Record<
     label: "active",
   },
   detached: {
-    className: "border-transparent bg-transparent text-amber-500",
+    className: "border-transparent bg-transparent text-dux-detached",
     Icon: CirclePause,
     fill: false,
     label: "detached",

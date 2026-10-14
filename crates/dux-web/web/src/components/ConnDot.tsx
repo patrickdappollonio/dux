@@ -9,8 +9,8 @@ import { cn } from "@/lib/utils"
 // red is reserved for "gave up, needs your action".
 const CONN: Record<ConnState, { dot: string; label: string }> = {
   open: { dot: "bg-green-500", label: "Connected" },
-  connecting: { dot: "bg-amber-500", label: "Connecting" },
-  closed: { dot: "bg-amber-500", label: "Reconnecting…" },
+  connecting: { dot: "bg-dux-connecting", label: "Connecting" },
+  closed: { dot: "bg-dux-connecting", label: "Reconnecting…" },
   failed: { dot: "bg-red-500", label: "Connection failed" },
 }
 

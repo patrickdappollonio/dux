@@ -138,7 +138,7 @@ describe("statusDotColorClass", () => {
 
   it("falls back to the per-status color when not flagged for attention", () => {
     expect(statusDotColorClass("active", false)).toBe("text-green-500")
-    expect(statusDotColorClass("detached", false)).toBe("text-amber-500")
+    expect(statusDotColorClass("detached", false)).toBe("text-dux-detached")
     expect(statusDotColorClass("exited", false)).toBe("text-muted-foreground")
   })
 })
