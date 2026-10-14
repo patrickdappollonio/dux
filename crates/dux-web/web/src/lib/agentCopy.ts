@@ -27,35 +27,15 @@ export function copyPreview(text: string): string {
   return `${flat.slice(0, COPY_PREVIEW_CHARS).join("")}…`
 }
 
-/// Focus is the one thing a caller can read and set; structural so a test needs
-/// no DOM.
-interface Focusable {
-  focus(options?: FocusOptions): void
-}
-
-/// Copy, then hand focus back to whatever held it.
+/// Copy without taking focus from the user.
 ///
-/// The fallback inside `copyToClipboard` focuses a hidden textarea for the
-/// length of the copy, and removing it leaves focus on the page body. A program's
-/// copy arrives while the user is typing, into the terminal or into the message
-/// box, so focus goes back to that element: a textarea keeps its caret and
-/// selection across the blur, so the draft is exactly as it was.
-export async function copyKeepingFocus(text: string): Promise<boolean> {
-  const prior = (typeof document !== "undefined" ? document.activeElement : null) as
-    | (Focusable & { isConnected?: boolean })
-    | null
-  try {
-    return await copyToClipboard(text)
-  } finally {
-    if (
-      prior &&
-      typeof prior.focus === "function" &&
-      prior.isConnected !== false &&
-      document.activeElement !== (prior as unknown)
-    ) {
-      prior.focus({ preventScroll: true })
-    }
-  }
+/// A program's copy arrives while the user is typing, into the terminal or into
+/// the message box, so the hidden-textarea fallback hands focus back to that
+/// element: a textarea keeps its caret and selection across the blur, so the
+/// draft is exactly as it was. The modern API is awaited and may finish after the
+/// user has moved on, so its copy leaves focus alone.
+export function copyKeepingFocus(text: string): Promise<boolean> {
+  return copyToClipboard(text, { keepFocus: true })
 }
 
 /// The toast id for a pane's blocked copies: a newer one from the same pane

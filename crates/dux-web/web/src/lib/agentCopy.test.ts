@@ -163,6 +163,27 @@ describe("an agent's clipboard copy", () => {
     expect(state.active).toBe(surface)
   })
 
+  it("leaves focus where the user moved it while the clipboard API was working", async () => {
+    const { doc, state, surface } = fakeDocument({ hasFocus: true, execCommand: false })
+    state.active = surface
+    let finish = () => {}
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    )
+    vi.stubGlobal("document", doc)
+    vi.stubGlobal("navigator", { clipboard: { writeText } })
+    const copied = copyKeepingFocus("x")
+    const elsewhere: FakeEl = { focus: () => {}, isConnected: true }
+    state.active = elsewhere
+    finish()
+    expect(await copied).toBe(true)
+    expect(state.active).toBe(elsewhere)
+    expect(surface.focus).not.toHaveBeenCalled()
+  })
+
   it("raises one sticky toast naming the pane, with a Copy button, when both paths fail", async () => {
     const { doc } = fakeDocument({ hasFocus: true, execCommand: false })
     vi.stubGlobal("document", doc)
