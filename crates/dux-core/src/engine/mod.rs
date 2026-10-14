@@ -21,6 +21,7 @@ mod pr_sync_control;
 mod project_base;
 mod reload_origin;
 pub(crate) mod removal;
+mod rename;
 mod resume_fallback;
 mod spawn_worker;
 #[cfg(any(test, feature = "test-support"))]
@@ -115,6 +116,7 @@ pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
     removal_waiting_message,
 };
+pub use rename::{branch_rename_refusal, rename_branch_note_prose};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
@@ -4726,27 +4728,27 @@ impl Engine {
         rename_branch: bool,
     ) -> BranchRenamePlan {
         let name = new_name.trim().to_string();
-        if name.is_empty() {
-            return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
-        }
-        // The refname rules apply only when the name really does become a git
-        // branch. A STANDALONE agent's name is a label: creation takes it
-        // verbatim precisely because folder names legally contain spaces, dots
-        // and punctuation a ref cannot, so applying the ref validator here made
-        // a title dux itself had minted impossible to type back, and clearing it
-        // a one-way door (the fallback label is that same folder name).
-        //
-        // Non-empty, checked above, is the whole rule for a folder: every row
-        // label falls back through a branch name it does not have, so a
-        // nameless agent is what must not be allowed.
-        if self
+        let branch_named = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .map(|s| s.supports_branch_git())
-            .unwrap_or(true)
-            && !crate::git::is_valid_agent_name(&name)
-        {
+            .unwrap_or(true);
+        if name.is_empty() {
+            // An empty name resets the label to the branch (or, for a
+            // standalone agent, the folder) name. A branch cannot be renamed
+            // to nothing, so asking for both at once is refused rather than
+            // quietly doing only the reset.
+            if rename_branch && branch_named {
+                return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
+            }
+        } else if branch_named && !crate::git::is_valid_agent_name(&name) {
+            // The refname rules apply only when the name really does become a
+            // git branch. A STANDALONE agent's name is a label: creation takes
+            // it verbatim precisely because folder names legally contain
+            // spaces, dots and punctuation a ref cannot, so applying the ref
+            // validator here made a title dux itself had minted impossible to
+            // type back.
             return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
         }
         // Block overlapping renames: a second concurrent `git branch -m` on the
@@ -4770,7 +4772,8 @@ impl Engine {
             .and_then(|s| s.workspace.as_managed())
             .cloned();
         if let Some(managed) = &managed {
-            let renames_the_branch = rename_branch && name != managed.branch_name;
+            let renames_the_branch =
+                rename_branch && !name.is_empty() && name != managed.branch_name;
             let refused = if renames_the_branch {
                 self.hold_path_for_in_flight(
                     &InFlightKey::BranchRename(session_id.to_string()),
@@ -4794,13 +4797,16 @@ impl Engine {
             .find(|s| s.id == session_id)
             .and_then(|s| s.title.clone());
 
-        // Always update the display title immediately (optimistic write).
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-            session.title = Some(name.clone());
-            session.updated_at = Utc::now();
+        // Always update the display title immediately (optimistic write). An
+        // empty name stores no custom title, so the label follows the branch
+        // (or folder) again.
+        if !self.sessions.iter().any(|s| s.id == session_id) {
+            return BranchRenamePlan::Noop;
         }
-        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
-            let _ = self.session_store.upsert_session(session);
+        self.write_session_title(session_id, (!name.is_empty()).then(|| name.clone()));
+
+        if name.is_empty() {
+            return BranchRenamePlan::TitleCleared;
         }
 
         if !rename_branch {
@@ -4828,8 +4834,11 @@ impl Engine {
         };
         let old_branch = managed.branch_name.clone();
         if name == old_branch {
-            // The branch already carries this name: only the title changed, and
-            // there is nothing to sync.
+            // The branch already carries this name, so there is nothing to
+            // rename and nothing to sync. The label is left following the
+            // branch rather than pinned to a copy of its name, exactly as a
+            // completed branch rename leaves it.
+            self.write_session_title(session_id, None);
             return BranchRenamePlan::TitleWritten {
                 name,
                 sync_branches: false,
@@ -4858,6 +4867,21 @@ impl Engine {
             new_branch: name,
             previous_title,
         })
+    }
+
+    /// Set (or, with `None`, clear) a session's custom title and persist it.
+    pub(crate) fn write_session_title(&mut self, session_id: &str, title: Option<String>) {
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.title = title;
+            session.updated_at = Utc::now();
+        }
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id)
+            && let Err(err) = self.session_store.upsert_session(session)
+        {
+            crate::logger::error(&format!(
+                "failed to persist the new name of {session_id}: {err}"
+            ));
+        }
     }
 
     /// Roll back the optimistic state that a rename call site set up before
@@ -7230,12 +7254,14 @@ mod tests {
             "and the title actually changed"
         );
 
-        // Empty is still refused: every row label falls back through a branch
-        // name this agent does not have, so a nameless agent is not allowed.
-        assert!(matches!(
+        // Empty resets the label to the folder's name; with no branch to
+        // rename, the branch flag is no reason to refuse it.
+        assert_eq!(
             engine.prepare_branch_rename("sa1", "   ", true),
-            BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName)
-        ));
+            BranchRenamePlan::TitleCleared
+        );
+        assert_eq!(engine.sessions[0].title, None);
+        assert_eq!(engine.sessions[0].display_label(), "My Notes");
     }
 
     /// A MANAGED agent keeps the refname rules, because its name really does
@@ -7536,7 +7562,10 @@ mod tests {
             }
         );
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
-        assert_eq!(s.title.as_deref(), Some("same-branch"));
+        assert_eq!(
+            s.title, None,
+            "the label follows the branch rather than a copy of its name"
+        );
         assert!(engine.rename_expected.is_empty());
     }
 

@@ -163,7 +163,8 @@ impl RenameExpectation {
 /// each variant maps to that surface's own error string.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchRenameRejection {
-    /// The requested name was empty (after trimming).
+    /// The requested name was empty (after trimming) while the branch was to
+    /// be renamed too. An empty name alone is a reset, not a refusal.
     EmptyName,
     /// The requested name failed `git::is_valid_agent_name`.
     MalformedName,
@@ -208,6 +209,9 @@ pub enum BranchRenamePlan {
     /// branch. `sync_branches` is true only on the title-only path, which also
     /// refreshes branch-sync state, and false for the name-equals-branch no-op.
     TitleWritten { name: String, sync_branches: bool },
+    /// The name was empty, so the custom title was removed and the label is
+    /// back to the branch name (for a standalone agent, the folder's name).
+    TitleCleared,
     /// The display title was updated and the expectation stashed; the surface
     /// must dispatch the git rename worker with these parameters.
     RenameBranch(BranchRenameDispatch),

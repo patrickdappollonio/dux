@@ -3496,6 +3496,13 @@ impl Engine {
                         ));
                         managed.branch_name = new_branch.clone();
                     }
+                    // The optimistic title was the new branch name. Kept as a
+                    // custom title it would pin the label to a copy of that
+                    // name, so a later rename of the branch would leave the
+                    // label behind; without one the label follows the branch.
+                    if session.title.as_deref() == Some(new_branch.as_str()) {
+                        session.title = None;
+                    }
                     session.updated_at = Utc::now();
                     if let Err(err) = self.session_store.upsert_session(session) {
                         logger::error(&format!(
@@ -6417,6 +6424,47 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A rename that moved the branch to the agent's new name leaves no custom
+    /// title behind, so the label keeps following the branch afterwards; a
+    /// custom title that differs from the branch is kept.
+    #[test]
+    fn branch_rename_completed_drops_a_title_that_only_repeats_the_branch() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("new-branch".into());
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let mut other = sample_session("s2", "p1", "other-old");
+        other.title = Some("Something else".into());
+        engine.session_store.upsert_session(&other).unwrap();
+        engine.sessions.push(other);
+
+        for (id, branch) in [("s1", "new-branch"), ("s2", "other-new")] {
+            engine.mark_in_flight(InFlightKey::BranchRename(id.into()));
+            engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+                session_id: id.into(),
+                new_branch: branch.into(),
+                previous_title: None,
+                result: Ok(()),
+                status: crate::engine::ResolvedFinal::new(
+                    "rename",
+                    crate::engine::Final::info("renamed"),
+                ),
+            });
+        }
+
+        let stored = engine.session_store.load_sessions().unwrap();
+        let title = |id: &str| {
+            stored
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.title.clone())
+        };
+        assert_eq!(title("s1"), None, "the label follows the branch again");
+        assert_eq!(engine.sessions[0].display_label(), "new-branch");
+        assert_eq!(title("s2").as_deref(), Some("Something else"));
     }
 
     #[test]

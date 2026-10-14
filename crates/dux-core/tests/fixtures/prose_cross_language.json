@@ -576,6 +576,84 @@
           "quoted": false
         }
       ]
+    },
+    {
+      "what": "the rename dialog's branch box, nothing pushed",
+      "sentence": "rename_branch_note",
+      "args": {
+        "branch": "feat/login",
+        "open_pr": null,
+        "pushed": false
+      },
+      "segments": [
+        "Renames ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        },
+        " to the new name."
+      ]
+    },
+    {
+      "what": "the rename dialog's branch box, a pushed branch",
+      "sentence": "rename_branch_note",
+      "args": {
+        "branch": "feat/login",
+        "open_pr": null,
+        "pushed": true
+      },
+      "segments": [
+        "Renames ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        },
+        " on this machine only: the pushed branch on the remote keeps the old name."
+      ]
+    },
+    {
+      "what": "the rename dialog's branch box, an open pull request",
+      "sentence": "rename_branch_note",
+      "args": {
+        "branch": "feat/login",
+        "open_pr": 42,
+        "pushed": false
+      },
+      "segments": [
+        "Renames ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        },
+        " on this machine only: pull request ",
+        {
+          "name": "#42",
+          "quoted": false
+        },
+        " stays on the old name."
+      ]
+    },
+    {
+      "what": "the rename dialog's branch box, an open pull request and a pushed branch",
+      "sentence": "rename_branch_note",
+      "args": {
+        "branch": "feat/login",
+        "open_pr": 42,
+        "pushed": true
+      },
+      "segments": [
+        "Renames ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        },
+        " on this machine only: pull request ",
+        {
+          "name": "#42",
+          "quoted": false
+        },
+        " and the pushed branch stay on the old name."
+      ]
     }
   ]
 }

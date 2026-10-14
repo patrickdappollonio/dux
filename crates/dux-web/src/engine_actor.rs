@@ -271,6 +271,10 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::engine::BranchDeleteInputs>>,
     ),
+    /// Where the rename dialog asks whether the agent's branch was pushed: its
+    /// worktree and branch (instant lookup; the git read runs off-thread in the
+    /// handler). `None` for a standalone agent, which has no branch.
+    RenamePushedProbe(String, oneshot::Sender<Option<(String, String)>>),
     /// What git dux may do for one agent in one round trip: the directory, whether
     /// the changes panel works, and whether the branch features exist there. Asking
     /// separately would let a caller act on half an answer. Asking also refreshes a
@@ -1734,6 +1738,20 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// See [`EngineRequest::RenamePushedProbe`].
+    pub async fn rename_pushed_probe(&self, session_id: String) -> Option<(String, String)> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::RenamePushedProbe(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// See [`EngineRequest::SessionBranchDeleteInputs`].
     pub async fn session_branch_delete_inputs(
         &self,
@@ -2405,6 +2423,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::SlotTabId(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::SessionBranchDeleteInputs(..)
+        | EngineRequest::RenamePushedProbe(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
         | EngineRequest::PtyKeyForPaneId(..)
@@ -4653,6 +4672,9 @@ fn handle_request(
         }
         EngineRequest::SessionBranchDeleteInputs(session_id, reply) => {
             let _ = reply.send(engine.branch_delete_inputs(&session_id));
+        }
+        EngineRequest::RenamePushedProbe(session_id, reply) => {
+            let _ = reply.send(engine.rename_pushed_probe(&session_id));
         }
         EngineRequest::NoteChangedFilesOutcome(session_id, failure) => {
             engine.post_changed_files_outcome(&session_id, failure.as_deref());
@@ -8882,6 +8904,11 @@ mod tests {
             (
                 "SessionBranchDeleteInputs",
                 EngineRequest::SessionBranchDeleteInputs("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "RenamePushedProbe",
+                EngineRequest::RenamePushedProbe("s1".into(), dead_reply()),
                 false,
             ),
             (

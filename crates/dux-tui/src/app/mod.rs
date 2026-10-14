@@ -7093,163 +7093,18 @@ impl App {
         new_name: String,
         rename_branch: bool,
     ) {
-        use dux_core::engine::{BranchRenamePlan, BranchRenameRejection};
-
-        // Core owns the decision: name validation, the overlap guard, the
-        // optimistic title write, no-op detection, and the expectation stash.
-        // This surface keeps only the presentation: the error copy, the keyed
-        // status wording, the worker dispatch, and the list rebuild.
-        let dispatch = match self
+        // The engine owns the whole rename, the branch worker included, so the
+        // web's rename runs the same rules and says the same sentences.
+        match self
             .engine
-            .prepare_branch_rename(session_id, &new_name, rename_branch)
+            .rename_agent(session_id, &new_name, rename_branch)
         {
-            BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName) => {
-                self.set_error("Name cannot be empty.");
-                return;
-            }
-            BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName) => {
-                self.set_error(
-                    "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
-                     It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
-                );
-                return;
-            }
-            BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight) => {
-                self.set_error(
-                    "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
-                );
-                return;
-            }
-            BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved) => {
-                self.set_error(
-                    "This agent's worktree is being removed, so dux did not rename its branch. \
-                     Nothing new can start in a worktree while it is being removed.",
-                );
-                return;
-            }
-            BranchRenamePlan::Noop => {
-                // The session vanished before the branch could be resolved; stay
-                // silent, but keep the list consistent with the optimistic write.
+            Ok(reaction) => self.apply_reaction(reaction),
+            Err(err) => {
+                // A refusal or a worker that never started can still have
+                // changed nothing but the list; keep it consistent either way.
                 self.rebuild_left_items();
-                return;
-            }
-            BranchRenamePlan::TitleWritten {
-                name,
-                sync_branches,
-            } => {
-                self.rebuild_left_items();
-                self.set_info(format!("Renamed agent to \"{name}\"."));
-                if sync_branches {
-                    self.engine.update_branch_sync_sessions();
-                }
-                return;
-            }
-            BranchRenamePlan::RenameBranch(dispatch) => {
-                // The optimistic title landed and the expectation is stashed;
-                // reflect the new name before the git worker runs.
-                self.rebuild_left_items();
-                dispatch
-            }
-        };
-
-        let sid = dispatch.session_id;
-        let old_branch = dispatch.old_branch;
-        let worktree = dispatch.worktree_path;
-        let new_branch = dispatch.new_branch;
-        let previous_title = dispatch.previous_title;
-
-        // Declare the loading→final states together; the worker resolves the
-        // matching message and carries it back on BranchRenameCompleted.
-        let success_branch = new_branch.clone();
-        let op =
-            dux_core::engine::status_op(format!("Renaming branch to \"{new_branch}\"\u{2026}"))
-                .on_success(move |_: &()| {
-                    dux_core::engine::Final::info(format!(
-                        "Renamed agent and branch to \"{success_branch}\"."
-                    ))
-                })
-                .on_failure(|e: &String| {
-                    dux_core::engine::Final::error(format!(
-                        "Branch rename failed, reverted agent name: {e}"
-                    ))
-                });
-        let op_key = op.key().to_string();
-        let pending = self.engine.begin_status_op(&op);
-
-        // Clones for the panic path: if the worker thread panics, the
-        // synthesised `BranchRenameCompleted` still runs the handler, which
-        // reverts the title AND clears both the in-flight marker and
-        // `rename_expected`, so a panic can never permanently freeze drift
-        // detection for this session.
-        let panic_sid = sid.clone();
-        let panic_new_branch = new_branch.clone();
-        let panic_previous_title = previous_title.clone();
-        // A separate clone for the synchronous-spawn-failure revert below:
-        // if the worker thread never starts, no `BranchRenameCompleted`
-        // fires, so we must unwind the optimistic title/marker/expectation
-        // here instead.
-        let revert_previous_title = previous_title.clone();
-
-        // Route through the panic-safe background-worker primitive. Its
-        // `in_flight_key` marks the rename in flight (so the branch-sync
-        // poller skips it) and its `panic_event` guarantees the completion
-        // event fires even on panic.
-        let job_worktree = worktree;
-        let job_old_branch = old_branch;
-        let job_sid = sid.clone();
-        let job_new_branch = new_branch;
-        let outcome = self.engine.spawn_background_worker(
-            dux_core::engine::BackgroundWorkerSpec {
-                label: format!("branch-rename[{job_sid}]"),
-                in_flight_key: Some(dux_core::engine::InFlightKey::BranchRename(sid.clone())),
-                panic_event: Some(Box::new(move |reason| WorkerEvent::BranchRenameCompleted {
-                    session_id: panic_sid,
-                    new_branch: panic_new_branch,
-                    previous_title: panic_previous_title,
-                    result: Err(reason.clone()),
-                    status: dux_core::engine::ResolvedFinal::error(
-                        op_key,
-                        format!("Branch rename failed, reverted agent name: {reason}"),
-                    ),
-                })),
-            },
-            move |tx| {
-                let result =
-                    git::rename_branch(Path::new(&job_worktree), &job_old_branch, &job_new_branch)
-                        .map_err(|e| e.to_string());
-                let status = op.resolve(&result);
-                let _ = tx.send(WorkerEvent::BranchRenameCompleted {
-                    session_id: job_sid,
-                    new_branch: job_new_branch,
-                    previous_title,
-                    result,
-                    status,
-                });
-            },
-        );
-        // Only apply the pending Busy if the worker actually started. On a
-        // synchronous spawn failure no `BranchRenameCompleted` will ever
-        // fire, so the Busy would hang forever and the optimistic title +
-        // `rename_expected` would be orphaned. Unwind them and surface an
-        // error instead.
-        match outcome {
-            dux_core::engine::BackgroundSpawn::Spawned => {
-                self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
-            }
-            dux_core::engine::BackgroundSpawn::SpawnFailed
-            | dux_core::engine::BackgroundSpawn::AlreadyInFlight => {
-                // The busy was never shown, but its key was registered as a
-                // running operation: retire it, since no final will come.
-                if let Some(key) = pending.key.as_deref() {
-                    self.engine.retire_status_key(key);
-                }
-                self.engine
-                    .revert_optimistic_rename(&sid, revert_previous_title);
-                self.rebuild_left_items();
-                self.set_error(
-                    "Could not start the branch-rename worker; reverted the agent name. \
-                     Please try again.",
-                );
+                self.set_error(format!("{err:#}"));
             }
         }
     }
