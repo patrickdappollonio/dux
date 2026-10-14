@@ -49,7 +49,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | `dux projects add <path>` | Adds a project. `--name` names it, `--checkout-default` checks the repository's default branch out first, and `--init` makes a plain folder a git repository with a first commit. |
 | `dux projects rm <project>` | Removes a project. Its agents' worktrees stay on disk unless you add `--delete-worktrees`. |
 | `dux projects worktrees ls <project>` | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
-| `dux agents ls`, `show <agent>` | Agents, with their project or folder, provider, state, running tabs and how many browsers have it open. `--project` keeps one project's; `--worktrees` prints just each agent's id and the folder it works in. |
+| `dux agents ls`, `show <agent>` | Agents, with their project or folder, provider, state, running tabs and how many browsers count as connected to it. `--project` keeps one project's; `--worktrees` prints just each agent's id and the folder it works in. |
 | `dux agents add` | Creates an agent. `--project` on a new branch, plus `--existing-branch`, `--from-pr <number or URL>` or `--from-worktree <path>`; `--fork <agent>`; or `--standalone <folder>` with an optional `--provider`. `--name` names it and `--copy-uncommitted` brings the project's uncommitted changes along. |
 | `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. `--delete-branch` needs `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
 | `dux agents stop <agent>`, `start <agent>` | Stops everything an agent runs, or starts it again. |
@@ -88,9 +88,14 @@ Every `ls` prints an aligned table with a header row. Two flags change that:
 - `-q` prints only the ids, one per line, ready for `xargs`.
 
 `dux agents ls`, for example, has the columns `ID`, `NAME`, `PROJECT`, `WORKTREE`,
-`PROVIDER`, `STATE`, `TABS` (running of total) and `BROWSERS` (how many browsers have it open). An
-agent's state is `active`, `detached` or `exited`, or `removing` while its deletion is
+`PROVIDER`, `STATE`, `TABS` (running of total) and `BROWSERS`. An agent's state is `active`, `detached` or `exited`, or `removing` while its deletion is
 still running. `show` prints one field per line.
+
+`BROWSERS` counts the browsers that would stop a change to the agent: every one with it
+open now, plus every one whose connection to it was lost within the last
+`[server] presence_grace_seconds` (see below), each browser counted once however many of
+its tabs or terminals are open. So it can be higher than the count on the agent's row in
+the terminal UI, which shows only the browsers that have it open right now.
 
 ## Changes ask first, and wait until they are done
 

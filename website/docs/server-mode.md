@@ -190,7 +190,10 @@ saying goodbye keeps counting until dux notices its connection is dead.
 
 Each agent's row picks up a quiet `2 browsers` on its second line when browsers have that
 agent open in any terminal it owns: its provider tabs and its companion terminals. One
-browser with several of them open still counts once. The center pane's caption says the
+browser with several of them open still counts once. It counts only what is open right
+now: a browser whose connection dropped leaves the count at once, even while it still
+holds off stopping or deleting the agent for `presence_grace_seconds`, which the
+`BROWSERS` column of `dux agents ls` does count. The center pane's caption says the
 same for the provider tab it is showing.
 
 **One driver at a time.** The terminal UI is an ordinary participant in the same

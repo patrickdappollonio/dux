@@ -19,8 +19,9 @@
 //! - `GET /api/v1/sessions` also lists, after the live agents, each agent a followed
 //!   delete is still removing, with `"removing": true` and no terminals, until the
 //!   delete's record finishes; the workspace document drops it when the delete starts.
-//! - Its live rows carry `remote_viewers`, how many browsers have the agent open
-//!   (every tab of one browser profile counted once). The pushed workspace document
+//! - Its live rows carry `remote_viewers`, how many browsers a change to the agent
+//!   would cut off: those with it open now and those whose socket was lost within the
+//!   presence grace (every tab of one browser profile counted once). The pushed workspace document
 //!   leaves the count out, or every attach would re-push it, and so does
 //!   `GET /api/v1/sessions/{id}`, which keeps the create replay's shape.
 //!
