@@ -252,6 +252,10 @@ impl App {
     ///
     /// With nothing serving there is no seat and no gate, and the write is
     /// exactly the write this surface has always made.
+    ///
+    /// A write that reaches the child marks its run as used
+    /// ([`dux_core::engine::Engine::note_pty_used`]), so a macro sent from the
+    /// bar exempts a brief run from the rapid-exit failure just as typing does.
     pub(crate) fn write_into_focused_pty(&mut self, bytes: &[u8]) -> bool {
         let Some(pty_id) = self.selected_terminal_surface_id() else {
             return false;
@@ -262,6 +266,7 @@ impl App {
         };
         let Some(seat) = seat else {
             let _ = provider.write_bytes(bytes);
+            self.engine.note_pty_used(&pty_id, bytes);
             return true;
         };
         // The enqueue leaves a full queue unreported, because logging takes the
@@ -273,7 +278,9 @@ impl App {
         if queue_full {
             dux_core::pty::log_dropped_pty_write();
         }
-        if !wrote {
+        if wrote {
+            self.engine.note_pty_used(&pty_id, bytes);
+        } else {
             self.log_refused_pty_write(&pty_id, &seat);
         }
         wrote
@@ -2907,6 +2914,10 @@ mod tests {
             app.write_into_focused_pty(b"a"),
             "the driver's own keystroke reaches its child"
         );
+        assert!(
+            app.engine.pty_run_was_used("session-1-slot"),
+            "a write that reached the child marks its run as used"
+        );
 
         let browser = seat.owners.next_conn_id();
         seat.owners.claim("session-1-slot", browser);
@@ -2930,6 +2941,10 @@ mod tests {
 
         assert!(!app.write_into_focused_pty(b"a"));
         assert!(!seat.owners.is_owner("session-1-slot", seat.conn_id));
+        assert!(
+            !app.engine.pty_run_was_used("session-1-slot"),
+            "a write that reached nothing is not somebody using the run"
+        );
     }
 
     /// With nothing serving none of this exists: no seat, no card, and typing

@@ -196,14 +196,22 @@ there would be no way to look at the agent without restarting the thing that kee
 failing. Once a run succeeds, or you stop the tab yourself, or you restart dux, the tab is
 back to starting on selection.
 
+A run that was over in under five seconds ends badly too, whatever status it exited with,
+because a provider that quits that fast usually never came up. That only applies when
+nobody used the run. Anything you send it, from the terminal UI or the browser, counts: a
+keystroke, a paste, a dropped file, a click or scroll in the pane, or a macro. So opening
+an agent and quitting it straight away, even with a macro that types `/exit` for you, is
+you ending the run rather than the run failing, and the tab goes on starting when you
+select it.
+
 So a dormant tab shows one of two things, and it is the same on both the terminal UI and
 the web UI. A tab that is simply not running shows the dux idle screen, logo and rotating
 tip and all, with a *Start session* button under it. A tab whose last run ended badly shows
 a card instead: how the run ended and how long ago (a failed launch and the error it gave,
-an exit status, or a run that was over in under five seconds), and, under *Last output*, the
-last few lines the run had on screen. That is usually where the answer is: a provider
-refusing to resume a conversation that is already open somewhere else says so on its way
-out.
+an exit status, or a run that was over in under five seconds with nothing sent to it), and,
+under *Last output*, the last few lines the run had on screen. That is usually where the
+answer is: a provider refusing to resume a conversation that is already open somewhere else
+says so on its way out.
 
 You do not have to open the agent to find that out. When a resume is refused, and the run
 was over in seconds, the notice dux raises says the agent could not resume its previous
@@ -212,7 +220,7 @@ and in the terminal UI the status line, when that agent is the one on screen. Wh
 CLI told you to do about it is in the message; the card still has the full output.
 
 That is the notice you get whenever a resume was over in seconds, nobody had a chance to
-type into it, and it left something readable behind, however short. A single line saying
+send it anything, and it left something readable behind, however short. A single line saying
 *No conversation found to continue* is the provider telling you something, so dux keeps
 the tab exactly as it ended, repeats those words, and waits for you to start a fresh
 session yourself. It makes no difference whether the CLI treated that as an error or not:

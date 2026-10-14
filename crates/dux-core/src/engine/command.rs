@@ -1808,6 +1808,7 @@ impl Engine {
             .or_else(|| self.companion_terminals.get(target_id).map(|t| &t.client));
         if let Some(client) = client {
             client.write_bytes(&payload)?;
+            self.note_pty_used(target_id, &payload);
         }
         Ok(EventReaction::Status(StatusUpdate::info(
             crate::status_text!["Sent macro ", q(name), "."],

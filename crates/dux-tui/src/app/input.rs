@@ -34857,6 +34857,67 @@ cyan = "#00ffff"
         );
     }
 
+    /// A macro sent from the bar is somebody using the run, so a provider it
+    /// quits inside the rapid-exit window came up and was ended on purpose: no
+    /// failure is recorded, and the macro still does not light Typing.
+    #[test]
+    fn a_macro_bar_quit_inside_the_rapid_window_is_not_a_failed_run() {
+        let mut app = test_app(default_bindings());
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_owned();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "read line; exit 0".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(slot_tab.clone(), client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+        app.engine.config.macros.entries.insert(
+            "quit".to_string(),
+            crate::config::MacroEntry {
+                text: "/exit\n".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::Agent,
+        });
+
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+        assert_eq!(app.status.message(), "Sent macro \"quit\".");
+        assert!(
+            !app.engine.is_typing(slot_tab.as_str()),
+            "a macro marks the run as used without lighting Typing"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !app
+            .engine
+            .providers
+            .get_mut(slot_tab.as_ref_id())
+            .is_some_and(|c| c.is_exited() && c.try_wait().is_some())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the macro never quit the provider"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.engine.prune_exited_ptys();
+
+        assert!(
+            !app.engine.tab_last_run_failed(slot_tab.as_str()),
+            "a run a macro quit came up, so its brief end is not a failure"
+        );
+    }
+
     /// Sending a macro from the minimized bar writes to the FOCUSED center
     /// surface's PTY, exactly as the fullscreen bar does.
     #[test]

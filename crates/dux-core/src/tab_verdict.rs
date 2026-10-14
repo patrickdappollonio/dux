@@ -43,7 +43,7 @@ pub enum TabRunEnding {
     /// status unknown" is a genuinely different answer from any number.
     ExitedUnknownStatus,
     /// The child exited CLEANLY but was over inside
-    /// [`crate::engine::RAPID_EXIT_WINDOW`] with nobody typing into
+    /// [`crate::engine::RAPID_EXIT_WINDOW`] with nobody sending input to
     /// it, which dux reads as a provider that never came up.
     RapidCleanExit,
 }

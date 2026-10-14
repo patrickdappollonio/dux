@@ -90,27 +90,28 @@ pub fn agent_pty_ready_to_prune(
 /// explicit start clears the tab's verdict. The verdict is enforced server-side,
 /// so no client can forget it or talk past it.
 ///
-/// Two shapes are accepted false positives:
-/// - a provider that double-forks, exiting its foreground process while the real
-///   session runs on, records a failed run on every launch, because dux judges
-///   the child it spawned. No supported provider has that shape.
-/// - a quit that was not typed: a macro or other programmatic write ending the
-///   CLI within the window is not stamped as input, so it reads as a run that
-///   never came up. Typing is the fact that separates a person quitting from a
-///   provider that never started.
+/// One shape is an accepted false positive: a provider that double-forks,
+/// exiting its foreground process while the real session runs on, records a
+/// failed run on every launch, because dux judges the child it spawned. No
+/// supported provider has that shape.
+///
+/// Input is the fact that separates a person quitting from a provider that
+/// never started, so any write somebody sent the run counts, a macro or a click
+/// as much as a keystroke (see [`Engine::pty_run_was_used`]).
 pub const RAPID_EXIT_WINDOW: Duration = Duration::from_secs(5);
 
 /// Whether a finished run ended badly by virtue of how BRIEF it was: shorter
-/// than [`RAPID_EXIT_WINDOW`] and never typed into.
+/// than [`RAPID_EXIT_WINDOW`] and never sent any input.
 ///
-/// Typing is the exemption because it is the one thing that separates "this
-/// never worked" from "the user opened it and quit": quitting a CLI means typing
-/// `/exit`, `q`, or Ctrl-C into it, and a run that a person spoke to is a run
-/// that came up. A run still in flight (`None`) has no verdict to give.
+/// Input is the exemption because it is the one thing that separates "this
+/// never worked" from "the user opened it and quit": quitting a CLI means
+/// sending it `/exit`, `q`, or Ctrl-C, typed or from a macro, and a run that a
+/// person spoke to is a run that came up. A run still in flight (`None`) has no
+/// verdict to give.
 ///
 /// Pure, so the policy is testable without waiting out a real window.
-pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into: bool) -> bool {
-    !was_typed_into && run_duration.is_some_and(|ran_for| ran_for < RAPID_EXIT_WINDOW)
+pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_used: bool) -> bool {
+    !was_used && run_duration.is_some_and(|ran_for| ran_for < RAPID_EXIT_WINDOW)
 }
 
 /// The provider's last words when a RESUME run was REFUSED, or `None` when this
@@ -118,7 +119,7 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 ///
 /// The shape a refusal has: the launch asked the provider to continue a previous
 /// conversation, the provider printed why it would not, it quit before anybody
-/// could type into it, and it was over in a blink. A resume that ran a real
+/// sent it any input, and it was over in a blink. A resume that ran a real
 /// conversation and ended later is not this, which is why the rapid-exit rule is
 /// asked here rather than re-derived: a session that lasted an hour is a session
 /// ending.
@@ -143,11 +144,11 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 pub fn refused_resume_excerpt(
     was_resume: bool,
     run_duration: Option<Duration>,
-    was_typed_into: bool,
+    was_used: bool,
     verdict_excerpt: &[String],
 ) -> Option<Vec<String>> {
     if !was_resume
-        || !rapid_exit_ends_run_badly(run_duration, was_typed_into)
+        || !rapid_exit_ends_run_badly(run_duration, was_used)
         || verdict_excerpt.iter().all(|line| line.trim().is_empty())
     {
         return None;
@@ -1079,11 +1080,11 @@ impl Engine {
                         .to_string(),
                 ))
             });
-            // Whether anybody typed into this tab during THIS run, read before
-            // the teardown below drops the stamp. `pty_input` is cleared with
-            // the rest of a tab's runtime, so an entry here can only have been
-            // made since this provider came up.
-            let was_typed_into = self.pty_input.contains_key(tab_id.as_str());
+            // Whether anybody sent this tab input during THIS run, read before
+            // the teardown below drops the marks. Both are cleared with the
+            // rest of a tab's runtime, so an entry can only have been made
+            // since this provider came up.
+            let was_used = self.pty_run_was_used(tab_id.as_str());
             // Whether THIS run asked the provider to continue a previous
             // conversation, read before the teardown below forgets it. The
             // resume-fallback candidacy cannot answer it: the sweep retires a
@@ -1129,7 +1130,7 @@ impl Engine {
                 }
             }
             // A run ends badly either by exiting non-zero or by being over
-            // within `RAPID_EXIT_WINDOW` with nobody typing into it, which says
+            // within `RAPID_EXIT_WINDOW` with nobody sending it input, which says
             // the provider never came up whatever status it exited with.
             // Recorded after `clear_tab_runtime` above, which wipes the flag for
             // every deliberate end, so the verdict survives its own teardown.
@@ -1140,9 +1141,9 @@ impl Engine {
             // resume-fallback sweep runs first and relaunches fresh. The one arm
             // that falls through is `DropSpokenExit`, a resume that left
             // readable text on screen and then ended, and inside the rapid
-            // window with nobody typing it is judged here like any other run.
-            let ended_badly = exit_success == Some(false)
-                || rapid_exit_ends_run_badly(run_duration, was_typed_into);
+            // window with no input it is judged here like any other run.
+            let ended_badly =
+                exit_success == Some(false) || rapid_exit_ends_run_badly(run_duration, was_used);
             // Read before `mark_tab_run_failed` below consumes the excerpt: the
             // verdict's tail and the warning's quote are the same lines, read
             // off the same once-only capture.
@@ -1153,7 +1154,7 @@ impl Engine {
             let refused_resume = refused_resume_excerpt(
                 was_resume && owning.is_some(),
                 run_duration,
-                was_typed_into,
+                was_used,
                 &verdict_excerpt,
             );
             if ended_badly && owning.is_some() {
@@ -3546,11 +3547,13 @@ mod tests {
         );
     }
 
-    /// The same instant exit, on a tab somebody typed into: that is a person
-    /// quitting a CLI they were using, and it leaves a clean slate.
-    #[test]
-    fn prune_records_no_failure_when_a_rapid_exit_was_typed_into() {
-        let (mut engine, _tmp) = test_engine();
+    /// One agent whose first tab runs whatever `spawn` starts in its worktree,
+    /// for the rapid-exit tests. The worktree directory is returned so it
+    /// outlives the run.
+    fn engine_with_slot_running(
+        spawn: impl FnOnce(&Path) -> PtyClient,
+    ) -> (Engine, impl Sized, TempDir, TabId) {
+        let (mut engine, tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(
             "p1",
@@ -3570,7 +3573,16 @@ mod tests {
         engine.sessions.push(session);
         engine
             .providers
-            .insert(slot.clone(), spawn_exit(worktree.path(), "0"));
+            .insert(slot.clone(), spawn(worktree.path()));
+        (engine, tmp, worktree, slot)
+    }
+
+    /// The same instant exit, on a tab somebody typed into: that is a person
+    /// quitting a CLI they were using, and it leaves a clean slate.
+    #[test]
+    fn prune_records_no_failure_when_a_rapid_exit_was_typed_into() {
+        let (mut engine, _tmp, _worktree, slot) =
+            engine_with_slot_running(|cwd| spawn_exit(cwd, "0"));
         engine.note_pty_input(slot.as_str());
 
         wait_for_exit(&mut engine, &slot);
@@ -3579,6 +3591,96 @@ mod tests {
         assert!(
             !engine.tab_last_run_failed(slot.as_str()),
             "a run the user typed into came up, so quitting it is not a failure"
+        );
+    }
+
+    /// A provider that waits for one line of input and then quits cleanly, the
+    /// shape of a CLI that a macro sending `/exit` ends.
+    fn spawn_quit_on_line(cwd: &Path) -> PtyClient {
+        PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), "read line; exit 0".to_string()],
+            cwd,
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn sh")
+    }
+
+    /// A macro is input somebody sent: a run a macro quit inside the window
+    /// came up and was ended on purpose, so it leaves a clean slate exactly as
+    /// typing does. The mark is torn down with the run, so the next run starts
+    /// unused.
+    #[test]
+    fn prune_records_no_failure_when_a_macro_ended_a_rapid_run() {
+        use crate::config::{MacroEntry, MacroSurface};
+        use crate::engine::Command;
+
+        let (mut engine, _tmp, _worktree, slot) = engine_with_slot_running(spawn_quit_on_line);
+        engine.config.macros.entries.insert(
+            "quit".to_string(),
+            MacroEntry {
+                text: "/exit\n".to_string(),
+                surface: MacroSurface::Agent,
+            },
+        );
+
+        engine
+            .apply(Command::RunMacro {
+                target_id: slot.as_str().to_string(),
+                name: "quit".to_string(),
+            })
+            .expect("the macro runs against the live tab");
+        assert!(
+            !engine.pty_input.contains_key(slot.as_str()),
+            "a macro marks the run as used without stamping the typing window"
+        );
+
+        wait_for_exit(&mut engine, &slot);
+        engine.prune_exited_ptys();
+
+        assert!(
+            !engine.tab_last_run_failed(slot.as_str()),
+            "a run a macro quit came up, so its brief end is not a failure"
+        );
+        assert!(
+            !engine.pty_run_was_used(slot.as_str()),
+            "the mark belongs to the run that ended, never to the next one"
+        );
+    }
+
+    /// Traffic nobody caused is not use: a focus report the viewer sends on
+    /// its own, and the emulator's answers to the child's terminal queries,
+    /// which dux writes back without any surface's write path. A run that saw
+    /// only those and was over in a blink still never came up.
+    #[test]
+    fn prune_records_a_failure_when_a_rapid_run_saw_only_automatic_traffic() {
+        let (mut engine, _tmp, _worktree, slot) = engine_with_slot_running(|cwd| {
+            PtyClient::spawn_with_env(
+                "sh",
+                &[
+                    "-c".to_string(),
+                    r"printf '\033[c\033[6n'; sleep 0.5; exit 0".to_string(),
+                ],
+                cwd,
+                24,
+                80,
+                100,
+                &[],
+            )
+            .expect("spawn sh")
+        });
+        engine.note_pty_write(slot.as_str(), b"\x1b[I");
+        engine.note_pty_write(slot.as_str(), b"\x1b[O");
+
+        wait_for_exit(&mut engine, &slot);
+        engine.prune_exited_ptys();
+
+        assert!(
+            engine.tab_last_run_failed(slot.as_str()),
+            "focus reports and query replies are not somebody using the run"
         );
     }
 
@@ -5917,6 +6019,7 @@ mod tests {
         engine.pty_activity.insert(tid.clone(), Instant::now());
         engine.pty_input.insert(tid.clone(), Instant::now());
         engine.note_pty_pointer(&tid, crate::pty::PointerReport::Wheel);
+        engine.pty_used.insert(tid.clone());
         assert!(engine.pty_pointer.contains_key(&tid), "armed for the test");
 
         engine.begin_close_companion_terminal(&tid);
@@ -5932,6 +6035,10 @@ mod tests {
         assert!(
             !engine.pty_pointer.contains_key(&tid),
             "teardown must clear the terminal's pointer entry too"
+        );
+        assert!(
+            !engine.pty_used.contains(&tid),
+            "teardown must clear the terminal's use mark too"
         );
     }
 
