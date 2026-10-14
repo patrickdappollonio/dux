@@ -257,10 +257,12 @@ pub enum RunningTabFate {
 }
 
 impl RunningTabFate {
-    /// `resumes` is whether the provider's configuration carries resume
-    /// arguments, the same answer every launch asks.
-    pub fn of(provider: &str, resumes: bool) -> Self {
-        if provider.eq_ignore_ascii_case("claude") {
+    /// `command` is the file name of the provider's command, which names the
+    /// CLI whatever the provider is called, and `resumes` is whether the
+    /// provider's configuration carries resume arguments, the same answer
+    /// every launch asks.
+    pub fn of(command: &str, resumes: bool) -> Self {
+        if command.eq_ignore_ascii_case("claude") {
             Self::Follows
         } else if resumes {
             Self::Restartable
@@ -281,10 +283,11 @@ pub struct RunningTabs {
 }
 
 impl RunningTabs {
-    /// Sort one running tab of `provider` by its fate.
-    pub fn push(&mut self, provider: &str, resumes: bool) {
+    /// Sort one running tab of `provider`, whose command's file name is
+    /// `command`, by its fate.
+    pub fn push(&mut self, provider: &str, command: &str, resumes: bool) {
         let provider = provider.to_string();
-        match RunningTabFate::of(&provider, resumes) {
+        match RunningTabFate::of(command, resumes) {
             RunningTabFate::Follows => self.follows.push(provider),
             RunningTabFate::Restartable => self.restartable.push(provider),
             RunningTabFate::LeftRunning => self.left_running.push(provider),
@@ -657,7 +660,7 @@ mod tests {
     fn running(tabs: &[(&str, bool)]) -> RunningTabs {
         let mut running = RunningTabs::default();
         for (provider, resumes) in tabs {
-            running.push(provider, *resumes);
+            running.push(provider, provider, *resumes);
         }
         running
     }

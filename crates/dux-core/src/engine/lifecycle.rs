@@ -2245,6 +2245,7 @@ impl Engine {
                     let mut slot = crate::working_copy::RunningTabs::default();
                     slot.push(
                         session.provider.as_str(),
+                        &self.provider_command_file_name(&session.provider),
                         self.provider_resumes(&session.provider),
                     );
                     slot
@@ -2257,6 +2258,12 @@ impl Engine {
                 .map(|(_, provider)| provider.as_str().to_string())
                 .collect(),
         })
+    }
+
+    /// The file name of the command `provider` runs, which names the CLI
+    /// whatever the provider is called.
+    fn provider_command_file_name(&self, provider: &crate::model::ProviderKind) -> String {
+        crate::config::provider_config(&self.config, provider).command_file_name()
     }
 
     /// Whether `provider` picks its conversation back up in the same directory.
@@ -2274,7 +2281,11 @@ impl Engine {
         for id in self.ordered_tab_ids_for_session(crate::ids::SessionIdRef::new(session_id)) {
             if self.tab_is_live(id.as_ref_id()) {
                 let provider = self.tab_running_provider(session, id.as_ref_id());
-                running.push(provider.as_str(), self.provider_resumes(&provider));
+                running.push(
+                    provider.as_str(),
+                    &self.provider_command_file_name(&provider),
+                    self.provider_resumes(&provider),
+                );
             }
         }
         running
@@ -2299,7 +2310,7 @@ impl Engine {
             })
             .filter(|(_, provider)| {
                 crate::working_copy::RunningTabFate::of(
-                    provider.as_str(),
+                    &self.provider_command_file_name(provider),
                     self.provider_resumes(provider),
                 ) == crate::working_copy::RunningTabFate::Restartable
             })
@@ -3122,20 +3133,26 @@ mod recreate_tests {
     /// The missing-copy agent with its slot tab running `slot` and each extra
     /// `(tab id, provider)` tab running too, every one a `cat` that exits on
     /// SIGTERM. Every CLI has run in this agent before, so a launch may resume
-    /// it, and every provider command is `true`, so a launch runs nothing real.
+    /// it, and every provider command is `true`, so a launch runs nothing real,
+    /// except Claude's, a path that still names Claude: a running Claude tab
+    /// follows the folder and is never started again here.
     fn agent_running(
         slot: &str,
         extras: &[(&str, &str)],
     ) -> (Engine, crate::test_scratch::ScratchDir, tempfile::TempDir) {
         let (mut engine, tmp) = engine_with_a_missing_working_copy();
-        for provider in engine.config.providers.commands.values_mut() {
-            provider.command = "true".to_string();
+        let cwd = tempfile::tempdir().expect("a directory for the stand-in processes");
+        for (name, provider) in engine.config.providers.commands.iter_mut() {
+            provider.command = if name == "claude" {
+                cwd.path().join("claude").to_string_lossy().into_owned()
+            } else {
+                "true".to_string()
+            };
         }
         engine.sessions[0].provider = crate::model::ProviderKind::new(slot);
         for provider in ["claude", "codex", "opencode", "copilot"] {
             engine.sessions[0].mark_provider_started(&crate::model::ProviderKind::new(provider));
         }
-        let cwd = tempfile::tempdir().expect("a directory for the stand-in processes");
         let spawn = || {
             PtyClient::spawn_with_env("cat", &[], cwd.path(), 24, 80, 1000, &[]).expect("spawn cat")
         };
@@ -3249,6 +3266,38 @@ mod recreate_tests {
 
         let opencode = inputs("claude", &[("tab-b", "opencode")]);
         assert_eq!(opencode.restart_offer, vec!["opencode".to_string()]);
+    }
+
+    /// What a tab does with the recreated folder is a fact about the CLI it
+    /// runs, so it is decided by the provider's command, not its name: a
+    /// provider named anything whose command is Claude follows the folder, and
+    /// one named `claude` that runs something else does not.
+    #[test]
+    fn a_running_tab_is_sorted_by_the_command_it_runs() {
+        let (mut engine, _tmp, cwd) = agent_running("codex", &[("tab-b", "claude")]);
+        engine.config.providers.commands.insert(
+            "mine".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: cwd.path().join("claude").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        );
+        engine.sessions[0].provider = crate::model::ProviderKind::new("mine");
+        let claude = engine
+            .config
+            .providers
+            .commands
+            .get_mut("claude")
+            .expect("claude is configured");
+        claude.command = "/usr/local/bin/something-else".to_string();
+        assert!(claude.supports_session_resume());
+
+        let inputs = engine
+            .recreate_working_copy_inputs("s1")
+            .expect("a managed agent whose copy is gone");
+        assert_eq!(inputs.running_tabs.follows, vec!["mine".to_string()]);
+        assert_eq!(inputs.running_tabs.restartable, vec!["claude".to_string()]);
+        assert_eq!(inputs.restart_offer, vec!["claude".to_string()]);
     }
 
     /// The browser asks no CLI question of its own: the agent's view carries the
