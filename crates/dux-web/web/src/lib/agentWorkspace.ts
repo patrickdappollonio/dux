@@ -26,6 +26,27 @@ export type FolderRepoStatus =
    * way out is to recreate it at the same path. */
   | "missing"
 
+/** The running tabs of an agent whose working copy is gone, one provider per
+ * tab, sorted by what each does once the copy is back. Mirrors
+ * `dux_core::working_copy::RunningTabs`. */
+export type RunningTabs = {
+  /** Follows the folder by itself: Claude. */
+  follows: string[]
+  /** Cannot follow it, and picks its conversation back up once restarted. */
+  restartable: string[]
+  /** Cannot follow it, and would lose its conversation if restarted. */
+  left_running: string[]
+}
+
+/** Mirrors `dux_core::viewmodel::RecreateView`. */
+export type RecreateWire = {
+  /** The running tabs, or the slot tab alone when none is running. */
+  running: RunningTabs
+  /** The providers of the tabs the confirmation offers to restart, one per
+   * tab. Empty means no checkbox. */
+  restart_offer: string[]
+}
+
 /** The serialized workspace, exactly as it arrives on `SessionView.workspace`.
  * Field names are the server's (snake_case). */
 export type AgentWorkspaceWire =
@@ -56,6 +77,10 @@ export type AgentWorkspaceWire =
       /** Why the changes region is quiet, when it is. Empty or absent while the
        * working copy is there. */
       quiet_reason?: string
+      /** What the recreate confirmation says about the running tabs and offers
+       * to restart, decided on the server so the browser asks no CLI question
+       * of its own. Null or absent while the working copy is there. */
+      recreate?: RecreateWire | null
     }
   | {
       kind: "folder"

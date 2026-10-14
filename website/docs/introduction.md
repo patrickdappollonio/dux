@@ -115,9 +115,14 @@ would normally name the project.
 > The browser has the same action in the agent's menu.
 >
 > You can run it while the agent is running. A running Claude tab never notices the folder
-> going and carries on in the recreated one with its conversation intact; every other CLI
-> is the cautious case, so stop the tab and start the agent again to continue there. The
-> confirmation says which of the two you are getting.
+> going and carries on in the recreated one with its conversation intact. Codex, OpenCode
+> and any other CLI that can pick its conversation back up cannot follow the folder, so the
+> confirmation offers to restart those tabs, ticked by default: once the working copy is
+> back, dux shuts them down politely and starts each again so it continues its
+> conversation there. Only one tab per CLI gets its conversation back; a second tab of the
+> same CLI starts fresh, and the message afterwards says so. A CLI with no way to pick a
+> conversation back up, such as Copilot, is left running, because restarting it would lose
+> the conversation; stop and start it yourself if it cannot follow the folder.
 
 If the branch is gone locally but still on the remote, dux creates it again from
 `origin/<branch>`, holding everything that had been pushed. If it is gone everywhere, dux

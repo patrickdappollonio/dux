@@ -208,67 +208,168 @@ fn provider_name(provider: &str) -> String {
     }
 }
 
-/// Several provider names as one subject, each marked as a name: "Codex",
-/// "Codex or Opencode", "Codex, Opencode or Copilot".
-fn providers_joined(names: &[String]) -> Prose {
+/// Each provider once, in the order first met, as a sentence names it.
+fn distinct_names(providers: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for provider in providers {
+        let name = provider_name(provider);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Several provider names as one subject, each marked as a name, with `last`
+/// before the final one: "Codex", "Codex or Opencode", "Codex, Opencode and
+/// Copilot".
+fn providers_joined(names: &[String], last: &str) -> Prose {
     let mut joined = Prose::new();
     for (index, name) in names.iter().enumerate() {
         if index > 0 {
-            joined.push_text(if index == names.len() - 1 {
-                " or "
-            } else {
-                ", "
-            });
+            joined.push_text(if index == names.len() - 1 { last } else { ", " });
         }
         joined.push_name(name.clone());
     }
     joined
 }
 
-/// What the tabs still running in the deleted directory do once the working copy
-/// is back, in the one sentence the confirmation and the final both say.
-///
-/// Takes the providers that are actually RUNNING, not the agent's slot-tab
-/// mirror: a dormant claude slot beside a live codex extra is the stuck CLI, and
-/// naming the mirror would promise the user the opposite of what happens. One
-/// non-claude provider among them is enough to make the whole sentence the
-/// cautious one, and it names every such provider, because each of those tabs is
-/// one the user has to stop.
+/// What one tab still running in a deleted working copy does once the copy is
+/// back, decided per CLI.
 ///
 /// Measured against the real CLIs. The Claude CLI never notices its directory
 /// going, and once one exists at the same path again it keeps working in it with
 /// its conversation intact. The Codex CLI answers every turn with "invalid cwd"
 /// from the moment the directory goes and stays stuck there after the recreate,
 /// until it is quit and resumed in the new folder. OpenCode and Copilot have not
-/// been measured, so they get the cautious answer rather than a promise.
-pub fn recreate_running_tab_clause(providers: &[String]) -> String {
-    recreate_running_tab_prose(providers).plain()
+/// been measured, so they get the cautious answer rather than a promise, and so
+/// does any other CLI configured as a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunningTabFate {
+    /// It follows the folder by itself: Claude.
+    Follows,
+    /// It cannot follow the folder, and its CLI picks its conversation back up
+    /// in the same directory, so stopping and starting it again continues it.
+    Restartable,
+    /// It cannot follow the folder, and its CLI has no way to pick a
+    /// conversation back up, so restarting it would lose the conversation.
+    LeftRunning,
+}
+
+impl RunningTabFate {
+    /// `resumes` is whether the provider's configuration carries resume
+    /// arguments, the same answer every launch asks.
+    pub fn of(provider: &str, resumes: bool) -> Self {
+        if provider.eq_ignore_ascii_case("claude") {
+            Self::Follows
+        } else if resumes {
+            Self::Restartable
+        } else {
+            Self::LeftRunning
+        }
+    }
+}
+
+/// The providers of the tabs running in a deleted working copy, one entry per
+/// tab, sorted by what each does once the copy is back. The confirmation, its
+/// restart checkbox and the final are all written from this, on both surfaces.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RunningTabs {
+    pub follows: Vec<String>,
+    pub restartable: Vec<String>,
+    pub left_running: Vec<String>,
+}
+
+impl RunningTabs {
+    /// Sort one running tab of `provider` by its fate.
+    pub fn push(&mut self, provider: &str, resumes: bool) {
+        let provider = provider.to_string();
+        match RunningTabFate::of(&provider, resumes) {
+            RunningTabFate::Follows => self.follows.push(provider),
+            RunningTabFate::Restartable => self.restartable.push(provider),
+            RunningTabFate::LeftRunning => self.left_running.push(provider),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.follows.is_empty() && self.restartable.is_empty() && self.left_running.is_empty()
+    }
+}
+
+/// Sentences joined with one space.
+fn sentences(parts: impl IntoIterator<Item = Prose>) -> Prose {
+    let mut joined = Prose::new();
+    for part in parts.into_iter().filter(|part| !part.is_empty()) {
+        if !joined.is_empty() {
+            joined.push_text(" ");
+        }
+        joined = joined.then(part);
+    }
+    joined
+}
+
+/// What the tabs still running in the deleted directory do once the working copy
+/// is back, in the sentences the confirmation and the final both say.
+///
+/// Written from the tabs that are actually RUNNING, not the agent's slot-tab
+/// mirror: a dormant claude slot beside a live codex extra is the stuck CLI, and
+/// naming the mirror would promise the user the opposite of what happens. One
+/// sentence per fate present, each naming every provider it is about.
+pub fn recreate_running_tab_clause(tabs: &RunningTabs) -> String {
+    recreate_running_tab_prose(tabs).plain()
 }
 
 /// [`recreate_running_tab_clause`] with each provider marked as a name.
-fn recreate_running_tab_prose(providers: &[String]) -> Prose {
-    let cautious: Vec<String> = providers
-        .iter()
-        .filter(|p| !p.eq_ignore_ascii_case("claude"))
-        .map(|p| provider_name(p))
-        .collect();
-    if cautious.is_empty() {
-        let name = providers
-            .first()
-            .map(|p| provider_name(p))
-            .unwrap_or_else(|| "Claude".to_string());
-        return Prose::new()
+fn recreate_running_tab_prose(tabs: &RunningTabs) -> Prose {
+    let follows = (!tabs.follows.is_empty()).then(|| {
+        Prose::new()
             .text("A running ")
-            .name(name)
-            .text(" tab keeps working in the recreated copy by itself.");
-    }
+            .then(providers_joined(&distinct_names(&tabs.follows), " or "))
+            .text(" tab keeps working in the recreated copy by itself.")
+    });
+    let restartable = (!tabs.restartable.is_empty()).then(|| {
+        Prose::new()
+            .text("A running ")
+            .then(providers_joined(&distinct_names(&tabs.restartable), " or "))
+            .text(
+                " tab cannot follow the folder by itself; restarting it continues its \
+                 conversation in the recreated copy.",
+            )
+    });
+    let left_running =
+        (!tabs.left_running.is_empty()).then(|| left_running_prose(&tabs.left_running));
+    sentences([follows, restartable, left_running].into_iter().flatten())
+}
+
+/// A running tab whose CLI cannot pick a conversation back up is never
+/// restarted: the sentence says so, and what to do instead.
+fn left_running_prose(providers: &[String]) -> Prose {
     Prose::new()
         .text("A running ")
-        .then(providers_joined(&cautious))
+        .then(providers_joined(&distinct_names(providers), " or "))
         .text(
-            " tab cannot follow the folder: stop it and start the agent again to continue \
-             in the recreated copy.",
+            " tab is left running, because restarting it would lose its conversation; if it \
+             cannot follow the folder, stop it and start it again yourself.",
         )
+}
+
+/// The label of the confirmation's restart checkbox, naming the providers of the
+/// tabs it restarts: "Restart the Codex tab so it continues in the new copy",
+/// "Restart the Codex and Opencode tabs so they continue in the new copy".
+///
+/// `restartable` holds one entry per tab, so two tabs of one provider read as
+/// plural while the provider is named once. Pinned against the browser's
+/// `recreateRestartCheckboxProse` by `tests/fixtures/prose_cross_language.json`.
+pub fn recreate_restart_checkbox_prose(restartable: &[String]) -> Prose {
+    let tail = if restartable.len() == 1 {
+        " tab so it continues in the new copy"
+    } else {
+        " tabs so they continue in the new copy"
+    };
+    Prose::new()
+        .text("Restart the ")
+        .then(providers_joined(&distinct_names(restartable), " and "))
+        .text(tail)
 }
 
 /// What recreating the working copy costs, said plainly in the confirmation.
@@ -287,22 +388,22 @@ fn recreate_running_tab_prose(providers: &[String]) -> Prose {
 /// with no resume arguments) would have this dialog promising something that
 /// cannot happen, and the same path buys it nothing.
 ///
-/// `providers` are the providers of the tabs running right now, or the slot
-/// tab's when none is: the dialog is about to ask for a checkout under whatever
-/// is live, and with nothing live it still says what starting one would mean.
+/// `running` are the tabs running right now, or the slot tab alone when none
+/// is: the dialog is about to ask for a checkout under whatever is live, and
+/// with nothing live it still says what starting one would mean.
 pub fn recreate_confirm_body(
     worktree: &Path,
     branch_name: &str,
     source_branch: &str,
     conversation_resumes: bool,
-    providers: &[String],
+    running: &RunningTabs,
 ) -> String {
     recreate_confirm_prose(
         worktree,
         branch_name,
         source_branch,
         conversation_resumes,
-        providers,
+        running,
     )
     .plain()
 }
@@ -315,7 +416,7 @@ pub fn recreate_confirm_prose(
     branch_name: &str,
     source_branch: &str,
     conversation_resumes: bool,
-    providers: &[String],
+    running: &RunningTabs,
 ) -> Prose {
     let conversation = if conversation_resumes {
         "The conversation may resume, because the agent's CLI keys its history by directory path \
@@ -346,7 +447,7 @@ pub fn recreate_confirm_prose(
         )
         .text(conversation)
         .text("\n\n")
-        .then(recreate_running_tab_prose(providers))
+        .then(recreate_running_tab_prose(running))
         .text(
             " A terminal still open in the old directory keeps working in a directory that is \
              gone; close it and open one in the recreated copy.",
@@ -362,6 +463,108 @@ pub fn recreate_busy_message(agent_label: &str) -> crate::status_text::StatusTex
     ]
 }
 
+/// What dux did to the tabs it was asked to restart after a recreate, one entry
+/// per tab, each the provider the tab started again with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TabRestartReport {
+    /// Started again, picking its conversation back up.
+    pub continued: Vec<String>,
+    /// Started again with a fresh conversation, because another tab of the same
+    /// CLI got the conversation back: only one can.
+    pub fresh: Vec<String>,
+    /// Not started again: closed, already running again, or refused by the
+    /// time its old process had gone.
+    pub not_restarted: Vec<String>,
+    /// The wait the old processes were given, when any of them outlasted it and
+    /// was force-closed.
+    pub forced_after_seconds: Option<u64>,
+}
+
+/// The spinner while dux waits for the tabs it is restarting to shut down.
+pub fn recreate_restart_busy_message(
+    agent_label: &str,
+    restartable: &[String],
+) -> crate::status_text::StatusText {
+    let tail = if restartable.len() == 1 {
+        " tab so it continues in the recreated copy…"
+    } else {
+        " tabs so they continue in the recreated copy…"
+    };
+    Prose::new()
+        .text("Recreated the working copy for agent ")
+        .quoted(agent_label)
+        .text("; restarting its ")
+        .then(providers_joined(&distinct_names(restartable), " and "))
+        .text(tail)
+        .into()
+}
+
+/// "the Codex tab" / "the Codex and Opencode tabs", for the restart report,
+/// after `lead`.
+fn the_tabs(lead: &str, providers: &[String]) -> Prose {
+    Prose::new()
+        .text(lead)
+        .then(providers_joined(&distinct_names(providers), " and "))
+        .text(if providers.len() == 1 {
+            " tab"
+        } else {
+            " tabs"
+        })
+}
+
+/// The restart half of the final: what happened to every tab dux restarted, in
+/// words, beside the sentences about the tabs it left alone.
+fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose {
+    let one = |tabs: &[String]| tabs.len() == 1;
+    let follows = (!live.follows.is_empty()).then(|| {
+        recreate_running_tab_prose(&RunningTabs {
+            follows: live.follows.clone(),
+            ..RunningTabs::default()
+        })
+    });
+    let continued = (!report.continued.is_empty()).then(|| {
+        the_tabs("Restarted the ", &report.continued).text(if one(&report.continued) {
+            ", which continues its conversation in the recreated copy."
+        } else {
+            ", which continue their conversations in the recreated copy."
+        })
+    });
+    let fresh = (!report.fresh.is_empty()).then(|| {
+        the_tabs("The ", &report.fresh).text(if one(&report.fresh) {
+            " started a fresh conversation instead, because only one tab per CLI can pick \
+                 its conversation back up."
+        } else {
+            " started fresh conversations instead, because only one tab per CLI can pick \
+                 its conversation back up."
+        })
+    });
+    let not_restarted = (!report.not_restarted.is_empty()).then(|| {
+        the_tabs("dux did not restart the ", &report.not_restarted).text(
+            ", because the tab or its agent changed while the old process shut down; start \
+             it yourself if you still want it running.",
+        )
+    });
+    let forced = report.forced_after_seconds.map(|seconds| {
+        Prose::new().text(format!(
+            "An old process did not exit within {seconds} seconds and was force-closed first."
+        ))
+    });
+    let left_running =
+        (!live.left_running.is_empty()).then(|| left_running_prose(&live.left_running));
+    sentences(
+        [
+            follows,
+            continued,
+            fresh,
+            not_restarted,
+            forced,
+            left_running,
+        ]
+        .into_iter()
+        .flatten(),
+    )
+}
+
 /// The success sentence, naming the path and what actually happened to the
 /// branch.
 ///
@@ -370,15 +573,18 @@ pub fn recreate_busy_message(agent_label: &str) -> crate::status_text::StatusTex
 /// own pushed commits, and a branch rebuilt from the source branch holds none
 /// of them, which is not a difference to leave to a caller's `Option`.
 ///
-/// `live_providers` are the providers of the tabs running when the checkout
-/// landed: empty says nothing was running and the tail is about dormant tabs,
-/// and anything else names what those processes do next.
+/// `live` are the tabs running when the checkout landed: empty says nothing was
+/// running and the tail is about dormant tabs, and anything else names what
+/// those processes do next. `restart` is what dux did when the confirmation
+/// asked it to restart the tabs that cannot follow the folder, and replaces
+/// their sentence.
 pub fn recreate_success_message(
     agent_label: &str,
     worktree: &Path,
     branch_name: &str,
     outcome: &RecreatedBranch,
-    live_providers: &[String],
+    live: &RunningTabs,
+    restart: Option<&TabRestartReport>,
 ) -> crate::status_text::StatusText {
     let branch_outcome = match outcome {
         RecreatedBranch::RecreatedFrom(source) => crate::status_text![
@@ -401,10 +607,12 @@ pub fn recreate_success_message(
             crate::status_text!["branch ", q(branch_name), " was checked out again"]
         }
     };
-    let tail: crate::status_text::StatusText = if live_providers.is_empty() {
-        "Its tabs stay dormant; start one when you want the agent running there.".into()
-    } else {
-        recreate_running_tab_prose(live_providers).into()
+    let tail: crate::status_text::StatusText = match restart {
+        Some(report) => restart_report_prose(live, report).into(),
+        None if live.is_empty() => {
+            "Its tabs stay dormant; start one when you want the agent running there.".into()
+        }
+        None => recreate_running_tab_prose(live).into(),
     };
     crate::status_text![
         "Recreated the working copy for agent ",
@@ -422,6 +630,20 @@ pub fn recreate_success_message(
 mod tests {
     use super::*;
 
+    /// Running tabs as the engine sorts them: each `(provider, resumes)` pair is
+    /// one tab, `resumes` being whether its provider has resume arguments.
+    fn running(tabs: &[(&str, bool)]) -> RunningTabs {
+        let mut running = RunningTabs::default();
+        for (provider, resumes) in tabs {
+            running.push(provider, *resumes);
+        }
+        running
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
     /// A branch name can come from a pull request somebody else opened; an
     /// override inside it must not reorder the confirm's own words.
     #[test]
@@ -431,7 +653,7 @@ mod tests {
             "feat\u{202E}txt.exe",
             "main",
             true,
-            &["claude".to_string()],
+            &running(&[("claude", true)]),
         );
         let plain = prose.plain();
         assert!(
@@ -487,7 +709,7 @@ mod tests {
                 "feat",
                 "main",
                 true,
-                &["claude".to_string()]
+                &running(&[("claude", true)])
             ),
             "Recreate the working copy for this agent at /worktrees/repo/feat?\n\n\
              If branch \"feat\" still exists locally, dux checks it out there again. If it is \
@@ -503,77 +725,98 @@ mod tests {
         );
     }
 
-    /// The running-tab paragraph is the measured truth per CLI: Claude follows
-    /// the folder on its own, and every other provider is told to stop and start
-    /// again, because Codex was measured stuck and the rest were not measured.
+    /// Each CLI is sorted by what it does with the recreated folder: Claude
+    /// follows it, a CLI that can resume is restartable, and one that cannot is
+    /// left running, whatever its name, a custom provider included.
     #[test]
-    fn the_confirm_says_what_a_running_tab_does_per_provider() {
-        let claude = recreate_confirm_body(
-            Path::new("/tmp/wt"),
-            "feat",
-            "main",
-            true,
-            &["claude".to_string()],
-        );
-        assert!(
-            claude.contains("A running Claude tab keeps working in the recreated copy by itself."),
-            "{claude}"
-        );
-
-        for provider in ["codex", "opencode", "copilot"] {
-            let body = recreate_confirm_body(
-                Path::new("/tmp/wt"),
-                "feat",
-                "main",
-                true,
-                &[provider.to_string()],
-            );
-            assert!(
-                body.contains("cannot follow the folder: stop it and start the agent again"),
-                "{body}"
-            );
-            assert!(
-                !body.contains("keeps working in the recreated copy"),
-                "{body}"
-            );
-        }
-
+    fn a_running_tab_is_sorted_by_its_cli() {
+        assert_eq!(RunningTabFate::of("claude", true), RunningTabFate::Follows);
+        assert_eq!(RunningTabFate::of("Claude", false), RunningTabFate::Follows);
         assert_eq!(
-            recreate_running_tab_clause(&["codex".to_string()]),
-            "A running Codex tab cannot follow the folder: stop it and start the agent again to \
-             continue in the recreated copy."
+            RunningTabFate::of("codex", true),
+            RunningTabFate::Restartable
+        );
+        assert_eq!(
+            RunningTabFate::of("opencode", true),
+            RunningTabFate::Restartable
+        );
+        assert_eq!(
+            RunningTabFate::of("copilot", false),
+            RunningTabFate::LeftRunning
+        );
+        assert_eq!(
+            RunningTabFate::of("my-cli", true),
+            RunningTabFate::Restartable
+        );
+        assert_eq!(
+            RunningTabFate::of("my-cli", false),
+            RunningTabFate::LeftRunning
         );
     }
 
-    /// One stuck CLI among the running tabs makes the whole sentence the
-    /// cautious one, and it names every tab the user has to stop rather than
-    /// only the first.
+    /// The running-tab paragraph is the measured truth per CLI, one sentence per
+    /// fate: Claude follows the folder on its own, a CLI that can resume
+    /// continues once restarted, and one that cannot is left running with what
+    /// to do about it.
     #[test]
-    fn the_clause_is_cautious_when_any_running_tab_is_not_claude() {
-        let names = |providers: &[&str]| {
-            recreate_running_tab_clause(
-                &providers.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-            )
-        };
+    fn the_clause_says_what_each_running_tab_does() {
+        let clause = |tabs: &[(&str, bool)]| recreate_running_tab_clause(&running(tabs));
         assert_eq!(
-            names(&["claude", "codex"]),
-            "A running Codex tab cannot follow the folder: stop it and start the agent again to \
-             continue in the recreated copy."
-        );
-        assert_eq!(
-            names(&["codex", "opencode"]),
-            "A running Codex or Opencode tab cannot follow the folder: stop it and start the \
-             agent again to continue in the recreated copy."
-        );
-        assert_eq!(
-            names(&["codex", "opencode", "copilot"]),
-            "A running Codex, Opencode or Copilot tab cannot follow the folder: stop it and start \
-             the agent again to continue in the recreated copy."
-        );
-        assert_eq!(
-            names(&["claude"]),
+            clause(&[("claude", true)]),
             "A running Claude tab keeps working in the recreated copy by itself."
         );
+        assert_eq!(
+            clause(&[("codex", true)]),
+            "A running Codex tab cannot follow the folder by itself; restarting it continues its \
+             conversation in the recreated copy."
+        );
+        assert_eq!(
+            clause(&[("codex", true), ("opencode", true), ("codex", true)]),
+            "A running Codex or Opencode tab cannot follow the folder by itself; restarting it \
+             continues its conversation in the recreated copy."
+        );
+        assert_eq!(
+            clause(&[("copilot", false)]),
+            "A running Copilot tab is left running, because restarting it would lose its \
+             conversation; if it cannot follow the folder, stop it and start it again yourself."
+        );
+        assert_eq!(
+            clause(&[("claude", true), ("codex", true), ("copilot", false)]),
+            "A running Claude tab keeps working in the recreated copy by itself. A running Codex \
+             tab cannot follow the folder by itself; restarting it continues its conversation in \
+             the recreated copy. A running Copilot tab is left running, because restarting it \
+             would lose its conversation; if it cannot follow the folder, stop it and start it \
+             again yourself."
+        );
+    }
+
+    /// The checkbox names every provider it restarts once, and reads plural by
+    /// tab count, so two tabs of one CLI are "the Codex tabs".
+    #[test]
+    fn the_restart_checkbox_names_the_providers_it_restarts() {
+        let label = |providers: &[&str]| recreate_restart_checkbox_prose(&strings(providers));
+        assert_eq!(
+            label(&["codex"]).plain(),
+            "Restart the Codex tab so it continues in the new copy"
+        );
+        assert_eq!(
+            label(&["codex", "opencode"]).plain(),
+            "Restart the Codex and Opencode tabs so they continue in the new copy"
+        );
+        assert_eq!(
+            label(&["codex", "codex"]).plain(),
+            "Restart the Codex tabs so they continue in the new copy"
+        );
+        let two = label(&["codex", "opencode"]);
+        let names: Vec<&str> = two
+            .segments()
+            .iter()
+            .filter_map(|segment| match segment {
+                crate::prose::ProseSegment::Name { name, .. } => Some(name.as_str()),
+                crate::prose::ProseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["Codex", "Opencode"], "the names are chips");
     }
 
     #[test]
@@ -583,7 +826,7 @@ mod tests {
             "feat",
             "main",
             true,
-            &["claude".to_string()],
+            &running(&[("claude", true)]),
         );
         assert!(body.contains("checks it out there again"), "{body}");
         assert!(body.contains("from \"origin/feat\""), "{body}");
@@ -600,7 +843,7 @@ mod tests {
             "feat",
             "main",
             false,
-            &["copilot".to_string()],
+            &running(&[("copilot", false)]),
         );
         assert!(no_resume.contains("will not resume"), "{no_resume}");
         assert!(!no_resume.contains("may resume"), "{no_resume}");
@@ -834,7 +1077,8 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::CheckedOut,
-            &[],
+            &RunningTabs::default(),
+            None,
         );
         assert!(checked_out.contains("/tmp/wt"), "{checked_out}");
         assert!(checked_out.contains("checked out again"), "{checked_out}");
@@ -844,7 +1088,8 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::RecreatedFrom("main".to_string()),
-            &[],
+            &RunningTabs::default(),
+            None,
         );
         assert!(minted.contains("recreated from \"main\""), "{minted}");
         assert!(minted.contains("none of the"), "{minted}");
@@ -855,7 +1100,8 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::RecreatedFromRemote("origin/feat".to_string()),
-            &[],
+            &RunningTabs::default(),
+            None,
         );
         assert!(
             from_remote.contains("recreated from \"origin/feat\""),
@@ -878,7 +1124,8 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::CheckedOut,
-            &["claude".to_string()],
+            &running(&[("claude", true)]),
+            None,
         );
         assert!(
             claude.ends_with(
@@ -894,12 +1141,13 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::CheckedOut,
-            &["codex".to_string()],
+            &running(&[("codex", true)]),
+            None,
         );
         assert!(
             codex.ends_with(
-                "A running Codex tab cannot follow the folder: stop it and start the agent again \
-                 to continue in the recreated copy."
+                "A running Codex tab cannot follow the folder by itself; restarting it continues \
+                 its conversation in the recreated copy."
             ),
             "{codex}"
         );
@@ -909,7 +1157,8 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             &RecreatedBranch::CheckedOut,
-            &[],
+            &RunningTabs::default(),
+            None,
         );
         assert!(
             idle.ends_with(
@@ -917,6 +1166,79 @@ mod tests {
                             there."
             ),
             "{idle}"
+        );
+    }
+
+    /// After a restart the final says, in words, which tabs continued, which
+    /// started fresh because a sibling of the same CLI got the conversation,
+    /// which were left running, and which dux did not get to.
+    #[test]
+    fn the_success_message_reports_every_restarted_tab() {
+        let live = running(&[
+            ("claude", true),
+            ("codex", true),
+            ("codex", true),
+            ("copilot", false),
+        ]);
+        let report = TabRestartReport {
+            continued: strings(&["codex"]),
+            fresh: strings(&["codex"]),
+            not_restarted: Vec::new(),
+            forced_after_seconds: None,
+        };
+        let message = recreate_success_message(
+            "v0",
+            Path::new("/tmp/wt"),
+            "feat",
+            &RecreatedBranch::CheckedOut,
+            &live,
+            Some(&report),
+        );
+        assert!(
+            message.ends_with(
+                "branch \"feat\" was checked out again. A running Claude tab keeps working in the \
+                 recreated copy by itself. Restarted the Codex tab, which continues its \
+                 conversation in the recreated copy. The Codex tab started a fresh conversation \
+                 instead, because only one tab per CLI can pick its conversation back up. A \
+                 running Copilot tab is left running, because restarting it would lose its \
+                 conversation; if it cannot follow the folder, stop it and start it again \
+                 yourself."
+            ),
+            "{message}"
+        );
+
+        let rest = TabRestartReport {
+            continued: strings(&["codex", "opencode"]),
+            fresh: Vec::new(),
+            not_restarted: strings(&["opencode"]),
+            forced_after_seconds: Some(30),
+        };
+        let message = recreate_success_message(
+            "v0",
+            Path::new("/tmp/wt"),
+            "feat",
+            &RecreatedBranch::CheckedOut,
+            &running(&[("codex", true), ("opencode", true), ("opencode", true)]),
+            Some(&rest),
+        );
+        assert!(
+            message.ends_with(
+                "Restarted the Codex and Opencode tabs, which continue their conversations in the \
+                 recreated copy. dux did not restart the Opencode tab, because the tab or its \
+                 agent changed while the old process shut down; start it yourself if you still \
+                 want it running. An old process did not exit within 30 seconds and was \
+                 force-closed first."
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_restart_busy_names_the_tabs_it_waits_for() {
+        assert_eq!(
+            recreate_restart_busy_message("v0", &strings(&["codex", "opencode"])),
+            "Recreated the working copy for agent \"v0\"; restarting its Codex and Opencode tabs \
+             so they continue in the recreated copy…"
         );
     }
 }

@@ -99,12 +99,12 @@ pub use in_flight::{
 };
 pub use lifecycle::{
     ClosedTabExit, DeferredWorktreeRemoval, DetachSessionOutcome, ForceDetachOutcome,
-    GroupWorktreeRemoval, PendingDetach, PrunedPty, PrunedPtyKind, PtyGone, PtyGoneNotice,
-    RAPID_EXIT_WINDOW, ReapedTerminations, RemovalProcesses, ShutdownReport, TerminatingOwner,
-    TerminatingPty, agent_exit_with_companion_notice, clean_exit_closes_tab_row,
-    closed_tab_exit_notice, closed_terminal_notice, detach_busy_message, detach_confirm_body,
-    detach_confirm_prose, detach_final, detach_not_running_message, detach_status_key,
-    detached_agent_notice, format_shutdown_result, format_shutdown_start,
+    GroupWorktreeRemoval, PendingDetach, PendingTabRestart, PrunedPty, PrunedPtyKind, PtyGone,
+    PtyGoneNotice, RAPID_EXIT_WINDOW, ReapedTerminations, RecreateRestartSweep, RemovalProcesses,
+    ShutdownReport, TerminatingOwner, TerminatingPty, agent_exit_with_companion_notice,
+    clean_exit_closes_tab_row, closed_tab_exit_notice, closed_terminal_notice, detach_busy_message,
+    detach_confirm_body, detach_confirm_prose, detach_final, detach_not_running_message,
+    detach_status_key, detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
 pub use pending_removals::recorded_at_or_through_link;
 pub(crate) use pending_removals::{
@@ -442,6 +442,11 @@ pub struct Engine {
     /// [`PendingDetach`]). `reap_terminating_ptys` drains these as their members
     /// reap, the same way it drains `pending_group_removals`.
     pub pending_detachments: Vec<lifecycle::PendingDetach>,
+    /// Tabs a recreate is restarting, each set waiting for every one of its old
+    /// processes to reap before any starts again (see [`PendingTabRestart`]).
+    /// `reap_terminating_ptys` drains the waits; `sweep_recreate_restarts`
+    /// starts the tabs.
+    pub pending_tab_restarts: Vec<lifecycle::PendingTabRestart>,
     pub gh_status: GhStatus,
     /// Test-only injection point for the rare synchronous worker-spawn failure
     /// (PID/RLIMIT exhaustion in production). Consumed by the next
@@ -813,8 +818,10 @@ pub struct Engine {
     /// engine-side. Keyed by **session id**, which is what the completion
     /// `WorkingCopyRecreated` event carries, and consumed exactly once by
     /// `process_working_copy_recreated`, which resolves it against a
-    /// [`RecreateOutcome`] it can only assemble there.
-    pub pending_recreate_ops: HashMap<String, HandlerStatusOp<RecreateOutcome>>,
+    /// [`RecreateOutcome`] it can only assemble there, or handed on to a
+    /// [`PendingTabRestart`] when the confirmation asked for the tabs that
+    /// cannot follow the folder to be restarted.
+    pub pending_recreate_ops: HashMap<String, PendingRecreate>,
     /// Web-side async worktree-deletion ops (the "Removing worktree for agent …"
     /// busy). Keyed by **session id** (the completion `WorktreeRemoveCompleted`
     /// event carries `session_id`, so it is the natural correlation handle), not
@@ -1012,8 +1019,19 @@ pub struct RecreateOutcome {
     /// The branch arm the checkout took, or the sentence explaining what stopped
     /// it.
     pub result: Result<crate::working_copy::RecreatedBranch, String>,
-    /// The providers of the tabs live at completion, empty when none is.
-    pub live_providers: Vec<String>,
+    /// The tabs live at completion, empty when none is.
+    pub live: crate::working_copy::RunningTabs,
+    /// What dux did to the tabs it restarted, when the confirmation asked it to
+    /// and there was something to restart.
+    pub restart: Option<crate::working_copy::TabRestartReport>,
+}
+
+/// A recreate waiting for its checkout: the status op its outcome resolves,
+/// and whether the confirmation asked for the tabs that cannot follow the
+/// folder to be restarted once the checkout lands.
+pub struct PendingRecreate {
+    pub op: HandlerStatusOp<RecreateOutcome>,
+    pub restart_tabs: bool,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see
@@ -5992,34 +6010,6 @@ impl Engine {
             .any(|id| self.tab_is_live(id.as_ref_id()))
     }
 
-    /// The providers of this session's LIVE tabs, in display order and without
-    /// repeats. Empty when every tab is dormant.
-    ///
-    /// Each tab answers with the provider it is actually RUNNING, which a
-    /// retarget leaves different from the configured one, and the session's
-    /// provider mirror answers for the slot tab alone: a dormant claude slot
-    /// beside a live codex extra is a codex process, and a sentence written from
-    /// the mirror would be about a CLI nobody is running.
-    pub fn live_tab_providers(&self, session_id: &str) -> Vec<String> {
-        let Some(session) = self.session_by_id(session_id) else {
-            return Vec::new();
-        };
-        let mut providers: Vec<String> = Vec::new();
-        for id in self.ordered_tab_ids_for_session(SessionIdRef::new(session_id)) {
-            if !self.tab_is_live(id.as_ref_id()) {
-                continue;
-            }
-            let provider = self
-                .tab_running_provider(session, id.as_ref_id())
-                .as_str()
-                .to_string();
-            if !providers.contains(&provider) {
-                providers.push(provider);
-            }
-        }
-        providers
-    }
-
     /// The first LIVE tab of a session, in display order: the session-slot tab
     /// first, then extra tabs ordered by `(sort_order, created_at, id)` (the
     /// same order the TUI's tab strip renders). A tab counts as live when it has a
@@ -6693,30 +6683,6 @@ mod tests {
             },
         );
         (engine, tmp)
-    }
-
-    /// Liveness is per tab, so the answer follows the tabs that are running
-    /// rather than the session's provider mirror: a dormant slot beside a live
-    /// extra answers with the extra's provider alone.
-    #[test]
-    fn live_tab_providers_names_the_tabs_that_are_running() {
-        let (mut engine, _tmp) = engine_with_an_extra_tab();
-        assert!(
-            engine.live_tab_providers("s1").is_empty(),
-            "nothing is running yet"
-        );
-
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-b")));
-        assert_eq!(engine.live_tab_providers("s1"), vec!["codex".to_string()]);
-
-        let slot = engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned();
-        engine.mark_in_flight(InFlightKey::AgentLaunch(slot));
-        assert_eq!(
-            engine.live_tab_providers("s1"),
-            vec!["claude".to_string(), "codex".to_string()],
-            "the slot tab leads, and each provider is named once"
-        );
-        assert!(engine.live_tab_providers("nope").is_empty());
     }
 
     #[test]

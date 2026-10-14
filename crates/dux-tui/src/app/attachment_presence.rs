@@ -165,6 +165,9 @@ impl App {
             PromptState::ConfirmKillRunning(confirm) => {
                 self.kill_running_scope(&confirm.target_ids)
             }
+            PromptState::ConfirmRecreateWorkingCopy { session_id, .. } => {
+                self.engine.recreate_restart_scope(session_id)
+            }
             PromptState::ConfirmQuit { .. } => return Some(self.engine.attached_elsewhere()),
             _ => return None,
         };
@@ -222,6 +225,7 @@ impl PromptState {
             | PromptState::ConfirmDetachAgent { attached, .. }
             | PromptState::ConfirmDeleteProject { attached, .. }
             | PromptState::ConfirmRemoveProject { attached, .. }
+            | PromptState::ConfirmRecreateWorkingCopy { attached, .. }
             | PromptState::ConfirmQuit { attached, .. } => attached,
             PromptState::ConfirmKillRunning(confirm) => &confirm.attached,
             _ => &[],
@@ -240,6 +244,12 @@ impl PromptState {
             PromptState::ConfirmKillRunning(confirm) => {
                 confirm.attached = blockers;
                 confirm.focus = ConfirmFocus::Cancel;
+            }
+            PromptState::ConfirmRecreateWorkingCopy {
+                attached, focus, ..
+            } => {
+                *attached = blockers;
+                *focus = RecreateWorkingCopyFocus::Cancel;
             }
             PromptState::ConfirmDeleteTerminal {
                 attached, focus, ..
@@ -397,6 +407,57 @@ mod tests {
             app.engine
                 .reserve_destruction(app.engine.agent_scope(&session_id))
                 .is_ok()
+        );
+    }
+
+    /// A ticked restart stops tabs, so it is guarded like a stop: refused while
+    /// a browser watches the tab it would restart, the dialog reopening with
+    /// that browser named and focus back on Cancel, nothing checked out; the
+    /// override then goes ahead over exactly the browser it named.
+    #[test]
+    fn a_recreate_that_restarts_a_watched_tab_names_the_watcher() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        app.engine.sessions[0].provider = dux_core::model::ProviderKind::new("codex");
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), spawn_sleeper());
+        app.engine
+            .folder_repo_statuses
+            .insert(session_id.clone(), dux_core::git::FolderRepoStatus::Missing);
+        let _watch = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
+        let recreating = dux_core::engine::InFlightKey::RecreateWorkingCopy(session_id.to_string());
+
+        app.confirm_recreate_selected_working_copy()
+            .expect("open the recreate dialog");
+        let PromptState::ConfirmRecreateWorkingCopy {
+            restart_offer,
+            restart_tabs,
+            ..
+        } = &app.prompt
+        else {
+            panic!("the recreate dialog opens");
+        };
+        assert_eq!(restart_offer, &vec!["codex".to_string()]);
+        assert!(*restart_tabs, "ticked by default");
+
+        app.resolve_confirm_recreate_working_copy(true);
+        let PromptState::ConfirmRecreateWorkingCopy {
+            attached, focus, ..
+        } = &app.prompt
+        else {
+            panic!("the dialog reopens naming who is attached");
+        };
+        assert_eq!(attached.len(), 1);
+        assert_eq!(*focus, RecreateWorkingCopyFocus::Cancel);
+        assert!(!app.engine.is_in_flight(&recreating), "nothing checked out");
+
+        app.resolve_confirm_recreate_working_copy(true);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.engine.is_in_flight(&recreating),
+            "the override goes ahead"
         );
     }
 

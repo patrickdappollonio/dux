@@ -234,6 +234,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
+        pending_tab_restarts: Vec::new(),
         gh_status: GhStatus::Unknown,
         gh_probe: Default::default(),
         pr_statuses: HashMap::new(),

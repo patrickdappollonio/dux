@@ -28,7 +28,10 @@ import {
   prose,
   wireProse,
 } from "./prose"
-import { recreateConfirmProse } from "./recreateWorkingCopy"
+import {
+  recreateConfirmProse,
+  recreateRestartCheckboxProse,
+} from "./recreateWorkingCopy"
 import { renameBranchNoteProse } from "./renameAgent"
 
 describe("a name's bidi controls", () => {
@@ -39,7 +42,11 @@ describe("a name's bidi controls", () => {
 
   it("never reach the recreate confirm's text", () => {
     const text = proseText(
-      recreateConfirmProse("~/wt", "feat\u202Etxt.exe", "main", true, ["claude"]),
+      recreateConfirmProse("~/wt", "feat\u202Etxt.exe", "main", true, {
+        follows: ["claude"],
+        restartable: [],
+        left_running: [],
+      }),
     )
     expect(text).toContain('"feattxt.exe"')
     expect(text).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/)
@@ -119,8 +126,15 @@ describe("the sentences both surfaces print", () => {
           args.branch_name as string,
           args.source_branch as string,
           args.conversation_resumes as boolean,
-          args.providers as string[],
+          {
+            follows: [],
+            restartable: [],
+            left_running: [],
+            ...(args.running as Record<string, string[]>),
+          },
         )
+      case "recreate_restart_checkbox":
+        return recreateRestartCheckboxProse(args.restartable as string[])
       case "checkout_default_branch_confirm":
         return checkoutDefaultBranchProse(
           args.project_name as string,

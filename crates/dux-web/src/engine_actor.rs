@@ -88,10 +88,11 @@ impl OperationTicket {
 }
 
 /// A change covered by an operation record, and whether the client asked to
-/// follow it (which decides only the answer's shape).
+/// follow it (which decides only the answer's shape). With no kind it is the
+/// attachment policy alone, for a guarded change that keeps no record.
 #[derive(Clone, Debug)]
 pub struct Followed {
-    pub kind: OperationKind,
+    pub kind: Option<OperationKind>,
     pub answered: bool,
     /// Go ahead even though somebody else is attached to what the change
     /// would end (`force_connected` on the route). Only that refusal is
@@ -1233,7 +1234,7 @@ impl EngineHandle {
                 tx,
                 origin,
                 Some(Followed {
-                    kind,
+                    kind: Some(kind),
                     answered: true,
                     force_connected: false,
                     accepted_connected: None,
@@ -1269,7 +1270,7 @@ impl EngineHandle {
                 tx,
                 origin,
                 Some(Followed {
-                    kind,
+                    kind: Some(kind),
                     answered: false,
                     force_connected: false,
                     accepted_connected: None,
@@ -3181,6 +3182,27 @@ impl EngineService {
                 let _ = self.status.send(status);
             }
         }
+        // Tabs a recreate stopped start again once the reaper above has seen
+        // the last of them go: their launches take the same followup path the
+        // resume-fallback relaunches below do, and the recreate's spinner is
+        // answered by its final. Same fixed seed size as every web launch.
+        let restarts = engine.sweep_recreate_restarts((24, 80));
+        for reaction in restarts.launches {
+            self.note_mutation();
+            let followup = engine.drive_web_launch_followup(&reaction);
+            for status in followup.statuses {
+                let _ = self.status.send(status);
+            }
+            for key in followup.clear_keys {
+                self.status.clear(key);
+            }
+        }
+        for outcome in restarts.finals {
+            self.note_mutation();
+            for status in dux_core::wire::wire_statuses_from_reaction(&outcome.into_reaction()) {
+                let _ = self.status.send(status);
+            }
+        }
 
         // Resume-fallback sweep (both detection windows), BEFORE the exit prune:
         // a `--continue` that came up empty or a resume that hung past its
@@ -4251,16 +4273,16 @@ fn handle_apply_wire_request(
     engine.current_origin = origin.scope;
     let result = match origin.operation {
         Some(Followed {
-            kind,
+            kind: Some(kind),
             answered: true,
             ..
         }) => engine.apply_wire_operation(cmd, kind),
         Some(Followed {
-            kind,
+            kind: Some(kind),
             answered: false,
             ..
         }) => engine.apply_wire_recorded(cmd, kind),
-        None => engine.apply_wire(cmd),
+        Some(Followed { kind: None, .. }) | None => engine.apply_wire(cmd),
     }
     .map_err(|e| WireError {
         attached: e

@@ -470,11 +470,45 @@ pub(crate) async fn dispatch_guarded(
     force: &ForceConnectedQuery,
     client: &crate::server::SocketClient,
 ) -> Result<Result<Guarded, String>, RouteRejection> {
+    dispatch_under_guard(
+        state,
+        command,
+        headers,
+        Some(kind),
+        operation.asked(),
+        force,
+        client,
+    )
+    .await
+}
+
+/// [`dispatch_guarded`] for a change that keeps no operation record: the same
+/// refusal and the same `force_connected`, with what it reserves held for as
+/// long as the engine decides.
+pub(crate) async fn dispatch_guarded_unrecorded(
+    state: &crate::server::AppState,
+    command: dux_core::wire::WireCommand,
+    headers: &HeaderMap,
+    force: &ForceConnectedQuery,
+    client: &crate::server::SocketClient,
+) -> Result<Result<Guarded, String>, RouteRejection> {
+    dispatch_under_guard(state, command, headers, None, false, force, client).await
+}
+
+async fn dispatch_under_guard(
+    state: &crate::server::AppState,
+    command: dux_core::wire::WireCommand,
+    headers: &HeaderMap,
+    kind: Option<dux_core::operations::OperationKind>,
+    answered: bool,
+    force: &ForceConnectedQuery,
+    client: &crate::server::SocketClient,
+) -> Result<Result<Guarded, String>, RouteRejection> {
     let scope = scope_from_headers(headers, &state.connections);
     let (force_connected, accepted_connected) = force.decision();
     let followed = crate::engine_actor::Followed {
         kind,
-        answered: operation.asked(),
+        answered,
         force_connected,
         accepted_connected,
         requester: exempt_requester(

@@ -537,6 +537,7 @@ mod tests {
             | L::ConfirmRecreateWorkingCopy {
                 cancel_button,
                 confirm_button,
+                ..
             }
             | L::ConfirmCheckoutDefaultBranch {
                 cancel_button,
@@ -735,6 +736,7 @@ mod tests {
                     focus: ConfirmFocus::Cancel,
                 }),
             ),
+            ("ConfirmRecreateWorkingCopy(restart)", restart_prompt()),
             (
                 "ConfirmDeleteTerminal(foreground)",
                 PromptState::ConfirmDeleteTerminal {
@@ -898,8 +900,15 @@ mod tests {
             branch_name: "feat".to_string(),
             source_branch: "main".to_string(),
             conversation_resumes: false,
-            running_providers: vec!["claude".to_string(), "codex".to_string()],
-            focus: ConfirmFocus::Cancel,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: vec!["claude".to_string()],
+                restartable: vec!["codex".to_string()],
+                left_running: Vec::new(),
+            },
+            restart_offer: Vec::new(),
+            restart_tabs: false,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
         };
         let roomy = render_at(&mut app, prompt.clone(), ROOMY);
         let roomy_modal = app.overlay_layout.frame.get().expect("modal");
@@ -989,8 +998,15 @@ mod tests {
             branch_name: "feat".to_string(),
             source_branch: "main".to_string(),
             conversation_resumes: true,
-            running_providers: vec!["claude".to_string()],
-            focus: ConfirmFocus::Cancel,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: vec!["claude".to_string()],
+                restartable: Vec::new(),
+                left_running: Vec::new(),
+            },
+            restart_offer: Vec::new(),
+            restart_tabs: false,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
         };
         let top = render_at(&mut app, prompt, tiny);
         let modal = app.overlay_layout.frame.get().expect("modal");
@@ -1061,8 +1077,15 @@ mod tests {
             branch_name: "feat".to_string(),
             source_branch: "main".to_string(),
             conversation_resumes: true,
-            running_providers: vec!["claude".to_string()],
-            focus: ConfirmFocus::Cancel,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: vec!["claude".to_string()],
+                restartable: Vec::new(),
+                left_running: Vec::new(),
+            },
+            restart_offer: Vec::new(),
+            restart_tabs: false,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
         };
         let top = render_at(&mut app, prompt.clone(), tiny);
         let modal = app.overlay_layout.frame.get().expect("modal");
@@ -1125,8 +1148,15 @@ mod tests {
             branch_name: "feat".to_string(),
             source_branch: "main".to_string(),
             conversation_resumes: true,
-            running_providers: vec!["claude".to_string()],
-            focus: ConfirmFocus::Cancel,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: vec!["claude".to_string()],
+                restartable: Vec::new(),
+                left_running: Vec::new(),
+            },
+            restart_offer: Vec::new(),
+            restart_tabs: false,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
         }
     }
 
@@ -1158,7 +1188,7 @@ mod tests {
             matches!(
                 app.prompt,
                 PromptState::ConfirmRecreateWorkingCopy {
-                    focus: ConfirmFocus::Confirm,
+                    focus: RecreateWorkingCopyFocus::Recreate,
                     ..
                 }
             ),
@@ -1257,6 +1287,7 @@ mod tests {
                 ..
             } => rects.extend(checkbox.iter().chain(branch_checkbox).map(|c| c.rect)),
             L::ConfirmDeleteWorktree { checkbox, .. }
+            | L::ConfirmRecreateWorkingCopy { checkbox, .. }
             | L::ConfirmNonDefaultBranch { checkbox, .. } => {
                 rects.extend(checkbox.iter().map(|c| c.rect));
             }
@@ -1368,5 +1399,128 @@ mod tests {
             "one blank row between the checkbox and the buttons:\n{}",
             screen(&buf)
         );
+    }
+
+    /// The recreate confirmation under a running Claude, two Codex tabs and a
+    /// Copilot tab: the restart is offered for the Codex tabs, ticked.
+    fn restart_prompt() -> PromptState {
+        PromptState::ConfirmRecreateWorkingCopy {
+            session_id: "s1".to_string(),
+            worktree_path: std::path::PathBuf::from("/tmp/worktrees/repo/feat"),
+            branch_name: "feat".to_string(),
+            source_branch: "main".to_string(),
+            conversation_resumes: true,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: vec!["claude".to_string()],
+                restartable: vec!["codex".to_string(), "codex".to_string()],
+                left_running: vec!["copilot".to_string()],
+            },
+            restart_offer: vec!["codex".to_string(), "codex".to_string()],
+            restart_tabs: true,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
+        }
+    }
+
+    fn restart_state(app: &App) -> (bool, RecreateWorkingCopyFocus) {
+        match &app.prompt {
+            PromptState::ConfirmRecreateWorkingCopy {
+                restart_tabs,
+                focus,
+                ..
+            } => (*restart_tabs, *focus),
+            other => panic!("the recreate dialog closed: {other:?}"),
+        }
+    }
+
+    /// The restart checkbox renders with its label, ticked; movement keys move
+    /// focus Cancel, Recreate, checkbox and round again, and activating the
+    /// focused box toggles it without confirming the dialog.
+    #[test]
+    fn the_recreate_restart_checkbox_is_a_focus_stop_that_toggles() {
+        let mut app = test_app(default_bindings());
+        let buf = render_at(&mut app, restart_prompt(), ROOMY);
+        let text = screen(&buf);
+        assert!(text.contains("Restart the"), "{text}");
+        assert!(text.contains("tabs so they continue in the new"), "{text}");
+        assert!(
+            matches!(
+                app.overlay_layout.active,
+                OverlayMouseLayout::ConfirmRecreateWorkingCopy {
+                    checkbox: Some(_),
+                    ..
+                }
+            ),
+            "the checkbox publishes its click target"
+        );
+        assert_eq!(
+            restart_state(&app),
+            (true, RecreateWorkingCopyFocus::Cancel),
+            "ticked by default, Cancel focused"
+        );
+
+        app.handle_key(key(KeyCode::Tab)).expect("key");
+        assert_eq!(restart_state(&app).1, RecreateWorkingCopyFocus::Recreate);
+        app.handle_key(key(KeyCode::Tab)).expect("key");
+        assert_eq!(
+            restart_state(&app).1,
+            RecreateWorkingCopyFocus::RestartCheckbox
+        );
+        app.handle_key(key(KeyCode::Char(' '))).expect("key");
+        assert_eq!(
+            restart_state(&app),
+            (false, RecreateWorkingCopyFocus::RestartCheckbox),
+            "activating the box toggles it and leaves the dialog open"
+        );
+        app.handle_key(key(KeyCode::Tab)).expect("key");
+        assert_eq!(
+            restart_state(&app).1,
+            RecreateWorkingCopyFocus::Cancel,
+            "and the ring wraps"
+        );
+    }
+
+    /// A click on the box toggles it and moves focus there.
+    #[test]
+    fn a_click_on_the_recreate_restart_checkbox_toggles_it() {
+        let mut app = test_app(default_bindings());
+        render_at(&mut app, restart_prompt(), ROOMY);
+        let OverlayMouseLayout::ConfirmRecreateWorkingCopy {
+            checkbox: Some(checkbox),
+            ..
+        } = app.overlay_layout.active
+        else {
+            panic!("the checkbox publishes its click target")
+        };
+        click(&mut app, checkbox.rect.x + 1, checkbox.rect.y);
+        assert_eq!(
+            restart_state(&app),
+            (false, RecreateWorkingCopyFocus::RestartCheckbox)
+        );
+    }
+
+    /// With nothing to restart there is no box, and focus has two stops.
+    #[test]
+    fn the_recreate_dialog_without_a_restart_has_no_checkbox_stop() {
+        let mut app = test_app(default_bindings());
+        let mut prompt = restart_prompt();
+        if let PromptState::ConfirmRecreateWorkingCopy {
+            restart_offer,
+            restart_tabs,
+            ..
+        } = &mut prompt
+        {
+            restart_offer.clear();
+            *restart_tabs = false;
+        }
+        let buf = render_at(&mut app, prompt, ROOMY);
+        assert!(!screen(&buf).contains("Restart the"), "{}", screen(&buf));
+        assert!(matches!(
+            app.overlay_layout.active,
+            OverlayMouseLayout::ConfirmRecreateWorkingCopy { checkbox: None, .. }
+        ));
+        app.handle_key(key(KeyCode::Tab)).expect("key");
+        app.handle_key(key(KeyCode::Tab)).expect("key");
+        assert_eq!(restart_state(&app).1, RecreateWorkingCopyFocus::Cancel);
     }
 }

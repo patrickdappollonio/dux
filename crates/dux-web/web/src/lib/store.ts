@@ -7861,19 +7861,23 @@ export function saveSettings(
 // Manager, which is the panic surface: both its per-row Force stop and its
 // "Force stop everything" pass it, and the polite detach in the agent's row
 // menu is the only caller that does not.
-// Put a managed agent's working copy back at the path it already had. The
+// Put a managed agent's working copy back at the path it already had, and with
+// `restartTabs` restart the running tabs that cannot follow the folder. The
 // outcome rides the status stream, like every other keyed operation; only a
-// synchronous refusal is reported here.
-export function recreateWorkingCopy(sessionId: string): void {
-  sessionsApi
-    .recreateWorkingCopy(sessionId)
-    .catch((e) =>
+// synchronous refusal is reported here. Resolves with who is attached when the
+// restart was refused for them, so the dialog can name them and ask again.
+export function recreateWorkingCopy(
+  sessionId: string,
+  restartTabs: boolean,
+  accepted: readonly string[] | null = null,
+): Promise<AttachedBlocker[] | null> {
+  return guardedChange(
+    sessionsApi.recreateWorkingCopy(sessionId, restartTabs, accepted),
+    (e) =>
       notifyError(
-        e instanceof Error
-          ? e.message
-          : "Could not recreate the working copy.",
+        e instanceof Error ? e.message : "Could not recreate the working copy.",
       ),
-    )
+  )
 }
 
 export function killSessionPty(
