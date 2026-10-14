@@ -36,7 +36,7 @@ sign-in link, and what to do with it depends on the CLI:
 ### Copying inside an agent CLI lands on the wrong clipboard
 
 A copy made inside a CLI (Claude Code's `/copy`, say) reaches your browser only when the
-CLI sends it through the terminal. Measured on macOS: Claude Code, OpenCode and Copilot
+CLI sends it through the terminal. On macOS, Claude Code, OpenCode and Copilot
 send it through the terminal and also write the Mac's own clipboard, while Codex writes
 only the Mac's clipboard, so its copies never reach a remote browser. On Linux, a CLI that
 can reach a desktop session may write that desktop's clipboard instead.
