@@ -22,12 +22,21 @@ const runMacro = vi.fn<
   (name: string, target: SelectedTarget) => "compose" | "pty" | "none"
 >()
 const openMacrosDialog = vi.fn()
+// The workspace the control reads its tab's state from; a case that needs a
+// dormant tab seeds one.
+let mockSpine: unknown = null
+const mockState = () => ({
+  bootstrap: {
+    macros: [{ name: "Greet", text: "hello", surface: "both" }],
+  },
+  spine: mockSpine,
+  startedDormantTabs: [],
+  pendingSlotTab: {},
+  endedInViewTab: null,
+})
 vi.mock("@/lib/store", () => ({
-  useDux: () => ({
-    bootstrap: {
-      macros: [{ name: "Greet", text: "hello", surface: "both" }],
-    },
-  }),
+  useDux: () => mockState(),
+  useDuxSelector: (select: (s: unknown) => unknown) => select(mockState()),
   runMacro: (name: string, target: SelectedTarget) => runMacro(name, target),
   openMacrosDialog: () => openMacrosDialog(),
 }))
@@ -80,6 +89,7 @@ function stubMatchMedia(coarse = false) {
 }
 
 beforeEach(() => {
+  mockSpine = null
   runMacro.mockReset()
   openMacrosDialog.mockReset()
   resetPaneMacroTargets()
@@ -414,5 +424,59 @@ describe("MacroPopover under the take-over card", () => {
     registerPaneMacroTarget("t9", { ...ownerPane(), takeoverCard: true, send: null })
     render(<MacroPopover target={target} />)
     expect(isDisabled(screen.getByRole("button", { name: "Run a macro" }))).toBe(false)
+  })
+})
+
+// A tab that is not running has no pane, so nothing can carry a macro to it: the
+// control is disabled and says how to get one.
+describe("MacroPopover over a dormant tab", () => {
+  const dormantTarget: SelectedTarget = {
+    kind: "agent",
+    sessionId: "s1",
+    tabId: "t2",
+  } as SelectedTarget
+
+  beforeEach(() => {
+    mockSpine = {
+      projects: [],
+      sessions: [
+        {
+          id: "s1",
+          slot_tab_id: "s1",
+          tabs: [
+            { id: "s1", has_live_process: true },
+            { id: "t2", has_live_process: false },
+          ],
+        },
+      ],
+    }
+  })
+
+  it.each(["labeled", "icon", "pill"] as const)(
+    "the %s trigger is disabled and opens nothing",
+    async (variant) => {
+      render(<MacroPopover variant={variant} target={dormantTarget} />)
+      const trigger = screen.getByRole("button", { name: "Run a macro" })
+      expect((trigger as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.click(trigger)
+      await settle()
+      expect(document.querySelector('[data-slot="popover-content"]')).toBeNull()
+      expect(runMacro).not.toHaveBeenCalled()
+    },
+  )
+
+  it("says to start the tab, through the shared tooltip", async () => {
+    render(<MacroPopover target={dormantTarget} />)
+    const wrapper = screen.getByTestId("macros-disabled")
+    expect(wrapper.getAttribute("title")).toBeNull()
+    act(() => wrapper.focus())
+    expect(await screen.findByText("Start the tab to send macros")).toBeTruthy()
+  })
+
+  it("stays live for the running tab beside it", () => {
+    registerPaneMacroTarget("s1", ownerPane())
+    render(<MacroPopover target={target} />)
+    const trigger = screen.getByRole("button", { name: "Run a macro" })
+    expect((trigger as HTMLButtonElement).disabled).toBe(false)
   })
 })

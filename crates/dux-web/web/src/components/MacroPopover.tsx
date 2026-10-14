@@ -17,14 +17,14 @@ import {
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { targetPtyId } from "@/components/terminalAreaModel"
+import { targetPtyId, targetTabDormant } from "@/components/terminalAreaModel"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
 import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
 import { cn } from "@/lib/utils"
-import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
+import { openMacrosDialog, runMacro, useDux, useDuxSelector } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 
 // A quick-picker for sending a text macro to the pane it belongs to: a
@@ -34,7 +34,8 @@ import type { SelectedTarget } from "@/lib/store"
 // while that is the typing surface, and the feedback is the text appearing.
 //
 // While the take-over card covers that pane the trigger is disabled: this tab is
-// not driving the pty, and a macro is not a way to start.
+// not driving the pty, and a macro is not a way to start. So is it while the
+// tab is not running, when there is no pane at all to carry the macro.
 //
 // The trigger is rendered as an absolutely-positioned sibling of the xterm
 // host, never inside the unpadded container xterm opens into, so it cannot
@@ -63,6 +64,7 @@ export function MacroPopover({
   variant?: "labeled" | "icon" | "pill"
 }) {
   const { bootstrap } = useDux()
+  const dormant = useDuxSelector((s) => targetTabDormant(target, s))
   const [open, setOpen] = useState(false)
   const isMobile = useIsMobile()
   const coarsePointer = useIsCoarsePointer()
@@ -113,7 +115,12 @@ export function MacroPopover({
     return true
   }
 
-  if (pane?.takeoverCard) return <DisabledTrigger variant={variant} />
+  if (dormant) {
+    return <DisabledTrigger variant={variant} hint="Start the tab to send macros" />
+  }
+  if (pane?.takeoverCard) {
+    return <DisabledTrigger variant={variant} hint="Take over to send macros" />
+  }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -274,9 +281,15 @@ function TriggerFace({ variant }: { variant: TriggerVariant }) {
 // wrapper around it, through the shared tooltip; the wrapper wears the focus
 // ring the disabled button cannot. The button keeps its full size, so the touch
 // floor and the cluster's height token hold while it is disabled.
-function DisabledTrigger({ variant }: { variant: TriggerVariant }) {
+function DisabledTrigger({
+  variant,
+  hint,
+}: {
+  variant: TriggerVariant
+  hint: string
+}) {
   return (
-    <SimpleTooltip content="Take over to send macros">
+    <SimpleTooltip content={hint}>
       <span
         tabIndex={0}
         data-testid="macros-disabled"

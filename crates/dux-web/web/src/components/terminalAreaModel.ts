@@ -31,6 +31,28 @@ export function targetPtyId(target: SelectedTarget): string {
   return target.kind === "agent" ? target.tabId : target.terminalId
 }
 
+type DormantContext = {
+  spine: DuxState["spine"]
+  startedDormantTabs: DuxState["startedDormantTabs"]
+  pendingSlotTab: DuxState["pendingSlotTab"]
+  endedInViewTab: DuxState["endedInViewTab"]
+}
+
+/**
+ * Whether the target's tab gets the "Start session" card instead of a pane:
+ * the pane's own chrome outside it (the Macros control) asks the same question,
+ * because a tab with no pane has nothing to carry its input.
+ */
+export function targetTabDormant(target: SelectedTarget, ctx: DormantContext): boolean {
+  return terminalAreaModel({
+    ...ctx,
+    target,
+    bootstrap: null,
+    selectedSessionId: null,
+    terminalEpoch: 0,
+  }).dormant
+}
+
 export function terminalAreaModel(ctx: {
   target: SelectedTarget
   spine: DuxState["spine"]
