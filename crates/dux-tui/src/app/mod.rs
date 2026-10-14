@@ -4455,6 +4455,7 @@ impl App {
             pty_activity: HashMap::new(),
             pty_input: HashMap::new(),
             pty_pointer: HashMap::new(),
+            pty_used: HashSet::new(),
             needs_attention: HashSet::new(),
             failed_tab_runs: HashMap::new(),
             pty_progress: HashMap::new(),

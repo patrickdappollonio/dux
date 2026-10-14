@@ -699,6 +699,19 @@ pub struct Engine {
     /// Invariant, as for `pty_input`: cleared wherever `pty_activity` is
     /// cleared, so the maps never drift.
     pub pty_pointer: HashMap<String, PointerStamp>,
+    /// PTYs somebody sent input to during the run now in flight: a keystroke,
+    /// a paste, a macro, a click or a wheel notch, from either surface. Answers
+    /// "did anybody use this run", which exempts a brief run from the rapid-exit
+    /// failure (see [`RAPID_EXIT_WINDOW`]).
+    /// Separate from `pty_input`, which answers "is somebody typing right now"
+    /// for the Typing cue, echo suppression and attention, so marking a write
+    /// here never changes any of those. Traffic nobody caused is never marked: a
+    /// focus report is classified out by [`Engine::note_pty_used`], and the
+    /// emulator's own query replies never pass through a surface's write path.
+    ///
+    /// Invariant, as for `pty_input`: cleared wherever `pty_activity` is
+    /// cleared, so an entry can only belong to the run in flight.
+    pub pty_used: HashSet<String>,
     /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
     /// has not yet been looked at. Memory-only runtime state, never persisted.
     /// Like `working`/`has_output`, it does not survive a restart, by tenet.
@@ -2255,11 +2268,37 @@ impl Engine {
     /// agent's PTY. [`Engine::is_agent_streaming`] treats such input as voiding
     /// the streaming indicator for [`AGENT_INPUT_SUPPRESSION_WINDOW`] so the
     /// terminal echo of the user's own typing isn't mistaken for the agent
-    /// working. Stamp this only for agent PTYs, never companion terminals, and
-    /// never for programmatic writes (macros, startup commands): those should
-    /// keep showing the agent as working.
+    /// working. This window also drives the Typing cue and attention
+    /// engagement, so it is about somebody typing NOW; whether a run was used
+    /// at all, macros included, is the separate [`Engine::note_pty_used`] mark,
+    /// and the rapid-exit rule asks either.
     pub fn note_pty_input(&mut self, tab_id: &str) {
         self.pty_input.insert(tab_id.to_string(), Instant::now());
+    }
+
+    /// Mark that a write reached this PTY on somebody's behalf during the run
+    /// now in flight, which exempts the run from the rapid-exit failure. Every
+    /// write a surface forwards counts (keys, pastes, macros, pointer reports)
+    /// except one nobody caused: an empty write, a focus report, or a mouse
+    /// report too malformed to read, all of which [`classify_pty_write`]
+    /// calls `Ignored`.
+    ///
+    /// [`classify_pty_write`]: crate::pty::classify_pty_write
+    pub fn note_pty_used(&mut self, id: &str, bytes: &[u8]) {
+        self.note_pty_used_kind(id, crate::pty::classify_pty_write(bytes));
+    }
+
+    fn note_pty_used_kind(&mut self, id: &str, kind: crate::pty::PtyWriteKind) {
+        if !matches!(kind, crate::pty::PtyWriteKind::Ignored) {
+            self.pty_used.insert(id.to_string());
+        }
+    }
+
+    /// Whether this run of the PTY was typed into or written to by anybody,
+    /// which is what separates a person quitting a CLI from a provider that
+    /// never came up. See [`RAPID_EXIT_WINDOW`].
+    pub fn pty_run_was_used(&self, id: &str) -> bool {
+        self.pty_input.contains_key(id) || self.pty_used.contains(id)
     }
 
     /// Record that a forwarded POINTER report just reached this PTY. This is
@@ -2300,6 +2339,7 @@ impl Engine {
             crate::pty::PtyWriteKind::Pointer(report) => self.note_pty_pointer(id, report),
             crate::pty::PtyWriteKind::Ignored => {}
         }
+        self.note_pty_used_kind(id, kind);
         kind
     }
 
@@ -8012,6 +8052,36 @@ mod tests {
             engine.recent_pointer_input("s1"),
             "it must stamp the pointer window instead"
         );
+    }
+
+    /// Whether a run was used is asked of every write somebody caused, a
+    /// pointer report and a macro included, and marking it never touches the
+    /// typing window; a write nobody caused marks nothing.
+    #[test]
+    fn every_write_but_automatic_traffic_marks_the_run_used() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.note_pty_write("auto", b"\x1b[I");
+        engine.note_pty_write("auto", b"\x1b[O");
+        engine.note_pty_write("auto", b"");
+        assert!(
+            !engine.pty_run_was_used("auto"),
+            "a focus report or an empty write is nobody using the run"
+        );
+
+        engine.note_pty_write("click", CLICK_REPORT);
+        assert!(engine.pty_run_was_used("click"), "a click is use");
+        assert!(!engine.is_typing("click"), "and it still is not typing");
+
+        engine.note_pty_used("macro", b"/exit\x1b\r");
+        assert!(engine.pty_run_was_used("macro"), "a macro is use");
+        assert!(
+            !engine.pty_input.contains_key("macro"),
+            "marking use must leave the typing window alone"
+        );
+
+        engine.note_pty_write("keys", b"q");
+        assert!(engine.pty_run_was_used("keys"), "a keystroke is use");
     }
 
     /// A click causes one repaint and is over, so it must hand the heuristic

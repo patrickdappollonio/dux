@@ -2201,6 +2201,7 @@ impl Engine {
         self.pty_activity.remove(tab_id.as_str());
         self.pty_input.remove(tab_id.as_str());
         self.pty_pointer.remove(tab_id.as_str());
+        self.pty_used.remove(tab_id.as_str());
         // Attention/progress runtime state is torn down with the tab so a
         // detach/relaunch/delete can never leave a stale flag or a stuck
         // "working" progress override behind.
@@ -2228,6 +2229,7 @@ impl Engine {
         self.pty_activity.remove(terminal_id);
         self.pty_input.remove(terminal_id);
         self.pty_pointer.remove(terminal_id);
+        self.pty_used.remove(terminal_id);
     }
 
     /// Engine half of the session-deletion cascade: remove the session from the
@@ -4805,6 +4807,7 @@ mod tests {
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
         engine.pty_input.insert("tab-2".to_string(), Instant::now());
+        engine.pty_used.insert("tab-2".to_string());
         // `pty_pointer` is asserted below alongside the others because its field
         // doc claims it is cleared wherever `pty_activity` is, and a claim
         // nothing pins is a claim that quietly stops being true.
@@ -4828,6 +4831,7 @@ mod tests {
             assert!(!engine.pty_activity.contains_key(key));
             assert!(!engine.pty_input.contains_key(key));
             assert!(!engine.pty_pointer.contains_key(key));
+            assert!(!engine.pty_used.contains(key));
             assert!(
                 !engine
                     .running_provider_pins

@@ -1077,6 +1077,7 @@ mod tests {
         engine
             .pty_input
             .insert("s1-slot".to_string(), Instant::now());
+        engine.pty_used.insert("s1-slot".to_string());
         engine.needs_attention.insert(TabId::new("s1-slot"));
         engine.pty_progress.insert(
             TabId::new("s1-slot"),
@@ -1137,6 +1138,10 @@ mod tests {
         assert!(
             !engine.pty_input.contains_key("s1-slot"),
             "stale input would read as a typing tab with no process"
+        );
+        assert!(
+            !engine.pty_used.contains("s1-slot"),
+            "a stale use mark would exempt the next run from the rapid-exit rule"
         );
         assert!(!engine.needs_attention.contains(TabIdRef::new("s1-slot")));
         assert!(
