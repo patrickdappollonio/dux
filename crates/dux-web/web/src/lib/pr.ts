@@ -30,7 +30,7 @@ export function prAriaLabel(number: number, state: PrStateLike): string {
 // background (the row carries its own hover/active surface).
 export function prIconClass(state: PrStateLike): string {
   if (state === "open") return "text-dux-pr-open"
-  if (state === "merged") return "text-purple-400"
+  if (state === "merged") return "text-dux-pr-merged"
   if (state === "closed") return "text-dux-pr-closed"
   return "text-muted-foreground"
 }
@@ -39,7 +39,7 @@ export function prIconClass(state: PrStateLike): string {
 // out, so a brighter glyph plus a subtle same-hue chip keeps it readable on both surfaces.
 export function prIconHoverClass(state: PrStateLike): string {
   if (state === "open") return "hover:bg-dux-pr-open-tint/15 hover:text-dux-pr-open-hover"
-  if (state === "merged") return "hover:bg-purple-600/15 hover:text-purple-300"
+  if (state === "merged") return "hover:bg-dux-pr-merged-tint/15 hover:text-dux-pr-merged-hover"
   if (state === "closed") return "hover:bg-dux-pr-closed-tint/15 hover:text-dux-pr-closed-hover"
   return "hover:bg-muted hover:text-foreground"
 }
@@ -50,7 +50,7 @@ export function prBannerClass(state: PrStateLike): string {
   if (state === "open")
     return "bg-dux-pr-open-tint/10 border-dux-pr-open-tint/30 text-dux-pr-open hover:bg-dux-pr-open-tint/15"
   if (state === "merged")
-    return "bg-purple-600/10 border-purple-600/30 text-purple-400 hover:bg-purple-600/15"
+    return "bg-dux-pr-merged-tint/10 border-dux-pr-merged-tint/30 text-dux-pr-merged hover:bg-dux-pr-merged-tint/15"
   if (state === "closed")
     return "bg-dux-pr-closed-tint/10 border-dux-pr-closed-tint/30 text-dux-pr-closed hover:bg-dux-pr-closed-tint/15"
   return "bg-muted border-border text-muted-foreground hover:bg-muted/80"

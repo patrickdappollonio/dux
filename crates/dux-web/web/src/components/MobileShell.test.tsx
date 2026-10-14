@@ -1639,7 +1639,7 @@ describe("MobileShell agent header PR chip", () => {
   it("keeps the state coloring for a merged and a closed pull request", () => {
     mockState = prState({ ...openPr, state: "merged" })
     render(<MobileShell />)
-    expect(chip().className).toContain("text-purple-400")
+    expect(chip().className).toContain("text-dux-pr-merged")
     cleanup()
     mockState = prState({ ...openPr, state: "closed" })
     render(<MobileShell />)

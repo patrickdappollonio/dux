@@ -175,9 +175,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        vitals tooltip's status line; added and deleted, the changed-files line
        counts and file markers (an untracked file counts as added); success,
        the success toast's icon and a connected socket's dot; error, the dot of
-       a connection that gave up; and a pull request's open and closed states,
-       each with the brighter text its icon takes on hover and the deeper shade
-       its banner and hover chip are tinted from. Their values live in
+       a connection that gave up; and a pull request's open, merged and closed
+       states, each with the brighter text its icon takes on hover and the
+       deeper shade its banner and hover chip are tinted from. Their values live in
        :root/.dark below. */
     --color-dux-working: var(--dux-working);
     --color-dux-active: var(--dux-active);
@@ -188,6 +188,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --color-dux-pr-open: var(--dux-pr-open);
     --color-dux-pr-open-hover: var(--dux-pr-open-hover);
     --color-dux-pr-open-tint: var(--dux-pr-open-tint);
+    --color-dux-pr-merged: var(--dux-pr-merged);
+    --color-dux-pr-merged-hover: var(--dux-pr-merged-hover);
+    --color-dux-pr-merged-tint: var(--dux-pr-merged-tint);
     --color-dux-pr-closed: var(--dux-pr-closed);
     --color-dux-pr-closed-hover: var(--dux-pr-closed-hover);
     --color-dux-pr-closed-tint: var(--dux-pr-closed-tint);
@@ -445,8 +448,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        active, added, success and an open pull request; red-500 for deleted
        and error; red-400 for a closed pull request; green-400 and red-300 for
        the pull request icon's hover; green-600 and red-600 for the pull
-       request tints. Constant across light/dark since the web app is
-       dark-only. */
+       request tints; purple-400 for a merged pull request, with purple-300
+       for its hover and purple-600 for its tints. Constant across light/dark
+       since the web app is dark-only. */
     --dux-working: oklch(72.3% 0.219 149.579);
     --dux-active: oklch(72.3% 0.219 149.579);
     --dux-added: oklch(72.3% 0.219 149.579);
@@ -456,6 +460,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
     --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    --dux-pr-merged: oklch(71.4% 0.203 305.504);
+    --dux-pr-merged-hover: oklch(82.7% 0.119 306.383);
+    --dux-pr-merged-tint: oklch(55.8% 0.288 302.321);
     --dux-pr-closed: oklch(70.4% 0.191 22.216);
     --dux-pr-closed-hover: oklch(80.8% 0.114 19.571);
     --dux-pr-closed-tint: oklch(57.7% 0.245 27.325);
@@ -521,6 +528,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
     --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    --dux-pr-merged: oklch(71.4% 0.203 305.504);
+    --dux-pr-merged-hover: oklch(82.7% 0.119 306.383);
+    --dux-pr-merged-tint: oklch(55.8% 0.288 302.321);
     --dux-pr-closed: oklch(70.4% 0.191 22.216);
     --dux-pr-closed-hover: oklch(80.8% 0.114 19.571);
     --dux-pr-closed-tint: oklch(57.7% 0.245 27.325);

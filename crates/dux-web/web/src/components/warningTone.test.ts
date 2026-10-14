@@ -6,9 +6,10 @@
 // lib/ and fails on a palette amber or yellow utility outside the allowlist
 // below, which carries a reason for every entry. The green and red state
 // colors (working, active, added and deleted lines, a pull request's state,
-// success and failure) are tokens for the same reason, so a palette green, red,
-// emerald or rose utility class written out in any source file under src/
-// fails too, with no exceptions. Both checks match literal palette class names
+// success and failure) and a merged pull request's purple are tokens for the
+// same reason, so a palette green, red, emerald, rose, purple, violet or fuchsia
+// utility class written out in any source file under src/ fails too, with no
+// exceptions. Both checks match literal palette class names
 // only: a hex or arbitrary value, or a class assembled at runtime, gets past
 // them. Each state token must also be defined in index.css and used where it
 // belongs, because Tailwind emits nothing for a class naming an undefined
@@ -28,7 +29,7 @@ function walk(dir: string): string[] {
 }
 
 const PALETTE_AMBER = /\b[a-z-]+-(?:amber|yellow)-\d{2,3}\b/g
-const PALETTE_GREEN_RED = /\b[a-z-]+-(?:green|red|emerald|rose)-\d{2,3}\b/g
+const PALETTE_STATE = /\b[a-z-]+-(?:green|red|emerald|rose|purple|violet|fuchsia)-\d{2,3}\b/g
 
 // File and exact class, with why it cannot be a token.
 const ALLOWED: Record<string, { classes: string[]; why: string }> = {}
@@ -94,6 +95,9 @@ const STATE_TOKENS: { token: string; uses: Record<string, string> }[] = [
   { token: "dux-pr-open", uses: { "lib/pr.ts": "text-dux-pr-open" } },
   { token: "dux-pr-open-hover", uses: { "lib/pr.ts": "hover:text-dux-pr-open-hover" } },
   { token: "dux-pr-open-tint", uses: { "lib/pr.ts": "bg-dux-pr-open-tint/10" } },
+  { token: "dux-pr-merged", uses: { "lib/pr.ts": "text-dux-pr-merged" } },
+  { token: "dux-pr-merged-hover", uses: { "lib/pr.ts": "hover:text-dux-pr-merged-hover" } },
+  { token: "dux-pr-merged-tint", uses: { "lib/pr.ts": "bg-dux-pr-merged-tint/10" } },
   { token: "dux-pr-closed", uses: { "lib/pr.ts": "text-dux-pr-closed" } },
   { token: "dux-pr-closed-hover", uses: { "lib/pr.ts": "hover:text-dux-pr-closed-hover" } },
   { token: "dux-pr-closed-tint", uses: { "lib/pr.ts": "bg-dux-pr-closed-tint/10" } },
@@ -123,13 +127,13 @@ describe("warning tone", () => {
     expect(offenders).toEqual([])
   })
 
-  it("paints green and red states with tokens, never a palette class", () => {
+  it("paints green, red and purple states with tokens, never a palette class", () => {
     const offenders: string[] = []
     for (const path of walk(srcDir)) {
       const name = relative(srcDir, path)
       if (!/\.tsx?$/.test(name) || name.includes(".test.")) continue
       const source = readFileSync(path, "utf-8")
-      for (const match of source.matchAll(PALETTE_GREEN_RED)) {
+      for (const match of source.matchAll(PALETTE_STATE)) {
         offenders.push(`${name}: ${match[0]}`)
       }
     }
