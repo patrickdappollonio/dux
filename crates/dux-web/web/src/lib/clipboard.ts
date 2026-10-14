@@ -78,7 +78,7 @@ function copyEventCopy(text: string): boolean | null {
     written = true
   }
   document.addEventListener("copy", onCopy, true)
-  let ok = false
+  let ok: boolean
   try {
     ok = document.execCommand("copy")
   } catch {
