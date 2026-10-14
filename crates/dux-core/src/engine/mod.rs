@@ -1036,7 +1036,7 @@ pub struct PendingRecreate {
     /// attachment guard reserved, so a tab that comes up during the checkout,
     /// which nothing reserved and somebody may have attached to since, is
     /// never stopped. `None` when no restart was asked for.
-    pub restart_targets: Option<Vec<TabId>>,
+    pub restart_targets: Option<Vec<(TabId, crate::model::ProviderKind)>>,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see

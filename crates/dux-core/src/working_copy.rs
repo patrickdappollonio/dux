@@ -483,6 +483,9 @@ pub struct TabRestartReport {
     /// Restartable tabs that came up while the copy was being recreated, after
     /// the restart was asked for, and so were left running.
     pub came_up_later: Vec<String>,
+    /// Tabs the restart was asked for whose process exited while the copy was
+    /// being recreated, so there was nothing left to restart.
+    pub exited_during_checkout: Vec<String>,
     /// The wait the old processes were given, when any of them outlasted it and
     /// was force-closed.
     pub forced_after_seconds: Option<u64>,
@@ -570,6 +573,17 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
              conversations in the recreated copy."
         })
     });
+    let exited = (!report.exited_during_checkout.is_empty()).then(|| {
+        the_tabs("The ", &report.exited_during_checkout).text(
+            if one(&report.exited_during_checkout) {
+                " stopped while the copy was being recreated, so dux did not restart it; start \
+                 it again to continue its conversation in the recreated copy."
+            } else {
+                " stopped while the copy was being recreated, so dux did not restart them; \
+                 start them again to continue their conversations in the recreated copy."
+            },
+        )
+    });
     let forced = report.forced_after_seconds.map(|seconds| {
         Prose::new().text(format!(
             "An old process did not exit within {seconds} seconds and was force-closed first."
@@ -583,7 +597,7 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
             .flatten()
             .chain(failed)
             .chain(
-                [not_restarted, came_up_later, forced, left_running]
+                [not_restarted, exited, came_up_later, forced, left_running]
                     .into_iter()
                     .flatten(),
             ),

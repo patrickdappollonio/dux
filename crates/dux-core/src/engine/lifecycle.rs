@@ -2437,12 +2437,7 @@ impl Engine {
         let status_key = op.id().to_string();
         // Read in the same engine turn as the guard that reserved them, so these
         // are exactly the tabs reserved.
-        let restart_targets = restart_tabs.then(|| {
-            self.recreate_restart_targets(session_id)
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect()
-        });
+        let restart_targets = restart_tabs.then(|| self.recreate_restart_targets(session_id));
         self.pending_recreate_ops.insert(
             session_id.to_string(),
             crate::engine::PendingRecreate {
@@ -2516,14 +2511,7 @@ impl Engine {
         // Only the tabs reserved with the request are stopped. One that came up
         // since is running outside the reservation, where somebody may have
         // attached to it, so it is left alone and the final says so.
-        let (tabs, came_up_later): (Vec<_>, Vec<_>) = match (&result, &restart_targets) {
-            (Ok(_), Some(reserved)) => self
-                .recreate_restart_targets(session_id)
-                .into_iter()
-                .partition(|(id, _)| reserved.contains(id)),
-            _ => (Vec::new(), Vec::new()),
-        };
-        let (Ok(branch), false) = (&result, tabs.is_empty()) else {
+        let (Ok(branch), Some(reserved)) = (&result, restart_targets) else {
             return op
                 .resolve(&crate::engine::RecreateOutcome {
                     result,
@@ -2532,6 +2520,33 @@ impl Engine {
                 })
                 .into_reaction();
         };
+        let (tabs, came_up_later): (Vec<_>, Vec<_>) = self
+            .recreate_restart_targets(session_id)
+            .into_iter()
+            .partition(|(id, _)| reserved.iter().any(|(reserved, _)| reserved == id));
+        let names = |tabs: &[(TabId, crate::model::ProviderKind)]| -> Vec<String> {
+            tabs.iter()
+                .map(|(_, provider)| provider.as_str().to_string())
+                .collect()
+        };
+        let exited: Vec<_> = reserved
+            .into_iter()
+            .filter(|(id, _)| !tabs.iter().any(|(live, _)| live == id))
+            .collect();
+        let report = crate::working_copy::TabRestartReport {
+            came_up_later: names(&came_up_later),
+            exited_during_checkout: names(&exited),
+            ..Default::default()
+        };
+        if tabs.is_empty() {
+            return op
+                .resolve(&crate::engine::RecreateOutcome {
+                    result: Ok(branch.clone()),
+                    live,
+                    restart: Some(report),
+                })
+                .into_reaction();
+        }
         let label = self
             .session_by_id(session_id)
             .map(|session| session.display_label())
@@ -2560,13 +2575,7 @@ impl Engine {
             forced: false,
             grace_seconds: self.individual_close_grace().as_secs(),
             cancelled: false,
-            report: crate::working_copy::TabRestartReport {
-                came_up_later: came_up_later
-                    .into_iter()
-                    .map(|(_, provider)| provider.as_str().to_string())
-                    .collect(),
-                ..Default::default()
-            },
+            report,
             dispatched: false,
             launching: std::collections::HashMap::new(),
         });
@@ -3490,6 +3499,70 @@ mod recreate_tests {
             ),
             "{message}"
         );
+    }
+
+    /// A reserved tab whose process exits while the checkout runs has nothing
+    /// left to restart, and the final still says what happened to it rather
+    /// than falling back to the sentence about running tabs.
+    #[test]
+    fn a_reserved_tab_that_exits_during_the_checkout_is_named() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs");
+        drop(engine.providers.remove(TabIdRef::new("s1-slot")));
+
+        let crate::engine::EventReaction::Status(status) = checkout_lands(&mut engine, false)
+        else {
+            panic!("the checkout answers its spinner")
+        };
+        assert_eq!(status.tone, crate::statusline::StatusTone::Info);
+        assert!(
+            status.message.contains(
+                "The Codex tab stopped while the copy was being recreated, so dux did not \
+                 restart it"
+            ),
+            "{}",
+            status.message
+        );
+        assert!(engine.pending_tab_restarts.is_empty());
+    }
+
+    /// When no reserved tab is left to restart, a tab that came up during the
+    /// checkout is still named as left running, beside the reserved one that
+    /// exited.
+    #[test]
+    fn a_tab_that_came_up_is_named_when_no_reserved_tab_is_left() {
+        let (mut engine, _tmp, cwd) = agent_running("codex", &[("tab-b", "codex")]);
+        drop(engine.providers.remove(TabIdRef::new("tab-b")));
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs");
+        drop(engine.providers.remove(TabIdRef::new("s1-slot")));
+        engine.providers.insert(
+            TabId::new("tab-b"),
+            PtyClient::spawn_with_env("cat", &[], cwd.path(), 24, 80, 1000, &[]).expect("spawn"),
+        );
+
+        let crate::engine::EventReaction::Status(status) = checkout_lands(&mut engine, false)
+        else {
+            panic!("the checkout answers its spinner")
+        };
+        assert!(
+            status.message.contains(
+                "The Codex tab that started while the copy was being recreated was left running"
+            ),
+            "{}",
+            status.message
+        );
+        assert!(
+            status
+                .message
+                .contains("The Codex tab stopped while the copy was being recreated"),
+            "{}",
+            status.message
+        );
+        assert!(engine.providers.contains_key(TabIdRef::new("tab-b")));
     }
 
     /// A running tab keeps the provider it was started with until it exits,
