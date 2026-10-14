@@ -49,14 +49,14 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 web_dragdrop_paste = "bare"
 ```
 
-A file at `/home/you/My Project/it's here.png` goes out as:
+A file at `/home/you/Bob's Project/.dux/uploads/shot.png` goes out as:
 
 | Value | What is written into the prompt |
 |---|---|
-| `bare` | `/home/you/My Project/it's here.png` |
-| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
-| `double_quoted` | `"/home/you/My Project/it's here.png"` |
-| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
+| `bare` | `/home/you/Bob's Project/.dux/uploads/shot.png` |
+| `single_quoted` | `'/home/you/Bob'\''s Project/.dux/uploads/shot.png'` |
+| `double_quoted` | `"/home/you/Bob's Project/.dux/uploads/shot.png"` |
+| `backslash_escaped` | `/home/you/Bob\'s\ Project/.dux/uploads/shot.png` |
 
 > [!TIP]
 > Which value your CLI wants is covered in

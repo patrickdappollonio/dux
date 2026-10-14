@@ -456,8 +456,9 @@ Drag a screenshot (or any file) from your desktop onto the terminal, or paste an
 and dux saves it on the server and pastes its path into the prompt. Dropped on an agent it
 goes to that agent's upload folder (`.dux/uploads` in its worktree), invisible to git and
 deleted along with the agent; dropped on a terminal it goes to the folder that terminal is
-in right now. Nothing is ever overwritten, your filename is kept as you had it, and only
-the device holding input can drop or paste. On a phone, pasting an image puts its path
+in right now. Nothing is ever overwritten, a terminal keeps your filename as you had it
+(an agent's upload folder saves a cleaned-up version, like `report-q3-draft.pdf`, because
+agent CLIs misread quotes in a path), and only the device holding input can drop or paste. On a phone, pasting an image puts its path
 into your compose draft. See
 [Dropping and pasting files onto an agent](/docs/dropping-files).
 

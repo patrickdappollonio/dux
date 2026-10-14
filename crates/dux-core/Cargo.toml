@@ -43,6 +43,10 @@ url.workspace = true
 percent-encoding.workspace = true
 uuid.workspace = true
 walkdir = "2"
+# Cleans the name of a file saved into an agent's upload folder
+# (dux_core::file_drop), so the pasted path carries no quote or backslash an
+# agent CLI would misread.
+slug = "0.1.6"
 alacritty_terminal = "0.26.0"
 ureq = "3.3.0"
 # Encodes the tailnet addresses `dux server` and the start-web-server flip show
