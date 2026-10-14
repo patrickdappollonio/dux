@@ -57,8 +57,14 @@ let listening = false
 // A tab that minted and wrote before another tab's write landed hears about it
 // here and adopts what storage now holds. It reads storage rather than the
 // event's value, because events for two racing writes can arrive after both
-// have landed, and only the last write is the browser's id. The events socket
-// presents the adopted id from its next open.
+// have landed, and only the last write is the browser's id.
+//
+// A socket already open keeps presenting the id it opened with until it
+// reconnects; the events and terminal sockets present the adopted id from their
+// next open. Until then the server counts this tab as a second browser. That is
+// accepted rather than forced with a reconnect: the id only feeds a displayed
+// count, it decides nothing, and the race needs two tabs minting on the same
+// first visit to this browser.
 function listenForOtherTabs(): void {
   if (listening || typeof window === "undefined") return
   listening = true
