@@ -22,15 +22,20 @@ function mint(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
 }
 
-export function browserId(): string {
-  if (pageId !== null) return pageId
-  let id: string | null = null
+function readStored(): string | null {
   try {
     const stored = localStorage.getItem(BROWSER_ID_KEY)
-    if (stored !== null && VALID.test(stored)) id = stored
+    if (stored !== null && VALID.test(stored)) return stored
   } catch {
-    // Unreadable storage: a fresh id for this page below.
+    // Unreadable storage: the caller keeps or mints its own.
   }
+  return null
+}
+
+export function browserId(): string {
+  if (pageId !== null) return pageId
+  listenForOtherTabs()
+  let id = readStored()
   if (id === null) {
     id = mint()
     try {
@@ -38,9 +43,29 @@ export function browserId(): string {
     } catch {
       // Unwritable storage: the id is this page's alone.
     }
+    // Storage is shared without a lock, so another tab minting at the same
+    // moment may have written after this one; the stored value is the one
+    // every tab converges on.
+    id = readStored() ?? id
   }
   pageId = id
   return id
+}
+
+let listening = false
+
+// A tab that minted and wrote before another tab's write landed hears about it
+// here and adopts what storage now holds. It reads storage rather than the
+// event's value, because events for two racing writes can arrive after both
+// have landed, and only the last write is the browser's id. The events socket
+// presents the adopted id from its next open.
+function listenForOtherTabs(): void {
+  if (listening || typeof window === "undefined") return
+  listening = true
+  window.addEventListener("storage", (event) => {
+    if (event.key !== BROWSER_ID_KEY || pageId === null) return
+    pageId = readStored() ?? pageId
+  })
 }
 
 // Tests only: forget the page's cached id, as a new tab of the same browser would.
