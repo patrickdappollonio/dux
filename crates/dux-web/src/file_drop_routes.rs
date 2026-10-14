@@ -38,7 +38,8 @@
 //! A tree drop reuses this route rather than getting one of its own, because
 //! everything except the destination is the part that is easy to get wrong: the
 //! size cap, the concurrency permit taken before the body is buffered, the name
-//! validated and never rewritten, the create relative to a pinned directory
+//! validated and never rewritten (except slugified in an agent's upload folder,
+//! see [`dux_core::file_drop::slugify_drop_name`]), the create relative to a pinned directory
 //! handle, the refusal of a symlink at any candidate, and the collision suffix.
 //!
 //! On an occupied name a drop suffixes where the editor's MOVE refuses. Both
@@ -103,8 +104,8 @@ struct DropQuery {
 struct SavedDropBody {
     /// The absolute path, which is what the browser pastes.
     path: String,
-    /// The name it was saved under. Differs from `requested_name` on a
-    /// collision.
+    /// The name it was saved under. Differs from `requested_name` when an
+    /// agent's upload folder slugified it or a collision forced a suffix.
     saved_name: String,
     /// The name as dropped, so the browser can report the pair rather than a
     /// count when they differ.
@@ -115,7 +116,7 @@ struct SavedDropBody {
     /// the SERVER is the machine whose home directory it is; the browser has no
     /// way to know.
     folder_label: String,
-    /// True when a collision forced a different name.
+    /// True when the saved name differs from the dropped one.
     renamed: bool,
 }
 
@@ -344,8 +345,9 @@ async fn upload_dropped_file(
                 )
             })?;
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let saved =
+            dux_core::file_drop::save_drop(&dir, &filename, destination.naming(), &bytes, &stamp)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
         // On the final path, once it exists, and resolved on both sides: a
         // terminal's shell may have been `cd`'d to a sibling directory whose path
         // merely starts with the worktree's.
@@ -748,6 +750,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_agent_drop_is_reported_under_its_slugified_name() {
+        // Quotes in a pasted path are what agent CLIs misread, so the upload
+        // folder saves the slug and says so through the rename pair.
+        let world = drop_world().await;
+        let resp = world.drop_on("s1-slot", "it%27s%20%22final%22.txt").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(body["requested_name"], "it's \"final\".txt");
+        assert_eq!(body["saved_name"], "it-s-final.txt");
+        assert_eq!(body["renamed"], true);
+        assert!(
+            body["path"].as_str().unwrap().ends_with("/it-s-final.txt"),
+            "the pasted path must carry the slug: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_drop_keeps_its_exact_name() {
+        // A terminal's folder is where the user keeps the file, so its name is
+        // theirs, quotes and all.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/sessions/s1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+        let resp = world.drop_on(&terminal, "it%27s%20%22final%22.txt").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(body["saved_name"], "it's \"final\".txt");
+        assert_eq!(body["renamed"], false);
+        assert!(world.wt.join("it's \"final\".txt").exists());
+    }
+
+    #[tokio::test]
     async fn dropping_on_the_agent_s_terminal_outside_the_worktree_refreshes_nothing() {
         // The shell was `cd`'d out of the worktree, so the file landed somewhere
         // git is not looking. Refreshing would be a lie about what changed.
@@ -884,9 +918,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
 
-        assert_eq!(body["saved_name"], "Screen Shot.png");
+        assert_eq!(body["saved_name"], "screen-shot.png");
         assert_eq!(body["requested_name"], "Screen Shot.png");
-        assert_eq!(body["renamed"], false);
+        assert_eq!(body["renamed"], true);
         let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
         let uploads = wt.join(".dux").join("uploads");
         assert_eq!(
@@ -1328,6 +1362,22 @@ mod tests {
                 &format!("pty={pty}&filename={filename}&dir={dir}"),
                 b"bytes".to_vec(),
             )
+        }
+
+        #[tokio::test]
+        async fn a_tree_drop_keeps_its_exact_name() {
+            // Only the agent's upload folder slugifies; a file added to the
+            // project keeps the name the user gave it.
+            let (_tmp, wt, app) = router().await;
+            let resp = app
+                .oneshot(tree_drop("s1-slot", "Report%20Q3%20(draft).PDF", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+            assert_eq!(body["saved_name"], "Report Q3 (draft).PDF");
+            assert_eq!(body["renamed"], false);
+            assert!(wt.join("Report Q3 (draft).PDF").exists());
         }
 
         #[tokio::test]

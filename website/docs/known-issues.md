@@ -90,6 +90,18 @@ long as the program does. See
 [what happens on restart](/docs/agent-tabs#what-happens-on-restart) for the card such a
 tab shows, and [custom agents](/docs/custom-agents) for setting one up.
 
+### A dropped file's path doesn't reach the agent intact
+
+dux cleans up the name of a file it saves for an agent, but not the folders above it. When
+one of those folders has an apostrophe or a backslash in its name (a project folder called
+`Bob's app`, say), some agent CLIs misread the pasted path, and the file is not attached.
+Codex also ignores any paste longer than 1000 characters, so a very deep path never reaches
+it as a path. Either way the file is still saved and the toast names where. Rename the
+folder, move the project somewhere with a shorter path, or set `[ui] upload_directory` to a
+shorter folder. If a path arrives with stray quotes or backslashes, the provider's
+`web_dragdrop_paste` setting may help. See
+[what is known to fail](/docs/dropping-files#what-is-known-to-fail).
+
 ## Terminals
 
 ### Terminals don't come back after dux restarts

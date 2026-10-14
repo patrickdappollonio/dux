@@ -431,7 +431,9 @@ function renameNote(saved: SavedFile[], ctx: DropContext): Prose {
   if (renamed.length > MAX_NAMED_FILES) {
     const where = folderPhrase(renamed, ctx)
     const listedIn: Prose = where.length === 0 ? ["the folders above"] : where
-    return prose` ${renamed.length} already existed and were saved under new names, which are listed in ${listedIn}.`
+    // Not "already existed": an agent's upload folder renames to clean a name
+    // up as well as to step around a clash.
+    return prose` ${renamed.length} were saved under different names, which are listed in ${listedIn}.`
   }
   const pairs = joinProse(
     renamed.map((r) => prose`${chip(r.requestedName)} was saved as ${chip(r.savedName)}`),

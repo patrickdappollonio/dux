@@ -1079,6 +1079,23 @@ describe("a drop whose files did not all end the same way", () => {
     expect(t.message).not.toContain("worktree root")
   })
 
+  it("does not blame a collision for a name the agent's folder cleaned up", () => {
+    // An agent's upload folder saves a slugified name, so a renamed file did
+    // not necessarily clash with anything that was already there.
+    const t = dropToastFor(
+      "ABCDEFG"
+        .split("")
+        .map((n) =>
+          sent(`${n} shot.png`, `${n.toLowerCase()}-shot.png`, "~/wt/.dux/uploads"),
+        ),
+      agent,
+    )
+    expect(t.message).toContain(
+      "7 were saved under different names, which are listed in ~/wt/.dux/uploads",
+    )
+    expect(t.message).not.toContain("already existed")
+  })
+
   it("claims only that the path was SENT, never that it was pasted", () => {
     // A write to the PTY socket is not acknowledged, and a take-over landing
     // between the upload's courtesy check and the frame reaching the server

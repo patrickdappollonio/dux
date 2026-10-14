@@ -15,9 +15,15 @@
 //!
 //! # What this module guarantees
 //!
-//! - **A dropped name is validated, never rewritten.** Rewriting names to "safe"
-//!   characters destroys them, can collapse two distinct names into one, and can
-//!   even produce `.` or `..`.
+//! - **A dropped name is validated, never rewritten, except in an agent's upload
+//!   folder.** Rewriting names to "safe" characters destroys them, can collapse
+//!   two distinct names into one, and can even produce `.` or `..`, so a drop on
+//!   a terminal or on the editor's file tree keeps its exact name. A file saved
+//!   into an agent's upload folder is the one exception: it is slugified (see
+//!   [`slugify_drop_name`]), because agent CLIs misread quotes and backslashes in
+//!   the path pasted to them, and nobody browses that folder by name. The name
+//!   as dropped is validated first either way, so a refusal means the same thing
+//!   on every destination.
 //! - **Creation is atomic and never overwrites.** The file is created relative to
 //!   a pinned directory handle, exclusively, refusing to follow a symlink. On a
 //!   name clash the next candidate is tried.
@@ -68,7 +74,8 @@ pub const FALLBACK_NAME_MAX_BYTES: usize = 255;
 /// Why a dropped filename is unusable.
 ///
 /// These are all REFUSALS, not repairs: the name the user dropped is the name
-/// they get, or they are told why they cannot have it.
+/// they get (slugified only in an agent's upload folder), or they are told why
+/// they cannot have it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropNameError {
     /// No name at all.
@@ -380,7 +387,8 @@ pub struct SavedDrop {
     pub path: PathBuf,
     /// The name it was actually saved under.
     pub saved_name: String,
-    /// True when a collision forced a different name from the dropped one. The
+    /// True when the saved name differs from the dropped one, because the
+    /// destination slugifies names or because a collision forced a suffix. The
     /// browser reports the pair (original, saved) rather than a count, because a
     /// count says something changed without saying what the file is now called.
     pub renamed: bool,
@@ -479,6 +487,53 @@ pub fn collision_candidate(
         // character of the extension back and try again.
         ext = truncate_at_char_boundary(ext, ext.len() - 1);
     }
+}
+
+/// How a destination names the file it saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropNaming {
+    /// The name exactly as dropped.
+    Exact,
+    /// The name through [`slugify_drop_name`].
+    Slugified,
+}
+
+/// The slugified form of a dropped name, fitted within `name_max` bytes.
+///
+/// The stem and the last extension are slugified separately so the file keeps
+/// a type a viewer recognizes: `Report Q3 (draft).PDF` becomes
+/// `report-q3-draft.pdf`. A leading dot survives, so `.env` stays a hidden
+/// file. A stem with nothing left after slugifying becomes `file`, and an
+/// extension with nothing left is dropped. Slugifying can lengthen a name
+/// (transliteration spells a glyph out in letters), so the stem is shortened to
+/// fit, keeping the extension.
+pub fn slugify_drop_name(name: &str, name_max: usize) -> String {
+    let (dot, rest) = match name.strip_prefix('.') {
+        Some(rest) => (".", rest),
+        None => ("", name),
+    };
+    let (stem, ext) = match rest.rfind('.') {
+        Some(idx) if idx > 0 => (&rest[..idx], &rest[idx + 1..]),
+        _ => (rest, ""),
+    };
+    let mut stem = slug::slugify(stem);
+    if stem.is_empty() {
+        stem = "file".to_string();
+    }
+    let ext = slug::slugify(ext);
+    let ext = if ext.is_empty() {
+        String::new()
+    } else {
+        format!(".{ext}")
+    };
+    // One byte of stem is the least a name can have, so the extension gives way
+    // first only when even that would not fit.
+    let ext = truncate_at_char_boundary(&ext, name_max.saturating_sub(dot.len() + 1));
+    let ext = if ext == "." { "" } else { ext };
+    let room = name_max.saturating_sub(dot.len() + ext.len());
+    // A cut can land just after a dash, and a slug never ends in one.
+    let stem = truncate_at_char_boundary(&stem, room).trim_end_matches('-');
+    format!("{dot}{stem}{ext}")
 }
 
 /// A PINNED handle to the directory a dropped file will be written into.
@@ -903,17 +958,19 @@ fn collision_step(probe: rustix::io::Result<bool>) -> CollisionStep {
     }
 }
 
-/// Save `bytes` into `dir` under `requested_name`, or the next free candidate.
+/// Save `bytes` into `dir` under `requested_name` (as `naming` shapes it), or
+/// the next free candidate.
 ///
 /// `stamp` is the timestamp half of the collision suffix, passed in rather than
 /// read from the clock so the naming is testable.
 pub fn save_drop(
     dir: &DropDir,
     requested_name: &str,
+    naming: DropNaming,
     bytes: &[u8],
     stamp: &str,
 ) -> Result<SavedDrop, DropSaveError> {
-    save_drop_from(dir, requested_name, &mut &bytes[..], stamp)
+    save_drop_from(dir, requested_name, naming, &mut &bytes[..], stamp)
 }
 
 /// Save whatever `source` yields into `dir`. See [`save_drop`].
@@ -924,19 +981,28 @@ pub fn save_drop(
 pub fn save_drop_from<R: Read>(
     dir: &DropDir,
     requested_name: &str,
+    naming: DropNaming,
     source: &mut R,
     stamp: &str,
 ) -> Result<SavedDrop, DropSaveError> {
     let name_max = dir.name_max();
     validate_drop_name(requested_name, name_max).map_err(DropSaveError::Name)?;
+    let base = match naming {
+        DropNaming::Exact => requested_name.to_string(),
+        DropNaming::Slugified => {
+            let slug = slugify_drop_name(requested_name, name_max);
+            validate_drop_name(&slug, name_max).map_err(DropSaveError::Name)?;
+            slug
+        }
+    };
 
     let mut counter = 0u32;
     let mut retries = 0u32;
     loop {
         let (candidate, renamed) = if counter == 0 {
-            (requested_name.to_string(), false)
+            (base.clone(), base != requested_name)
         } else {
-            match collision_candidate(requested_name, stamp, counter, name_max) {
+            match collision_candidate(&base, stamp, counter, name_max) {
                 Some(c) => (c, true),
                 None => return Err(DropSaveError::NoUsableName),
             }
@@ -1054,6 +1120,18 @@ pub enum FileDropDestination {
 }
 
 impl FileDropDestination {
+    /// How a file saved here is named. Only the agent's upload folder rewrites:
+    /// its path is pasted to an agent CLI, which misreads quotes and
+    /// backslashes, and nobody browses that folder by name. A terminal's folder
+    /// and the editor's tree are where the user keeps the file, under the name
+    /// they gave it.
+    pub fn naming(&self) -> DropNaming {
+        match self {
+            Self::AgentUploads { .. } => DropNaming::Slugified,
+            Self::WorktreeDirectory { .. } | Self::Terminal(_) => DropNaming::Exact,
+        }
+    }
+
     /// Pin the destination directory, creating the agent's upload directory if
     /// this is the first file to land in it. Blocking: this creates
     /// directories, and for a terminal reads `/proc` (Linux) or asks the kernel
@@ -1746,9 +1824,10 @@ mod tests {
     #[test]
     fn keeps_ordinary_awkward_names_exactly_as_dropped() {
         // Spaces, parentheses and quotes are all legal in a filename and are
-        // what a screenshot is actually called. They are the paste layer's
-        // business, not a naming problem here, and the paste sends the path
-        // bare, so they travel unchanged.
+        // what a screenshot is actually called. A terminal or editor-tree drop
+        // saves them unchanged; only the agent's upload folder slugifies.
+        let dir = tmp();
+        let pinned = DropDir::open(dir.path()).expect("pin");
         for name in [
             "Screen Shot 2026-08-01 at 12.00.00.png",
             "report (final).pdf",
@@ -1757,13 +1836,146 @@ mod tests {
             "スクリーンショット.png",
             "Снимок экрана.png",
             ".env",
+            "back\\slash.txt",
         ] {
             assert_eq!(
                 validate_drop_name(name, 255),
                 Ok(()),
                 "{name} should be accepted unchanged"
             );
+            let saved = save_drop(&pinned, name, DropNaming::Exact, b"x", "S").expect("save");
+            assert_eq!(saved.saved_name, name);
+            assert!(!saved.renamed, "{name} must not be reported as renamed");
         }
+    }
+
+    #[test]
+    fn only_the_agent_upload_folder_slugifies() {
+        let wt = tmp();
+        let agent = FileDropDestination::AgentUploads {
+            worktree: wt.path().to_path_buf(),
+            relative: ".dux/uploads".to_string(),
+            write_gitignore: true,
+        };
+        let tree = FileDropDestination::WorktreeDirectory {
+            worktree: wt.path().to_path_buf(),
+            relative: String::new(),
+        };
+        let terminal = FileDropDestination::Terminal(WorkingDirectory {
+            foreground_pid: None,
+            shell_pid: None,
+            spawn_dir: wt.path().to_path_buf(),
+        });
+        assert_eq!(agent.naming(), DropNaming::Slugified);
+        assert_eq!(tree.naming(), DropNaming::Exact);
+        assert_eq!(terminal.naming(), DropNaming::Exact);
+    }
+
+    // ── Slugified names, for an agent's upload folder ───────────────────────
+
+    #[test]
+    fn a_slug_cleans_the_stem_and_the_extension_separately() {
+        for (dropped, slug) in [
+            ("Report Q3 (draft).PDF", "report-q3-draft.pdf"),
+            ("archive.tar.gz", "archive-tar.gz"),
+            ("it's \"final\".txt", "it-s-final.txt"),
+            ("back\\slash.txt", "back-slash.txt"),
+            ("Снимок экрана.png", "snimok-ekrana.png"),
+            ("README", "readme"),
+            ("trailing.", "trailing"),
+        ] {
+            assert_eq!(slugify_drop_name(dropped, 255), slug, "{dropped}");
+        }
+    }
+
+    #[test]
+    fn a_dotfile_keeps_its_leading_dot() {
+        assert_eq!(slugify_drop_name(".env", 255), ".env");
+        assert_eq!(slugify_drop_name(".Env Local", 255), ".env-local");
+        assert_eq!(slugify_drop_name(".env.local", 255), ".env.local");
+    }
+
+    #[test]
+    fn a_stem_with_nothing_left_becomes_file() {
+        assert_eq!(slugify_drop_name("'''.txt", 255), "file.txt");
+        assert_eq!(slugify_drop_name("\"\"", 255), "file");
+        // An extension with nothing left is dropped rather than left as a dot.
+        assert_eq!(slugify_drop_name("notes.'''", 255), "notes");
+    }
+
+    #[test]
+    fn generated_paste_names_come_out_unchanged() {
+        // The browser invents these for a pasted image or a long text paste.
+        for name in [
+            "pasted-2026-08-01-120000.png",
+            "pasted-2026-08-01-120000.txt",
+        ] {
+            assert_eq!(slugify_drop_name(name, 255), name);
+        }
+    }
+
+    #[test]
+    fn a_slug_that_grows_past_the_limit_is_cut_keeping_the_extension() {
+        // Transliteration spells each glyph out, so 80 three-byte glyphs (240
+        // bytes, under the limit) become far more than 255 bytes of letters.
+        let dropped = format!("{}.png", "日".repeat(80));
+        assert!(validate_drop_name(&dropped, 255).is_ok());
+        let slug = slugify_drop_name(&dropped, 255);
+        assert!(slug.len() <= 255, "{} bytes: {slug}", slug.len());
+        assert!(slug.ends_with(".png"), "{slug}");
+        assert!(
+            !slug.contains("-.png"),
+            "a cut must not leave a dash: {slug}"
+        );
+        assert_eq!(validate_drop_name(&slug, 255), Ok(()));
+    }
+
+    #[test]
+    fn an_upload_is_saved_under_its_slug_and_reported_renamed() {
+        let dir = tmp();
+        let pinned = DropDir::open(dir.path()).expect("pin");
+        let saved = save_drop(
+            &pinned,
+            "Report Q3 (draft).PDF",
+            DropNaming::Slugified,
+            b"x",
+            "S",
+        )
+        .expect("save");
+        assert_eq!(saved.saved_name, "report-q3-draft.pdf");
+        assert!(saved.renamed);
+        assert!(dir.path().join("report-q3-draft.pdf").exists());
+
+        // A name that is already a slug is not a rename.
+        let plain = save_drop(&pinned, "shot.png", DropNaming::Slugified, b"x", "S").expect("save");
+        assert_eq!(plain.saved_name, "shot.png");
+        assert!(!plain.renamed);
+    }
+
+    #[test]
+    fn two_names_with_the_same_slug_collide_and_the_second_is_suffixed() {
+        let dir = tmp();
+        let pinned = DropDir::open(dir.path()).expect("pin");
+        let first =
+            save_drop(&pinned, "My Shot.png", DropNaming::Slugified, b"one", "S").expect("first");
+        let second =
+            save_drop(&pinned, "my_shot.PNG", DropNaming::Slugified, b"two", "S").expect("second");
+        assert_eq!(first.saved_name, "my-shot.png");
+        assert_eq!(second.saved_name, "my-shot-S-1.png");
+        assert!(second.renamed);
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second.path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused_before_it_is_slugified() {
+        // The slug would turn the separator into a dash; the refusal must not
+        // depend on the destination.
+        let dir = tmp();
+        let pinned = DropDir::open(dir.path()).expect("pin");
+        let err = save_drop(&pinned, "../escaped.png", DropNaming::Slugified, b"x", "S")
+            .expect_err("must refuse");
+        assert!(matches!(err, DropSaveError::Name(DropNameError::Separator)));
     }
 
     #[test]
@@ -1912,12 +2124,25 @@ mod tests {
         let dir = tmp();
         let pinned = DropDir::open(dir.path()).expect("pin");
 
-        let first = save_drop(&pinned, "shot.png", b"one", "20260801-120000").expect("first save");
+        let first = save_drop(
+            &pinned,
+            "shot.png",
+            DropNaming::Exact,
+            b"one",
+            "20260801-120000",
+        )
+        .expect("first save");
         assert_eq!(first.saved_name, "shot.png");
         assert!(!first.renamed);
 
-        let second =
-            save_drop(&pinned, "shot.png", b"two", "20260801-120000").expect("second save");
+        let second = save_drop(
+            &pinned,
+            "shot.png",
+            DropNaming::Exact,
+            b"two",
+            "20260801-120000",
+        )
+        .expect("second save");
         assert!(
             second.renamed,
             "the second drop must be reported as renamed"
@@ -1933,7 +2158,14 @@ mod tests {
     fn a_non_latin_name_is_saved_exactly_as_dropped() {
         let dir = tmp();
         let pinned = DropDir::open(dir.path()).expect("pin");
-        let saved = save_drop(&pinned, "スクリーンショット.png", b"x", "S").expect("save");
+        let saved = save_drop(
+            &pinned,
+            "スクリーンショット.png",
+            DropNaming::Exact,
+            b"x",
+            "S",
+        )
+        .expect("save");
         assert_eq!(saved.saved_name, "スクリーンショット.png");
         assert!(saved.path.ends_with("スクリーンショット.png"));
         assert!(saved.path.exists());
@@ -1950,7 +2182,8 @@ mod tests {
         std::os::unix::fs::symlink(&victim, dir.path().join("shot.png")).unwrap();
 
         let pinned = DropDir::open(dir.path()).expect("pin");
-        let err = save_drop(&pinned, "shot.png", b"attacker", "S").expect_err("must refuse");
+        let err = save_drop(&pinned, "shot.png", DropNaming::Exact, b"attacker", "S")
+            .expect_err("must refuse");
         assert!(
             matches!(&err, DropSaveError::Symlink { name } if name == "shot.png"),
             "expected a symlink refusal, got {err:?}"
@@ -1974,7 +2207,8 @@ mod tests {
         std::os::unix::fs::symlink(&victim, dir.path().join("shot-S-1.png")).unwrap();
 
         let pinned = DropDir::open(dir.path()).expect("pin");
-        let err = save_drop(&pinned, "shot.png", b"attacker", "S").expect_err("must refuse");
+        let err = save_drop(&pinned, "shot.png", DropNaming::Exact, b"attacker", "S")
+            .expect_err("must refuse");
         assert!(
             matches!(&err, DropSaveError::Symlink { name } if name == "shot-S-1.png"),
             "expected a symlink refusal at the second candidate, got {err:?}"
@@ -2033,7 +2267,8 @@ mod tests {
         let dir = tmp();
         let pinned = DropDir::open(dir.path()).expect("pin");
         let mut source = FailsHalfway { sent: false };
-        let err = save_drop_from(&pinned, "shot.png", &mut source, "S").expect_err("must fail");
+        let err = save_drop_from(&pinned, "shot.png", DropNaming::Exact, &mut source, "S")
+            .expect_err("must fail");
         assert!(matches!(err, DropSaveError::Io(_)), "got {err:?}");
 
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -2052,7 +2287,8 @@ mod tests {
         let dir = parent.path().join("inner");
         std::fs::create_dir(&dir).unwrap();
         let pinned = DropDir::open(&dir).expect("pin");
-        let err = save_drop(&pinned, "../escaped.png", b"x", "S").expect_err("must refuse");
+        let err = save_drop(&pinned, "../escaped.png", DropNaming::Exact, b"x", "S")
+            .expect_err("must refuse");
         assert!(
             matches!(err, DropSaveError::Name(DropNameError::Separator)),
             "got {err:?}"
@@ -2182,7 +2418,7 @@ mod tests {
             std::fs::create_dir(&child).unwrap();
             let pinned = DropDir::open(&child)
                 .unwrap_or_else(|e| panic!("{name} must still be usable, got {e}"));
-            let saved = save_drop(&pinned, "shot.png", b"x", "S")
+            let saved = save_drop(&pinned, "shot.png", DropNaming::Exact, b"x", "S")
                 .unwrap_or_else(|e| panic!("{name} must still save, got {e}"));
             assert!(saved.path.exists(), "{name}: the file must be there");
             assert!(saved.path.to_str().unwrap().contains(name));
@@ -3412,7 +3648,14 @@ mod uploads_dir {
         // check keeps answering yes.
         let wt = worktree();
         let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("open uploads");
-        let saved = save_drop(&dir, "shot.png", b"png", "20260809-120000").expect("save");
+        let saved = save_drop(
+            &dir,
+            "shot.png",
+            DropNaming::Slugified,
+            b"png",
+            "20260809-120000",
+        )
+        .expect("save");
 
         assert_eq!(
             saved.path.parent().unwrap(),
@@ -3508,7 +3751,14 @@ mod tree_drop_dir {
         let wt = worktree();
         std::fs::create_dir(wt.path().join("we\nird")).unwrap();
         let dir = DropDir::open_tree_dir(wt.path(), "we\nird").expect("open the odd folder");
-        let saved = save_drop(&dir, "logo.png", b"png", "20260809-120000").expect("save");
+        let saved = save_drop(
+            &dir,
+            "logo.png",
+            DropNaming::Exact,
+            b"png",
+            "20260809-120000",
+        )
+        .expect("save");
         assert_eq!(saved.path, wt.path().join("we\nird/logo.png"));
         assert_eq!(std::fs::read(&saved.path).unwrap(), b"png");
     }
@@ -3568,7 +3818,14 @@ mod tree_drop_dir {
         let wt = worktree();
         std::fs::create_dir(wt.path().join("assets")).unwrap();
         let dir = DropDir::open_tree_dir(wt.path(), "assets").expect("open assets");
-        let saved = save_drop(&dir, "logo.png", b"png", "20260809-120000").expect("save");
+        let saved = save_drop(
+            &dir,
+            "logo.png",
+            DropNaming::Exact,
+            b"png",
+            "20260809-120000",
+        )
+        .expect("save");
 
         assert_eq!(saved.saved_name, "logo.png");
         assert!(!saved.renamed);
@@ -3584,7 +3841,14 @@ mod tree_drop_dir {
     fn a_non_latin_name_survives_exactly_as_dropped() {
         let wt = worktree();
         let dir = DropDir::open_tree_dir(wt.path(), "").expect("open root");
-        let saved = save_drop(&dir, "設計メモ.md", b"x", "20260809-120000").expect("save");
+        let saved = save_drop(
+            &dir,
+            "設計メモ.md",
+            DropNaming::Exact,
+            b"x",
+            "20260809-120000",
+        )
+        .expect("save");
         assert_eq!(saved.saved_name, "設計メモ.md");
         assert!(wt.path().join("設計メモ.md").exists());
     }
@@ -3594,7 +3858,14 @@ mod tree_drop_dir {
         let wt = worktree();
         std::fs::write(wt.path().join("notes.md"), "mine\n").unwrap();
         let dir = DropDir::open_tree_dir(wt.path(), "").expect("open root");
-        let saved = save_drop(&dir, "notes.md", b"theirs", "20260809-120000").expect("save");
+        let saved = save_drop(
+            &dir,
+            "notes.md",
+            DropNaming::Exact,
+            b"theirs",
+            "20260809-120000",
+        )
+        .expect("save");
 
         assert!(saved.renamed);
         assert_ne!(saved.saved_name, "notes.md");

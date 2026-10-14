@@ -240,20 +240,41 @@ the editor: a move is *refused* when something is already at the destination, be
 named that exact destination, while a drop names only a folder, so the next free name is the
 honest answer. Neither overwrites.
 
-## Your filenames are kept as you had them
+## How a dropped file is named
 
-dux **validates** a dropped name; it does not rewrite it. Accented, Japanese and Cyrillic
-names, names with spaces, parentheses and apostrophes all arrive exactly as they were.
+**On a terminal or the editor's file tree, your filename is kept exactly as you had it.**
+Accented, Japanese and Cyrillic names, names with spaces, parentheses and apostrophes all
+arrive exactly as they were. Those folders are yours, and so is what the file is called.
 
-A handful are refused outright, with the reason named:
+**In an agent's upload folder, the name is cleaned up first.** Agent CLIs misread a pasted
+path whose file name holds quotes, apostrophes or backslashes, so dux saves the file under a
+plain version of its name: lowercase letters, digits and dashes, with the extension kept.
+
+| You drop | Saved in the upload folder as |
+|---|---|
+| `Report Q3 (draft).PDF` | `report-q3-draft.pdf` |
+| `it's "final".txt` | `it-s-final.txt` |
+| `Снимок экрана.png` | `snimok-ekrana.png` |
+| `archive.tar.gz` | `archive-tar.gz` |
+| `.env` | `.env` |
+
+Letters from other alphabets are spelled out in Latin ones, only the last extension is kept
+as an extension, and a hidden file keeps its leading dot. A name with nothing usable left in
+it, such as one made only of punctuation, is saved as `file` with its extension. The toast
+names both, so you always know what the file is now called. The upload folder is scratch
+that nobody browses by name, which is why this happens there and nowhere else.
+
+Before any of that, a handful of names are refused outright, wherever you drop them, with the
+reason named:
 
 - an empty name, or `.` and `..`, which name a folder and not a file
 - anything containing a `/`, which makes it a path rather than a name
 - control characters and null bytes, which no terminal can print back to you
 - anything longer than the filesystem will accept
 
-When a name is right at the length limit and a collision forces a suffix, dux trims the front
-of the name to make room and keeps the extension.
+When a name is right at the length limit and a collision forces a suffix, or cleaning up a
+name for the upload folder makes it longer than the limit (spelling out another alphabet can),
+dux trims the name to make room and keeps the extension.
 
 The folders above it are held to the same standard, since the whole path ends up in your
 prompt. dux refuses a drop into a folder whose path holds a line feed (which arrives as a
@@ -281,14 +302,14 @@ web_dragdrop_paste = "single_quoted"
 
 ### The four values
 
-A file at `/home/you/My Project/it's here.png` goes out as:
+A file at `/home/you/Bob's Project/.dux/uploads/shot.png` goes out as:
 
 | Value | What is written into the prompt |
 |---|---|
-| `bare` | `/home/you/My Project/it's here.png` |
-| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
-| `double_quoted` | `"/home/you/My Project/it's here.png"` |
-| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
+| `bare` | `/home/you/Bob's Project/.dux/uploads/shot.png` |
+| `single_quoted` | `'/home/you/Bob'\''s Project/.dux/uploads/shot.png'` |
+| `double_quoted` | `"/home/you/Bob's Project/.dux/uploads/shot.png"` |
+| `backslash_escaped` | `/home/you/Bob\'s\ Project/.dux/uploads/shot.png` |
 
 `bare` sends the path exactly as it is on disk. `single_quoted` and `double_quoted` wrap it
 so a shell lexer reads the whole thing as one word. `backslash_escaped` protects the
@@ -320,18 +341,19 @@ UI, dropping a file onto the window is your terminal emulator's job.
 ### What is known to fail
 
 None of this is something dux can fix from its side. dux sends the correct bytes; the
-receiving tool rewrites them.
+receiving tool rewrites them. The file's own name is not the trouble, because the
+upload folder [cleans it up](#how-a-dropped-file-is-named). What is left is the **folder**
+part of the path: your project's folder or home folder, the upload folder you configured, or
+a standalone agent's own folder.
 
 - **Single-quoting a path that contains an apostrophe breaks Claude Code.** POSIX quoting
   writes an embedded apostrophe by closing the quote, escaping it and reopening, and Claude
   Code's own unescaping collapses that into three apostrophes in a row. A file in a folder
   called `Bob's app` comes out naming nothing. This is why Claude's value is `bare`.
-- **Any form carrying a backslash is mangled by Claude Code's unescaping step.** That covers
-  `backslash_escaped` outright, and a path that simply has a backslash in its name whatever
-  form you send it in. Rare on macOS and Linux, but when it happens no form survives.
-- **OpenCode eats a trailing quote character, and unescapes backslashes.** It strips quote
-  characters from *both ends* rather than one matching pair, so a file whose name ends in a
-  quote loses that character.
+- **A backslash in a folder name is mangled by Claude Code and OpenCode.** Both undo
+  backslash escapes, so `backslash_escaped` fails outright, and a folder that simply has a
+  backslash in its name fails whatever form you send it in. Rare on macOS and Linux, but when
+  it happens no form survives. Renaming the folder is the fix.
 - **Codex ignores a paste that is too long before it ever looks for a path.** Anything over
   1000 characters is filed away as generic pasted content, and the quoting dux adds counts
   toward that. dux measures the finished paste, and when it would go over the limit it does
