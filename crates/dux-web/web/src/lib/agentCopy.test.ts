@@ -26,6 +26,7 @@ const {
 } = await import("./agentCopy")
 const agentCopy = await import("./agentCopy")
 const { registerAgentNotifications } = await import("./agentNotifications")
+const { watchComposition } = await import("./clipboard")
 
 // A document with just enough of the DOM for the hidden-textarea fallback: an
 // element that takes focus while it is in the page, and focus falling back to
@@ -137,6 +138,66 @@ describe("an agent's clipboard copy", () => {
     expect(writeText).toHaveBeenCalledWith("hello")
     expect(doc.execCommand).not.toHaveBeenCalled()
     expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it("lands over plain HTTP through a copy event, never moving focus", async () => {
+    const { doc, state, surface } = fakeDocument({ hasFocus: true, execCommand: true })
+    const listeners = new Set<(ev: unknown) => void>()
+    const setData = vi.fn()
+    const createElement = vi.spyOn(doc, "createElement")
+    Object.assign(doc, {
+      addEventListener: (type: string, l: (ev: unknown) => void) => {
+        if (type === "copy") listeners.add(l)
+      },
+      removeEventListener: (type: string, l: (ev: unknown) => void) => {
+        if (type === "copy") listeners.delete(l)
+      },
+    })
+    doc.execCommand.mockImplementation(() => {
+      const ev = { clipboardData: { setData }, preventDefault() {}, stopImmediatePropagation() {} }
+      for (const l of [...listeners]) l(ev)
+      return true
+    })
+    state.active = surface
+    vi.stubGlobal("document", doc)
+    vi.stubGlobal("navigator", {})
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, { enabled: () => false, title: () => "Agent" })
+    handlers[52](HELLO)
+    await settle()
+    expect(setData).toHaveBeenCalledWith("text/plain", "hello")
+    // No element was created to take focus, and focus never left the surface.
+    expect(createElement).not.toHaveBeenCalled()
+    expect(surface.focus).not.toHaveBeenCalled()
+    expect(state.active).toBe(surface)
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it("keeps the text in the toast instead of taking focus from an IME composition", async () => {
+    const target = new EventTarget()
+    const stop = watchComposition(target)
+    try {
+      const { doc, state, surface } = fakeDocument({ hasFocus: true, execCommand: true })
+      state.active = surface
+      const createElement = vi.spyOn(doc, "createElement")
+      vi.stubGlobal("document", doc)
+      vi.stubGlobal("navigator", {})
+      target.dispatchEvent(new Event("compositionstart"))
+      const { term, handlers } = stubTerm()
+      registerAgentNotifications(term, {
+        enabled: () => false,
+        title: () => "fix-login",
+        tag: () => "dux-agent-7",
+      })
+      handlers[52](HELLO)
+      await settle()
+      expect(createElement).not.toHaveBeenCalled()
+      expect(state.active).toBe(surface)
+      expect(toast.warning).toHaveBeenCalledTimes(1)
+      expect(lastCall(toast.warning)[1].id).toBe(blockedCopyToastId("dux-agent-7"))
+    } finally {
+      stop()
+    }
   })
 
   it("falls back to the hidden textarea over plain HTTP and hands focus back", async () => {

@@ -4,11 +4,15 @@ import './index.css'
 import App from './App.tsx'
 import { AuthGate } from './components/AuthGate.tsx'
 import { RootErrorBoundary } from './components/RootErrorBoundary.tsx'
+import { watchComposition } from './lib/clipboard.ts'
 import { registerServiceWorker } from './lib/sw.ts'
 
 // dux's web UI is a dark, desktop-style app; opt into the `.dark` token set.
 document.documentElement.classList.add('dark')
 document.documentElement.style.colorScheme = 'dark'
+
+// A copy must never take focus from a half-typed IME composition.
+watchComposition(document)
 
 // Offline-fallback PWA support (dormant on insecure origins; see lib/sw.ts).
 registerServiceWorker()
