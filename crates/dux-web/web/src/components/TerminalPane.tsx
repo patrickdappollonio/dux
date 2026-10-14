@@ -26,10 +26,6 @@ import {
   terminalKeysApply,
 } from "@/lib/composebar"
 import {
-  getComposeInsertSink,
-  setComposeInsertSink,
-} from "@/lib/composeInsert"
-import {
   peekTerminalFocusTarget,
   setTerminalFocusTarget,
 } from "@/lib/terminalFocus"
@@ -89,6 +85,7 @@ import {
 } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
 import { registerPaneCover } from "@/lib/paneCover"
+import { registerPaneMacroTarget } from "@/lib/paneMacroTarget"
 import { registerPaneInputGroup } from "@/lib/paneInputGroup"
 import {
   focusTypingSurfaceIn,
@@ -446,24 +443,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeInputRef,
     termRef,
   ])
-  // While the bar renders, a picked macro is spliced into the compose DRAFT at
-  // the caret instead of being written to the PTY (`composeInsert.ts`).
-  useEffect(() => {
-    if (!(composeBarEnabled && isOwner)) return
-    const sink = {
-      insert: input.insertComposeText,
-      target: () => composeInputRef.current,
-    }
-    setComposeInsertSink(sink)
-    return () => {
-      // Only retire our own registration: a successor pane may already have
-      // replaced it (the same guard `setActivePtySocket` cleanup uses).
-      if (getComposeInsertSink() === sink) setComposeInsertSink(null)
-    }
-    // `insertComposeText` reads only refs and the stable setter, so listing it
-    // would re-register the sink on every keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [composeBarEnabled, isOwner])
   // The desktop macro picker lives in the header, outside this pane, so it needs
   // a registered close-focus target; the surface is resolved at call time.
   useEffect(() => {
@@ -553,6 +532,32 @@ export function TerminalPane(props: TerminalPaneProps) {
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
   useLayoutEffect(() => registerPaneCover(id, coverOwnsPane), [id, coverOwnsPane])
+
+  // Where a picked macro goes, published under this pane's pty id for the Macros
+  // controls outside it. Only the owner gets a way to write: under the take-over
+  // card the control is disabled, and nothing else may type for it either. While
+  // the bar renders, a macro is spliced into the compose DRAFT at the caret
+  // instead of being written to the PTY. A layout effect, like the cover above,
+  // so the control is never painted enabled over a card for a frame.
+  const takeoverCard = cover.kind === "card"
+  const composeSinkLive = composeBarEnabled && isOwner
+  useLayoutEffect(
+    () =>
+      registerPaneMacroTarget(id, {
+        takeoverCard,
+        send: isOwner ? (bytes) => ptyRef.current?.sendInput(bytes) : null,
+        compose: composeSinkLive
+          ? {
+              insert: input.insertComposeText,
+              target: () => composeInputRef.current,
+            }
+          : null,
+      }),
+    // `insertComposeText` reads only refs and the stable setter, so listing it
+    // would republish on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id, takeoverCard, isOwner, composeSinkLive],
+  )
 
   const pane = (
     <TerminalPaneSurface

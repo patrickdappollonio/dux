@@ -3611,4 +3611,108 @@ mod tests {
             })
         );
     }
+
+    /// A live pty with one agent macro defined and the macro bar opened over it
+    /// through the default chord, which works whatever covers the pane.
+    fn open_the_macro_bar(app: &mut App) {
+        app.engine.config.macros.entries.insert(
+            "Greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL))
+            .expect("the chord is handled");
+        assert!(app.macro_bar.is_some(), "the macro bar opens over the pane");
+    }
+
+    fn press_enter(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the key is handled");
+    }
+
+    /// Picking a macro while another device drives the pty sends nothing,
+    /// claims nothing, and says so naming that device, never "Sent".
+    #[test]
+    fn a_macro_under_another_devices_card_is_refused_naming_the_device() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                false,
+                None,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
+            .epoch
+            .expect("the browser claimed the pty");
+
+        open_the_macro_bar(&mut app);
+        press_enter(&mut app);
+
+        assert!(app.macro_bar.is_none(), "the bar closes either way");
+        let (tone, message) = app.status.most_recent_tui().expect("a status was set");
+        assert_eq!(tone, StatusTone::Warning);
+        assert!(
+            message.contains("Did not send macro") && message.contains("Chrome on macOS"),
+            "the refusal names who is driving: {message}"
+        );
+        assert!(
+            !app.engine.pty_run_was_used("session-1-slot"),
+            "nothing reached the child"
+        );
+        assert!(
+            seat.owners.is_owner("session-1-slot", browser),
+            "the driving device keeps the pty"
+        );
+    }
+
+    /// The same refusal on a pty nobody drives: the macro does not become the
+    /// claim, and the sentence says nothing is driving rather than naming anyone.
+    #[test]
+    fn a_macro_under_the_take_control_card_is_refused_and_claims_nothing() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+
+        open_the_macro_bar(&mut app);
+        press_enter(&mut app);
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status was set");
+        assert_eq!(tone, StatusTone::Warning);
+        assert!(
+            message.contains("Did not send macro")
+                && message.contains("nothing is driving this terminal yet"),
+            "the refusal says nobody is driving: {message}"
+        );
+        assert!(!app.engine.pty_run_was_used("session-1-slot"));
+        assert!(
+            !seat.owners.is_owner("session-1-slot", seat.conn_id),
+            "a refused macro claims nothing"
+        );
+    }
+
+    /// The driver's own macro reaches its child and says it was sent.
+    #[test]
+    fn a_macro_from_the_driving_surface_is_sent() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        seat.owners
+            .claim("session-1-slot", seat.conn_id)
+            .expect("this surface claimed the pty");
+
+        open_the_macro_bar(&mut app);
+        press_enter(&mut app);
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status was set");
+        assert_eq!(tone, StatusTone::Info);
+        assert!(message.contains("Sent macro"), "{message}");
+        assert!(
+            app.engine.pty_run_was_used("session-1-slot"),
+            "the macro reached the child"
+        );
+    }
 }

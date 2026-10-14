@@ -229,7 +229,7 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   }
 
   // Splice text into the compose draft at the caret. Shared by everything that
-  // puts text there without typing it (the `composeInsert` sink, a pasted
+  // puts text there without typing it (a picked macro, a pasted
   // image's path), so the caret handling and the refocus cannot drift.
   function insertComposeText(text: string) {
     // Read up front, once: the splice below may run more than once and must

@@ -1,4 +1,5 @@
 import { useRef, useState } from "react"
+import type * as React from "react"
 import { SquarePen, SquareSlash } from "lucide-react"
 
 import {
@@ -15,18 +16,25 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
-import { getComposeInsertSink } from "@/lib/composeInsert"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { targetPtyId } from "@/components/terminalAreaModel"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
+import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
+import { cn } from "@/lib/utils"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
 import { getTerminalFocusElement } from "@/lib/terminalFocus"
 import type { SelectedTarget } from "@/lib/store"
 
-// A quick-picker for sending a text macro to the focused target: a filterable
-// list restricted to that target's surface, run by Enter or click. There is
-// deliberately no confirmation and no status; `runMacro` writes the payload
-// straight to the focused PTY socket, or splices it into the compose draft
+// A quick-picker for sending a text macro to the pane it belongs to: a
+// filterable list restricted to that target's surface, run by Enter or click.
+// There is deliberately no confirmation and no status; `runMacro` writes the
+// payload down that pane's own socket, or splices it into its compose draft
 // while that is the typing surface, and the feedback is the text appearing.
+//
+// While the take-over card covers that pane the trigger is disabled: this tab is
+// not driving the pty, and a macro is not a way to start.
 //
 // The trigger is rendered as an absolutely-positioned sibling of the xterm
 // host, never inside the unpadded container xterm opens into, so it cannot
@@ -65,12 +73,13 @@ export function MacroPopover({
 
   const allMacros = bootstrap?.macros ?? []
   const macros = macrosForTarget(allMacros, target)
+  const pane = usePaneMacroTarget(targetPtyId(target))
 
   function handleRun(name: string) {
-    // The payload goes to the focused PTY socket, or into the compose draft
-    // while that bar is the typing surface. The returned destination says which
+    // The payload goes to this target's pane, or into its compose draft while
+    // that bar is the typing surface. The returned destination says which
     // happened, which steers the close focus below.
-    pickedIntoComposeRef.current = runMacro(name) === "compose"
+    pickedIntoComposeRef.current = runMacro(name, target) === "compose"
     setOpen(false)
   }
 
@@ -87,13 +96,15 @@ export function MacroPopover({
   function resolveFinalFocus(): HTMLElement | boolean | null {
     if (pickedIntoComposeRef.current) {
       pickedIntoComposeRef.current = false
-      const composeTarget = getComposeInsertSink()?.target() ?? null
+      const composeTarget = pane?.compose?.target() ?? null
       if (composeTarget) return composeTarget
     }
     if (finalFocus) return finalFocus()
     if (variant === "labeled") return getTerminalFocusElement() ?? true
     return true
   }
+
+  if (pane?.takeoverCard) return <DisabledTrigger variant={variant} />
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -112,29 +123,8 @@ export function MacroPopover({
           cannot drift from the `±N` and `⋯` buttons it sits between: all
           outline, all sized from `size="lg"`, all on the same 44px width
           floor. */}
-      <PopoverTrigger
-        render={
-          variant === "pill" ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-10 shrink-0 rounded-full"
-              aria-label="Run a macro"
-            />
-          ) : variant === "icon" ? (
-            <Button
-              variant="outline"
-              size="lg"
-              className="min-w-11 shrink-0"
-              aria-label="Run a macro"
-            />
-          ) : (
-            <Button variant="outline" aria-label="Run a macro" />
-          )
-        }
-      >
-        <SquareSlash />
-        {variant === "labeled" ? <>Macros…</> : null}
+      <PopoverTrigger render={<TriggerButton shape={variant} />}>
+        <TriggerFace variant={variant} />
       </PopoverTrigger>
       <PopoverContent
         align="end"
@@ -215,5 +205,82 @@ export function MacroPopover({
         </button>
       </PopoverContent>
     </Popover>
+  )
+}
+
+type TriggerVariant = "labeled" | "icon" | "pill"
+
+// The trigger's one shape, shared by the live and the disabled control so the
+// cluster does not move when the take-over card comes or goes.
+function TriggerButton({
+  shape,
+  className,
+  ...props
+}: { shape: TriggerVariant } & Omit<
+  React.ComponentProps<typeof Button>,
+  "variant" | "size"
+>) {
+  if (shape === "pill") {
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Run a macro"
+        {...props}
+        className={cn("size-10 shrink-0 rounded-full", className)}
+      />
+    )
+  }
+  if (shape === "icon") {
+    return (
+      <Button
+        variant="outline"
+        size="lg"
+        aria-label="Run a macro"
+        {...props}
+        className={cn("min-w-11 shrink-0", className)}
+      />
+    )
+  }
+  return (
+    <Button
+      variant="outline"
+      aria-label="Run a macro"
+      {...props}
+      className={className}
+    />
+  )
+}
+
+function TriggerFace({ variant }: { variant: TriggerVariant }) {
+  return (
+    <>
+      <SquareSlash />
+      {variant === "labeled" ? <>Macros…</> : null}
+    </>
+  )
+}
+
+// A disabled button takes no pointer events, so the hint hangs off a focusable
+// wrapper around it, through the shared tooltip; the wrapper wears the focus
+// ring the disabled button cannot. The button keeps its full size, so the touch
+// floor and the cluster's height token hold while it is disabled.
+function DisabledTrigger({ variant }: { variant: TriggerVariant }) {
+  return (
+    <SimpleTooltip content="Take over to send macros">
+      <span
+        tabIndex={0}
+        data-testid="macros-disabled"
+        className={cn(
+          "inline-flex shrink-0",
+          variant === "pill" ? "rounded-full" : "rounded-lg",
+          FOCUS_RING,
+        )}
+      >
+        <TriggerButton shape={variant} disabled>
+          <TriggerFace variant={variant} />
+        </TriggerButton>
+      </span>
+    </SimpleTooltip>
   )
 }

@@ -87,28 +87,35 @@ Once the bar is open:
 dux confirms with `Sent macro "<name>".` in the status line.
 
 > [!IMPORTANT]
-> A macro is a write like any other, so it goes through input ownership. If another
-> device is driving that terminal, which can only happen while dux is
+> A macro is a write like any other, so it goes through input ownership. While dux is
 > [serving in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
-> the macro is not sent. The status line names the device holding it and tells you to
-> take it over first. Nothing half-sends.
+> a terminal with a take-over card over it is not yours to type into: either another
+> device is driving it, or nothing is driving it yet. The bar still opens there, but
+> Enter sends nothing. The status line names the device that is driving, or says that
+> nothing is driving yet, and tells you to press **Take over** on the card first. Nothing
+> half-sends, and the macro never takes the terminal over for you.
 
 ## Sending a macro in the web UI
 
-Every terminal pane, agent or companion terminal, has a macro button in its corner.
-Click it for a picker of the macros matching that pane's surface, scoped to the pane you
-clicked rather than whatever is focused. Type to filter, then click a macro or press
-Enter to send it. The text simply appears at the prompt; there is no confirmation toast.
+Every terminal pane, agent or companion terminal, has a **Macros** button: in the pane's
+header on a computer, and in the action flap hanging off the top bar on a phone. Click it
+for a picker of the macros matching that pane's surface. A macro always goes to the pane
+the button belongs to, even when other terminals are open on the page. Type to filter,
+then click a macro or press Enter to send it. The text simply appears at the prompt;
+there is no confirmation toast. If the pane's message box is your typing surface, the
+macro lands in the box instead, ready for you to edit and send.
 
 ![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a search field and an Edit macros link at the bottom.](/screens/macro-popover.png)
 
 If a pane has no macros for its surface, the popover says so and points you at the
 editor. With no macros at all, it links straight to **Edit macros**.
 
-> [!WARNING]
-> The ownership rule applies here too, and it is quieter: if you are watching a terminal
-> somebody else is driving, the macro is dropped and nothing tells you so. Use the
-> pane's **Take over** button first.
+> [!IMPORTANT]
+> The ownership rule applies here too. While the take-over card covers a terminal,
+> because another device is driving it or because nothing is driving it yet, that pane's
+> **Macros** button is greyed out and its hint reads "Take over to send macros". Press
+> **Take over** on the card and the button works again straight away. A macro never takes
+> a terminal over for you.
 
 ## Managing macros in the terminal UI
 

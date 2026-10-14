@@ -29,9 +29,8 @@ import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { isMobileViewport } from "@/hooks/use-mobile"
 import { EventsSocket } from "./eventsSocket"
-import { getActivePtySocket } from "./ptySocket"
 import type { ReconnectPlanEvent } from "./reconnectingSocket"
-import { getComposeInsertSink } from "./composeInsert"
+import { paneMacroTargetFor } from "./paneMacroTarget"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { reuseUnchangedFiles } from "./changedFiles"
@@ -6902,36 +6901,48 @@ export function sortAgents(by: SortKey): void {
 }
 
 
-// Where a picked macro landed: the compose draft, the PTY, or nowhere (unknown
-// macro, no focused target, no active socket). The macro popover reads this to
-// decide its close-focus target: a compose insert must land focus in the
-// draft, while the PTY path keeps today's focus behavior.
+// Where a picked macro landed: the compose draft, the PTY, or nowhere (an
+// unknown macro, or a refusal). The macro popover reads this to decide its
+// close-focus target: a compose insert must land focus in the draft, while the
+// PTY path keeps today's focus behavior.
 export type MacroDestination = "compose" | "pty" | "none"
 
-// Run a macro by name on the focused target, client-side: the text comes from
-// the bootstrap document and goes to one of two destinations.
+// Run a macro by name on the pane the picker belongs to, client-side: the text
+// comes from the bootstrap document and goes to that pane, resolved by its pty
+// id, never to whichever pane mounted last.
 //
-// With a compose-insert sink registered, the RAW text joins the compose draft
-// at the caret, because the Send path owns the newline to keystroke transform.
-// Otherwise `macroPayloadBytes` applies that transform and writes to the active
-// PTY socket, which the picker's own filtering guarantees is the macro's
-// target. Neither path appends a submit: the user presses Enter.
-export function runMacro(name: string): MacroDestination {
+// With the pane's compose bar up, the RAW text joins the compose draft at the
+// caret, because the Send path owns the newline to keystroke transform.
+// Otherwise `macroPayloadBytes` applies that transform and the pane writes it
+// down its own socket. Neither path appends a submit: the user presses Enter.
+//
+// A pane this tab does not drive is refused here as well as by its disabled
+// control, because a write to a pty nobody drives would claim it: a macro must
+// never be how a terminal changes hands. The refusal says so rather than doing
+// nothing.
+export function runMacro(name: string, target: SelectedTarget): MacroDestination {
   const macro = (state.bootstrap?.macros ?? []).find((m) => m.name === name)
   if (!macro) return "none"
-  // Defensive: only inject when a terminal is actually focused. During a focus
-  // switch the outgoing pane may not have cleared its registration yet; without
-  // a selected target the active socket (or compose sink) is stale, and writing
-  // to it would paste the macro into the wrong (just-detached) surface.
-  if (state.selectedTarget === null) return "none"
-  const compose = getComposeInsertSink()
-  if (compose !== null) {
-    compose.insert(macro.text)
+  const pane = paneMacroTargetFor(
+    target.kind === "agent" ? target.tabId : target.terminalId,
+  )
+  if (pane === null) {
+    notifyWarning(
+      "The macro was not sent: this terminal is not open on this page. Open it, then pick the macro again.",
+    )
+    return "none"
+  }
+  if (pane.send === null) {
+    notifyWarning(
+      "The macro was not sent: this page is not driving this terminal. Take over to send macros.",
+    )
+    return "none"
+  }
+  if (pane.compose !== null) {
+    pane.compose.insert(macro.text)
     return "compose"
   }
-  const pty = getActivePtySocket()
-  if (pty === null) return "none"
-  pty.sendInput(macroPayloadBytes(macro.text))
+  pane.send(macroPayloadBytes(macro.text))
   return "pty"
 }
 

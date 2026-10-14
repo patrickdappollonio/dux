@@ -3,11 +3,7 @@ import type { FitAddon } from "@xterm/addon-fit"
 import type { Terminal } from "@xterm/xterm"
 
 import type { Heartbeat } from "@/lib/heartbeat"
-import {
-  getActivePtySocket,
-  setActivePtySocket,
-  type PtySocket,
-} from "@/lib/ptySocket"
+import type { PtySocket } from "@/lib/ptySocket"
 
 import type { ConnectionIdentity, TakeoverIntent } from "./channels"
 import type { LinkPress } from "./linkPress"
@@ -80,7 +76,6 @@ export function disposeTerminalLifecycle(
   retireConnectionIdentity(connId)
   pty.dispose()
   if (ptyRef.current === pty) ptyRef.current = null
-  if (getActivePtySocket() === pty) setActivePtySocket(null)
   termRef.current = null
   fitAddonRef.current = null
   disposeTerminalSetup(terminalSetup)

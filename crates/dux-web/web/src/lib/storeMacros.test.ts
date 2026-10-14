@@ -16,7 +16,7 @@ vi.mock("sonner", () => {
 import type { MacroView } from "./types"
 import type { Bootstrap } from "./bootstrapApi"
 import { macroPayloadBytes } from "./macros"
-import type { PtySocket } from "./ptySocket"
+import type { SelectedTarget } from "./store"
 
 // `store` reads `location`/`localStorage`, registers a `popstate` listener, and
 // at module load constructs an `EventsSocket` and fetches bootstrap. Stub the
@@ -224,124 +224,120 @@ describe("store macros dialog", () => {
 })
 
 describe("store macros commands", () => {
-  // A minimal PtySocket double that records the stdin written to it. A macro
-  // goes straight to the focused PTY socket as stdin (no server-side
-  // `run_macro` command), so the store resolves the macro text from bootstrap,
-  // applies the newline transform, and calls `sendInput` on the active socket.
-  // `setActivePtySocket` is pulled from the SAME module graph the dynamically
-  // imported store uses (vi.resetModules() in beforeEach forks a fresh graph), so
-  // a static import here would write to a different, unobserved module instance.
-  async function fakeActivePty(): Promise<{ sent: Uint8Array[] }> {
+  // A macro goes to the pane its control belongs to, which each mounted pane
+  // publishes under its pty id. `registerPaneMacroTarget` is pulled from the
+  // SAME module graph the dynamically imported store uses (vi.resetModules() in
+  // beforeEach forks a fresh graph), so a static import would write to a
+  // different, unobserved module instance.
+  async function fakePane(
+    ptyId: string,
+    opts: { owner?: boolean; compose?: boolean } = {},
+  ): Promise<{ sent: Uint8Array[]; inserted: string[] }> {
     const sent: Uint8Array[] = []
-    const { setActivePtySocket } = await import("./ptySocket")
-    setActivePtySocket({
-      sendInput: (b: Uint8Array) => sent.push(b),
-    } as unknown as PtySocket)
-    return { sent }
+    const inserted: string[] = []
+    const owner = opts.owner ?? true
+    const { registerPaneMacroTarget } = await import("./paneMacroTarget")
+    registerPaneMacroTarget(ptyId, {
+      takeoverCard: !owner,
+      send: owner ? (b) => sent.push(b) : null,
+      compose: opts.compose
+        ? { insert: (text) => inserted.push(text), target: () => null }
+        : null,
+    })
+    return { sent, inserted }
   }
 
-  it("runMacro writes the macro payload to the active PTY socket", async () => {
+  const agentTab = (tabId: string): SelectedTarget => ({
+    kind: "agent",
+    sessionId: "s1",
+    tabId,
+  })
+
+  it("runMacro writes the macro payload to its target pane's socket", async () => {
     bootstrapMacros = [{ name: "Greet", text: "hello\nworld", surface: "both" }]
     const mod = await loadStore()
-    const pty = await fakeActivePty()
-    // A macro only runs against a FOCUSED terminal: select a session so
-    // `selectedTarget` is set, mirroring the real precondition the guard enforces
-    // (without a target the active socket is treated as stale and skipped).
-    mod.selectSession("s1")
-    mod.runMacro("Greet")
-    expect(pty.sent).toHaveLength(1)
+    const pane = await fakePane("s1")
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("pty")
+    expect(pane.sent).toHaveLength(1)
     // The bytes match the newline→Alt+Enter transform exactly.
-    expect(Array.from(pty.sent[0])).toEqual(
+    expect(Array.from(pane.sent[0])).toEqual(
       Array.from(macroPayloadBytes("hello\nworld")),
     )
   })
 
-  it("runMacro is a no-op when no target is focused even if a socket lingers", async () => {
-    // A stale active socket can outlive its pane during a focus switch; with no
-    // selected target the macro must NOT be injected into it.
+  it("runMacro types into its own pane when two panes are mounted", async () => {
     bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
     const mod = await loadStore()
-    const pty = await fakeActivePty()
-    // No selectSession → selectedTarget stays null.
-    mod.runMacro("Greet")
-    expect(pty.sent).toHaveLength(0)
+    const mine = await fakePane("s1")
+    // Mounted after, so the one a "last mounted" rule would have picked.
+    const other = await fakePane("t1")
+    mod.runMacro("Greet", agentTab("s1"))
+    expect(mine.sent).toHaveLength(1)
+    expect(other.sent).toHaveLength(0)
+    mod.runMacro("Greet", { kind: "terminal", terminalId: "t1" } as SelectedTarget)
+    expect(other.sent).toHaveLength(1)
+    expect(mine.sent).toHaveLength(1)
   })
 
-  it("runMacro is a no-op when no terminal is focused (no active socket)", async () => {
+  it("runMacro refuses out loud, sending nothing, when its pane is not the owner", async () => {
+    // Against a pty nobody drives, a write would claim it: a macro must never
+    // be how a terminal changes hands.
     bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
     const mod = await loadStore()
-    const { setActivePtySocket } = await import("./ptySocket")
-    setActivePtySocket(null)
-    expect(() => mod.runMacro("Greet")).not.toThrow()
+    const watcher = await fakePane("s1", { owner: false })
+    const owner = await fakePane("t1")
+    const { toast } = await import("sonner")
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("none")
+    expect(watcher.sent).toHaveLength(0)
+    expect(owner.sent).toHaveLength(0)
+    expect(toast.warning).toHaveBeenCalledWith(
+      "The macro was not sent: this page is not driving this terminal. Take over to send macros.",
+      expect.anything(),
+    )
+  })
+
+  it("runMacro refuses out loud when no pane for its target is mounted", async () => {
+    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
+    const mod = await loadStore()
+    const other = await fakePane("t1")
+    const { toast } = await import("sonner")
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("none")
+    expect(other.sent).toHaveLength(0)
+    expect(toast.warning).toHaveBeenCalledWith(
+      "The macro was not sent: this terminal is not open on this page. Open it, then pick the macro again.",
+      expect.anything(),
+    )
   })
 
   it("runMacro ignores an unknown macro name", async () => {
     bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
     const mod = await loadStore()
-    const pty = await fakeActivePty()
-    mod.runMacro("Nope")
-    expect(pty.sent).toHaveLength(0)
+    const pane = await fakePane("s1")
+    expect(mod.runMacro("Nope", agentTab("s1"))).toBe("none")
+    expect(pane.sent).toHaveLength(0)
   })
 
-  // The mobile compose-bar routing: while the compose bar is the rendered
-  // typing surface (TerminalPane registers the sink for exactly that window),
-  // a picked macro is a DRAFT INSERT, never a wire write. The RAW text goes to
-  // the sink verbatim (newlines included: the compose Send path owns the
-  // newline→keystroke transform later), and the PTY receives NOTHING.
-  async function fakeComposeSink(): Promise<{ inserted: string[] }> {
-    const inserted: string[] = []
-    const { setComposeInsertSink } = await import("./composeInsert")
-    setComposeInsertSink({
-      insert: (text: string) => inserted.push(text),
-      target: () => null,
-    })
-    return { inserted }
-  }
-
-  it("runMacro routes the raw macro text into a registered compose sink, PTY untouched", async () => {
+  // The compose-bar routing: while the compose bar is the rendered typing
+  // surface, a picked macro is a DRAFT INSERT, never a wire write. The RAW text
+  // goes to the draft verbatim (newlines included: the compose Send path owns
+  // the newline→keystroke transform later), and the PTY receives NOTHING.
+  it("runMacro routes the raw macro text into its pane's compose draft, PTY untouched", async () => {
     bootstrapMacros = [{ name: "Greet", text: "hello\nworld", surface: "both" }]
     const mod = await loadStore()
-    const pty = await fakeActivePty()
-    const compose = await fakeComposeSink()
-    mod.selectSession("s1")
-    expect(mod.runMacro("Greet")).toBe("compose")
-    // Verbatim text, newlines preserved, NOT the Alt+Enter wire transform.
-    expect(compose.inserted).toEqual(["hello\nworld"])
-    expect(pty.sent).toHaveLength(0)
+    const pane = await fakePane("s1", { compose: true })
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("compose")
+    expect(pane.inserted).toEqual(["hello\nworld"])
+    expect(pane.sent).toHaveLength(0)
   })
 
-  it("runMacro reports the PTY destination when no compose sink is registered", async () => {
+  it("runMacro resolves the compose draft for its target, not another pane's", async () => {
     bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
     const mod = await loadStore()
-    const pty = await fakeActivePty()
-    mod.selectSession("s1")
-    expect(mod.runMacro("Greet")).toBe("pty")
-    expect(pty.sent).toHaveLength(1)
-  })
-
-  it("runMacro skips a registered compose sink when no target is focused", async () => {
-    // Same stale-focus guard as the PTY path: without a selected target the
-    // sink may belong to a pane mid-teardown, so nothing is inserted.
-    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
-    const mod = await loadStore()
-    const pty = await fakeActivePty()
-    const compose = await fakeComposeSink()
-    expect(mod.runMacro("Greet")).toBe("none")
-    expect(compose.inserted).toHaveLength(0)
-    expect(pty.sent).toHaveLength(0)
-  })
-
-  it("a cleared compose sink restores the direct PTY path", async () => {
-    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
-    const mod = await loadStore()
-    const pty = await fakeActivePty()
-    const compose = await fakeComposeSink()
-    const { setComposeInsertSink } = await import("./composeInsert")
-    setComposeInsertSink(null)
-    mod.selectSession("s1")
-    expect(mod.runMacro("Greet")).toBe("pty")
-    expect(compose.inserted).toHaveLength(0)
-    expect(pty.sent).toHaveLength(1)
+    const mine = await fakePane("s1")
+    const other = await fakePane("t1", { compose: true })
+    expect(mod.runMacro("Greet", agentTab("s1"))).toBe("pty")
+    expect(mine.sent).toHaveLength(1)
+    expect(other.inserted).toHaveLength(0)
   })
 
   it("saveMacros PUTs the FULL ordered entries with the version it read, closes, and comes back on a stale refusal", async () => {

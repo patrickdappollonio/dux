@@ -5,9 +5,9 @@ import { useLayoutEffect } from "react"
 
 import { COMPOSE_SUBMIT_DELAY_MS } from "@/lib/composebar"
 import {
-  getComposeInsertSink,
-  setComposeInsertSink,
-} from "@/lib/composeInsert"
+  paneMacroTargetFor,
+  resetPaneMacroTargets,
+} from "@/lib/paneMacroTarget"
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView, ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
@@ -644,9 +644,9 @@ beforeEach(() => {
   // The `pty.owner` epoch high-water marks are module-global; reset so a handover
   // in one test is never dropped as "stale" by a prior test's epoch.
   resetPtyOwnerEpochs()
-  // The compose-insert sink is module-global too; a pane left registered by a
-  // prior test must never satisfy this test's assertions.
-  setComposeInsertSink(null)
+  // The macro targets are module-global too; a pane left registered by a prior
+  // test must never satisfy this test's assertions.
+  resetPaneMacroTargets()
 })
 
 afterEach(() => {
@@ -1504,14 +1504,12 @@ describe("TerminalPane terminal lifecycle resources", () => {
   })
 
   it("disposes its terminal resources and stops page events at unmount", async () => {
-    const { getActivePtySocket } = await import("@/lib/ptySocket")
     const mounted = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
     const pty = last()
     const term = TermStub.instances.at(-1)!
 
-    expect(getActivePtySocket()).toBe(pty)
     expect(term.resizeListeners.length).toBeGreaterThan(0)
     mounted.unmount()
 
@@ -1520,7 +1518,6 @@ describe("TerminalPane terminal lifecycle resources", () => {
     expect(term.oscHandlerDispose).toHaveBeenCalledTimes(1)
     expect(disposeAgentNotifications).toHaveBeenCalledTimes(1)
     expect(term.resizeListeners).toEqual([])
-    expect(getActivePtySocket()).toBeNull()
 
     window.dispatchEvent(new Event("pageshow"))
     window.dispatchEvent(new Event("freeze"))
@@ -2028,6 +2025,9 @@ describe("TerminalPane accessory keys preserve the keyboard state", () => {
 // to the PTY. The sink exists exactly while the bar is rendered: desktop, a
 // disabled preference, and a non-owner viewer all leave it unregistered, which
 // is what keeps today's direct-to-PTY path for those cases.
+// The compose draft a picked macro lands in, as this pane publishes it.
+const composeSink = () => paneMacroTargetFor("s1")?.compose ?? null
+
 describe("TerminalPane compose macro insert sink", () => {
   const desktopWidth = window.innerWidth
   // `goMobile` now means "the phone SHELL is up AND touch is the primary
@@ -2060,7 +2060,7 @@ describe("TerminalPane compose macro insert sink", () => {
   it("registers the sink while the compose bar is rendered (mobile owner)", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const sink = getComposeInsertSink()
+    const sink = composeSink()
     expect(sink).not.toBeNull()
     // The sink's focus target is the compose textarea itself (the macro
     // popover hands it to Base UI as the close-focus target).
@@ -2069,7 +2069,7 @@ describe("TerminalPane compose macro insert sink", () => {
 
   it("does not register the sink on desktop", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(getComposeInsertSink()).toBeNull()
+    expect(composeSink()).toBeNull()
   })
 
   it("does not register the sink when the ui.compose_bar preference is off", () => {
@@ -2079,7 +2079,7 @@ describe("TerminalPane compose macro insert sink", () => {
       "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(getComposeInsertSink()).toBeNull()
+    expect(composeSink()).toBeNull()
   })
 
   it("retires the sink when a foreign device takes over, restores it on reclaim", () => {
@@ -2087,14 +2087,14 @@ describe("TerminalPane compose macro insert sink", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
     act(() => pty.onConnected("conn-me"))
-    expect(getComposeInsertSink()).not.toBeNull()
+    expect(composeSink()).not.toBeNull()
     // Demoted to a read-only viewer: the compose bar unmounts, so a picked
     // macro must fall back to the (owner-gated) PTY path, not a hidden draft.
     act(() => notifyPtyOwner("s1", "conn-other", undefined, undefined))
-    expect(getComposeInsertSink()).toBeNull()
+    expect(composeSink()).toBeNull()
     // Our own claim echo restores ownership, the bar, and the sink.
     act(() => notifyPtyOwner("s1", "conn-me", undefined, undefined))
-    expect(getComposeInsertSink()).not.toBeNull()
+    expect(composeSink()).not.toBeNull()
   })
 
   it("retires the sink on unmount", () => {
@@ -2102,9 +2102,9 @@ describe("TerminalPane compose macro insert sink", () => {
     const { unmount } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
-    expect(getComposeInsertSink()).not.toBeNull()
+    expect(composeSink()).not.toBeNull()
     unmount()
-    expect(getComposeInsertSink()).toBeNull()
+    expect(composeSink()).toBeNull()
   })
 
   it("insert lands the text in the draft at the caret and writes NOTHING to the PTY", () => {
@@ -2113,7 +2113,7 @@ describe("TerminalPane compose macro insert sink", () => {
     const pty = last()
     fireEvent.change(composeTextarea(), { target: { value: "hello world" } })
     composeTextarea().setSelectionRange(5, 5)
-    act(() => getComposeInsertSink()?.insert(" brave"))
+    act(() => composeSink()?.insert(" brave"))
     expect(composeTextarea().value).toBe("hello brave world")
     // The caret sits after the inserted text, ready to keep editing.
     expect(composeTextarea().selectionStart).toBe(11)
@@ -2125,7 +2125,7 @@ describe("TerminalPane compose macro insert sink", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => getComposeInsertSink()?.insert("first\nsecond\nthird"))
+    act(() => composeSink()?.insert("first\nsecond\nthird"))
     // Real newlines in the DRAFT: the Send path owns the wire transform
     // (newline-without-submit keystrokes plus the lone submitting CR).
     expect(composeTextarea().value).toBe("first\nsecond\nthird")
@@ -2137,7 +2137,7 @@ describe("TerminalPane compose macro insert sink", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     composeTextarea().blur()
     expect(document.activeElement).not.toBe(composeTextarea())
-    act(() => getComposeInsertSink()?.insert("run the tests"))
+    act(() => composeSink()?.insert("run the tests"))
     expect(document.activeElement).toBe(composeTextarea())
   })
 })
@@ -5468,5 +5468,70 @@ describe("a promoted-away slot tab hands its pane over", () => {
     expect(first.dispose).toHaveBeenCalled()
     expect(TermStub.instances.length).toBe(terminals + 1)
     expect(second.connect).toHaveBeenCalled()
+  })
+})
+
+// Where a picked macro goes is published under this pane's own pty id, so a
+// Macros control outside the pane reaches this pane and no other. Only the
+// owner gets a way to write, and the take-over card's two states (another
+// device driving, nobody driving) both disable the control.
+describe("TerminalPane publishes its macro target", () => {
+  it("an owner publishes a writer down its own socket and no card", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onConnected("conn-me", null))
+    const target = paneMacroTargetFor("s1")
+    expect(target?.takeoverCard).toBe(false)
+    const bytes = new Uint8Array([104, 105])
+    target?.send?.(bytes)
+    expect(pty.sendInput).toHaveBeenCalledWith(bytes)
+  })
+
+  it("under 'Active on another device' it publishes the card and no writer", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    const target = paneMacroTargetFor("s1")
+    expect(target?.takeoverCard).toBe(true)
+    expect(target?.send).toBeNull()
+    expect(target?.compose).toBeNull()
+  })
+
+  it("under 'Running in the background' it publishes the card and no writer", () => {
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    })
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      act(() => last().onConnected("conn-self", null))
+      expect(screen.getByText("Running in the background")).toBeTruthy()
+      const target = paneMacroTargetFor("s1")
+      expect(target?.takeoverCard).toBe(true)
+      expect(target?.send).toBeNull()
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      })
+    }
+  })
+
+  it("lifts the card and gains a writer the moment this pane becomes the owner", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-me", "conn-other"))
+    expect(paneMacroTargetFor("s1")?.takeoverCard).toBe(true)
+    act(() => notifyPtyOwner("s1", "conn-me", undefined, undefined))
+    expect(paneMacroTargetFor("s1")?.takeoverCard).toBe(false)
+    expect(paneMacroTargetFor("s1")?.send).not.toBeNull()
+  })
+
+  it("retires its target on unmount", () => {
+    const { unmount } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    expect(paneMacroTargetFor("s1")).not.toBeNull()
+    unmount()
+    expect(paneMacroTargetFor("s1")).toBeNull()
   })
 })

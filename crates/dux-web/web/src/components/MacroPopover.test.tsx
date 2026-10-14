@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
-import { setComposeInsertSink } from "@/lib/composeInsert"
+import {
+  registerPaneMacroTarget,
+  resetPaneMacroTargets,
+  type PaneMacroTarget,
+} from "@/lib/paneMacroTarget"
 import type { SelectedTarget } from "@/lib/store"
 
 // Where focus lands after PICKING a macro is a contract, not a nicety. On the
@@ -14,7 +18,9 @@ import type { SelectedTarget } from "@/lib/store"
 // is about to edit. runMacro's returned destination is what steers this, so
 // the store is mocked to answer either way per test.
 
-const runMacro = vi.fn<(name: string) => "compose" | "pty" | "none">()
+const runMacro = vi.fn<
+  (name: string, target: SelectedTarget) => "compose" | "pty" | "none"
+>()
 const openMacrosDialog = vi.fn()
 vi.mock("@/lib/store", () => ({
   useDux: () => ({
@@ -22,7 +28,7 @@ vi.mock("@/lib/store", () => ({
       macros: [{ name: "Greet", text: "hello", surface: "both" }],
     },
   }),
-  runMacro: (name: string) => runMacro(name),
+  runMacro: (name: string, target: SelectedTarget) => runMacro(name, target),
   openMacrosDialog: () => openMacrosDialog(),
 }))
 
@@ -36,6 +42,10 @@ const target: SelectedTarget = {
 
 // Base UI runs its open/close transitions and focus moves on timers; a short
 // settle lets them land (the idiom the dropdown-menu tests use).
+function ownerPane(over: Partial<PaneMacroTarget> = {}): PaneMacroTarget {
+  return { takeoverCard: false, send: () => {}, compose: null, ...over }
+}
+
 const settle = () => new Promise((r) => setTimeout(r, 40))
 
 function stubMatchMedia() {
@@ -66,7 +76,9 @@ function stubMatchMedia() {
 beforeEach(() => {
   runMacro.mockReset()
   openMacrosDialog.mockReset()
-  setComposeInsertSink(null)
+  resetPaneMacroTargets()
+  // The pane under the control, published as its owner: an ordinary pane.
+  registerPaneMacroTarget("s1", ownerPane())
   stubMatchMedia()
   // cmdk scrolls the selected item into view on mount; jsdom has no layout.
   Element.prototype.scrollIntoView = () => {}
@@ -74,7 +86,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
-  setComposeInsertSink(null)
+  resetPaneMacroTargets()
   vi.unstubAllGlobals()
 })
 
@@ -162,13 +174,16 @@ describe("MacroPopover pick focus routing", () => {
     // surface); its target is the compose textarea the draft lives in.
     const compose = document.createElement("textarea")
     document.body.appendChild(compose)
-    setComposeInsertSink({ insert: () => {}, target: () => compose })
+    registerPaneMacroTarget(
+      "s1",
+      ownerPane({ compose: { insert: () => {}, target: () => compose } }),
+    )
     runMacro.mockReturnValue("compose")
 
     render(<MacroPopover variant="icon" target={target} />)
     await openAndPick()
 
-    expect(runMacro).toHaveBeenCalledWith("Greet")
+    expect(runMacro).toHaveBeenCalledWith("Greet", target)
     expect(document.activeElement).toBe(compose)
     compose.remove()
   })
@@ -185,7 +200,7 @@ describe("MacroPopover pick focus routing", () => {
     )
     await openAndPick()
 
-    expect(runMacro).toHaveBeenCalledWith("Greet")
+    expect(runMacro).toHaveBeenCalledWith("Greet", target)
     expect(document.activeElement).toBe(xtermTextarea)
     xtermTextarea.remove()
   })
@@ -215,5 +230,70 @@ describe("MacroPopover pick focus routing", () => {
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Run a macro" }),
     )
+  })
+})
+
+// While the take-over card covers the pane a Macros control belongs to, this tab
+// is not driving the pty: the control stays on screen at its full size, cannot
+// be pressed, and says why through the shared tooltip. Both card states, another
+// device driving and nobody driving, publish the same `takeoverCard` verdict.
+describe("MacroPopover under the take-over card", () => {
+  const isDisabled = (el: HTMLElement) => (el as HTMLButtonElement).disabled
+  const covered = () =>
+    registerPaneMacroTarget("s1", { takeoverCard: true, send: null, compose: null })
+
+  it.each(["labeled", "icon", "pill"] as const)(
+    "the %s trigger is disabled and opens nothing",
+    async (variant) => {
+      covered()
+      render(<MacroPopover variant={variant} target={target} />)
+      const trigger = screen.getByRole("button", { name: "Run a macro" })
+      expect(isDisabled(trigger)).toBe(true)
+      fireEvent.click(trigger)
+      await settle()
+      expect(document.querySelector('[data-slot="popover-content"]')).toBeNull()
+      expect(runMacro).not.toHaveBeenCalled()
+    },
+  )
+
+  it("keeps the trigger's own size classes while disabled", () => {
+    covered()
+    render(<MacroPopover variant="pill" target={target} />)
+    expect(screen.getByRole("button", { name: "Run a macro" }).className).toContain(
+      "size-10",
+    )
+  })
+
+  it("explains itself through the shared tooltip, never a title", async () => {
+    covered()
+    render(<MacroPopover target={target} />)
+    const wrapper = screen.getByTestId("macros-disabled")
+    expect(wrapper.getAttribute("title")).toBeNull()
+    expect(
+      screen.getByRole("button", { name: "Run a macro" }).getAttribute("title"),
+    ).toBeNull()
+    act(() => wrapper.focus())
+    expect(await screen.findByText("Take over to send macros")).toBeTruthy()
+  })
+
+  it("re-enables the moment this tab becomes the owner", async () => {
+    const retire = covered()
+    render(<MacroPopover target={target} />)
+    expect(isDisabled(screen.getByRole("button", { name: "Run a macro" }))).toBe(true)
+    act(() => {
+      retire()
+      registerPaneMacroTarget("s1", ownerPane())
+    })
+    const trigger = screen.getByRole("button", { name: "Run a macro" })
+    expect(isDisabled(trigger)).toBe(false)
+    expect(screen.queryByTestId("macros-disabled")).toBeNull()
+    await openAndPick()
+    expect(runMacro).toHaveBeenCalledWith("Greet", target)
+  })
+
+  it("reads the card of its own pane, not another mounted one", () => {
+    registerPaneMacroTarget("t9", { takeoverCard: true, send: null, compose: null })
+    render(<MacroPopover target={target} />)
+    expect(isDisabled(screen.getByRole("button", { name: "Run a macro" }))).toBe(false)
   })
 })
