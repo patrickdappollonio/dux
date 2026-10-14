@@ -4704,23 +4704,17 @@ impl Engine {
         }
     }
 
-    /// Core-owned first half of a branch rename: validate the requested name,
-    /// enforce the single-rename overlap guard, write the display title
+    /// The decision half of [`Engine::rename_agent`]: validate the requested
+    /// name, enforce the single-rename overlap guard, write the display title
     /// optimistically (and persist it), then decide whether a git branch
     /// rename is actually needed. When it is, stash the expected branches so
     /// the branch-sync poller can tell the user's own in-progress rename from
-    /// unrelated external drift, and return the parameters the surface hands to
-    /// `git::rename_branch` in its own background worker.
+    /// unrelated external drift, and return the parameters the worker hands to
+    /// `git::rename_branch`. An empty name clears the custom title.
     ///
-    /// The single decision every surface consumes, so validation, no-op
-    /// detection, the optimistic write and the expectation stash cannot drift
-    /// between them. The engine does not mark the rename in-flight here: that
-    /// marker belongs to the worker spawn, so a surface that never dispatches,
-    /// on the title-only or no-op paths, leaves no dangling marker.
-    ///
-    /// The surface owns everything presentation-shaped: the keyed status
-    /// wording, the worker dispatch and its completion event, the list rebuild,
-    /// and the unwind through `revert_optimistic_rename` on a spawn failure.
+    /// The engine does not mark the rename in-flight here: that marker belongs
+    /// to the worker spawn, so the title-only and no-op paths, which never
+    /// dispatch, leave no dangling marker.
     pub fn prepare_branch_rename(
         &mut self,
         session_id: &str,

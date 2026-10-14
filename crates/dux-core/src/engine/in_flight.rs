@@ -174,10 +174,10 @@ pub enum BranchRenameRejection {
     WorktreeBeingRemoved,
 }
 
-/// The parameters a surface needs to dispatch the git branch-rename worker and
-/// to unwind on a spawn failure. The surface runs
-/// `git::rename_branch(worktree_path, old_branch, new_branch)` in its own
-/// background worker and, on a synchronous spawn failure, rolls back through
+/// The parameters the git branch-rename worker runs with, and what unwinds it
+/// on a spawn failure: `Engine::rename_agent` runs
+/// `git::rename_branch(worktree_path, old_branch, new_branch)` on a background
+/// worker and, when the worker never starts, rolls back through
 /// `Engine::revert_optimistic_rename(session_id, previous_title)`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchRenameDispatch {
