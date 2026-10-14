@@ -1040,6 +1040,18 @@ enum TreeMove {
     WorktreeAdd,
 }
 
+/// A `git` command for a subcommand that ends by starting git's background
+/// auto-maintenance (`fetch`, `merge`, `commit`), with that turned off for
+/// this invocation only. Since git 2.54 the detached `maintenance run --auto`
+/// prunes worktrees, and one racing a `git worktree add` dux runs next deletes
+/// the half-made `.git/worktrees/<name>` before git writes its `gitdir`, so
+/// the add fails. The user's own git keeps its maintenance.
+fn git_without_auto_maintenance() -> Command {
+    let mut command = Command::new("git");
+    command.args(["-c", "maintenance.auto=false"]);
+    command
+}
+
 /// `git <subcommand>` in `repo` for a [`TreeMove`], never recursing into
 /// submodules whatever `submodule.recurse` the user has set: the move check
 /// ([`crate::checkout_move`]) looks at this repository's own tree only, so git
@@ -1048,7 +1060,7 @@ enum TreeMove {
 /// (measured on git 2.53: `switch` and `checkout` take it; `merge` and
 /// `worktree add` refuse it, and the config override is what keeps them out).
 fn tree_move(repo: &Path, kind: TreeMove) -> Command {
-    let mut command = Command::new("git");
+    let mut command = git_without_auto_maintenance();
     command
         .args(["-c", "submodule.recurse=false", "-C"])
         .arg(repo);
@@ -1083,7 +1095,7 @@ fn pull_origin_branch(
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
     let refspec = format!("refs/heads/{branch}");
-    let output = Command::new("git")
+    let output = git_without_auto_maintenance()
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -1629,7 +1641,7 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
 
-    let mut child = Command::new("git")
+    let mut child = git_without_auto_maintenance()
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -2303,7 +2315,7 @@ fn same_worktree_path(registered: &Path, target: &Path) -> bool {
 pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &str) -> Result<()> {
     let repo = repo_path.to_string_lossy();
     let refspec = format!("pull/{pr_number}/head:refs/heads/{branch_name}");
-    let output = Command::new("git")
+    let output = git_without_auto_maintenance()
         .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
         .output()?;
     if !output.status.success() {
@@ -5299,7 +5311,7 @@ fn git_failure(what: &str, worktree_path: &Path, output: &std::process::Output) 
 
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
+    let output = git_without_auto_maintenance()
         .args(["-C", wt.as_ref(), "commit", "-m", message])
         .output()?;
     if !output.status.success() {

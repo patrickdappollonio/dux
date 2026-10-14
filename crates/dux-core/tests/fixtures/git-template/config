@@ -2,8 +2,12 @@
 # `dux_core::test_git`. A fixture commit must never be signed with the
 # developer's key, and a repository's own config outranks their global
 # `commit.gpgsign` and `tag.gpgsign`, including for the git commands the code
-# under test runs inside the fixture.
+# under test runs inside the fixture. Auto-maintenance is off because, since
+# git 2.54, the one a fixture's own fetch or commit starts in the background
+# prunes worktrees and can delete one a test is creating.
 [commit]
 	gpgsign = false
 [tag]
 	gpgsign = false
+[maintenance]
+	auto = false

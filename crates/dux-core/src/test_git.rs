@@ -111,6 +111,7 @@ mod tests {
         let config = Path::new(FIXTURE_TEMPLATE_DIR).join("config");
         let text = std::fs::read_to_string(&config).unwrap();
         assert!(text.contains("gpgsign = false"), "{text}");
+        assert!(text.contains("[maintenance]\n\tauto = false"), "{text}");
     }
 
     #[test]
