@@ -127,13 +127,21 @@ pub enum ConnClass {
 /// `.await`.
 #[derive(Default)]
 pub struct ConnectionRegistry {
-    entries: Mutex<HashMap<String, ConnClass>>,
-    /// How many [`ConnClass::Events`] connections are live, maintained on every
+    entries: Mutex<HashMap<String, Entry>>,
+    /// How many distinct browsers have an Events connection open, set on every
     /// insert and remove so it can be read without the lock and from a crate that
-    /// cannot see this type: the terminal UI's serving chip counts connected
-    /// browsers and `dux-tui` never sees `dux-web`. Every registry has one, so the
+    /// cannot see this type: the terminal UI's serving chip and the flip's status
+    /// screen show it, and neither sees `dux-web`. Every registry has one, so the
     /// count is never a special case.
-    events_live: Arc<AtomicUsize>,
+    browsers_live: Arc<AtomicUsize>,
+}
+
+struct Entry {
+    class: ConnClass,
+    /// What an Events connection is counted under: its browser's id, else what
+    /// the lost connection it succeeds was counted under, else its own id.
+    /// `None` for the other classes, which are never counted.
+    browser: Option<String>,
 }
 
 impl ConnectionRegistry {
@@ -141,64 +149,89 @@ impl ConnectionRegistry {
         Self::default()
     }
 
-    /// A registry that reports its live Events count into `gauge`, so a reader
-    /// outside this crate can see it. One registry per gauge: two sharing one would
-    /// each subtract from a total neither owns, and the reset below would zero a
-    /// count the other still has entries for, after which its next disconnect wraps
-    /// the `usize`.
+    /// A registry that reports its live browser count into `gauge`, so a reader
+    /// outside this crate can see it. One registry per gauge: two sharing one
+    /// would each overwrite a total the other is also keeping.
     pub fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
         debug_assert_eq!(
             gauge.load(Ordering::Relaxed),
             0,
-            "a connection registry's events gauge must be its own: this one is already counting \
+            "a connection registry's browser gauge must be its own: this one is already counting \
              somebody else's connections"
         );
         gauge.store(0, Ordering::Relaxed);
         Self {
             entries: Mutex::new(HashMap::new()),
-            events_live: gauge,
+            browsers_live: gauge,
         }
     }
 
     /// Register a live connection id with its class (called on socket upgrade).
+    /// An Events connection registered this way counts as a browser of its own.
     pub fn insert(&self, id: String, class: ConnClass) {
+        let browser = (class == ConnClass::Events).then(|| format!("connection:{id}"));
+        self.put(id, Entry { class, browser });
+    }
+
+    /// Register a browser tab's Events connection, counted under `browser`, or,
+    /// when it named none, under whatever the live connection it succeeds
+    /// (`after`) is counted under, so a reconnect is not a second browser while
+    /// the lost socket waits to be reaped. The id is display-only and decides
+    /// nothing else (see [`dux_core::attachments::BrowserId`]).
+    pub fn insert_events(
+        &self,
+        id: String,
+        browser: Option<&dux_core::attachments::BrowserId>,
+        after: Option<&str>,
+    ) {
         let mut entries = self.entries.lock().unwrap();
-        let previous = entries.insert(id, class);
-        self.adjust_events_count(previous, Some(class));
+        let key = match browser {
+            Some(browser) => format!("browser:{}", browser.as_str()),
+            None => after
+                .and_then(|old| entries.get(old))
+                .and_then(|old| old.browser.clone())
+                .unwrap_or_else(|| format!("connection:{id}")),
+        };
+        entries.insert(
+            id,
+            Entry {
+                class: ConnClass::Events,
+                browser: Some(key),
+            },
+        );
+        self.recount(&entries);
+    }
+
+    fn put(&self, id: String, entry: Entry) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.insert(id, entry);
+        self.recount(&entries);
     }
 
     /// Deregister a connection id (called on socket disconnect), freeing its slot.
     pub fn remove(&self, id: &str) {
         let mut entries = self.entries.lock().unwrap();
-        let previous = entries.remove(id);
-        self.adjust_events_count(previous, None);
+        entries.remove(id);
+        self.recount(&entries);
     }
 
-    /// How many Events connections are live: one per open browser tab. Events
-    /// sockets only, because a tab watching a terminal has a PTY socket open beside
-    /// its Events one. Called with the entries lock held, so a concurrent insert and
-    /// remove cannot interleave into a count that drifts from the map.
-    fn adjust_events_count(&self, previous: Option<ConnClass>, current: Option<ConnClass>) {
-        let was = previous == Some(ConnClass::Events);
-        let is = current == Some(ConnClass::Events);
-        match (was, is) {
-            (false, true) => {
-                self.events_live.fetch_add(1, Ordering::Relaxed);
-            }
-            (true, false) => {
-                self.events_live.fetch_sub(1, Ordering::Relaxed);
-            }
-            // Unchanged, including the re-insert of an id that is already there.
-            // Ids are server-minted UUIDs so that should never happen, but a
-            // double count would be permanent and this costs nothing.
-            (false, false) | (true, true) => {}
-        }
+    /// Set the gauge from the map, under its lock, so a concurrent insert and
+    /// remove cannot leave a count that drifts from the map. Events sockets only,
+    /// because a tab watching a terminal has a PTY socket open beside its Events
+    /// one; a handful of entries, so counting them again each time costs nothing.
+    fn recount(&self, entries: &HashMap<String, Entry>) {
+        let browsers: std::collections::HashSet<&str> = entries
+            .values()
+            .filter(|entry| entry.class == ConnClass::Events)
+            .filter_map(|entry| entry.browser.as_deref())
+            .collect();
+        self.browsers_live.store(browsers.len(), Ordering::Relaxed);
     }
 
-    /// How many browser tabs are connected right now: the live
-    /// [`ConnClass::Events`] count.
-    pub fn events_count(&self) -> usize {
-        self.events_live.load(Ordering::Relaxed)
+    /// How many browsers are connected right now: every tab of one browser
+    /// profile counted once.
+    pub fn browsers_count(&self) -> usize {
+        self.browsers_live.load(Ordering::Relaxed)
     }
 
     /// Whether `id` is a currently-live connection.
@@ -211,7 +244,11 @@ impl ConnectionRegistry {
     /// Used by [`scope_from_headers`] to require that a scoped header carries
     /// a live EVENTS-class id rather than any registered id.
     pub fn class_of(&self, id: &str) -> Option<ConnClass> {
-        self.entries.lock().unwrap().get(id).copied()
+        self.entries
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.class)
     }
 
     /// Whether `id` names a connection that is still up, whatever its class.
@@ -733,6 +770,7 @@ mod tests {
                 address: Some("10.0.0.1".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );
@@ -939,19 +977,19 @@ mod tests {
         );
     }
 
-    /// The gauge counts browser tabs, which means Events sockets and nothing
-    /// else: a PTY socket is a second connection from a tab that is already
-    /// counted, so counting those would report three connections for one browser.
+    /// The gauge counts Events sockets and nothing else: a PTY socket is a second
+    /// connection from a tab that is already counted, so counting those would
+    /// report three for one browser.
     #[test]
     fn the_events_gauge_counts_only_events_connections() {
         let gauge = Arc::new(AtomicUsize::new(0));
         let reg = ConnectionRegistry::with_events_gauge(Arc::clone(&gauge));
-        assert_eq!(reg.events_count(), 0, "nothing connected yet");
+        assert_eq!(reg.browsers_count(), 0, "nothing connected yet");
 
         reg.insert("tab-1".into(), ConnClass::Events);
         reg.insert("tab-1-pty".into(), ConnClass::AgentPty);
         reg.insert("tab-1-term".into(), ConnClass::TerminalPty);
-        assert_eq!(reg.events_count(), 1, "one browser tab, three sockets");
+        assert_eq!(reg.browsers_count(), 1, "one browser tab, three sockets");
         assert_eq!(
             gauge.load(Ordering::Relaxed),
             1,
@@ -959,24 +997,24 @@ mod tests {
         );
 
         reg.insert("tab-2".into(), ConnClass::Events);
-        assert_eq!(reg.events_count(), 2);
+        assert_eq!(reg.browsers_count(), 2);
 
         reg.remove("tab-1-pty");
         assert_eq!(
-            reg.events_count(),
+            reg.browsers_count(),
             2,
             "a PTY socket closing changes nothing"
         );
         reg.remove("tab-1");
-        assert_eq!(reg.events_count(), 1, "the tab left");
+        assert_eq!(reg.browsers_count(), 1, "the tab left");
         reg.remove("tab-1");
         assert_eq!(
-            reg.events_count(),
+            reg.browsers_count(),
             1,
             "removing an id twice must not underflow the count"
         );
         reg.remove("tab-2");
-        assert_eq!(reg.events_count(), 0);
+        assert_eq!(reg.browsers_count(), 0);
         assert_eq!(gauge.load(Ordering::Relaxed), 0);
     }
 
@@ -992,26 +1030,26 @@ mod tests {
         reg.insert("tab-1".into(), ConnClass::Events);
         reg.insert("tab-1".into(), ConnClass::Events);
         assert_eq!(
-            reg.events_count(),
+            reg.browsers_count(),
             1,
             "the same id registered twice is still one connection"
         );
 
         reg.insert("tab-1".into(), ConnClass::AgentPty);
         assert_eq!(
-            reg.events_count(),
+            reg.browsers_count(),
             0,
             "an id that stopped being an Events connection must stop being counted"
         );
 
         reg.insert("tab-1".into(), ConnClass::Events);
         assert_eq!(
-            reg.events_count(),
+            reg.browsers_count(),
             1,
             "and counted again when it comes back"
         );
         reg.remove("tab-1");
-        assert_eq!(reg.events_count(), 0);
+        assert_eq!(reg.browsers_count(), 0);
     }
 
     /// A registry nobody handed a gauge to still counts, so every existing serve
@@ -1020,7 +1058,74 @@ mod tests {
     fn a_registry_without_a_shared_gauge_still_counts() {
         let reg = ConnectionRegistry::default();
         reg.insert("tab-1".into(), ConnClass::Events);
-        assert_eq!(reg.events_count(), 1);
+        assert_eq!(reg.browsers_count(), 1);
+    }
+
+    fn browser_id(raw: &str) -> dux_core::attachments::BrowserId {
+        dux_core::attachments::BrowserId::parse(raw).expect("a well-formed browser id")
+    }
+
+    /// The count is browsers, not tabs: two tabs of one browser profile are one
+    /// browser, a second browser is a second one, and the browser leaves the
+    /// count only when its last tab closes.
+    #[test]
+    fn tabs_of_one_browser_count_once_and_a_second_browser_counts_again() {
+        let gauge = Arc::new(AtomicUsize::new(0));
+        let reg = ConnectionRegistry::with_events_gauge(Arc::clone(&gauge));
+        let laptop = browser_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let phone = browser_id("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+        reg.insert_events("tab-1".into(), Some(&laptop), None);
+        reg.insert_events("tab-2".into(), Some(&laptop), None);
+        reg.insert("tab-2-pty".into(), ConnClass::AgentPty);
+        assert_eq!(reg.browsers_count(), 1, "two tabs of one browser");
+        assert_eq!(gauge.load(Ordering::Relaxed), 1, "the gauge agrees");
+
+        reg.insert_events("tab-3".into(), Some(&phone), None);
+        assert_eq!(reg.browsers_count(), 2, "a second browser");
+
+        reg.remove("tab-1");
+        assert_eq!(reg.browsers_count(), 2, "the laptop still has a tab open");
+        reg.remove("tab-2");
+        assert_eq!(reg.browsers_count(), 1, "the laptop's last tab closed");
+        reg.remove("tab-3");
+        assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    }
+
+    /// A tab that named no browser (old page, no storage, a malformed id the
+    /// socket dropped) is a browser of its own, never folded into another one.
+    #[test]
+    fn a_tab_with_no_browser_id_counts_on_its_own() {
+        let reg = ConnectionRegistry::default();
+        let laptop = browser_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        reg.insert_events("tab-1".into(), Some(&laptop), None);
+        reg.insert_events("tab-2".into(), None, None);
+        reg.insert_events("tab-3".into(), None, None);
+        assert_eq!(reg.browsers_count(), 3);
+    }
+
+    /// A reconnect opens its new socket while the lost one may still be waiting
+    /// to be reaped; naming the lost one (`?after=`) keeps that one browser.
+    #[test]
+    fn a_reconnect_naming_its_lost_connection_is_not_a_second_browser() {
+        let reg = ConnectionRegistry::default();
+        let laptop = browser_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        reg.insert_events("old".into(), Some(&laptop), None);
+        reg.insert_events("new".into(), Some(&laptop), Some("old"));
+        assert_eq!(reg.browsers_count(), 1, "same browser id");
+
+        // With no browser id, the succession alone keeps it one browser.
+        reg.insert_events("bare-old".into(), None, None);
+        reg.insert_events("bare-new".into(), None, Some("bare-old"));
+        assert_eq!(reg.browsers_count(), 2);
+        reg.remove("bare-old");
+        assert_eq!(reg.browsers_count(), 2, "the successor still counts");
+        reg.remove("bare-new");
+        assert_eq!(reg.browsers_count(), 1);
+
+        // Naming a connection that is not there inherits nothing.
+        reg.insert_events("stray".into(), None, Some("gone"));
+        assert_eq!(reg.browsers_count(), 2);
     }
 
     #[test]

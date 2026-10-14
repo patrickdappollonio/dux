@@ -430,6 +430,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
             address: Some("10.0.0.7".parse().unwrap()),
             verified: false,
             events: true,
+            browser: None,
         },
         None,
     );
@@ -475,6 +476,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
             address: Some("10.0.0.8".parse().unwrap()),
             verified: false,
             events: true,
+            browser: None,
         },
         None,
     );

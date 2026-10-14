@@ -416,6 +416,7 @@ pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) -> u64 
             address: Some("10.0.0.7".parse().unwrap()),
             verified: false,
             events: true,
+            browser: None,
         },
         None,
     );

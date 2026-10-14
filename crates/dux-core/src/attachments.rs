@@ -88,6 +88,39 @@ pub struct Target {
     pub agent: Option<String>,
 }
 
+/// The random id a browser profile keeps for itself and presents on its
+/// events socket, so its tabs count as one browser.
+///
+/// Untrusted and DISPLAY-ONLY: it feeds the browser counts and the listing's
+/// grouping and nothing else. No ownership, exemption, auth, presence-grace or
+/// destructive-change decision reads it, because any client can claim any id.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BrowserId(String);
+
+impl BrowserId {
+    /// The id when `raw` is 16 to 64 ASCII letters, digits, `-` or `_`;
+    /// anything else is no id, and its connection counts as a browser of its
+    /// own.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let shaped = (16..=64).contains(&raw.len())
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        shaped.then(|| Self(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The first eight characters, enough to tell a handful of browsers apart
+    /// in a listing.
+    pub fn short(&self) -> &str {
+        &self.0[..8]
+    }
+}
+
 /// Who a connection is, as it presented itself when it connected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionFacts {
@@ -102,6 +135,20 @@ pub struct ConnectionFacts {
     /// Whether this is a browser tab's events connection, the only kind a
     /// terminal socket may link itself to.
     pub events: bool,
+    /// The browser profile it says it belongs to, for counting only (see
+    /// [`BrowserId`]). A terminal socket linked to a tab carries the tab's.
+    pub browser: Option<BrowserId>,
+}
+
+impl ConnectionFacts {
+    /// What a browser count counts this connection under: its browser, or the
+    /// connection itself when it named none.
+    fn browser_key(&self, connection: &str) -> String {
+        match &self.browser {
+            Some(browser) => format!("browser:{}", browser.as_str()),
+            None => format!("connection:{connection}"),
+        }
+    }
 }
 
 /// When a peer was last heard from, shared with the socket that hears it so the
@@ -257,6 +304,10 @@ pub struct ConnectionView {
     /// The registry's id for it.
     pub id: String,
     pub surface: Surface,
+    /// The short form of the browser it says it belongs to ([`BrowserId::short`]),
+    /// so the rows of one browser's tabs read as one browser.
+    #[serde(default)]
+    pub browser: Option<String>,
     pub device: Option<String>,
     pub address: Option<String>,
     /// Whether `address` is one the auth layer verified; otherwise it is the
@@ -539,18 +590,18 @@ impl Attachments {
         self.with(|state| state.blockers(scope, exempt, now))
     }
 
-    /// How many browser connections a change to `scope` would cut off at `now`,
-    /// graced presences included, each counted once.
+    /// How many browsers a change to `scope` would cut off at `now`, graced
+    /// presences included: every tab of one browser profile counted once (see
+    /// [`BrowserId`]), a connection that named no browser counted on its own.
     pub fn remote_viewers(&self, scope: &Scope, now: Instant) -> usize {
-        self.with(|state| {
-            let browsers: BTreeSet<String> = state
-                .in_scope(scope, None, now)
-                .into_iter()
-                .filter(|(_, blocker)| blocker.surface == Surface::Browser)
-                .map(|(connection, _)| connection)
-                .collect();
-            browsers.len()
-        })
+        self.with(|state| state.browsers(scope, now, true))
+    }
+
+    /// How many browsers have a socket open on something in `scope` right now,
+    /// counted like [`Self::remote_viewers`] but without the graced presences of
+    /// sockets already lost: what the terminal UI's rows and caption show.
+    pub fn browsers_attached(&self, scope: &Scope, now: Instant) -> usize {
+        self.with(|state| state.browsers(scope, now, false))
     }
 
     /// In one locked step, reserve `scope` against new attachments for `life`,
@@ -677,18 +728,24 @@ impl State {
     fn blockers(&self, scope: &Scope, exempt: Option<&str>, now: Instant) -> Vec<Blocker> {
         self.in_scope(scope, exempt, now)
             .into_iter()
-            .map(|(_, blocker)| blocker)
+            .map(|found| found.blocker)
             .collect()
     }
 
+    fn browsers(&self, scope: &Scope, now: Instant, graced: bool) -> usize {
+        let browsers: BTreeSet<String> = self
+            .in_scope(scope, None, now)
+            .into_iter()
+            .filter(|found| found.blocker.surface == Surface::Browser)
+            .filter(|found| graced || !found.graced)
+            .map(|found| found.browser)
+            .collect();
+        browsers.len()
+    }
+
     /// Every attachment and kept presence in `scope` that counts at `now`,
-    /// leaving out `exempt`, with the connection it belongs to.
-    fn in_scope(
-        &self,
-        scope: &Scope,
-        exempt: Option<&str>,
-        now: Instant,
-    ) -> Vec<(String, Blocker)> {
+    /// leaving out `exempt`.
+    fn in_scope(&self, scope: &Scope, exempt: Option<&str>, now: Instant) -> Vec<InScope> {
         let exempted = |id: &str| Some(id) == exempt;
         let mut attached: Vec<(&u64, &Attachment)> = self.attachments.iter().collect();
         attached.sort_by_key(|(token, _)| **token);
@@ -709,10 +766,11 @@ impl State {
             {
                 continue;
             }
-            blockers.push((
-                attachment.connection.clone(),
-                blocker(facts, &attachment.target, self.drives(facts, attachment)),
-            ));
+            blockers.push(InScope {
+                browser: facts.browser_key(&attachment.connection),
+                graced: false,
+                blocker: blocker(facts, &attachment.target, self.drives(facts, attachment)),
+            });
         }
         for presence in &self.presences {
             if presence.until <= now
@@ -721,10 +779,11 @@ impl State {
             {
                 continue;
             }
-            blockers.push((
-                presence.connection.clone(),
-                blocker(&presence.facts, &presence.target, false),
-            ));
+            blockers.push(InScope {
+                browser: presence.facts.browser_key(&presence.connection),
+                graced: true,
+                blocker: blocker(&presence.facts, &presence.target, false),
+            });
         }
         blockers
     }
@@ -755,6 +814,11 @@ impl State {
                 let view = ConnectionView {
                     id: id.clone(),
                     surface: connection.facts.surface,
+                    browser: connection
+                        .facts
+                        .browser
+                        .as_ref()
+                        .map(|browser| browser.short().to_string()),
                     device: connection.facts.device.clone(),
                     address: connection.facts.address.map(|a| a.to_string()),
                     verified: connection.facts.verified,
@@ -782,6 +846,15 @@ impl State {
     }
 }
 
+/// One attachment or kept presence a scope covers.
+struct InScope {
+    /// What a browser count counts it under ([`ConnectionFacts::browser_key`]).
+    browser: String,
+    /// A presence kept for the grace after its socket was lost.
+    graced: bool,
+    blocker: Blocker,
+}
+
 fn blocker(facts: &ConnectionFacts, target: &Target, driving: bool) -> Blocker {
     Blocker {
         surface: facts.surface,
@@ -805,6 +878,7 @@ mod tests {
             address: Some(address.parse().unwrap()),
             verified: false,
             events: true,
+            browser: None,
         }
     }
 
@@ -1156,6 +1230,7 @@ mod tests {
                 address: None,
                 verified: true,
                 events: false,
+                browser: None,
             },
             None,
         );
@@ -1168,6 +1243,147 @@ mod tests {
             .unwrap();
         assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 2);
         assert_eq!(attachments.remote_viewers(&agent_scope("s9"), now), 0);
+    }
+
+    fn from_browser(facts: ConnectionFacts, id: &str) -> ConnectionFacts {
+        ConnectionFacts {
+            browser: Some(BrowserId::parse(id).unwrap()),
+            ..facts
+        }
+    }
+
+    const LAPTOP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PHONE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// The counts are browsers: two tabs of one browser profile are one, a
+    /// second browser is another, a connection that named no browser counts on
+    /// its own, and the browser leaves the count with its last tab. The graced
+    /// presence of a lost socket counts for `remote_viewers` only.
+    #[test]
+    fn browser_counts_count_each_browser_profile_once() {
+        let attachments = Attachments::default();
+        let now = Instant::now();
+        let mut tokens = Vec::new();
+        for (id, facts) in [
+            ("e1", from_browser(browser("10.0.0.2", "Chrome"), LAPTOP)),
+            ("e2", from_browser(browser("10.0.0.2", "Chrome"), LAPTOP)),
+        ] {
+            attachments.register(id, facts, Some(Heard::at(now)));
+            tokens.push(
+                attachments
+                    .attach(id, tab("s1-slot", "s1"), Some(Heard::at(now)), None)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 1);
+        assert_eq!(attachments.browsers_attached(&agent_scope("s1"), now), 1);
+
+        attachments.register(
+            "e3",
+            from_browser(browser("10.0.0.3", "Safari"), PHONE),
+            Some(Heard::at(now)),
+        );
+        let phone = attachments
+            .attach("e3", tab("t2", "s1"), Some(Heard::at(now)), None)
+            .unwrap();
+        attachments.register("e4", browser("10.0.0.4", "Firefox"), Some(Heard::at(now)));
+        attachments
+            .attach("e4", tab("t2", "s1"), Some(Heard::at(now)), None)
+            .unwrap();
+        assert_eq!(
+            attachments.browsers_attached(&agent_scope("s1"), now),
+            3,
+            "laptop, phone, and a tab that named no browser"
+        );
+
+        attachments.detach(tokens[0], Ending::Deliberate, now, Duration::ZERO);
+        assert_eq!(
+            attachments.browsers_attached(&agent_scope("s1"), now),
+            3,
+            "the laptop still has a tab open"
+        );
+        attachments.detach(tokens[1], Ending::Deliberate, now, Duration::ZERO);
+        assert_eq!(attachments.browsers_attached(&agent_scope("s1"), now), 2);
+
+        // The phone's socket is lost while its page was looked at.
+        attachments.note_viewed(phone, true, now);
+        attachments.detach(phone, Ending::Lost, now, Duration::from_secs(60));
+        assert_eq!(
+            attachments.remote_viewers(&agent_scope("s1"), now),
+            2,
+            "a change would still cut the phone off for the grace"
+        );
+        assert_eq!(
+            attachments.browsers_attached(&agent_scope("s1"), now),
+            1,
+            "but it has no socket open"
+        );
+    }
+
+    /// The browser id is display-only: two connections claiming the same browser
+    /// get exactly the blockers, refusals and exemptions they would get without
+    /// it, so a client that lies about its id gains nothing.
+    #[test]
+    fn decisions_ignore_the_browser_id() {
+        let now = Instant::now();
+        let decide = |with_ids: bool| {
+            let attachments = Attachments::default();
+            let facts = |address: &str, device: &str| {
+                let plain = browser(address, device);
+                if with_ids {
+                    from_browser(plain, LAPTOP)
+                } else {
+                    plain
+                }
+            };
+            attachments.register("e1", facts("10.0.0.2", "Chrome"), Some(Heard::at(now)));
+            attachments.register("e2", facts("10.0.0.3", "Safari"), Some(Heard::at(now)));
+            for id in ["e1", "e2"] {
+                attachments
+                    .attach(id, tab("s1-slot", "s1"), Some(Heard::at(now)), None)
+                    .unwrap();
+            }
+            let blockers = attachments.blockers(&agent_scope("s1"), Some("e1"), now);
+            let requested = Policy {
+                requester: Some("e1".to_string()),
+                ..Policy::default()
+            };
+            let refused = attachments
+                .reserve(agent_scope("s1"), &requested, Life::Released, now)
+                .map(|_| ())
+                .map_err(|blockers| blockers.iter().map(Blocker::key).collect::<Vec<_>>());
+            (blockers, refused, attachments.connections(now).len())
+        };
+        let (blockers, refused, listed) = decide(true);
+        assert_eq!(
+            (blockers.clone(), refused.clone(), listed),
+            decide(false),
+            "the id changed a decision"
+        );
+        assert_eq!(
+            blockers.len(),
+            1,
+            "e2 shares e1's browser id and is still in e1's way"
+        );
+        assert!(refused.is_err(), "and still refuses e1's change");
+    }
+
+    /// Only a well-shaped id is one; anything else is no id at all.
+    #[test]
+    fn a_browser_id_is_parsed_strictly() {
+        assert!(BrowserId::parse(LAPTOP).is_some());
+        assert_eq!(BrowserId::parse(LAPTOP).unwrap().short(), "aaaaaaaa");
+        assert!(BrowserId::parse("0123456789abcdef-_ABCDEF").is_some());
+        for bad in [
+            "",
+            "short",
+            &"a".repeat(65),
+            "aaaaaaaaaaaaaaaa aaaa",
+            "aaaaaaaaaaaaaaaa/../",
+            "ääääääääääääääää",
+        ] {
+            assert!(BrowserId::parse(bad).is_none(), "{bad:?}");
+        }
     }
 
     /// The grace runs from the socket's last viewed beat, not from when the
@@ -1340,6 +1556,7 @@ mod tests {
                 address: None,
                 verified: true,
                 events: false,
+                browser: None,
             },
             None,
         );

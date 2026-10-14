@@ -278,6 +278,9 @@ const LIVENESS_SEND_DEADLINE: std::time::Duration = std::time::Duration::from_se
 pub(crate) struct SocketClient {
     link: Option<String>,
     after: Option<String>,
+    /// The browser profile it says it belongs to (`?browser=`), for counting
+    /// only: malformed is the same as absent.
+    browser: Option<dux_core::attachments::BrowserId>,
     address: Option<IpAddr>,
     verified: bool,
 }
@@ -286,6 +289,7 @@ pub(crate) struct SocketClient {
 struct SocketLinkQuery {
     events: Option<String>,
     after: Option<String>,
+    browser: Option<String>,
 }
 
 impl axum::extract::FromRequestParts<AppState> for SocketClient {
@@ -299,9 +303,16 @@ impl axum::extract::FromRequestParts<AppState> for SocketClient {
             .ok()
             .map(|axum::extract::Query(query)| query);
         let bounded = |id: Option<String>| id.filter(|id| crate::rest_common::id_within_bound(id));
-        let (link, after) = match query {
-            Some(query) => (bounded(query.events), bounded(query.after)),
-            None => (None, None),
+        let (link, after, browser) = match query {
+            Some(query) => (
+                bounded(query.events),
+                bounded(query.after),
+                query
+                    .browser
+                    .as_deref()
+                    .and_then(dux_core::attachments::BrowserId::parse),
+            ),
+            None => (None, None, None),
         };
         let verified = parts
             .extensions
@@ -314,6 +325,7 @@ impl axum::extract::FromRequestParts<AppState> for SocketClient {
         Ok(Self {
             link,
             after,
+            browser,
             address: verified.or(peer),
             verified: verified.is_some(),
         })
@@ -337,6 +349,7 @@ impl SocketClient {
             address: self.address,
             verified: self.verified,
             events,
+            browser: self.browser.clone(),
         }
     }
 }
@@ -540,8 +553,8 @@ impl RouterParams {
         self
     }
 
-    /// Ask `build_app`'s connection registry to keep its live browser-tab count in
-    /// `gauge`, for the terminal UI's serving chip. Only the background serve calls this.
+    /// Ask `build_app`'s connection registry to keep its live browser count in
+    /// `gauge`, for the terminal UI's serving chip or the flip's status screen.
     pub(crate) fn with_connections_gauge(
         mut self,
         gauge: Arc<std::sync::atomic::AtomicUsize>,
@@ -3122,7 +3135,11 @@ async fn handle_events_socket(
     // Register this id as a live connection so `scope_from_headers` validates the
     // echoed `X-Connection-Id` against it. The guard deregisters on EVERY exit path
     // (loop break or task cancellation), freeing the slot.
-    connections.insert(connection_id.clone(), crate::rest_common::ConnClass::Events);
+    connections.insert_events(
+        connection_id.clone(),
+        facts.browser.as_ref(),
+        after.as_deref(),
+    );
     // Bumped beside the registry insert and dropped by the same guard, so the
     // status emitter's "was anybody watching" answer cannot drift from the
     // registry. It is what decides whether a warning or an error raised now is
@@ -4297,10 +4314,10 @@ impl Drop for QuietWatchdog {
     }
 }
 
-/// Decrements the console's live-client count on Drop, so the number a serving
-/// dux prints cannot drift upwards over a process's life. Same reasoning as its
-/// two siblings above: the increment happens on one line at the top of the
-/// handler, and every exit path owes the matching decrement.
+/// Logs the client's leaving on Drop, so every connect line a serving dux
+/// prints gets its disconnect line. Same reasoning as its two siblings above:
+/// the connect is logged on one line at the top of the handler, and every exit
+/// path owes the matching disconnect.
 struct ClientCountGuard {
     console: Console,
     peer_ip: std::net::IpAddr,
@@ -5444,6 +5461,7 @@ mod tests {
                 address: None,
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );
@@ -6247,16 +6265,16 @@ mod tests {
         );
     }
 
-    /// And the console's live-client count comes back down on the same kind of
-    /// exit, for the same reason: the increment is one line at the top of the
-    /// handler and every path out owes the decrement.
+    /// And the console logs the client leaving on the same kind of exit, for the
+    /// same reason: the connect is one line at the top of the handler and every
+    /// path out owes the disconnect.
     #[test]
-    fn a_panicking_socket_still_counts_its_client_out() {
+    fn a_panicking_socket_still_logs_its_client_out() {
         let ring = dux_core::activity::ActivityRing::new(10);
         let console = Console::capture(ring.clone());
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
         console.client_connected(ip);
-        assert_eq!(ring.connections(), 1);
+        assert_eq!(ring.snapshot().lines.len(), 1);
         let panicked = std::panic::catch_unwind({
             let console = console.clone();
             move || {
@@ -6268,10 +6286,13 @@ mod tests {
             }
         });
         assert!(panicked.is_err(), "the test's own panic must have happened");
-        assert_eq!(
-            ring.connections(),
-            0,
-            "an unwind must not leave the count permanently high"
+        let lines = ring.snapshot().lines;
+        assert!(
+            lines.len() == 2
+                && lines[1]
+                    .text()
+                    .contains("client disconnected from 127.0.0.1"),
+            "an unwind must still log the client out"
         );
     }
 

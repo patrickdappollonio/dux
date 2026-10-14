@@ -598,16 +598,15 @@ fn ellipsize_field_highlighted(
 /// The line-two segment naming how many browsers have an agent open, or `None`
 /// when none do.
 ///
-/// "Remote" rather than "viewers" or "watching": the reader is at this terminal,
-/// so the interesting half is that somebody elsewhere has the same agent open,
-/// and one of them may be the device driving it, which "watching" would deny.
-/// Absent at zero rather than "0 remote". No singular form, because "remote" is
-/// not a countable noun here.
+/// "Browsers" rather than "viewers" or "watching": one of them may be the device
+/// driving it, which "watching" would deny, and every tab of one browser profile
+/// counts once, the same word and the same count as the header's serving chip.
+/// Absent at zero rather than "0 browsers".
 fn remote_viewers_segment(count: usize) -> Option<String> {
     if count == 0 {
         return None;
     }
-    Some(format!("{count} remote"))
+    Some(count_of(count, "browser"))
 }
 
 /// A line-two marker (leading indent included) and how the field after it is
@@ -646,7 +645,7 @@ impl MetaMarker {
 struct MetaCounts {
     /// "3 tabs", present only for an agent with more than one tab.
     tabs: Option<Span<'static>>,
-    /// "2 remote", present only while browsers have the agent open.
+    /// "2 browsers", present only while browsers have the agent open.
     remote: Option<Span<'static>>,
 }
 
@@ -681,7 +680,7 @@ struct MetaCounts {
 /// count do not fit, the count is cut from its end and keeps its number,
 /// `1 …`. At the default 120-column layout, whose rows have 20 columns of
 /// text, that is every WORKING agent with a remote count (glyph 4, "Working"
-/// and its dot slot 10, separator 3, leaving 3 for "1 remote"), while an idle
+/// and its dot slot 10, separator 3, leaving 3 for "1 browser"), while an idle
 /// one shows the count whole. The number stays at any width that holds the
 /// glyph, the word, the separator, the digits and the mark; narrower than
 /// that the count shows the bare `…`, never part of a number, and the
@@ -2096,8 +2095,7 @@ impl App {
         // never at all for an agent that has no branch.
         let branch_span = agent_row_branch_segment(session)
             .map(|branch| Span::styled(branch, Style::default().fg(muted)));
-        // Resolved once and shared with the remote-viewer count below: this is the
-        // render path, and `session_tab_ids` allocates.
+        // Resolved once: this is the render path, and `session_tab_ids` allocates.
         let tab_ids = self.session_tab_ids(&session.id);
         let tab_count = tab_ids.len();
         let tabs_span = (tab_count > 1)
@@ -2108,7 +2106,7 @@ impl App {
         // quieter than the state words beside it, which is exactly what muted is
         // for on this line. Absent at zero, and structurally zero when nothing is
         // serving, so a TUI on its own renders what it always did.
-        let remote_span = remote_viewers_segment(self.remote_viewer_count(&session.id, &tab_ids))
+        let remote_span = remote_viewers_segment(self.remote_browser_count(&session.id))
             .map(|label| Span::styled(label, Style::default().fg(muted)));
 
         // Line one: right-align the PR badge (name ellipsized to the space left
@@ -12215,14 +12213,10 @@ impl App {
             // tab's own count, not the agent's total: the caption titles one pane
             // showing one tab, and the sidebar row is where the agent-wide number
             // belongs.
-            let remote = self
-                .engine
-                .providers
-                .get(TabIdRef::new(&self.focused_tab_id(&session.id)))
-                .map(|client| client.subscriber_count())
-                .and_then(remote_viewers_segment)
-                .map(|segment| format!(" · {segment}"))
-                .unwrap_or_default();
+            let remote =
+                remote_viewers_segment(self.pty_browser_count(&self.focused_tab_id(&session.id)))
+                    .map(|segment| format!(" · {segment}"))
+                    .unwrap_or_default();
             let base = format!("{base}{remote}");
             let count = self.session_terminal_count(&session.id);
             if count > 0 {
@@ -15071,36 +15065,66 @@ mod tests {
     /// Spawn two idle companion terminals owned by the first session so the left
     /// pane renders a two-row Terminals list. Returns the rendered terminal and
     /// the app so callers can inspect the post-render mouse map and buffer.
-    /// An agent watched from a browser says so on line two, and stops saying it
-    /// when the browser leaves. Nothing renders while nobody is watching, which is
-    /// also every row's state whenever nothing is serving.
+    /// A browser tab attaching to `pty_id` the way a web socket joins the
+    /// attachment registry: its events connection `connection`, from the browser
+    /// profile `browser` (none for a page that sent no id).
+    fn attach_browser_tab(
+        app: &App,
+        connection: &str,
+        browser: Option<&str>,
+        kind: dux_core::attachments::TargetKind,
+        pty_id: &str,
+        agent: Option<&str>,
+    ) -> u64 {
+        use dux_core::attachments::{BrowserId, ConnectionFacts, Surface, Target};
+        app.engine.attachments.register(
+            connection,
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox".to_string()),
+                address: Some("10.0.0.7".parse().unwrap()),
+                verified: false,
+                events: true,
+                browser: browser.map(|id| BrowserId::parse(id).expect("a well-formed id")),
+            },
+            None,
+        );
+        app.engine
+            .attachments
+            .attach(
+                connection,
+                Target {
+                    kind,
+                    id: pty_id.to_string(),
+                    agent: agent.map(str::to_string),
+                },
+                None,
+                None,
+            )
+            .unwrap()
+    }
+
+    const LAPTOP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PHONE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// An agent open in browsers says how many on line two, and stops saying it
+    /// when they leave. Nothing renders while nobody has it open, which is also
+    /// every row's state whenever nothing is serving.
     #[test]
-    fn an_agent_row_names_how_many_browsers_are_watching_it() {
+    fn an_agent_row_names_how_many_browsers_have_it_open() {
+        use dux_core::attachments::TargetKind;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        let client = PtyClient::spawn(
-            "/bin/sh",
-            &["-c".to_string(), "sleep 30".to_string()],
-            std::path::Path::new("."),
-            24,
-            80,
-            100,
-        )
-        .expect("spawn pty");
-        app.engine
-            .providers
-            .insert(TabId::new(slot_tab.clone()), client);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
 
         // The SIDEBAR ROW's own line two, found by the project marker it carries.
         // A whole-frame search would be answered by the center pane's caption,
-        // which names the same fact somewhere else entirely; that is exactly how
-        // the first version of this test passed with the row's segment deleted.
+        // which names the same fact somewhere else entirely.
         let row_line = |app: &mut App| -> String {
             let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
             terminal
@@ -15118,41 +15142,63 @@ mod tests {
         };
 
         assert!(
-            !row_line(&mut app).contains("remote"),
-            "an unwatched agent must render exactly what it always did"
+            !row_line(&mut app).contains("browser"),
+            "an agent nobody has open must render exactly what it always did"
         );
 
-        let provider = app
-            .engine
-            .providers
-            .get(TabIdRef::new(&slot_tab))
-            .expect("the seeded provider");
-        let (one, _rx1) = provider.subscribe();
-        let (two, _rx2) = provider.subscribe();
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            2
+        let laptop_one = attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
+        );
+        let laptop_two = attach_browser_tab(
+            &app,
+            "e2",
+            Some(LAPTOP),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
         );
         let rendered = row_line(&mut app);
         assert!(
-            rendered.contains("· 2 remote"),
-            "line two must name the watchers: {rendered}"
+            rendered.contains("· 1 browser"),
+            "two tabs of one browser are one browser: {rendered}"
         );
 
-        drop(two);
-        assert!(row_line(&mut app).contains("· 1 remote"), "singular at one");
-        drop(one);
+        let phone = attach_browser_tab(
+            &app,
+            "e3",
+            Some(PHONE),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
+        );
+        let rendered = row_line(&mut app);
         assert!(
-            !row_line(&mut app).contains("remote"),
-            "the segment goes away with the last watcher"
+            rendered.contains("· 2 browsers"),
+            "a second browser counts again: {rendered}"
+        );
+
+        for token in [laptop_one, laptop_two, phone] {
+            crate::app::test_support::stop_watching(&app, token);
+        }
+        assert!(
+            !row_line(&mut app).contains("browser"),
+            "the segment goes away with the last browser"
         );
     }
 
-    /// The center pane's caption names the watchers of the terminal it is showing,
-    /// which is the FOCUSED tab's own count rather than the agent's total.
+    /// The center pane's caption names the browsers on the terminal it is
+    /// showing, which is the FOCUSED tab's own count rather than the agent's total.
     #[test]
-    fn the_center_pane_caption_names_the_watchers_of_the_tab_it_shows() {
+    fn the_center_pane_caption_names_the_browsers_on_the_tab_it_shows() {
+        use dux_core::attachments::TargetKind;
+
         let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.rebuild_left_items();
         app.selected_left = app
@@ -15161,126 +15207,123 @@ mod tests {
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("the test app has an agent row");
         assert!(
-            !app.center_pane_agent_title().contains("remote"),
-            "an unwatched agent's caption says nothing about watchers"
+            !app.center_pane_agent_title().contains("browser"),
+            "an unwatched agent's caption says nothing about browsers"
         );
 
-        let client = PtyClient::spawn(
-            "/bin/sh",
-            &["-c".to_string(), "sleep 30".to_string()],
-            std::path::Path::new("."),
-            24,
-            80,
-            100,
-        )
-        .expect("spawn pty");
-        let (_guard, _rx) = client.subscribe();
-        app.engine
-            .providers
-            .insert(TabId::new(slot_tab.clone()), client);
+        attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
+        );
+        attach_browser_tab(
+            &app,
+            "e2",
+            Some(PHONE),
+            TargetKind::Tab,
+            "another-tab",
+            Some(&session_id),
+        );
 
         let title = app.center_pane_agent_title();
         assert!(
-            title.contains("· 1 remote"),
-            "the caption must name the one browser watching this tab: {title}"
+            title.contains("· 1 browser") && !title.contains("2 browsers"),
+            "the caption must name the one browser on this tab, not the agent's total: {title}"
         );
     }
 
-    /// A browser watching one of the agent's COMPANION TERMINALS counts too.
+    /// A browser on one of the agent's COMPANION TERMINALS counts too, and a
+    /// browser with the agent's tab and its terminal open is still one browser.
     ///
     /// The agent's row is the only place this is shown at all (terminal rows carry
-    /// no count of their own), so leaving those watchers out would put "nobody is
-    /// watching" on a row while a second device demonstrably had one of its
-    /// terminals open. Project and standalone terminals belong to nobody's agent
-    /// and must not leak into anyone's row.
+    /// no count of their own). Project and standalone terminals belong to nobody's
+    /// agent and must not leak into anyone's row.
     #[test]
-    fn a_browser_watching_an_agents_terminal_counts_toward_that_agent() {
-        let mut app = app_with_two_terminals();
-        let session_id = app.engine.sessions[0].id.clone();
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            0,
-            "nobody yet"
-        );
+    fn a_browser_on_an_agents_terminal_counts_toward_that_agent_once() {
+        use dux_core::attachments::TargetKind;
 
-        let watched = app
-            .engine
-            .companion_terminals
-            .get("term-1")
-            .expect("the seeded terminal");
-        let (guard, _rx) = watched.client.subscribe();
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            1,
-            "a watcher on the agent's own terminal is a watcher of the agent"
-        );
-
-        // A standalone terminal's watchers belong to no agent at all.
-        let standalone = PtyClient::spawn(
-            "/bin/sh",
-            &["-c".to_string(), "sleep 30".to_string()],
-            std::path::Path::new("."),
-            24,
-            80,
-            100,
-        )
-        .expect("spawn pty");
-        // Subscribed before the client moves into the map; the guard holds the
-        // shared subscriber list, not the client.
-        let (_lone, _lone_rx) = standalone.subscribe();
-        app.engine.companion_terminals.insert(
-            "standalone-1".to_string(),
-            CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Standalone,
-                label: "standalone".to_string(),
-                foreground_cmd: None,
-                client: standalone,
-                sort_order: 9,
-                created_at: chrono::Utc::now(),
-            },
-        );
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            1,
-            "a standalone terminal's watcher must not turn up on an agent's row"
-        );
-
-        drop(guard);
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            0
-        );
-    }
-
-    /// The count is per agent and it is the SUM over the agent's tabs, the same way
-    /// the row's liveness ORs over them: the row is about the agent.
-    #[test]
-    fn the_remote_count_sums_over_an_agents_tabs() {
-        let mut app = test_app(default_bindings());
+        let app = app_with_two_terminals();
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
-        let mut guards = Vec::new();
-        for tab_id in [slot_tab, "tab-2".to_string()] {
-            let client = PtyClient::spawn(
-                "/bin/sh",
-                &["-c".to_string(), "sleep 30".to_string()],
-                std::path::Path::new("."),
-                24,
-                80,
-                100,
-            )
-            .expect("spawn pty");
-            let (guard, _rx) = client.subscribe();
-            guards.push((guard, _rx));
-            app.engine.providers.insert(TabId::new(tab_id), client);
-        }
+        assert_eq!(app.remote_browser_count(&session_id), 0, "nobody yet");
 
-        assert_eq!(
-            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
-            2,
-            "one watcher on each of the agent's two tabs is two watchers of the agent"
+        let terminal = attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Terminal,
+            "term-1",
+            Some(&session_id),
         );
+        assert_eq!(
+            app.remote_browser_count(&session_id),
+            1,
+            "a browser on the agent's own terminal has the agent open"
+        );
+        attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
+        );
+        assert_eq!(
+            app.remote_browser_count(&session_id),
+            1,
+            "the same browser on the tab and the terminal is one browser"
+        );
+
+        // A standalone terminal's browsers belong to no agent at all.
+        attach_browser_tab(
+            &app,
+            "e9",
+            Some(PHONE),
+            TargetKind::Terminal,
+            "standalone-1",
+            None,
+        );
+        assert_eq!(
+            app.remote_browser_count(&session_id),
+            1,
+            "a standalone terminal's browser must not turn up on an agent's row"
+        );
+
+        crate::app::test_support::stop_watching(&app, terminal);
+        assert_eq!(app.remote_browser_count(&session_id), 1, "still on the tab");
+    }
+
+    /// A tab that sent no browser id cannot be told apart from any other, so it
+    /// counts as a browser of its own rather than being folded into another.
+    #[test]
+    fn a_tab_with_no_browser_id_counts_as_its_own_browser() {
+        use dux_core::attachments::TargetKind;
+
+        let app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        for connection in ["e1", "e2"] {
+            attach_browser_tab(
+                &app,
+                connection,
+                None,
+                TargetKind::Tab,
+                &slot_tab,
+                Some(&session_id),
+            );
+        }
+        attach_browser_tab(
+            &app,
+            "e3",
+            Some(LAPTOP),
+            TargetKind::Tab,
+            &slot_tab,
+            Some(&session_id),
+        );
+        assert_eq!(app.remote_browser_count(&session_id), 3);
     }
 
     fn app_with_two_terminals() -> App {
@@ -16639,9 +16682,9 @@ mod tests {
 
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
-        recorded.lock().expect("not poisoned").connections = 2;
+        recorded.lock().expect("not poisoned").browsers = 2;
         assert!(
-            header_row(&mut app, 160).contains("serving :8080 · 2 connected"),
+            header_row(&mut app, 160).contains("serving :8080 · 2 browsers"),
             "the header must name the port and the connection count: {}",
             header_row(&mut app, 160)
         );
@@ -20491,7 +20534,7 @@ mod tests {
             branch.map(|b| Span::raw(b.to_string())),
             MetaCounts {
                 tabs: Some(Span::raw("3 tabs".to_string())),
-                remote: Some(Span::raw("1 remote".to_string())),
+                remote: Some(Span::raw("1 browser".to_string())),
             },
             MetaLineStyle {
                 sep: Style::default(),
@@ -20510,10 +20553,10 @@ mod tests {
         for width in 19..=46u16 {
             let idle = fit_counts_line(width, "Idle", None);
             let working = fit_counts_line(width, "Working...", None);
-            if width >= 25 {
+            if width >= 26 {
                 for line in [&idle, &working] {
                     assert!(
-                        line.ends_with(" · 1 remote"),
+                        line.ends_with(" · 1 browser"),
                         "at width {width} the remote count must stay whole: {line:?}"
                     );
                 }
@@ -20522,7 +20565,7 @@ mod tests {
                 band.push(width);
             }
         }
-        assert_eq!(band, (33..=38).collect::<Vec<u16>>());
+        assert_eq!(band, (34..=39).collect::<Vec<u16>>());
     }
 
     #[test]
@@ -20555,15 +20598,15 @@ mod tests {
     fn the_remote_count_keeps_its_number_at_every_width_with_a_branch_and_a_name() {
         let glyph = crate::theme::Glyphs::PLAIN.project;
         for (width, word, want) in [
-            (46, "Idle", "demo-api · Idle · age… · 3 tabs · 1 remote"),
-            (33, "Idle", "d… · Idle · 3 tabs · 1 remote"),
-            (28, "Idle", "demo-… · Idle · 1 remote"),
-            (24, "Idle", "d… · Idle · 1 remote"),
-            (20, "Idle", "Idle · 1 remote"),
-            (39, "Working...", "d… · Working... · 3 tabs · 1 remote"),
-            (34, "Working...", "demo-… · Working... · 1 remote"),
-            (28, "Working...", "Working... · 1 remote"),
-            (24, "Working...", "Working... · 1 remo…"),
+            (47, "Idle", "demo-api · Idle · age… · 3 tabs · 1 browser"),
+            (34, "Idle", "d… · Idle · 3 tabs · 1 browser"),
+            (29, "Idle", "demo-… · Idle · 1 browser"),
+            (25, "Idle", "d… · Idle · 1 browser"),
+            (21, "Idle", "Idle · 1 browser"),
+            (40, "Working...", "d… · Working... · 3 tabs · 1 browser"),
+            (35, "Working...", "demo-… · Working... · 1 browser"),
+            (29, "Working...", "Working... · 1 browser"),
+            (25, "Working...", "Working... · 1 brows…"),
             (20, "Working...", "Working... · 1 …"),
         ] {
             assert_eq!(
@@ -20618,34 +20661,12 @@ mod tests {
         );
     }
 
-    /// Seed a live provider on the first session's slot tab and open one
-    /// browser-style viewer on it, so its row carries "1 remote". The returned
-    /// subscription keeps the viewer alive.
-    fn watched_by_one(
-        app: &mut App,
-    ) -> (
-        dux_core::pty::PtyViewerGuard,
-        std::sync::mpsc::Receiver<Vec<u8>>,
-    ) {
+    /// Open the first session's slot tab in one browser, so its row carries
+    /// "1 browser".
+    fn watched_by_one(app: &mut App) {
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        let client = PtyClient::spawn(
-            "/bin/sh",
-            &["-c".to_string(), "sleep 30".to_string()],
-            std::path::Path::new("."),
-            24,
-            80,
-            100,
-        )
-        .expect("spawn pty");
-        app.engine
-            .providers
-            .insert(TabId::new(slot_tab.clone()), client);
-        let provider = app
-            .engine
-            .providers
-            .get(TabIdRef::new(&slot_tab))
-            .expect("the seeded provider");
-        provider.subscribe()
+        let session_id = app.engine.sessions[0].id.clone();
+        crate::app::test_support::watch_from_a_browser(app, &slot_tab, &session_id);
     }
 
     /// A WORKING agent watched by a browser at the default layout: the glyph,
@@ -20654,7 +20675,7 @@ mod tests {
     #[test]
     fn at_the_default_120_columns_a_watched_working_row_keeps_the_remote_number() {
         let mut app = with_three_tabs(narrow_row_app("demo-api"));
-        let _viewer = watched_by_one(&mut app);
+        watched_by_one(&mut app);
         let slot = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.pty_activity.insert(slot, Instant::now());
         // Mid-way through the fourth dot step, so the slot reads "...".
@@ -20686,7 +20707,7 @@ mod tests {
                 None,
                 MetaCounts {
                     tabs: None,
-                    remote: Some(Span::raw("12 remote".to_string())),
+                    remote: Some(Span::raw("12 browsers".to_string())),
                 },
                 MetaLineStyle {
                     sep: Style::default(),
@@ -20713,10 +20734,10 @@ mod tests {
     #[test]
     fn at_the_default_120_columns_a_watched_row_keeps_its_remote_count() {
         let mut app = with_three_tabs(narrow_row_app("demo-api"));
-        let _viewer = watched_by_one(&mut app);
+        watched_by_one(&mut app);
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
-            format!("{} Idle · 1 remote", crate::theme::Glyphs::PLAIN.project)
+            format!("{} Idle · 1 browser", crate::theme::Glyphs::PLAIN.project)
         );
     }
 

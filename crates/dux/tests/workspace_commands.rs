@@ -203,6 +203,10 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     let run = ok(dux(&root, &["agents", "ls"], ""));
     let row = run.stdout().lines().nth(1).unwrap_or_default().to_string();
     assert!(row.contains(&format!(" {path} ")), "{}", run.stdout());
+    // The last column counts browsers, and nobody has the agent open yet.
+    let header = run.stdout().lines().next().unwrap_or_default().to_string();
+    assert!(header.trim_end().ends_with("TABS   BROWSERS"), "{header}");
+    assert!(row.trim_end().ends_with(" 0"), "{row}");
 
     // Its only tab cannot be closed: the engine's own sentence, and a
     // non-zero exit.

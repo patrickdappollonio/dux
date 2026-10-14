@@ -331,6 +331,7 @@ mod tests {
                 address: Some("192.168.1.5".parse().unwrap()),
                 verified: true,
                 events: true,
+                browser: None,
             },
             Some(Heard::now()),
         );
@@ -346,6 +347,7 @@ mod tests {
                 address: None,
                 verified: true,
                 events: false,
+                browser: None,
             },
             None,
         );

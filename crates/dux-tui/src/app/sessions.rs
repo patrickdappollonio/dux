@@ -9720,6 +9720,7 @@ mod tests {
                 address: Some("10.0.0.7".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );

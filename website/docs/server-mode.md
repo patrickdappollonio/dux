@@ -117,7 +117,9 @@ Your **agents keep running the entire time**: no relaunch, no lost conversations
 dux you already have starts serving in place. Your terminal turns into a themed dux
 status screen showing the serve URLs (your MagicDNS and `tailscale serve` URLs included,
 kept current while it runs), the same tailnet QR codes `dux server` prints, and a log
-viewer. The viewer shows exactly the log
+viewer whose corner says how many browsers are connected (`1 browser`, `2 browsers`,
+counted the way the [background mode's crumb](#serve-in-the-background-and-keep-the-tui) counts them).
+The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
 missing here, the reachability note included: it is the banner's last row rather than a
 line of its own in the header. The one deliberate exception is the warning about an
@@ -179,15 +181,17 @@ custom host.
 > so.
 
 While it serves, the top bar grows a crumb right after the version: `● serving :3890` on
-its own, becoming `● serving :3890 · 3 connected` once somebody is on it. The count is
-browser tabs, not people, so one laptop with two tabs open counts as two, and a tab that
-vanished without saying goodbye keeps counting until dux notices the socket is dead.
+its own, becoming `● serving :3890 · 2 browsers` once somebody is on it. The count is
+browsers, not tabs: every tab of one browser counts once, while a private window or a
+second browser on the same machine counts as another. A browser that vanished without
+saying goodbye keeps counting until dux notices its connection is dead.
 
 ![The terminal UI top bar carrying a serving crumb with the port, above the usual workspace with one agent working.](/screens/tui-serving-crumb.png)
 
-Each agent's row picks up a quiet `2 remote` on its second line when browsers have that
-agent open, counting every terminal it owns: its provider tabs and its companion
-terminals. The center pane's caption says the same for the provider tab it is showing.
+Each agent's row picks up a quiet `2 browsers` on its second line when browsers have that
+agent open in any terminal it owns: its provider tabs and its companion terminals. One
+browser with several of them open still counts once. The center pane's caption says the
+same for the provider tab it is showing.
 
 **One driver at a time.** The terminal UI is an ordinary participant in the same
 input-ownership model the browsers use. One device drives a terminal and everybody else
@@ -270,8 +274,16 @@ each browser tab and, when it is serving, the terminal UI, with the device (the 
 system the tab says it is), the address, when it connected, and the agent tabs and terminals
 it is streaming, marked `(driving)` where it is the one typing. An address is shown
 `(unverified)` when dux could only see the connection's nearest hop, which a proxy in between
-may be. The word is connections, not devices: it counts browser tabs, so one laptop with two
-tabs open is two. Add `--format json` for the whole record, or `-q` for the ids alone.
+may be. It lists connections, one row per tab, and the `BROWSER` column tells you which rows
+are one browser: every tab of one browser shows the same short code, the one the counts
+elsewhere count once. A `-` there is the terminal UI, or a tab that did not say which browser
+it belongs to, which counts as a browser of its own. Add `--format json` for the whole
+record, or `-q` for the ids alone.
+
+> [!NOTE]
+> The browser code only tells tabs apart for counting. A browser keeps it in its own site
+> storage, so a private window, a second browser, or clearing the site's data gets a new
+> one, and it never decides who may type in, stop or delete anything.
 
 ## Who can get in
 

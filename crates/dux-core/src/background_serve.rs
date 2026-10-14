@@ -270,14 +270,15 @@ pub trait BackgroundServeCompanion {
     /// The URLs currently being served, for status copy. Empty when not serving.
     fn urls(&self) -> Vec<String>;
 
-    /// How many browser tabs are connected right now. Zero when not serving.
+    /// How many browsers are connected right now. Zero when not serving.
     ///
-    /// "Connections", not "devices": one browser with two tabs open is two of
-    /// these, and nothing on this side of the wire can tell they are one laptop.
+    /// Browsers, not tabs: every tab of one browser profile counts once, by the
+    /// display-only id each browser keeps for itself; a private window or a
+    /// second browser on the same machine counts again.
     ///
     /// Read once per rendered frame, so it must stay a cheap load rather than a
     /// question that takes a lock or a turn.
-    fn connections(&self) -> usize;
+    fn browsers(&self) -> usize;
 
     /// Start serving on `listeners`, which the caller already bound so a bind
     /// failure tears nothing down. Returns the URLs, or a status-line message.

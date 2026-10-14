@@ -1,3 +1,4 @@
+import { browserId } from "./browserId"
 import { getPreviousConnectionId, noteConnectionIdPending } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import type { EventsClientMessage, EventsServerMessage } from "./types"
@@ -25,13 +26,15 @@ export class EventsSocket extends ReconnectingSocket {
   }
 
   // Every open is a new connection with no id yet, so terminal sockets wait for its
-  // `connected` frame; `?after=` hands the lost connection's attachments to this one.
+  // `connected` frame; `?after=` hands the lost connection's attachments to this one,
+  // and `?browser=` lets the server count this browser's tabs as one browser.
   protected override openUrl(): string {
     noteConnectionIdPending()
+    const params = [`browser=${encodeURIComponent(browserId())}`]
     const previous = getPreviousConnectionId()
-    if (previous === null) return this.url
+    if (previous !== null) params.push(`after=${encodeURIComponent(previous)}`)
     const separator = this.url.includes("?") ? "&" : "?"
-    return `${this.url}${separator}after=${encodeURIComponent(previous)}`
+    return `${this.url}${separator}${params.join("&")}`
   }
 
   // Re-send the WHOLE interest set on every (re)open: server-side interest is

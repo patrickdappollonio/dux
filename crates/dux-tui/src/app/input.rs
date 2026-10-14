@@ -25306,6 +25306,7 @@ cyan = "#00ffff"
                 address: Some("10.0.0.8".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );

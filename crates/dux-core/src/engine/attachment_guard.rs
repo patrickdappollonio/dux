@@ -361,6 +361,7 @@ mod tests {
                 address: Some("192.168.1.5".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );

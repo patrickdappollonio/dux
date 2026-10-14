@@ -40,6 +40,10 @@ pub fn connections_ls(client: &Client, shape: Shape) -> Result<String, CliError>
             id: connection.id.clone(),
             cells: vec![
                 connection.id.clone(),
+                connection
+                    .browser
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
                 device_cell(connection),
                 address_cell(connection),
                 connection.since.clone(),
@@ -50,7 +54,14 @@ pub fn connections_ls(client: &Client, shape: Shape) -> Result<String, CliError>
         .collect();
     Ok(output::render(
         &Listing {
-            headers: vec!["CONNECTION", "DEVICE", "ADDRESS", "SINCE", "ATTACHED"],
+            headers: vec![
+                "CONNECTION",
+                "BROWSER",
+                "DEVICE",
+                "ADDRESS",
+                "SINCE",
+                "ATTACHED",
+            ],
             rows,
         },
         shape,
@@ -287,7 +298,7 @@ mod tests {
     const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
 
     const CONNECTIONS: &str = r#"[
-        {"id":"e1","surface":"browser",
+        {"id":"e1","surface":"browser","browser":"3f9a61c2",
          "device":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
          "address":"198.51.100.7","verified":false,"since":"2026-10-06T10:00:00Z","driving":true,
          "attachments":[{"kind":"tab","id":"t1","agent":"s1","driving":true},
@@ -351,10 +362,10 @@ mod tests {
         assert_eq!(
             connections_ls(&client, Shape::Table).unwrap(),
             [
-                "CONNECTION    DEVICE            ADDRESS                     SINCE                  ATTACHED\n",
-                "e1            Chrome on Linux   198.51.100.7 (unverified)   2026-10-06T10:00:00Z   tab t1 (driving), terminal x2\n",
-                "terminal-ui   the dux TUI       -                           2026-10-06T09:00:00Z   -\n",
-                "e3            a browser         203.0.113.9                 2026-10-06T11:30:05Z   -\n",
+                "CONNECTION    BROWSER    DEVICE            ADDRESS                     SINCE                  ATTACHED\n",
+                "e1            3f9a61c2   Chrome on Linux   198.51.100.7 (unverified)   2026-10-06T10:00:00Z   tab t1 (driving), terminal x2\n",
+                "terminal-ui   -          the dux TUI       -                           2026-10-06T09:00:00Z   -\n",
+                "e3            -          a browser         203.0.113.9                 2026-10-06T11:30:05Z   -\n",
             ]
             .concat()
         );
@@ -364,6 +375,7 @@ mod tests {
         );
         let json: serde_json::Value =
             serde_json::from_str(&connections_ls(&client, Shape::Json).unwrap()).unwrap();
+        assert_eq!(json[0]["browser"], "3f9a61c2");
         assert_eq!(json[0]["address"], "198.51.100.7");
         assert_eq!(json[0]["verified"], false);
         assert_eq!(json[0]["attachments"][0]["id"], "t1");

@@ -119,7 +119,7 @@ impl App {
 
     /// The header chip that says a listener is up, or `None` when none is.
     ///
-    /// Present whenever serving, connections or not: the chip's first job is to be
+    /// Present whenever serving, browsers or not: the chip's first job is to be
     /// the standing "you are running a listener" signal, and a chip that only
     /// appeared once somebody connected would hide exactly the state worth knowing
     /// about. The count is the second job.
@@ -131,7 +131,7 @@ impl App {
         Some(serving_chip_label(
             self.glyphs().serving,
             serving_port_label(&companion.urls()).as_deref(),
-            companion.connections(),
+            companion.browsers(),
         ))
     }
 
@@ -1011,19 +1011,22 @@ fn serving_port_label(urls: &[String]) -> Option<String> {
 
 /// The serving chip's text: where it is serving, and how many browsers are on it.
 ///
-/// "Connected", not "devices": one browser with two tabs open counts twice, and
-/// nothing here can honestly tell that they are the same laptop. Zero says only
-/// that a listener exists, because "0 connected" is a number nobody needs and the
-/// chip is already carrying that fact by being there at all.
-fn serving_chip_label(glyph: &str, port: Option<&str>, connections: usize) -> String {
+/// Browsers, not tabs: every tab of one browser profile counts once, and a private
+/// window or a second browser counts again. Zero says only that a listener exists,
+/// because "0 browsers" is a number nobody needs and the chip is already carrying
+/// that fact by being there at all.
+fn serving_chip_label(glyph: &str, port: Option<&str>, browsers: usize) -> String {
     let where_at = match port {
         Some(port) => format!("serving {port}"),
         None => "serving".to_string(),
     };
-    if connections == 0 {
+    if browsers == 0 {
         format!("{glyph} {where_at}")
     } else {
-        format!("{glyph} {where_at} · {connections} connected")
+        format!(
+            "{glyph} {where_at} · {}",
+            dux_core::text::count_of(browsers, "browser")
+        )
     }
 }
 
@@ -1114,9 +1117,9 @@ pub(crate) mod tests {
         pub(crate) published: Vec<PtyOwnershipEvent>,
         /// Every live Tailscale mode the seam was asked for, in order.
         pub(crate) tailscale_modes: Vec<dux_core::config::TailscaleMode>,
-        /// How many browser tabs the serve says are connected, standing in for the
+        /// How many browsers the serve says are connected, standing in for the
         /// connection registry's own count.
-        pub(crate) connections: usize,
+        pub(crate) browsers: usize,
         /// One entry per `[server]` section the seam was handed after an applied
         /// reload, standing in for the live limits a real serve would store.
         pub(crate) config_applied: Vec<dux_core::config::ServerConfig>,
@@ -1274,11 +1277,11 @@ pub(crate) mod tests {
             vec!["http://127.0.0.1:8080".to_string()]
         }
 
-        fn connections(&self) -> usize {
+        fn browsers(&self) -> usize {
             if !self.serving {
                 return 0;
             }
-            self.recorded.lock().expect("not poisoned").connections
+            self.recorded.lock().expect("not poisoned").browsers
         }
 
         fn server_log_path(&self) -> Option<std::path::PathBuf> {
@@ -1999,11 +2002,11 @@ pub(crate) mod tests {
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
         app.stop_background_server_quietly();
-        recorded.lock().expect("not poisoned").connections = 3;
+        recorded.lock().expect("not poisoned").browsers = 3;
         assert!(app.companion.as_ref().is_some_and(|c| c.has_core()));
         assert_eq!(app.max_poll_ms(), u64::MAX);
         assert_eq!(app.serving_chip(), None);
-        assert_eq!(app.companion.as_ref().map(|c| c.connections()), Some(0));
+        assert_eq!(app.companion.as_ref().map(|c| c.browsers()), Some(0));
         assert!(
             app.companion
                 .as_ref()
@@ -2916,15 +2919,15 @@ pub(crate) mod tests {
             "serving with nobody on it still has to say a listener exists"
         );
 
-        recorded.lock().expect("not poisoned").connections = 1;
+        recorded.lock().expect("not poisoned").browsers = 1;
         assert_eq!(
             app.serving_chip().as_deref(),
-            Some("● serving :8080 · 1 connected")
+            Some("● serving :8080 · 1 browser")
         );
-        recorded.lock().expect("not poisoned").connections = 3;
+        recorded.lock().expect("not poisoned").browsers = 3;
         assert_eq!(
             app.serving_chip().as_deref(),
-            Some("● serving :8080 · 3 connected")
+            Some("● serving :8080 · 3 browsers")
         );
 
         app.stop_background_server_quietly();
@@ -2962,7 +2965,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             serving_chip_label(crate::theme::DOT_GLYPH, None, 2),
-            "● serving · 2 connected",
+            "● serving · 2 browsers",
             "an unreadable port drops the address, never the count"
         );
     }
