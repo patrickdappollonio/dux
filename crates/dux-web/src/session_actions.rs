@@ -1252,6 +1252,7 @@ mod tests {
                 address: Some("10.1.2.3".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );

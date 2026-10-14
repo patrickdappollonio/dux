@@ -9602,6 +9602,7 @@ mod tests {
                 address: None,
                 verified: true,
                 events: false,
+                browser: None,
             },
             None,
         );

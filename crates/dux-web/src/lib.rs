@@ -2149,13 +2149,13 @@ fn say(
     status.identity_news(tone, message);
 }
 
-/// The hooks only the BACKGROUND serve wants, because it is the only serve with a
-/// terminal UI beside it: somewhere for `build_app` to leave this serve's
-/// ownership publisher, and a counter for its connection registry to keep the live
-/// browser-tab count in.
+/// The hooks a serve with a screen of its own wants: somewhere for `build_app` to
+/// leave this serve's ownership publisher (the background serve, the only one with
+/// a terminal UI beside it), and a counter for its connection registry to keep the
+/// live browser count in (the background serve's chip, the flip's status screen).
 ///
 /// Bundled rather than passed side by side. They travel together through the same
-/// three functions, every other serve path passes the default, and two adjacent
+/// three functions, the other serve paths pass the default, and two adjacent
 /// slots is the shape where a third one gets threaded into two callers out of
 /// three.
 #[derive(Default)]
@@ -2787,6 +2787,8 @@ pub fn serve_with_engine(
     // The flip owns the terminal with its themed status screen, so this console
     // writes NOTHING to stdout; it records every line into the shared ring the
     // status screen's log viewer draws, the same lines `dux server` prints.
+    // Its connection registry keeps the screen's browser count in the same ring.
+    let browsers = activity.browsers_gauge();
     let mut console = Console::capture(activity);
     // The same lines go to `server.log`, so the flip leaves the log the other two
     // ways of serving leave.
@@ -2853,9 +2855,12 @@ pub fn serve_with_engine(
             quit: Arc::clone(&quit),
         },
         // The flip has no terminal UI beside it (it took the terminal over), so
-        // there is no second surface to announce ownership changes for, and nowhere
-        // to show a connection count either.
-        BackgroundHooks::default(),
+        // there is no second surface to announce ownership changes for; its status
+        // screen shows the browser count.
+        BackgroundHooks {
+            ownership_publisher: None,
+            connections_gauge: Some(browsers),
+        },
     )?;
 
     // A serve failure or a tripped signal flag exits; otherwise the tick result maps through.
@@ -3720,7 +3725,6 @@ mod tests {
         let ring = dux_core::activity::ActivityRing::new(10);
         let console = crate::console::Console::capture(ring.clone());
         console.client_connected("10.0.0.7".parse().unwrap());
-        assert_eq!(ring.connections(), 1);
         assert_eq!(ring.snapshot().lines.len(), 1);
     }
 

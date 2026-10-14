@@ -1160,6 +1160,61 @@ async fn a_browser_tab_is_listed_and_not_in_its_own_way_but_a_second_tab_on_the_
     assert_eq!(delete_agent_once_free(addr, "s1", Some(&tab_a)).await, 204);
 }
 
+/// Two tabs naming the same browser id (`?browser=`) are one browser in the
+/// agent's count and share a code in the listing, yet the other tab is still in
+/// the way of a delete: the id counts and groups, and decides nothing. A
+/// malformed id is no id at all.
+#[tokio::test]
+async fn tabs_of_one_browser_count_once_but_still_block_each_other() {
+    let (addr, _tmp) = boot().await;
+    let laptop = "0123456789abcdef0123456789abcdef";
+    let (_events_a, tab_a) =
+        connect_events_at(addr, &format!("/ws/events?browser={laptop}"), "dux-ua").await;
+    let (_events_b, tab_b) =
+        connect_events_at(addr, &format!("/ws/events?browser={laptop}"), "dux-ua").await;
+    let (_events_c, tab_c) =
+        connect_events_at(addr, "/ws/events?browser=not%20an%20id", "dux-ua").await;
+    let mut ptys = Vec::new();
+    for tab in [&tab_a, &tab_b] {
+        ptys.push(
+            connect_pty_as(addr, &format!("/ws/sessions/s1/pty?events={tab}"), "dux-ua").await,
+        );
+    }
+
+    let sessions: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/sessions"))
+        .await
+        .expect("GET sessions")
+        .json()
+        .await
+        .unwrap();
+    let s1 = sessions
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == "s1"))
+        .expect("s1 is listed");
+    assert_eq!(s1["remote_viewers"], 1, "two tabs, one browser: {s1}");
+
+    let listed: serde_json::Value =
+        reqwest::get(format!("http://{addr}/api/v1/server/connections"))
+            .await
+            .expect("GET connections")
+            .json()
+            .await
+            .unwrap();
+    let browser_of = |tab: &str| {
+        listed
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == tab))
+            .map(|row| row["browser"].clone())
+            .unwrap_or_else(|| panic!("{tab} is listed: {listed}"))
+    };
+    assert_eq!(browser_of(&tab_a), "01234567");
+    assert_eq!(browser_of(&tab_b), "01234567");
+    assert_eq!(browser_of(&tab_c), serde_json::Value::Null);
+
+    let (status, refused) = delete_agent_as(addr, "s1", Some(&tab_a)).await;
+    assert_eq!(status, 409, "the other tab is in the way: {refused}");
+}
+
 /// A phone whose terminal socket was lost while its owner was looking at it
 /// (the last beat said so) still protects that agent for the grace, even once
 /// its events socket is reaped too; one whose page was not being looked at

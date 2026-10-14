@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { publishConnectionTiming } from "./connectionTiming"
+import { browserId } from "./browserId"
 import { setConnectionId } from "./connection"
 import { EventsSocket } from "./eventsSocket"
 import type { ConnState, EventsServerMessage, ResourceEvent } from "./types"
@@ -77,13 +78,14 @@ describe("EventsSocket", () => {
     vi.useFakeTimers()
     const sock = new EventsSocket("ws://x/ws/events")
     sock.connect()
-    expect(last().url).toBe("ws://x/ws/events")
+    const browser = `browser=${browserId()}`
+    expect(last().url).toBe(`ws://x/ws/events?${browser}`)
     last().open()
     setConnectionId("e/1")
     setConnectionId(null)
     last().triggerClose()
     vi.advanceTimersByTime(600)
-    expect(last().url).toBe("ws://x/ws/events?after=e%2F1")
+    expect(last().url).toBe(`ws://x/ws/events?${browser}&after=e%2F1`)
   })
 
   it("sends a subscribe frame for newly-added topics when open", () => {

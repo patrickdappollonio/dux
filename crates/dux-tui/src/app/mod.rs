@@ -7205,42 +7205,38 @@ impl App {
         }
     }
 
-    /// How many browsers have this agent open: every PTY the agent owns, summed.
+    /// How many browsers have this agent open: any of its provider tabs or its
+    /// companion terminals, the way the row's liveness ORs across tabs, because
+    /// the agent's row is the only place that fact is shown at all (the terminal
+    /// rows carry no count of their own).
     ///
-    /// Summed over its provider tabs and its companion terminals, the way the
-    /// row's liveness ORs across tabs, because the agent's row is the only place
-    /// that fact is shown at all (the terminal rows carry no count of their
-    /// own). A browser watching two of them counts twice, which is the honest
-    /// reading of "how many remote viewers are attached".
+    /// Browsers, not sockets: one browser watching two of the agent's terminals,
+    /// or the same one in two of its tabs, is one browser, read from the
+    /// attachment registry the web's sockets join. A project or standalone
+    /// terminal belongs to no agent, so its watchers never reach this count.
     ///
-    /// Zero when nothing is serving, structurally: the subscriber lists are
-    /// exactly the web PTY sockets, and without a serve there are none.
-    ///
-    /// Takes `tab_ids` rather than resolving them: the only caller is the agent
-    /// row, which needs them anyway, and `session_tab_ids` allocates a
-    /// `Vec<String>` with a clone per tab on a path that runs once per row per
-    /// frame.
-    pub(crate) fn remote_viewer_count(&self, session_id: &str, tab_ids: &[String]) -> usize {
-        let tabs: usize = tab_ids
-            .iter()
-            .filter_map(|tab_id| self.engine.providers.get(TabIdRef::new(tab_id)))
-            .map(|client| client.subscriber_count())
-            .sum();
-        tabs + self
-            .engine
-            .companion_terminals
-            .values()
-            // Exhaustive rather than a `matches!`, like
-            // `session_terminal_count`: whether a new owner kind's watchers
-            // count toward an agent's row is a decision, not a default.
-            .filter(|t| match t.owner.as_ref() {
-                TerminalOwnerRef::Session(sid) => sid == session_id,
-                // A project terminal belongs to a project and a standalone one
-                // to nothing, so watchers of either are nobody's agent's.
-                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => false,
-            })
-            .map(|t| t.client.subscriber_count())
-            .sum::<usize>()
+    /// Zero when nothing is serving, structurally: only a web socket attaches as
+    /// a browser, and without a serve there are none.
+    pub(crate) fn remote_browser_count(&self, session_id: &str) -> usize {
+        let scope = dux_core::attachments::Scope {
+            ptys: Default::default(),
+            agents: [session_id.to_string()].into(),
+        };
+        self.engine
+            .attachments
+            .browsers_attached(&scope, std::time::Instant::now())
+    }
+
+    /// How many browsers have the one PTY `pty_id` open, counted like
+    /// [`Self::remote_browser_count`].
+    pub(crate) fn pty_browser_count(&self, pty_id: &str) -> usize {
+        let scope = dux_core::attachments::Scope {
+            ptys: [pty_id.to_string()].into(),
+            agents: Default::default(),
+        };
+        self.engine
+            .attachments
+            .browsers_attached(&scope, std::time::Instant::now())
     }
 
     pub(crate) fn running_companion_terminal_count(&self) -> usize {

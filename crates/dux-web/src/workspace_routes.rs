@@ -19,10 +19,10 @@
 //! - `GET /api/v1/sessions` also lists, after the live agents, each agent a followed
 //!   delete is still removing, with `"removing": true` and no terminals, until the
 //!   delete's record finishes; the workspace document drops it when the delete starts.
-//! - Its live rows carry `remote_viewers`, the browser connections attached to the
-//!   agent. The pushed workspace document leaves the count out, or every attach would
-//!   re-push it, and so does `GET /api/v1/sessions/{id}`, which keeps the create
-//!   replay's shape.
+//! - Its live rows carry `remote_viewers`, how many browsers have the agent open
+//!   (every tab of one browser profile counted once). The pushed workspace document
+//!   leaves the count out, or every attach would re-push it, and so does
+//!   `GET /api/v1/sessions/{id}`, which keeps the create replay's shape.
 //!
 //! A nested terminal entry carries a tagged `owner` field. That is additive and it
 //! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
@@ -66,8 +66,8 @@ pub struct SessionWithTerminals {
     /// Set only on `GET /api/v1/sessions`, for an agent a delete is still removing.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     removing: bool,
-    /// Browser connections attached to the agent's tabs or terminals, each counted once;
-    /// present only on the live rows of `GET /api/v1/sessions`.
+    /// Browsers with the agent's tabs or terminals open, every tab of one browser
+    /// profile counted once; present only on the live rows of `GET /api/v1/sessions`.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_viewers: Option<usize>,
 }
@@ -82,7 +82,7 @@ impl SessionWithTerminals {
         }
     }
 
-    /// This row with its count of remote viewers, read from the attachment
+    /// This row with its count of browsers, read from the attachment
     /// registry, the one record of who is attached to what.
     fn counting_viewers(mut self, attachments: &dux_core::attachments::Attachments) -> Self {
         let scope = dux_core::attachments::Scope {
@@ -284,7 +284,7 @@ mod tests {
     /// browser reads does not. Every live row counts the browsers attached to
     /// the agent, leaving out the terminal UI.
     #[tokio::test]
-    async fn the_thin_read_lists_agents_being_removed_and_counts_remote_viewers() {
+    async fn the_thin_read_lists_agents_being_removed_and_counts_remote_browsers() {
         use dux_core::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
 
         let tmp = dux_core::test_scratch::ScratchDir::new();
@@ -304,12 +304,16 @@ mod tests {
             id: "live-slot".to_string(),
             agent: Some("live".to_string()),
         };
-        for (connection, surface) in [
-            ("e1", Surface::Browser),
-            ("e2", Surface::Browser),
+        // e1 and e2 are two tabs of one browser; e3 named no browser.
+        let laptop = dux_core::attachments::BrowserId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for (connection, surface, browser) in [
+            ("e1", Surface::Browser, laptop.clone()),
+            ("e2", Surface::Browser, laptop.clone()),
+            ("e3", Surface::Browser, None),
             (
                 dux_core::attachments::TERMINAL_UI_CONNECTION,
                 Surface::TerminalUi,
+                None,
             ),
         ] {
             engine.attachments.register(
@@ -320,6 +324,7 @@ mod tests {
                     address: None,
                     verified: true,
                     events: true,
+                    browser,
                 },
                 Some(Heard::now()),
             );
@@ -329,7 +334,7 @@ mod tests {
                 .unwrap();
         }
         // A second terminal of the agent on the same browser tab is still
-        // one viewer.
+        // one browser.
         engine
             .attachments
             .attach(

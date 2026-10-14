@@ -406,7 +406,8 @@ pub struct ServerStatusScreen {
     /// The shared line buffer fed by the web console.
     activity: ActivityRing,
     view: LogView,
-    connections: usize,
+    /// How many browsers are connected, as last drawn.
+    browsers: usize,
     scroll: LogScroll,
     /// The scrolling area's height and whether the startup stuck on top, at the
     /// last draw, for sizing a page between draws.
@@ -454,7 +455,7 @@ impl ServerStatusScreen {
             last_drawn_secs: 0,
             view: LogView::new(activity.capacity()),
             activity,
-            connections: 0,
+            browsers: 0,
             scroll: LogScroll::default(),
             log_rows: 0,
             sticky: true,
@@ -495,8 +496,8 @@ impl ServerStatusScreen {
         if self.sync() {
             self.dirty = true;
         }
-        if self.activity.connections() != self.connections {
-            self.connections = self.activity.connections();
+        if self.activity.browsers() != self.browsers {
+            self.browsers = self.activity.browsers();
             self.dirty = true;
         }
         if !self.dirty && secs == self.last_drawn_secs {
@@ -586,7 +587,7 @@ impl ServerStatusScreen {
         };
         let bindings = &self.bindings;
         let view = &mut self.view;
-        let connections = self.connections;
+        let browsers = browsers_title(self.browsers);
         let scroll = &mut self.scroll;
         let terminal = &mut self.terminal;
         let mut measured = (self.log_rows, self.sticky);
@@ -632,14 +633,7 @@ impl ServerStatusScreen {
 
                     // ── Log panel (rounded, themed) ─────────────────────────────
                     measured = draw_log_panel(
-                        frame,
-                        chunks[1],
-                        theme,
-                        bindings,
-                        view,
-                        scroll,
-                        "Log",
-                        format!(" {connections} connected "),
+                        frame, chunks[1], theme, bindings, view, scroll, "Log", browsers,
                     );
 
                     // ── Footer hints (centered) ─────────────────────────────────
@@ -761,6 +755,12 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
             Err(err.into())
         }
     }
+}
+
+/// The log panel's right-hand title: how many browsers are connected, every
+/// tab of one browser profile counted once.
+fn browsers_title(browsers: usize) -> String {
+    format!(" {} ", dux_core::text::count_of(browsers, "browser"))
 }
 
 /// Draw the log panel the flip's status screen and the server log viewer share. Returns
@@ -1311,6 +1311,18 @@ fn viewer_footer_lines(
 mod tests {
     use super::*;
     use crate::keybindings::BINDING_DEFS;
+
+    /// The log panel counts browsers, and reads them from the ring the serve's
+    /// connection registry keeps the count in.
+    #[test]
+    fn the_log_panel_counts_browsers_from_the_ring() {
+        let ring = ActivityRing::new(10);
+        assert_eq!(browsers_title(ring.browsers()), " 0 browsers ");
+        ring.browsers_gauge()
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(browsers_title(ring.browsers()), " 1 browser ");
+        assert_eq!(browsers_title(2), " 2 browsers ");
+    }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)

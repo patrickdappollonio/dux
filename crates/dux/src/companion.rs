@@ -191,10 +191,10 @@ impl BackgroundServeCompanion for WebCompanion {
         self.serving().map(|s| s.urls()).unwrap_or_default()
     }
 
-    fn connections(&self) -> usize {
-        // No serve, no connections: the count is structurally zero rather than
+    fn browsers(&self) -> usize {
+        // No serve, no browsers: the count is structurally zero rather than
         // remembered from last time.
-        self.serving().map_or(0, |s| s.connections())
+        self.serving().map_or(0, |s| s.browsers())
     }
 
     fn start(

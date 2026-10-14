@@ -264,6 +264,7 @@ mod tests {
                 address: Some("198.51.100.7".parse().unwrap()),
                 verified: false,
                 events: true,
+                browser: None,
             },
             None,
         );

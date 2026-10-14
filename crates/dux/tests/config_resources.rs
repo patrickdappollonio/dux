@@ -209,7 +209,7 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
         assert_eq!(run.code(), 0, "{through:?}: {}", run.stderr());
         assert_eq!(
             run.stdout(),
-            "CONNECTION   DEVICE   ADDRESS   SINCE   ATTACHED\n"
+            "CONNECTION   BROWSER   DEVICE   ADDRESS   SINCE   ATTACHED\n"
         );
         assert_eq!(with(&["server", "connections", "ls", "-q"]).stdout(), "");
         assert_eq!(

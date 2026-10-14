@@ -683,17 +683,14 @@ impl Console {
         }
     }
 
+    /// One socket arriving, in the log. The flip's browser count is not kept
+    /// here: it is the connection registry's, which knows which sockets are one
+    /// browser.
     pub fn client_connected(&self, ip: IpAddr) {
-        if let Some(ring) = &self.0.capture {
-            ring.connection_opened();
-        }
         self.emit(LogTone::Info, &format!("client connected from {ip}"));
     }
 
     pub fn client_disconnected(&self, ip: IpAddr) {
-        if let Some(ring) = &self.0.capture {
-            ring.connection_closed();
-        }
         self.emit(LogTone::Info, &format!("client disconnected from {ip}"));
     }
 
@@ -1128,14 +1125,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_console_tracks_active_connection_count() {
+    fn capture_console_logs_clients_but_leaves_the_browser_count_to_the_registry() {
         let ring = ActivityRing::new(10);
         let console = Console::capture(ring.clone());
         console.client_connected(ip("10.0.0.1"));
         console.client_connected(ip("10.0.0.2"));
-        assert_eq!(ring.connections(), 2);
         console.client_disconnected(ip("10.0.0.1"));
-        assert_eq!(ring.connections(), 1);
+        assert_eq!(ring.browsers(), 0, "sockets are not browsers");
         assert_eq!(ring.snapshot().lines.len(), 3);
     }
 

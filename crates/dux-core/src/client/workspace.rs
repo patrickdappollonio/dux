@@ -418,7 +418,7 @@ pub fn agents_ls(
     Ok(output::render(
         &Listing {
             headers: vec![
-                "ID", "NAME", "PROJECT", "WORKTREE", "PROVIDER", "STATE", "TABS", "REMOTE",
+                "ID", "NAME", "PROJECT", "WORKTREE", "PROVIDER", "STATE", "TABS", "BROWSERS",
             ],
             rows,
         },

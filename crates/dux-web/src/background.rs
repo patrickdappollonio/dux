@@ -45,10 +45,10 @@ pub struct BackgroundServer {
     /// filled by `build_app`. Empty is survivable: nothing is announced and
     /// browsers fall back to the fingerprint backstop and the handshake.
     publisher: Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
-    /// How many browser tabs are connected, kept up to date by the router's
+    /// How many browsers are connected, kept up to date by the router's
     /// connection registry. An atomic because the terminal UI reads it once per
     /// rendered frame from the thread that also services this serve.
-    connections: Arc<AtomicUsize>,
+    browsers: Arc<AtomicUsize>,
     /// The file this serve's console writes, which a reload of `[server]
     /// log_path` does not move for as long as this serve runs.
     log_path: Option<std::path::PathBuf>,
@@ -138,7 +138,7 @@ impl BackgroundServer {
             Vec::new()
         };
         let publisher = Arc::new(std::sync::OnceLock::new());
-        let connections = Arc::new(AtomicUsize::new(0));
+        let browsers = Arc::new(AtomicUsize::new(0));
         let service = EngineService::new(engine, ends, ShutdownEcho::Silent);
         let core = ServeCore::start(
             handle,
@@ -152,7 +152,7 @@ impl BackgroundServer {
             SignalPolicy::Inherited,
             crate::BackgroundHooks {
                 ownership_publisher: Some(Arc::clone(&publisher)),
-                connections_gauge: Some(Arc::clone(&connections)),
+                connections_gauge: Some(Arc::clone(&browsers)),
             },
         )?;
         let mut server = Self {
@@ -163,7 +163,7 @@ impl BackgroundServer {
             last_command_applies: engine.command_applies,
             ownership: Some(ownership),
             publisher,
-            connections,
+            browsers,
             log_path,
         };
         server.publish_ownership_events(&seeded_claims);
@@ -188,7 +188,7 @@ impl BackgroundServer {
             last_command_applies: engine.command_applies,
             ownership: None,
             publisher: Arc::new(std::sync::OnceLock::new()),
-            connections: Arc::new(AtomicUsize::new(0)),
+            browsers: Arc::new(AtomicUsize::new(0)),
             log_path: None,
         }))
     }
@@ -218,10 +218,10 @@ impl BackgroundServer {
         self.log_path.clone()
     }
 
-    /// How many browser tabs are connected to this serve right now. Connections,
-    /// not devices: two tabs of one browser count as two.
-    pub fn connections(&self) -> usize {
-        self.connections.load(std::sync::atomic::Ordering::Relaxed)
+    /// How many browsers are connected to this serve right now: every tab of one
+    /// browser profile counted once.
+    pub fn browsers(&self) -> usize {
+        self.browsers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The addresses this serve is reachable on right now.

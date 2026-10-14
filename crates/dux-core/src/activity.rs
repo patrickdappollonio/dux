@@ -1,5 +1,5 @@
 //! A bounded, thread-safe tail of the web server's console lines plus a live
-//! active-connection count. The web `Console` (the producer, on many tokio
+//! count of connected browsers. The web `Console` (the producer, on many tokio
 //! worker threads) pushes here; the flip's server status screen (the consumer,
 //! on the engine-loop thread) reads what arrived since it last looked
 //! ([`ActivityRing::lines_since`]) and scrolls back through its own copy.
@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::serve_log::LogLine;
 
 /// A point-in-time read of the whole log: the line generation, the live
-/// connection count, and every line in order (the pinned startup lines, then
+/// browser count, and every line in order (the pinned startup lines, then
 /// the retained rest, oldest first).
 #[derive(Clone, Debug)]
 pub struct ActivitySnapshot {
     /// How many lines were ever pushed, dropped ones included.
     pub generation: u64,
-    pub connections: usize,
+    pub browsers: usize,
     pub lines: Vec<LogLine>,
 }
 
@@ -38,7 +38,9 @@ struct Held {
 struct ActivityInner {
     held: Mutex<Held>,
     capacity: usize,
-    connections: AtomicUsize,
+    /// How many browsers are connected, kept by the serve's connection registry
+    /// through [`ActivityRing::browsers_gauge`].
+    browsers: Arc<AtomicUsize>,
     /// Bumped on every push (including pushes that drop an older line), so a
     /// reader can detect new activity without copying the buffer.
     generation: AtomicU64,
@@ -77,7 +79,7 @@ impl ActivityRing {
                 lines: VecDeque::with_capacity(capacity.min(4096)),
             }),
             capacity,
-            connections: AtomicUsize::new(0),
+            browsers: Arc::new(AtomicUsize::new(0)),
             generation: AtomicU64::new(0),
             pin_version: AtomicU64::new(0),
             serve_urls: Mutex::new(Vec::new()),
@@ -172,27 +174,19 @@ impl ActivityRing {
         self.0.urls_version.load(Ordering::Relaxed)
     }
 
-    pub fn connection_opened(&self) {
-        self.0.connections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement the active-connection count, saturating at zero so a disconnect
-    /// without a matching connect (or a double fire) can never wrap.
-    pub fn connection_closed(&self) {
-        let _ = self
-            .0
-            .connections
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
-                Some(c.saturating_sub(1))
-            });
+    /// The counter the serve's connection registry keeps the live browser count
+    /// in, which [`Self::browsers`] reads.
+    pub fn browsers_gauge(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.0.browsers)
     }
 
     pub fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::Relaxed)
     }
 
-    pub fn connections(&self) -> usize {
-        self.0.connections.load(Ordering::Relaxed)
+    /// How many browsers are connected right now.
+    pub fn browsers(&self) -> usize {
+        self.0.browsers.load(Ordering::Relaxed)
     }
 
     /// The whole log, pinned lines first. Copies everything, so it is for tests
@@ -201,7 +195,7 @@ impl ActivityRing {
         let held = self.held();
         ActivitySnapshot {
             generation: self.0.generation.load(Ordering::Relaxed),
-            connections: self.0.connections.load(Ordering::Relaxed),
+            browsers: self.0.browsers.load(Ordering::Relaxed),
             lines: held
                 .pinned
                 .iter()
@@ -244,11 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn ring_starts_empty_with_zero_connections() {
+    fn ring_starts_empty_with_no_browsers() {
         let ring = ActivityRing::new(10);
         let snap = ring.snapshot();
         assert!(snap.lines.is_empty());
-        assert_eq!(snap.connections, 0);
+        assert_eq!(snap.browsers, 0);
         assert_eq!(snap.generation, 0);
     }
 
@@ -364,21 +358,11 @@ mod tests {
     }
 
     #[test]
-    fn connection_counter_increments_and_decrements() {
+    fn the_browser_count_reads_what_the_gauge_holds() {
         let ring = ActivityRing::new(10);
-        ring.connection_opened();
-        ring.connection_opened();
-        assert_eq!(ring.connections(), 2);
-        ring.connection_closed();
-        assert_eq!(ring.connections(), 1);
-    }
-
-    #[test]
-    fn connection_close_saturates_at_zero() {
-        let ring = ActivityRing::new(10);
-        ring.connection_closed();
-        ring.connection_closed();
-        assert_eq!(ring.connections(), 0);
+        ring.browsers_gauge().store(2, Ordering::Relaxed);
+        assert_eq!(ring.browsers(), 2);
+        assert_eq!(ring.snapshot().browsers, 2);
     }
 
     #[test]
