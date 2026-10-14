@@ -1244,10 +1244,18 @@ async fn an_unlinked_terminal_socket_counts_as_the_browser_it_names() {
             .expect("s1 is listed")["remote_viewers"]
             .clone()
     };
-    assert_eq!(remote_viewers().await, 1, "the tab and its terminal are one browser");
+    assert_eq!(
+        remote_viewers().await,
+        1,
+        "the tab and its terminal are one browser"
+    );
 
     let _anonymous = connect_pty_as(addr, "/ws/sessions/s1/pty", "dux-ua").await;
-    assert_eq!(remote_viewers().await, 2, "a socket naming no browser is its own");
+    assert_eq!(
+        remote_viewers().await,
+        2,
+        "a socket naming no browser is its own"
+    );
 }
 
 /// A phone whose terminal socket was lost while its owner was looking at it
