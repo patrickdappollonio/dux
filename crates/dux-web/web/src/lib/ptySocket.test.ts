@@ -4,8 +4,6 @@ import {
   PROVIDER_UNAVAILABLE_CLOSE,
   PtySocket,
   agentPtyUrl,
-  getActivePtySocket,
-  setActivePtySocket,
   projectTerminalPtyUrl,
   standaloneTerminalPtyUrl,
   tabPtyUrl,
@@ -86,7 +84,6 @@ afterEach(() => {
   clearServerValidated()
   vi.unstubAllGlobals()
   vi.useRealTimers()
-  setActivePtySocket(null)
 })
 
 function last(): FakeWS {
@@ -801,17 +798,6 @@ describe("PtySocket", () => {
     sock.close()
     vi.advanceTimersByTime(10000)
     expect(FakeWS.instances.length).toBe(before)
-  })
-})
-
-describe("active PTY socket registry", () => {
-  it("stores and clears the active socket", () => {
-    expect(getActivePtySocket()).toBeNull()
-    const sock = new PtySocket("ws://x/pty")
-    setActivePtySocket(sock)
-    expect(getActivePtySocket()).toBe(sock)
-    setActivePtySocket(null)
-    expect(getActivePtySocket()).toBeNull()
   })
 })
 

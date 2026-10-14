@@ -480,17 +480,3 @@ export class PtySocket extends ReconnectingSocket {
     return false
   }
 }
-
-// The PTY socket the focused center pane is currently driving, or null when no
-// terminal is focused. Macro delivery is client-side, so the store needs a handle
-// to the active PTY without reaching into React. `TerminalPane` registers its
-// socket on mount and clears it on unmount.
-let activePtySocket: PtySocket | null = null
-
-export function setActivePtySocket(s: PtySocket | null): void {
-  activePtySocket = s
-}
-
-export function getActivePtySocket(): PtySocket | null {
-  return activePtySocket
-}

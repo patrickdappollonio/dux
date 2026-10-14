@@ -182,9 +182,22 @@ vi.mock("@/lib/store", async (importOriginal) => {
 // The store reads `localStorage` at import time, transitively through the pane.
 installStubs()
 const { TerminalPane } = await import("./TerminalPane")
-const { getActivePtySocket, setActivePtySocket } = await import(
-  "@/lib/ptySocket"
+const { paneMacroTargetFor, resetPaneMacroTargets } = await import(
+  "@/lib/paneMacroTarget"
 )
+
+// Which socket a picked macro would be written down: the pane's published
+// writer, probed with one write and read back off the fakes.
+function macroSocket(): FakePtySocket | null {
+  const send = paneMacroTargetFor(paneProps.id)?.send ?? null
+  if (send === null) return null
+  for (const pty of FakePtySocket.instances) pty.sendInput.mockClear()
+  send(new Uint8Array([1]))
+  return (
+    FakePtySocket.instances.find((pty) => pty.sendInput.mock.calls.length > 0) ??
+    null
+  )
+}
 
 function makeState(): DuxState {
   return {
@@ -277,14 +290,14 @@ const paneProps = { kind: "agent", id: "s1", sessionId: "s1" } as const
 beforeEach(() => {
   FakePtySocket.instances = []
   TermStub.instances = []
-  setActivePtySocket(null)
+  resetPaneMacroTargets()
   mockState = makeState()
   installStubs()
 })
 
 afterEach(() => {
   cleanup()
-  setActivePtySocket(null)
+  resetPaneMacroTargets()
   vi.unstubAllGlobals()
 })
 
@@ -295,7 +308,7 @@ describe("how many PTY sockets one pane mount opens", () => {
     expect(FakePtySocket.instances).toHaveLength(1)
     expect(FakePtySocket.instances[0].connect).toHaveBeenCalledTimes(1)
     expect(FakePtySocket.instances[0].dispose).not.toHaveBeenCalled()
-    expect(getActivePtySocket()).toBe(FakePtySocket.instances[0])
+    expect(macroSocket()).toBe(FakePtySocket.instances[0])
   })
 
   it("disposes that socket and clears the registration on unmount", () => {
@@ -304,7 +317,7 @@ describe("how many PTY sockets one pane mount opens", () => {
 
     expect(FakePtySocket.instances).toHaveLength(1)
     expect(FakePtySocket.instances[0].dispose).toHaveBeenCalledTimes(1)
-    expect(getActivePtySocket()).toBeNull()
+    expect(macroSocket()).toBeNull()
   })
 
   it("constructs two under StrictMode, one per effect invocation", () => {
@@ -337,18 +350,17 @@ describe("how many PTY sockets one pane mount opens", () => {
     expect(disposals).toEqual([1, 0])
   })
 
-  it("leaves the surviving socket registered as the active one", () => {
+  it("writes a picked macro down the surviving socket", () => {
     render(
       <React.StrictMode>
         <TerminalPane {...paneProps} />
       </React.StrictMode>,
     )
 
-    // The discarded socket clears the registration on its way out and the
-    // survivor claims it, so the macro picker writes to the live PTY rather
-    // than to a socket the pane has already thrown away.
-    expect(getActivePtySocket()).toBe(FakePtySocket.instances.at(-1))
-    expect(getActivePtySocket()).not.toBe(FakePtySocket.instances[0])
+    // The pane's writer resolves its socket at call time, so the macro picker
+    // writes to the live PTY rather than to a socket the pane has already
+    // thrown away.
+    expect(macroSocket()).toBe(FakePtySocket.instances.at(-1))
   })
 
   it("disposes the StrictMode survivor too, and clears the registration", () => {
@@ -365,7 +377,7 @@ describe("how many PTY sockets one pane mount opens", () => {
       (pty) => pty.dispose.mock.calls.length,
     )
     expect(disposals).toEqual([1, 1])
-    expect(getActivePtySocket()).toBeNull()
+    expect(macroSocket()).toBeNull()
   })
 })
 

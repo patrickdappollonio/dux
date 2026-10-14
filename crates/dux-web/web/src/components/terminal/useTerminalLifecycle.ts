@@ -21,7 +21,6 @@ import "@xterm/xterm/css/xterm.css"
 import {
   PtySocket,
   agentPtyUrl,
-  setActivePtySocket,
   tabPtyUrl,
   terminalSocketUrl,
 } from "@/lib/ptySocket"
@@ -216,10 +215,8 @@ export function useTerminalLifecycle(
     // Opening the socket is the subscription: it launches the tab if it is not
     // running, with resume decided server-side. A dormant tab is never
     // auto-mounted, so reaching here for one is an intentional launch.
-    // Registered as the active socket so the macro picker can write to it.
     const pty = new PtySocket(ptyUrl)
     ptyRef.current = pty
-    setActivePtySocket(pty)
     // Constructed before the addon so the coordinator below can be given the
     // socket's own `sendResize`; `connect()` is still the explicit act below.
     const fit = new FitAddon()

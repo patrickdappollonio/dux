@@ -7,9 +7,8 @@
 // which under Base UI's return-to-trigger default would reopen the menu instead.
 //
 // The mounted pane registers its typing surface here and retires the
-// registration on unmount, the same idiom as `composeInsert.ts` and
-// `setActivePtySocket`. No registration means no pane is mounted, and the caller
-// correctly falls back to Base UI's default.
+// registration on unmount. No registration means no pane is mounted, and the
+// caller correctly falls back to Base UI's default.
 
 export type TerminalFocusTarget = () => HTMLElement | null
 

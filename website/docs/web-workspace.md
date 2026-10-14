@@ -530,10 +530,11 @@ only what you do in it.
 
 ## Macros
 
-A floating **Macros…** button drops prewritten prompt snippets into the focused terminal
-without submitting them, so you review and press Enter yourself. Each macro is scoped to
-agents, terminals, or both, and multi-line macros are inserted so they do not submit line
-by line. Full details in [Managing Macros](/docs/macros).
+The **Macros…** button in a terminal pane's header (in the action flap on a phone) drops
+prewritten prompt snippets into that terminal without submitting them, so you review and
+press Enter yourself. It is greyed out while a take-over card covers the terminal. Each
+macro is scoped to agents, terminals, or both, and multi-line macros are inserted so they
+do not submit line by line. Full details in [Managing Macros](/docs/macros).
 
 ## On your phone
 
