@@ -402,6 +402,110 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
     }
 
+    /// An engine with one agent on branch `old-name` in a real repository that
+    /// also has a branch called `taken`, stored in the database.
+    fn engine_with_a_repository() -> (Engine, crate::test_scratch::ScratchDir) {
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=old-name"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        git(&repo, &["branch", "taken"]);
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "old-name");
+        session.title = None;
+        if let Some(managed) = session.workspace.as_managed_mut() {
+            managed.worktree_path = repo.to_string_lossy().to_string();
+        }
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        (engine, tmp)
+    }
+
+    /// The database refuses every later write to the agent's row.
+    fn refuse_session_writes(engine: &Engine) {
+        rusqlite::Connection::open(&engine.paths.sessions_db_path)
+            .unwrap()
+            .execute_batch(
+                "create trigger refuse_session_update before update on agent_sessions \
+                 begin select raise(abort, 'disk is full'); end",
+            )
+            .unwrap();
+    }
+
+    /// The rename's worker answers, and the reaction to its completion.
+    fn rename_lands(engine: &mut Engine) -> EventReaction {
+        let event = engine
+            .worker_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        engine.process_worker_event(event)
+    }
+
+    /// Git renamed the branch but dux could not save it: that is said, at a
+    /// warning, with what to do, and the agent in memory stays what the
+    /// database holds, so the branch check notices the new name and saves it
+    /// once it can.
+    #[test]
+    fn a_branch_rename_dux_could_not_save_is_reported() {
+        let (mut engine, _tmp) = engine_with_a_repository();
+        engine
+            .rename_agent("s1", "new-name", true)
+            .expect("the rename starts");
+        refuse_session_writes(&engine);
+
+        let fin = only_status(&rename_lands(&mut engine));
+        assert_eq!(fin.tone, StatusTone::Warning, "{}", fin.message);
+        assert!(
+            fin.message.contains(
+                "Renamed git branch \"old-name\" to \"new-name\", but dux could not save the \
+                 agent's new branch name: "
+            ),
+            "{}",
+            fin.message
+        );
+        assert!(fin.message.contains("disk is full"), "{}", fin.message);
+        let stored = engine.session_store.load_sessions().unwrap();
+        assert_eq!(engine.sessions[0].branch_name(), stored[0].branch_name());
+        assert_eq!(engine.sessions[0].title, stored[0].title);
+        assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+    }
+
+    /// A branch rename git refused puts the old name back, and when dux cannot
+    /// save that either, the final says the name stayed rather than claiming
+    /// it was put back, and memory keeps what the database holds.
+    #[test]
+    fn a_name_dux_could_not_put_back_is_reported() {
+        let (mut engine, _tmp) = engine_with_a_repository();
+        engine
+            .rename_agent("s1", "taken", true)
+            .expect("the rename starts");
+        refuse_session_writes(&engine);
+
+        let fin = only_status(&rename_lands(&mut engine));
+        assert_eq!(fin.tone, StatusTone::Error, "{}", fin.message);
+        assert!(
+            !fin.message.contains("was put back"),
+            "nothing was put back: {}",
+            fin.message
+        );
+        assert!(
+            fin.message
+                .contains("dux could not put the agent's old name back either"),
+            "{}",
+            fin.message
+        );
+        let stored = engine.session_store.load_sessions().unwrap();
+        assert_eq!(engine.sessions[0].title, stored[0].title);
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("taken"));
+    }
+
     /// Unticked, the branch is left alone and the sentence says so.
     #[test]
     fn a_title_only_rename_says_the_branch_kept_its_name() {
