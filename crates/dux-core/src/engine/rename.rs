@@ -124,6 +124,19 @@ impl Engine {
                 anyhow::bail!(branch_rename_refusal(&rejection))
             }
             BranchRenamePlan::Noop => return Ok(EventReaction::RebuildLeftItems),
+            BranchRenamePlan::Unchanged => {
+                let label = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .map(|s| s.display_label())
+                    .unwrap_or_default();
+                crate::status_text![
+                    "Agent ",
+                    q(label),
+                    " already has that name, so nothing changed."
+                ]
+            }
             BranchRenamePlan::NotSaved(err) => {
                 anyhow::bail!("Could not save the agent's new name, so it keeps its old one: {err}")
             }
@@ -445,6 +458,38 @@ mod tests {
             branch_rename_refusal(&BranchRenameRejection::EmptyName)
         );
         assert_eq!(engine.sessions[0].title.as_deref(), Some("s1-title"));
+    }
+
+    /// Saving the dialog with nothing changed says so, rather than claiming a
+    /// custom name was cleared that was never there, and writes nothing.
+    #[test]
+    fn saving_an_unchanged_name_says_nothing_changed() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.title = None;
+        engine.sessions.push(session);
+        let mut named = sample_session("s2", "p1", "other");
+        named.title = Some("custom".to_string());
+        engine.sessions.push(named);
+
+        for (id, name, rename_branch) in [
+            ("s1", "", false),
+            ("s1", "feat", false),
+            ("s1", "feat", true),
+            ("s2", "custom", false),
+        ] {
+            let status = only_status(&engine.rename_agent(id, name, rename_branch).unwrap());
+            assert_eq!(status.tone, StatusTone::Info);
+            assert!(
+                status
+                    .message
+                    .ends_with("already has that name, so nothing changed."),
+                "{id} {name:?} {rename_branch}: {}",
+                status.message
+            );
+        }
+        assert_eq!(engine.sessions[0].title, None);
+        assert_eq!(engine.sessions[1].title.as_deref(), Some("custom"));
     }
 
     /// A standalone agent's name is taken verbatim, spaces and all.

@@ -212,6 +212,9 @@ pub enum BranchRenamePlan {
     /// The name was empty, so the custom title was removed and the label is
     /// back to the branch name (for a standalone agent, the folder's name).
     TitleCleared,
+    /// The name asked for is the one the agent already has and no branch is
+    /// renamed, so nothing was written; the surface says nothing changed.
+    Unchanged,
     /// The display title was updated and the expectation stashed; the surface
     /// must dispatch the git rename worker with these parameters.
     RenameBranch(BranchRenameDispatch),

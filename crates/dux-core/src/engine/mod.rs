@@ -4864,6 +4864,11 @@ impl Engine {
         }
         let names_the_branch = managed.as_ref().is_some_and(|m| m.branch_name == name);
         let title = (!name.is_empty() && !names_the_branch).then(|| name.clone());
+        let renames_the_branch =
+            rename_branch && managed.is_some() && !name.is_empty() && !names_the_branch;
+        if title == previous_title && !renames_the_branch {
+            return BranchRenamePlan::Unchanged;
+        }
         if let Err(err) = self.write_session_title(session_id, title) {
             // Nothing was renamed: put the old name back and let go of the
             // worktree held for a branch rename that will not run.
