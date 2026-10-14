@@ -19,7 +19,7 @@ const STATUS: Record<
   { className: string; Icon: typeof Circle; fill: boolean; label: string }
 > = {
   active: {
-    className: "border-transparent bg-transparent text-dux-working",
+    className: "border-transparent bg-transparent text-dux-active",
     Icon: Circle,
     fill: true,
     label: "active",

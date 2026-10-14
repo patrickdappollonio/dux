@@ -5,9 +5,14 @@
 // the same reason. This guard reads every source file under components/ and
 // lib/ and fails on a palette amber or yellow utility outside the allowlist
 // below, which carries a reason for every entry. The green and red state
-// colors (working, added and deleted lines, a pull request's state, success
-// and failure) are tokens for the same reason, so a palette green, red,
-// emerald or rose utility anywhere in the source fails too, with no exceptions.
+// colors (working, active, added and deleted lines, a pull request's state,
+// success and failure) are tokens for the same reason, so a palette green, red,
+// emerald or rose utility class written out in any source file under src/
+// fails too, with no exceptions. Both checks match literal palette class names
+// only: a hex or arbitrary value, or a class assembled at runtime, gets past
+// them. Each state token must also be defined in index.css and used where it
+// belongs, because Tailwind emits nothing for a class naming an undefined
+// token and the color would vanish without an error.
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -28,8 +33,8 @@ const PALETTE_GREEN_RED = /\b[a-z-]+-(?:green|red|emerald|rose)-\d{2,3}\b/g
 // File and exact class, with why it cannot be a token.
 const ALLOWED: Record<string, { classes: string[]; why: string }> = {}
 
-// The amber state tokens, each with the classes that paint it and the files
-// that must use them.
+// The state tokens, each with the class that paints it in each file that must
+// use it.
 const STATE_TOKENS: { token: string; uses: Record<string, string> }[] = [
   {
     token: "dux-detached",
@@ -47,6 +52,51 @@ const STATE_TOKENS: { token: string; uses: Record<string, string> }[] = [
     token: "dux-git-modified",
     uses: { "components/FileStatusIcon.tsx": "text-dux-git-modified" },
   },
+  {
+    token: "dux-working",
+    uses: {
+      "lib/flatList.ts": "text-dux-working",
+      "lib/flatTerminals.ts": "text-dux-working",
+    },
+  },
+  {
+    token: "dux-active",
+    uses: {
+      "components/StatusBadge.tsx": "text-dux-active",
+      "lib/agentRow.ts": "text-dux-active",
+    },
+  },
+  {
+    token: "dux-added",
+    uses: {
+      "components/ChangedFiles.tsx": "text-dux-added",
+      "components/FileStatusIcon.tsx": "text-dux-added",
+    },
+  },
+  {
+    token: "dux-deleted",
+    uses: {
+      "components/ChangedFiles.tsx": "text-dux-deleted",
+      "components/FileStatusIcon.tsx": "text-dux-deleted",
+    },
+  },
+  {
+    token: "dux-success",
+    uses: {
+      "components/ConnDot.tsx": "bg-dux-success",
+      "components/ui/sonner.tsx": "text-dux-success",
+    },
+  },
+  {
+    token: "dux-error",
+    uses: { "components/ConnDot.tsx": "bg-dux-error" },
+  },
+  { token: "dux-pr-open", uses: { "lib/pr.ts": "text-dux-pr-open" } },
+  { token: "dux-pr-open-hover", uses: { "lib/pr.ts": "hover:text-dux-pr-open-hover" } },
+  { token: "dux-pr-open-tint", uses: { "lib/pr.ts": "bg-dux-pr-open-tint/10" } },
+  { token: "dux-pr-closed", uses: { "lib/pr.ts": "text-dux-pr-closed" } },
+  { token: "dux-pr-closed-hover", uses: { "lib/pr.ts": "hover:text-dux-pr-closed-hover" } },
+  { token: "dux-pr-closed-tint", uses: { "lib/pr.ts": "bg-dux-pr-closed-tint/10" } },
 ]
 
 describe("warning tone", () => {

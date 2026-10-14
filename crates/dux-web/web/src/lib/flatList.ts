@@ -186,8 +186,8 @@ export function stateWord(session: SessionView): StateWord {
     return { label: "Typing", className: "text-dux-typing" }
   }
   if (session.status === "active" && session.working) {
-    // Match the app's active status color (agentRow.ts STATUS_DOT_COLOR),
-    // not a new palette hue.
+    // The working token, which shares the active status dot's green
+    // (agentRow.ts STATUS_DOT_COLOR) today.
     return { label: "Working", className: "text-dux-working" }
   }
   if (session.status === "active") {

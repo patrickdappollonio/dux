@@ -45,7 +45,7 @@ export function agentRowVisual(
 // React Fast Refresh. `needsAttention` outranks the raw status, matching the
 // cyan treatment the Bot icon and the favicon dot use.
 const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
-  active: "text-dux-working",
+  active: "text-dux-active",
   detached: "text-dux-detached",
   exited: "text-muted-foreground",
 }
