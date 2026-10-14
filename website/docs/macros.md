@@ -116,6 +116,11 @@ editor. With no macros at all, it links straight to **Edit macros**.
 > **Macros** button is greyed out and its hint reads "Take over to send macros". Press
 > **Take over** on the card and the button works again straight away. A macro never takes
 > a terminal over for you.
+>
+> A tab that is not running has nothing to type into, so its **Macros** button is greyed
+> out too, with the hint "Start the tab to send macros". And if you pick a macro while the
+> terminal is reconnecting, nothing is sent and a message says so; pick it again once the
+> terminal is back.
 
 ## Managing macros in the terminal UI
 

@@ -43,7 +43,8 @@ can reach a desktop session may write that desktop's clipboard instead.
 
 Even a copy that does arrive has to be accepted by your browser, which only allows it
 within about 5 seconds of your last key press or click. A later copy shows a message with
-the start of the text and a **Copy** button that puts it on your clipboard. See
+the start of the text and a **Copy** button that puts it on your clipboard. The message
+appears only in the tab driving that terminal, never in one that is only watching it. See
 [the clipboard section](/docs/web-workspace#clipboard-the-classic-terminal-model) and
 [what plain HTTP costs](/docs/tailscale#plain-http-costs-you-a-few-browser-features).
 
