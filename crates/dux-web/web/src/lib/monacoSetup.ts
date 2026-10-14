@@ -121,12 +121,13 @@ if (!monaco.languages.getLanguages().some((l) => l.id === "diff")) {
 // removals and removals as additions, which is worse than no colour at all.
 // The two content colours are the `--dux-added` and `--dux-deleted` tokens the
 // changed-files pane counts additions and deletions in, resolved to hex because
-// Monaco's rules take nothing else. The viewer defines the theme just before it
+// Monaco's rules take nothing else. The theme is defined just before the editor
 // mounts, when the stylesheet is certain to have applied, and each mount reads
 // the tokens again. The fallbacks are those tokens' Tailwind green-500 and
-// red-500.
-export const DIFF_THEME = "dux-diff"
-export function defineDiffTheme(): void {
+// red-500. Only the props pair below is exported: an editor handed the name
+// without the definer would render under Monaco's fallback theme.
+const DIFF_THEME = "dux-diff"
+function defineDiffTheme(): void {
   monaco.editor.defineTheme(DIFF_THEME, {
     base: "vs-dark",
     inherit: true,
@@ -139,6 +140,10 @@ export function defineDiffTheme(): void {
     colors: {},
   })
 }
+export const DIFF_THEME_PROPS = {
+  theme: DIFF_THEME,
+  beforeMount: defineDiffTheme,
+} as const
 
 export { monaco }
 
