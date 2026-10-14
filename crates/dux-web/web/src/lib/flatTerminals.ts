@@ -98,7 +98,7 @@ export function assembleFlatTerminals(
 // Mirrors core terminal-row precedence: typing, then running, then idle.
 export function terminalStateWord(terminal: TerminalView): StateWord {
   if (terminal.typing) return { label: "Typing", className: "text-dux-typing" }
-  if (terminal.working) return { label: "Running", className: "text-green-500" }
+  if (terminal.working) return { label: "Running", className: "text-dux-working" }
   return { label: "Idle", className: "text-muted-foreground" }
 }
 

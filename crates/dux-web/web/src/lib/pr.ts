@@ -29,18 +29,18 @@ export function prAriaLabel(number: number, state: PrStateLike): string {
 // Icon-only tint for the sidebar/mobile session row: just the glyph color, no
 // background (the row carries its own hover/active surface).
 export function prIconClass(state: PrStateLike): string {
-  if (state === "open") return "text-green-500"
+  if (state === "open") return "text-dux-pr-open"
   if (state === "merged") return "text-purple-400"
-  if (state === "closed") return "text-red-400"
+  if (state === "closed") return "text-dux-pr-closed"
   return "text-muted-foreground"
 }
 
 // Explicit hover for the icon link: the row's near-white hover surface washes a plain glyph
 // out, so a brighter glyph plus a subtle same-hue chip keeps it readable on both surfaces.
 export function prIconHoverClass(state: PrStateLike): string {
-  if (state === "open") return "hover:bg-green-600/15 hover:text-green-400"
+  if (state === "open") return "hover:bg-dux-pr-open-tint/15 hover:text-dux-pr-open-hover"
   if (state === "merged") return "hover:bg-purple-600/15 hover:text-purple-300"
-  if (state === "closed") return "hover:bg-red-600/15 hover:text-red-300"
+  if (state === "closed") return "hover:bg-dux-pr-closed-tint/15 hover:text-dux-pr-closed-hover"
   return "hover:bg-muted hover:text-foreground"
 }
 
@@ -48,10 +48,10 @@ export function prIconHoverClass(state: PrStateLike): string {
 // border + readable text, mirroring the TUI banner's green/purple/red fill.
 export function prBannerClass(state: PrStateLike): string {
   if (state === "open")
-    return "bg-green-600/10 border-green-600/30 text-green-500 hover:bg-green-600/15"
+    return "bg-dux-pr-open-tint/10 border-dux-pr-open-tint/30 text-dux-pr-open hover:bg-dux-pr-open-tint/15"
   if (state === "merged")
     return "bg-purple-600/10 border-purple-600/30 text-purple-400 hover:bg-purple-600/15"
   if (state === "closed")
-    return "bg-red-600/10 border-red-600/30 text-red-400 hover:bg-red-600/15"
+    return "bg-dux-pr-closed-tint/10 border-dux-pr-closed-tint/30 text-dux-pr-closed hover:bg-dux-pr-closed-tint/15"
   return "bg-muted border-border text-muted-foreground hover:bg-muted/80"
 }

@@ -188,7 +188,7 @@ export function stateWord(session: SessionView): StateWord {
   if (session.status === "active" && session.working) {
     // Match the app's active status color (agentRow.ts STATUS_DOT_COLOR),
     // not a new palette hue.
-    return { label: "Working", className: "text-green-500" }
+    return { label: "Working", className: "text-dux-working" }
   }
   if (session.status === "active") {
     return { label: "Idle", className: "text-muted-foreground" }

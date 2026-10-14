@@ -4,7 +4,10 @@
 // modified file) are not warnings, and each has a semantic token of its own for
 // the same reason. This guard reads every source file under components/ and
 // lib/ and fails on a palette amber or yellow utility outside the allowlist
-// below, which carries a reason for every entry.
+// below, which carries a reason for every entry. The green and red state
+// colors (working, added and deleted lines, a pull request's state, success
+// and failure) are tokens for the same reason, so a palette green, red,
+// emerald or rose utility anywhere in the source fails too, with no exceptions.
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -20,6 +23,7 @@ function walk(dir: string): string[] {
 }
 
 const PALETTE_AMBER = /\b[a-z-]+-(?:amber|yellow)-\d{2,3}\b/g
+const PALETTE_GREEN_RED = /\b[a-z-]+-(?:green|red|emerald|rose)-\d{2,3}\b/g
 
 // File and exact class, with why it cannot be a token.
 const ALLOWED: Record<string, { classes: string[]; why: string }> = {}
@@ -64,6 +68,19 @@ describe("warning tone", () => {
       const allowed = ALLOWED[name]?.classes ?? []
       for (const match of source.matchAll(PALETTE_AMBER)) {
         if (!allowed.includes(match[0])) offenders.push(`${name}: ${match[0]}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it("paints green and red states with tokens, never a palette class", () => {
+    const offenders: string[] = []
+    for (const path of walk(srcDir)) {
+      const name = relative(srcDir, path)
+      if (!/\.tsx?$/.test(name) || name.includes(".test.")) continue
+      const source = readFileSync(path, "utf-8")
+      for (const match of source.matchAll(PALETTE_GREEN_RED)) {
+        offenders.push(`${name}: ${match[0]}`)
       }
     }
     expect(offenders).toEqual([])

@@ -58,7 +58,7 @@ export function toastPlacement(isMobile: boolean): {
 // never the only carrier. The loading spinner stays muted: in progress is not a
 // severity.
 const TONE_ICON = {
-  success: "size-4 text-green-500",
+  success: "size-4 text-dux-success",
   info: "size-4 text-sky-400",
   warning: "size-4 text-dux-warning",
   error: "size-4 text-destructive",

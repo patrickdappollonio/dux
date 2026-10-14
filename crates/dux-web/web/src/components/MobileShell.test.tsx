@@ -1630,7 +1630,7 @@ describe("MobileShell agent header PR chip", () => {
   it("keeps the state coloring and the same one-tap open", () => {
     mockState = prState(openPr)
     render(<MobileShell />)
-    expect(chip().className).toContain("text-green-500")
+    expect(chip().className).toContain("text-dux-pr-open")
     expect(chip().getAttribute("href")).toBe("https://github.com/o/r/pull/123")
     expect(chip().getAttribute("target")).toBe("_blank")
     expect(chip().getAttribute("rel")).toBe("noopener noreferrer")
@@ -1643,7 +1643,7 @@ describe("MobileShell agent header PR chip", () => {
     cleanup()
     mockState = prState({ ...openPr, state: "closed" })
     render(<MobileShell />)
-    expect(chip().className).toContain("text-red-400")
+    expect(chip().className).toContain("text-dux-pr-closed")
   })
 
   it("speaks the whole sentence to a screen reader", () => {

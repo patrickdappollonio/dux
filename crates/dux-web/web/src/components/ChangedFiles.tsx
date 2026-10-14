@@ -546,11 +546,11 @@ const FileRow = memo(function FileRow({
         {!file.binary && !file.diff_excluded && (file.additions > 0 || file.deletions > 0) && (
           <span className="shrink-0 font-mono text-xs">
             {file.additions > 0 && (
-              <span className="text-green-500">+{file.additions}</span>
+              <span className="text-dux-added">+{file.additions}</span>
             )}
             {file.additions > 0 && file.deletions > 0 && " "}
             {file.deletions > 0 && (
-              <span className="text-red-500">−{file.deletions}</span>
+              <span className="text-dux-deleted">−{file.deletions}</span>
             )}
           </span>
         )}
@@ -729,11 +729,11 @@ function ChangesRecap({
       aria-label={recapLabel(scope, recap)}
     >
       {additions > 0 && (
-        <span className="text-green-500">+{formatRecapCount(additions)}</span>
+        <span className="text-dux-added">+{formatRecapCount(additions)}</span>
       )}
       {additions > 0 && deletions > 0 && " "}
       {deletions > 0 && (
-        <span className="text-red-500">−{formatRecapCount(deletions)}</span>
+        <span className="text-dux-deleted">−{formatRecapCount(deletions)}</span>
       )}
       {binaryCount > 0 && (
         <span className="text-muted-foreground">

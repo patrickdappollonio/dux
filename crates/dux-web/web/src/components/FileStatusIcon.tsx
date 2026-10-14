@@ -34,13 +34,13 @@ const ICONS: Record<FileStatusKind, typeof DiffAddedIcon> = {
 // renamed/copied blue, conflict orange. `other` stays neutral.
 const COLORS: Record<FileStatusKind, string> = {
   modified: "text-dux-git-modified",
-  added: "text-green-500",
-  deleted: "text-red-500",
+  added: "text-dux-added",
+  deleted: "text-dux-deleted",
   renamed: "text-blue-500",
   copied: "text-blue-500",
   conflict: "text-orange-500",
   "type-changed": "text-dux-git-modified",
-  untracked: "text-green-500",
+  untracked: "text-dux-added",
   other: "text-muted-foreground",
 }
 

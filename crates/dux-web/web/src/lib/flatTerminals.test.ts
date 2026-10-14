@@ -100,7 +100,7 @@ describe("terminalStateWord", () => {
   it("maps a busy terminal to the active-green 'Running' word", () => {
     const word = terminalStateWord(term({ id: "t", working: true }))
     expect(word.label).toBe("Running")
-    expect(word.className).toBe("text-green-500")
+    expect(word.className).toBe("text-dux-working")
   })
 
   it("maps an idle terminal to the muted Idle word", () => {

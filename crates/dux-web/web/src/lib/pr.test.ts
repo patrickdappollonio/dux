@@ -23,9 +23,9 @@ describe("prStateLabel", () => {
 
 describe("prIconClass", () => {
   it("tints the icon green/purple/red per state", () => {
-    expect(prIconClass("open")).toContain("text-green-500")
+    expect(prIconClass("open")).toContain("text-dux-pr-open")
     expect(prIconClass("merged")).toContain("text-purple-400")
-    expect(prIconClass("closed")).toContain("text-red-400")
+    expect(prIconClass("closed")).toContain("text-dux-pr-closed")
   })
 
   it("uses a neutral tint for unknown states", () => {
@@ -35,10 +35,10 @@ describe("prIconClass", () => {
 
 describe("prIconHoverClass", () => {
   it("provides an explicit same-hue hover for every known state", () => {
-    expect(prIconHoverClass("open")).toContain("hover:text-green-400")
-    expect(prIconHoverClass("open")).toContain("hover:bg-green-600/15")
+    expect(prIconHoverClass("open")).toContain("hover:text-dux-pr-open-hover")
+    expect(prIconHoverClass("open")).toContain("hover:bg-dux-pr-open-tint/15")
     expect(prIconHoverClass("merged")).toContain("hover:text-purple-300")
-    expect(prIconHoverClass("closed")).toContain("hover:text-red-300")
+    expect(prIconHoverClass("closed")).toContain("hover:text-dux-pr-closed-hover")
   })
 
   it("never emits a near-white hover surface that would wash the icon out", () => {
@@ -52,10 +52,10 @@ describe("prIconHoverClass", () => {
 
 describe("prBannerClass", () => {
   it("produces a soft state-colored strip per state", () => {
-    expect(prBannerClass("open")).toContain("bg-green-600/10")
-    expect(prBannerClass("open")).toContain("border-green-600/30")
+    expect(prBannerClass("open")).toContain("bg-dux-pr-open-tint/10")
+    expect(prBannerClass("open")).toContain("border-dux-pr-open-tint/30")
     expect(prBannerClass("merged")).toContain("bg-purple-600/10")
-    expect(prBannerClass("closed")).toContain("bg-red-600/10")
+    expect(prBannerClass("closed")).toContain("bg-dux-pr-closed-tint/10")
   })
 
   it("falls back to a neutral strip for unknown states", () => {

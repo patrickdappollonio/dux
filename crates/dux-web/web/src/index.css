@@ -169,6 +169,24 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --color-dux-detached: var(--dux-detached);
     --color-dux-connecting: var(--dux-connecting);
     --color-dux-git-modified: var(--dux-git-modified);
+    /* The green and red STATE colors, each a token for the same reason: the
+       working and running state word and badge; added and deleted lines and
+       files (an untracked file counts as added); success (the success toast's
+       icon, a connected socket) and error (a connection that gave up); and a
+       pull request's open and closed states, each with the brighter text its
+       icon takes on hover and the deeper shade its banner and hover chip are
+       tinted from. Their values live in :root/.dark below. */
+    --color-dux-working: var(--dux-working);
+    --color-dux-added: var(--dux-added);
+    --color-dux-deleted: var(--dux-deleted);
+    --color-dux-success: var(--dux-success);
+    --color-dux-error: var(--dux-error);
+    --color-dux-pr-open: var(--dux-pr-open);
+    --color-dux-pr-open-hover: var(--dux-pr-open-hover);
+    --color-dux-pr-open-tint: var(--dux-pr-open-tint);
+    --color-dux-pr-closed: var(--dux-pr-closed);
+    --color-dux-pr-closed-hover: var(--dux-pr-closed-hover);
+    --color-dux-pr-closed-tint: var(--dux-pr-closed-tint);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -418,6 +436,23 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-detached: oklch(0.769 0.188 70.08);
     --dux-connecting: oklch(0.769 0.188 70.08);
     --dux-git-modified: oklch(0.769 0.188 70.08);
+    /* The green and red state colors (see the theme block above), the
+       Tailwind shades they have always been drawn in: green-500 for working,
+       added, success and an open pull request; red-500 for deleted and error;
+       red-400 for a closed pull request; green-400 and red-300 for the pull
+       request icon's hover; green-600 and red-600 for the pull request tints.
+       Constant across light/dark since the web app is dark-only. */
+    --dux-working: oklch(72.3% 0.219 149.579);
+    --dux-added: oklch(72.3% 0.219 149.579);
+    --dux-deleted: oklch(63.7% 0.237 25.331);
+    --dux-success: oklch(72.3% 0.219 149.579);
+    --dux-error: oklch(63.7% 0.237 25.331);
+    --dux-pr-open: oklch(72.3% 0.219 149.579);
+    --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
+    --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    --dux-pr-closed: oklch(70.4% 0.191 22.216);
+    --dux-pr-closed-hover: oklch(80.8% 0.114 19.571);
+    --dux-pr-closed-tint: oklch(57.7% 0.245 27.325);
     /* The phone action flap's OPAQUE body color: the tab strip's translucent
        `bg-muted/30` composited over the app background, written out as one
        opaque value. The flap grows out of the strip, so the two have to be the
@@ -470,6 +505,18 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-detached: oklch(0.769 0.188 70.08);
     --dux-connecting: oklch(0.769 0.188 70.08);
     --dux-git-modified: oklch(0.769 0.188 70.08);
+    /* The green and red state colors (see :root above). */
+    --dux-working: oklch(72.3% 0.219 149.579);
+    --dux-added: oklch(72.3% 0.219 149.579);
+    --dux-deleted: oklch(63.7% 0.237 25.331);
+    --dux-success: oklch(72.3% 0.219 149.579);
+    --dux-error: oklch(63.7% 0.237 25.331);
+    --dux-pr-open: oklch(72.3% 0.219 149.579);
+    --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
+    --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    --dux-pr-closed: oklch(70.4% 0.191 22.216);
+    --dux-pr-closed-hover: oklch(80.8% 0.114 19.571);
+    --dux-pr-closed-tint: oklch(57.7% 0.245 27.325);
     /* The phone action flap's opaque body color (see :root above). */
     --dux-flap-bg: color-mix(in srgb, var(--muted) 30%, var(--background));
 }
