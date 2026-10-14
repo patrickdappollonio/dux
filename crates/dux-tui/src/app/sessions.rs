@@ -6403,6 +6403,14 @@ mod tests {
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
         app.engine.sessions[0].provider = dux_core::model::ProviderKind::new("claude");
+        // The CLI is told by its command; this one is never started.
+        app.engine
+            .config
+            .providers
+            .commands
+            .get_mut("claude")
+            .expect("claude is configured")
+            .command = "/nowhere/claude".to_string();
         app.engine
             .folder_repo_statuses
             .insert(id.clone(), dux_core::git::FolderRepoStatus::Missing);
@@ -9201,6 +9209,53 @@ mod tests {
             "{}",
             app.status.text()
         );
+    }
+
+    /// A tab a working-copy recreate is restarting is dormant while its old
+    /// process shuts down, and it is the restart's to start: a start from here
+    /// launches nothing, and the status line says why.
+    #[test]
+    fn a_start_is_refused_while_a_recreate_is_restarting_the_tab() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app =
+            test_app_with_sessions(vec![session], vec![make_project("project-1", "claude")]);
+        app.selected_left = 1;
+        let cwd = tempfile::tempdir().expect("a directory for the stand-in process");
+        app.engine
+            .folder_repo_statuses
+            .insert("s1".to_string(), dux_core::git::FolderRepoStatus::Missing);
+        let slot = app.engine.sessions[0].slot_tab_id().to_owned();
+        app.engine.providers.insert(
+            slot.clone(),
+            dux_core::pty::PtyClient::spawn_with_env("cat", &[], cwd.path(), 24, 80, 1000, &[])
+                .expect("spawn"),
+        );
+        app.engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the recreate starts");
+        app.engine
+            .process_worker_event(dux_core::worker::WorkerEvent::WorkingCopyRecreated {
+                session_id: "s1".to_string(),
+                outcome: Ok(dux_core::working_copy::RecreatedBranch::CheckedOut),
+            });
+        assert!(!app.engine.providers.contains_key(slot.as_ref_id()));
+
+        let request = app.agent_launch_request(
+            app.engine.sessions[0].clone(),
+            true,
+            AgentLaunchKind::Reconnect {
+                status_message: "Starting".into(),
+            },
+        );
+        assert!(!app.dispatch_agent_launch(request), "nothing launched");
+        assert!(
+            app.status
+                .text()
+                .contains("is being restarted after its working copy was recreated"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!app.engine.tab_is_live(slot.as_ref_id()));
     }
 
     /// Confirming reaches the shared engine teardown: the provider leaves for

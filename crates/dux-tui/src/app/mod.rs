@@ -7177,24 +7177,29 @@ impl App {
         }
     }
 
+    /// Answers whether the rename was taken; a refusal is on the status line.
     pub(crate) fn apply_rename_session(
         &mut self,
         session_id: &str,
         new_name: String,
         rename_branch: bool,
-    ) {
+    ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
         match self
             .engine
             .rename_agent(session_id, &new_name, rename_branch)
         {
-            Ok(reaction) => self.apply_reaction(reaction),
+            Ok(reaction) => {
+                self.apply_reaction(reaction);
+                true
+            }
             Err(err) => {
                 // A refusal or a worker that never started can still have
                 // changed nothing but the list; keep it consistent either way.
                 self.rebuild_left_items();
                 self.set_error(format!("{err:#}"));
+                false
             }
         }
     }

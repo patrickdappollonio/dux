@@ -70,14 +70,16 @@ Rename an agent from its `⋯` menu in the browser, or with `rename-agent` in th
 UI. Both open the same dialog and follow the same rules.
 
 - **The name is what the agent shows.** The field holds the custom name you gave it, empty
-  when there is none, with the name it falls back to shown faintly behind it.
+  when there is none, with the name it falls back to shown faintly behind it. For an agent
+  with a branch, the name follows the same rules as a branch name whether or not you also
+  rename the branch.
 - **Leave it empty to go back.** An agent with a branch shows its branch name again; a
   standalone agent shows its folder's name.
 - **Also rename the git branch** is a checkbox under the field, unticked by default, for
   agents that have a branch. Tick it and dux renames the branch to the new name as well.
-  The name then follows the same rules as a branch name, and it can't be empty, because
-  a branch can't be renamed to nothing. Once the branch carries the new name the agent
-  simply shows its branch name, so a later branch rename carries the label along too.
+  The name can't be empty then, because a branch can't be renamed to nothing. Once the
+  branch carries the new name the agent simply shows its branch name, so a later branch
+  rename carries the label along too.
 
 > [!WARNING]
 > Renaming the branch only renames it on this machine. When the branch has an open pull

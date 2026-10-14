@@ -1036,7 +1036,7 @@ pub struct PendingRecreate {
     /// attachment guard reserved, so a tab that comes up during the checkout,
     /// which nothing reserved and somebody may have attached to since, is
     /// never stopped. `None` when no restart was asked for.
-    pub restart_targets: Option<Vec<TabId>>,
+    pub restart_targets: Option<Vec<(TabId, crate::model::ProviderKind)>>,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see
@@ -4864,6 +4864,11 @@ impl Engine {
         }
         let names_the_branch = managed.as_ref().is_some_and(|m| m.branch_name == name);
         let title = (!name.is_empty() && !names_the_branch).then(|| name.clone());
+        let renames_the_branch =
+            rename_branch && managed.is_some() && !name.is_empty() && !names_the_branch;
+        if title == previous_title && !renames_the_branch {
+            return BranchRenamePlan::Unchanged;
+        }
         if let Err(err) = self.write_session_title(session_id, title) {
             // Nothing was renamed: put the old name back and let go of the
             // worktree held for a branch rename that will not run.
@@ -5910,7 +5915,9 @@ impl Engine {
                 && self.tab_is_live(id.as_ref_id())
                 && self.tab_running_provider(session, &id) == *provider
         });
-        !others_same_provider
+        // A tab a working-copy recreate is about to start again is getting the
+        // conversation back, though its old process is still shutting down.
+        !others_same_provider && !self.restart_will_resume(&session.id, tab_id, provider)
     }
 
     /// The agent record for `session_id`, or `None`. A plain identity lookup by
@@ -6406,6 +6413,9 @@ impl Engine {
         // entry carries it, so a delete or a relaunch moments later still finds
         // this process to wait for.
         let owner = self.terminating_owner_for_tab(session_id, TabIdRef::new(tab_id));
+        // A tab a working-copy recreate waits to start again is closed, not
+        // restarted.
+        self.stop_tab_restart(TabIdRef::new(tab_id));
         let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
         {
             Some(

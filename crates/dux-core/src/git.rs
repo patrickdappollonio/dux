@@ -1345,17 +1345,34 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
 
+/// How long the pushed-branch probe waits for git before giving up. It reads
+/// only local refs, so a healthy repository answers in milliseconds; the bound
+/// is for a wedged filesystem or lock, where waiting longer helps nobody.
+pub const PUSHED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Whether branch `name` has been pushed anywhere this clone knows of: it
 /// tracks a remote branch, or some remote-tracking ref carries its name.
 ///
 /// Answered from this clone's refs, never by asking a remote, so it is as
 /// fresh as the last fetch or push. It shells out to git, so callers run it in
-/// a background worker. `for-each-ref` is plumbing; the branch is matched by
-/// comparing whole refnames here, because its own patterns also match every
-/// ref below a slash (`feat` would match `feat/x`).
+/// a background worker, and each git call is bounded by
+/// [`PUSHED_PROBE_TIMEOUT`]. `for-each-ref` is plumbing; the branch is matched
+/// by comparing whole refnames here, because its own patterns also match every
+/// ref below a slash (`feat` would match `feat/x`), and against the remotes
+/// this clone has, because a remote's name may hold a slash as well.
 pub fn branch_is_pushed(repo_path: &Path, name: &str) -> Result<bool> {
+    branch_is_pushed_within(repo_path, name, PUSHED_PROBE_TIMEOUT)
+}
+
+fn branch_is_pushed_within(
+    repo_path: &Path,
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let what = format!("look for a pushed copy of branch \"{name}\"");
     let local = format!("refs/heads/{name}");
-    let listing = run_git_capture(
+    let remotes = run_git_capture_bounded(repo_path, &["remote"], timeout, &what)?;
+    let listing = run_git_capture_bounded(
         repo_path,
         &[
             "for-each-ref",
@@ -1363,20 +1380,62 @@ pub fn branch_is_pushed(repo_path: &Path, name: &str) -> Result<bool> {
             &local,
             "refs/remotes/",
         ],
-        &format!("look for a pushed copy of branch \"{name}\""),
+        timeout,
+        &what,
     )?;
+    let tracking: Vec<String> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .map(|remote| format!("refs/remotes/{remote}/{name}"))
+        .collect();
     Ok(listing.lines().any(|line| {
         let (refname, upstream) = line.split_once(' ').unwrap_or((line, ""));
         if refname == local {
             return upstream.starts_with("refs/remotes/");
         }
-        // `refs/remotes/<remote>/<branch>`; a remote's own `HEAD` is a pointer,
-        // not a branch anybody pushed.
-        refname
-            .strip_prefix("refs/remotes/")
-            .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(_, branch)| branch == name && branch != "HEAD")
+        // A remote's own `HEAD` is a pointer, not a branch anybody pushed.
+        name != "HEAD" && tracking.iter().any(|tracked| tracked == refname)
     }))
+}
+
+/// [`run_git_capture`] bounded by `timeout`: past it the git process is killed
+/// and the call fails, so a wedged repository cannot hold the thread asking.
+fn run_git_capture_bounded(
+    path: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+    what: &str,
+) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(path).args(args);
+    let output = match crate::bounded_command::run_command_with_timeout(
+        cmd,
+        timeout,
+        crate::bounded_command::DEFAULT_READER_DRAIN,
+        "git",
+    ) {
+        crate::bounded_command::CommandOutcome::Completed(output) => output,
+        crate::bounded_command::CommandOutcome::TimedOut => {
+            return Err(anyhow!(
+                "failed to {what} for {}: git did not answer within {}s",
+                path.display(),
+                crate::duration_text::whole_seconds(timeout)
+            ));
+        }
+        crate::bounded_command::CommandOutcome::Failed(err)
+        | crate::bounded_command::CommandOutcome::NotFound(err) => {
+            return Err(anyhow!("failed to {what} for {}: {err}", path.display()));
+        }
+    };
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to {what} for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Whether origin has branch `name` right now, asked of origin itself with
@@ -8353,6 +8412,7 @@ mod tests {
         git(&["update-ref", "refs/remotes/fork/feat", "HEAD"]);
         git(&["update-ref", "refs/remotes/origin/elsewhere", "HEAD"]);
         git(&["remote", "add", "origin", "/nowhere"]);
+        git(&["remote", "add", "fork", "/nowhere"]);
         git(&["config", "branch.upstreamed.remote", "origin"]);
         git(&["config", "branch.upstreamed.merge", "refs/heads/elsewhere"]);
 
@@ -8361,6 +8421,37 @@ mod tests {
         assert!(!branch_is_pushed(repo.path(), "local-only").unwrap());
         assert!(!branch_is_pushed(repo.path(), "tracks-local").unwrap());
         assert!(!branch_is_pushed(repo.path(), "fe").unwrap());
+    }
+
+    /// A remote's name may hold a slash, and so may a branch's, so a
+    /// remote-tracking ref is read against the remotes this clone has rather
+    /// than split at its first slash: `refs/remotes/team/a/feat` is `feat` on
+    /// `team/a`, not `a/feat` on a `team` nobody configured.
+    #[test]
+    fn branch_is_pushed_reads_remote_names_with_slashes() {
+        let repo = init_test_repo();
+        let git = worktree_git(repo.path());
+        git(&["branch", "feat"]);
+        git(&["branch", "a/feat"]);
+        git(&["remote", "add", "team/a", "/nowhere"]);
+        git(&["update-ref", "refs/remotes/team/a/feat", "HEAD"]);
+        assert!(branch_is_pushed(repo.path(), "feat").unwrap());
+        assert!(!branch_is_pushed(repo.path(), "a/feat").unwrap());
+
+        git(&["remote", "add", "origin", "/nowhere"]);
+        git(&["update-ref", "refs/remotes/origin/a/feat", "HEAD"]);
+        assert!(branch_is_pushed(repo.path(), "a/feat").unwrap());
+    }
+
+    /// The probe asks git, which can stall on a wedged filesystem, so it is
+    /// bounded: past its wait it gives up with an error rather than hold the
+    /// thread that asked.
+    #[test]
+    fn branch_is_pushed_gives_up_at_its_wait() {
+        let repo = init_test_repo();
+        let err = branch_is_pushed_within(repo.path(), "main", std::time::Duration::ZERO)
+            .expect_err("no git answers in no time");
+        assert!(err.to_string().contains("did not answer"), "{err}");
     }
 
     // ── rename_branch tests ──────────────────────────────────────

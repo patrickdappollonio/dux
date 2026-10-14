@@ -5452,8 +5452,10 @@ impl App {
                     ));
                     return Some(false);
                 }
-                self.prompt = PromptState::None;
-                self.apply_rename_session(&id, new_name, also_rename_branch);
+                // Any other refusal keeps it up too, with the name as typed.
+                if self.apply_rename_session(&id, new_name, also_rename_branch) {
+                    self.prompt = PromptState::None;
+                }
             }
             ModalKeyStep::MoveFocus(forward) => self.focus_next_rename_session_control(forward),
             ModalKeyStep::ActivateFocus if checkbox_focused => {
@@ -14651,6 +14653,41 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// Confirming the branch's own name with the branch box unticked leaves no
+    /// custom title behind, in memory or in the database, so the label keeps
+    /// following the branch.
+    #[test]
+    fn renaming_to_the_branch_name_stores_no_title() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].title = Some("shiny".to_string());
+        app.engine
+            .session_store
+            .upsert_session(&app.engine.sessions[0])
+            .unwrap();
+        let branch = app.engine.sessions[0]
+            .branch_name()
+            .expect("a managed agent")
+            .to_string();
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text(branch.clone()),
+            rename_branch: false,
+            focus: RenameSessionFocus::Input,
+            branch_named: true,
+            open_pr: None,
+            pushed: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.engine.sessions[0].title, None);
+        assert_eq!(app.engine.sessions[0].display_label(), branch);
+        let stored = app.engine.session_store.load_sessions().unwrap();
+        assert_eq!(stored[0].title, None, "persisted");
+    }
+
     #[test]
     fn open_rename_session_clears_interactive_target() {
         let mut app = test_app(default_bindings());
@@ -15634,6 +15671,38 @@ not_a_real_action = ["x"]
             app.status.text(),
             dux_core::engine::branch_rename_refusal(
                 &dux_core::engine::BranchRenameRejection::EmptyName
+            )
+        );
+        assert_eq!(app.engine.sessions[0].title.as_deref(), Some("shiny"));
+    }
+
+    /// Any refusal keeps the dialog open with the name as typed, so it can be
+    /// fixed rather than typed again, and the status line says why.
+    #[test]
+    fn a_refused_name_keeps_the_dialog_open_with_what_was_typed() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].title = Some("shiny".to_string());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("-bad".to_string()),
+            rename_branch: false,
+            focus: RenameSessionFocus::Input,
+            branch_named: true,
+            open_pr: None,
+            pushed: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let PromptState::RenameSession { input, .. } = &app.prompt else {
+            panic!("the dialog stays open")
+        };
+        assert_eq!(input.text, "-bad");
+        assert_eq!(
+            app.status.text(),
+            dux_core::engine::branch_rename_refusal(
+                &dux_core::engine::BranchRenameRejection::MalformedName
             )
         );
         assert_eq!(app.engine.sessions[0].title.as_deref(), Some("shiny"));

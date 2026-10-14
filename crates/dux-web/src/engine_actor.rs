@@ -5052,6 +5052,15 @@ fn handle_subscribe(
         let _ = reply.send(Err(last_run_failed_refusal()));
         return;
     }
+    // Nor a tab a working-copy recreate is about to start again: its old
+    // process is still shutting down, and the restart starts it once that has
+    // gone. Said the same way, for the same reason.
+    if let Some(refusal) = engine.restart_launch_refusal(TabIdRef::new(&tab_id)) {
+        let _ = reply.send(Err(refusal.to_string()));
+        let _ = status_tx
+            .send(WireStatus::new("info", refusal).with_key(format!("tab-launch-{tab_id}")));
+        return;
+    }
     // Nor a tab another change holds, directly or through its agent, so an open
     // pane cannot undo a stop in flight. Joining a running launch starts nothing.
     let launching = engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
@@ -6033,6 +6042,106 @@ mod tests {
             Ok(_) => panic!("subscribing a held tab must be refused"),
             Err(err) => assert!(err.contains("op-held"), "{err}"),
         }
+    }
+
+    /// A tab a working-copy recreate is restarting is dormant while its old
+    /// process shuts down, and it is the restart's to start: opening its pane
+    /// does not launch it, and says why, and neither does the explicit start.
+    #[test]
+    fn a_tab_a_recreate_is_restarting_is_not_launched_by_its_pane_or_a_start() {
+        let (_tmp, paths) = temp_paths();
+        let worktree = paths.root.join("gone");
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .create_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    worktree.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        engine.projects.push(dux_core::model::Project {
+            id: "p1".to_string(),
+            name: "p1".to_string(),
+            path: paths.root.to_string_lossy().into_owned(),
+            explicit_default_provider: None,
+            default_provider: dux_core::model::ProviderKind::new("claude"),
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: dux_core::model::ProjectBranchStatus::Leading,
+            path_missing: false,
+            created_at: None,
+        });
+        engine
+            .folder_repo_statuses
+            .insert("s1".to_string(), dux_core::git::FolderRepoStatus::Missing);
+        let slot = engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+            .to_owned();
+        engine.providers.insert(
+            slot.clone(),
+            PtyClient::spawn_with_env("cat", &[], &paths.root, 24, 80, 1000, &[]).expect("spawn"),
+        );
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the recreate starts");
+        engine.process_worker_event(dux_core::worker::WorkerEvent::WorkingCopyRecreated {
+            session_id: "s1".to_string(),
+            outcome: Ok(dux_core::working_copy::RecreatedBranch::CheckedOut),
+        });
+        assert!(
+            !engine.providers.contains_key(slot.as_ref_id()),
+            "the restart is shutting the old process down"
+        );
+
+        let mut pending = Vec::new();
+        let mut last_pr = None;
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            Arc::new(AtomicUsize::new(1)),
+            Default::default(),
+            Default::default(),
+        );
+        let (tx, rx) = oneshot::channel();
+        handle_subscribe(
+            &mut engine,
+            &mut pending,
+            &mut last_pr,
+            &mut status,
+            slot.as_str().to_string(),
+            tx,
+        );
+        let said = "is being restarted after its working copy was recreated";
+        let emitted = status_rx.try_recv().expect("the refusal is said out loud");
+        assert!(emitted.message.contains(said), "{}", emitted.message);
+        assert_eq!(
+            emitted.key.as_deref(),
+            Some(format!("tab-launch-{}", slot.as_str()).as_str())
+        );
+        assert!(pending.is_empty(), "no launch may be waited on");
+        match rx.blocking_recv().expect("a reply") {
+            Ok(_) => panic!("subscribing a tab being restarted must be refused"),
+            Err(err) => assert!(err.contains(said), "{err}"),
+        }
+        assert!(
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(slot.clone())),
+            "nothing was launched"
+        );
+
+        let err = launch_agent(&mut engine, slot.as_str()).expect_err("the start is refused");
+        assert!(err.contains(said), "{err}");
+        assert!(!engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(slot)));
     }
 
     /// An engine whose agent has ALREADY had its slot promoted: the claude tab

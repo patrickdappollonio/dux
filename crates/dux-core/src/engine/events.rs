@@ -2270,6 +2270,7 @@ impl Engine {
         session_id: &str,
     ) -> Option<FinishDeleteSessionOutcome> {
         let session = self.sessions.iter().find(|s| s.id == session_id).cloned()?;
+        self.stop_agent_restarts(session_id, true);
         // The session is being removed now, so drop any "closing" marker set at the
         // start of its delete (both the async and synchronous delete paths clear it
         // here, in addition to the async worktree-removal-completed path).
@@ -2698,6 +2699,9 @@ impl Engine {
             );
         }
 
+        // A working-copy recreate waiting to start this agent's tabs again
+        // starts none of them, and says the agent was deleted.
+        self.stop_agent_restarts(&session.id, true);
         self.begin_session_tab_shutdown(&session, worktree_removal);
 
         match busy_message {
@@ -3457,7 +3461,7 @@ impl Engine {
         new_branch: String,
         previous_title: Option<String>,
         result: Result<(), String>,
-        status: ResolvedFinal,
+        mut status: ResolvedFinal,
     ) -> EventReaction {
         match &result {
             Ok(()) => {
@@ -3485,6 +3489,7 @@ impl Engine {
                     ));
                 }
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                    let saved = session.clone();
                     let label = session.display_label();
                     if let Some(managed) = session.workspace.as_managed_mut() {
                         let previous = managed.branch_name.clone();
@@ -3511,6 +3516,24 @@ impl Engine {
                             "failed to persist branch rename for {} (new branch: {}): {err}",
                             session.id, new_branch,
                         ));
+                        // Memory keeps what the database holds, so the branch
+                        // check sees the branch under its new name as a change
+                        // and saves it once the database takes writes again.
+                        let old_branch = saved.branch_name().unwrap_or_default().to_string();
+                        *session = saved;
+                        status.outcome = crate::engine::Final::warning(crate::status_text![
+                            "Renamed git branch ",
+                            q(old_branch),
+                            " to ",
+                            q(new_branch.clone()),
+                            format!(
+                                ", but dux could not save the agent's new branch name: {err:#}. \
+                                 dux saves it the next time it checks the agent's branch, once \
+                                 its database can be written again; until then the agent may \
+                                 show the old branch name. Check that the disk has room, and \
+                                 see dux.log."
+                            )
+                        ]);
                     }
                 }
                 self.update_branch_sync_sessions();
@@ -3524,13 +3547,28 @@ impl Engine {
                     "[{session_id}] agent rename to {new_branch} failed: {err}"
                 ));
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                    let saved = session.clone();
                     session.title = previous_title;
                     session.updated_at = Utc::now();
-                    if let Err(err) = self.session_store.upsert_session(session) {
+                    if let Err(save_err) = self.session_store.upsert_session(session) {
                         logger::error(&format!(
-                            "failed to persist branch-rename revert for {}: {err}",
+                            "failed to persist branch-rename revert for {}: {save_err}",
                             session.id,
                         ));
+                        // The optimistic name is still what the database
+                        // holds, so it is what the agent keeps showing.
+                        *session = saved;
+                        status.outcome = crate::engine::Final::error(crate::status_text![
+                            "Could not rename the agent's git branch to ",
+                            q(new_branch.clone()),
+                            format!(
+                                ": {err}. dux could not put the agent's old name back either: \
+                                 {save_err:#}, so it keeps showing "
+                            ),
+                            q(new_branch.clone()),
+                            ". Rename it again once dux can write its database; check that \
+                             the disk has room, and see dux.log."
+                        ]);
                     }
                 }
             }

@@ -323,6 +323,7 @@ impl Engine {
         {
             self.update_pr_sync_sessions();
         }
+        self.note_restart_resume_fell_back(tab_id, launched);
         ResumeFallbackOutcome::Retried {
             reaction: Box::new(reaction),
         }
