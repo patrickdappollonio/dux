@@ -54,11 +54,11 @@ function ownerPane(over: Partial<PaneMacroTarget> = {}): PaneMacroTarget {
 
 const settle = () => new Promise((r) => setTimeout(r, 40))
 
-function stubMatchMedia() {
+function stubMatchMedia(coarse = false) {
   vi.stubGlobal(
     "matchMedia",
     vi.fn((query: string) => ({
-      matches: false,
+      matches: coarse && query === "(pointer: coarse)",
       media: query,
       onchange: null,
       addEventListener: () => {},
@@ -212,8 +212,8 @@ describe("MacroPopover pick focus routing", () => {
   })
 
   it("a direct-to-PTY pick without finalFocus returns focus to the trigger", async () => {
-    // The mobile icon variant with the compose bar OFF: Base UI's default
-    // return-to-trigger behavior, exactly as before this routing existed.
+    // The pane published no typing surface (its terminal is not mounted
+    // yet): Base UI's default return-to-trigger behavior.
     runMacro.mockReturnValue("pty")
 
     render(<MacroPopover variant="icon" target={target} />)
@@ -290,6 +290,65 @@ describe("MacroPopover returns focus to the pane the macro was sent to", () => {
     expect(document.activeElement).toBe(first)
     first.remove()
     second.remove()
+  })
+})
+
+// The theater pill and the phone controls sit outside the pane just as the
+// desktop header's trigger does, so a pick written straight to the pty returns
+// focus to that pane's typing surface from every variant: the Enter that
+// submits the macro must reach the terminal, not re-press the trigger. On a
+// coarse pointer that would pop the soft keyboard the user never asked for, so
+// there the trigger keeps focus, as the phone flap always has.
+describe("MacroPopover returns focus to the pane from every variant", () => {
+  function typingSurface(): HTMLTextAreaElement {
+    const el = document.createElement("textarea")
+    document.body.appendChild(el)
+    registerPaneMacroTarget("s1", ownerPane({ typingSurface: () => el }))
+    return el
+  }
+
+  it.each(["labeled", "icon", "pill"] as const)(
+    "a %s pick sent to the pty focuses the pane's typing surface",
+    async (variant) => {
+      const surface = typingSurface()
+      runMacro.mockReturnValue("pty")
+
+      render(<MacroPopover variant={variant} target={target} />)
+      await openAndPick()
+
+      expect(document.activeElement).toBe(surface)
+      surface.remove()
+    },
+  )
+
+  it.each(["icon", "pill"] as const)(
+    "a %s pick on a coarse pointer leaves focus on the trigger",
+    async (variant) => {
+      stubMatchMedia(true)
+      const surface = typingSurface()
+      runMacro.mockReturnValue("pty")
+
+      render(<MacroPopover variant={variant} target={target} />)
+      await openAndPick()
+
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Run a macro" }),
+      )
+      surface.remove()
+    },
+  )
+
+  it("a pill pick that sent nothing leaves focus on the trigger", async () => {
+    const surface = typingSurface()
+    runMacro.mockReturnValue("none")
+
+    render(<MacroPopover variant="pill" target={target} />)
+    await openAndPick()
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Run a macro" }),
+    )
+    surface.remove()
   })
 })
 

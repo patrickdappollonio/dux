@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { targetPtyId } from "@/components/terminalAreaModel"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
@@ -54,21 +55,23 @@ export function MacroPopover({
   // This intentionally overrides the usual "return focus to the trigger" popover
   // convention because the trigger floats over a live terminal the user drives.
   finalFocus?: () => HTMLElement | null
-  // "labeled" is the desktop trigger; "icon" is the phone header's icon button,
-  // which passes no finalFocus so a dismissal returns focus to the trigger
-  // rather than popping the soft keyboard (a pick landing in the compose draft
-  // is the exception, in `resolveFinalFocus`); "pill" is the theater pill's
-  // round ghost button, since a square outline button inside that one rounded
-  // control would read as a second surface.
+  // "labeled" is the desktop trigger; "icon" is the phone header's icon button;
+  // "pill" is the round ghost button of the phone flap and the theater pill,
+  // since a square outline button inside that one rounded control would read
+  // as a second surface. The last two pass no finalFocus, so a dismissal
+  // returns focus to the trigger; where a pick lands is in `resolveFinalFocus`.
   variant?: "labeled" | "icon" | "pill"
 }) {
   const { bootstrap } = useDux()
   const [open, setOpen] = useState(false)
   const isMobile = useIsMobile()
+  const coarsePointer = useIsCoarsePointer()
   // Set when the LAST pick landed in the mobile compose draft rather than the
   // PTY, consumed by the close-focus resolver below. A ref, not state: it is
   // read during Base UI's close-focus pass, never rendered.
   const pickedIntoComposeRef = useRef(false)
+  // Set when the LAST pick was written straight to the pty, read the same way.
+  const pickedIntoPtyRef = useRef(false)
 
   const allMacros = bootstrap?.macros ?? []
   const macros = macrosForTarget(allMacros, target)
@@ -78,7 +81,9 @@ export function MacroPopover({
     // The payload goes to this target's pane, or into its compose draft while
     // that bar is the typing surface. The returned destination says which
     // happened, which steers the close focus below.
-    pickedIntoComposeRef.current = runMacro(name, target) === "compose"
+    const destination = runMacro(name, target)
+    pickedIntoComposeRef.current = destination === "compose"
+    pickedIntoPtyRef.current = destination === "pty"
     setOpen(false)
   }
 
@@ -86,20 +91,25 @@ export function MacroPopover({
   // pick that landed there, because Base UI owns focus during a close and would
   // otherwise yank the keyboard back to the trigger. Otherwise the caller's
   // finalFocus, else this target's pane's typing surface for the desktop
-  // labelled trigger, else Base UI's return-to-trigger.
+  // labelled trigger on any close and for every other variant after a pick
+  // sent to the pty, else Base UI's return-to-trigger.
   //
-  // The desktop trigger sits in the header outside `TerminalPane` and has no
-  // ref to hand in, so it reads the surface the pane published under its own
-  // pty id. That fallback is not applied to the `icon` variant, where focusing
-  // a terminal textarea pops the soft keyboard.
+  // Every trigger sits outside `TerminalPane` and has no ref to hand in, so it
+  // reads the surface the pane published under its own pty id. The icon and
+  // pill variants skip that on a coarse pointer, where focusing a terminal
+  // textarea pops a soft keyboard nobody asked for.
   function resolveFinalFocus(): HTMLElement | boolean | null {
+    const pickedIntoPty = pickedIntoPtyRef.current
+    pickedIntoPtyRef.current = false
     if (pickedIntoComposeRef.current) {
       pickedIntoComposeRef.current = false
       const composeTarget = pane?.compose?.target() ?? null
       if (composeTarget) return composeTarget
     }
     if (finalFocus) return finalFocus()
-    if (variant === "labeled") return pane?.typingSurface() ?? true
+    if (variant === "labeled" || (pickedIntoPty && !coarsePointer)) {
+      return pane?.typingSurface() ?? true
+    }
     return true
   }
 
