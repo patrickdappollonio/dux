@@ -3,8 +3,9 @@
 # developer's key, and a repository's own config outranks their global
 # `commit.gpgsign` and `tag.gpgsign`, including for the git commands the code
 # under test runs inside the fixture. Auto-maintenance is off because, since
-# git 2.54, the one a fixture's own fetch or commit starts in the background
-# prunes worktrees and can delete one a test is creating.
+# git 2.54, the one a fixture's fetch or commit starts in the background
+# prunes worktrees, and a prune landing between a `worktree add` creating
+# `.git/worktrees/<name>` and writing its `locked` file deletes that folder.
 [commit]
 	gpgsign = false
 [tag]

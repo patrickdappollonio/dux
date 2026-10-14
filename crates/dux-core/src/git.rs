@@ -1040,12 +1040,18 @@ enum TreeMove {
     WorktreeAdd,
 }
 
-/// A `git` command for a subcommand that ends by starting git's background
-/// auto-maintenance (`fetch`, `merge`, `commit`), with that turned off for
-/// this invocation only. Since git 2.54 the detached `maintenance run --auto`
-/// prunes worktrees, and one racing a `git worktree add` dux runs next deletes
-/// the half-made `.git/worktrees/<name>` before git writes its `gitdir`, so
-/// the add fails. The user's own git keeps its maintenance.
+/// A `git` command with background auto-maintenance turned off for this
+/// invocation and whatever it runs, hooks included. `fetch`, `merge` and
+/// `commit` end by starting a detached `maintenance run --auto`, which since
+/// git 2.54 prunes worktrees. A `git worktree add` dux runs next creates
+/// `.git/worktrees/<name>` and then writes its `locked` file; a prune landing
+/// between the two sees neither `locked` nor `gitdir` and deletes the folder,
+/// and it can also remove an empty `.git/worktrees` before the first add
+/// creates its folder there. Every tree-moving command goes through this for
+/// simplicity, though `switch`, `checkout` and `worktree add` start none.
+/// It narrows the race rather than closing it: an agent CLI running its own
+/// `git commit` or `fetch` in a sibling worktree can still start maintenance
+/// on the shared repository.
 fn git_without_auto_maintenance() -> Command {
     let mut command = Command::new("git");
     command.args(["-c", "maintenance.auto=false"]);

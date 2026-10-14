@@ -20,7 +20,10 @@ fn home(name: &str) -> PathBuf {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    // A fixture commit must not start background maintenance: since git 2.54
+    // it prunes worktrees and can delete one dux is creating right after.
     let out = Command::new("git")
+        .args(["-c", "maintenance.auto=false"])
         .args(args)
         .current_dir(dir)
         .output()
