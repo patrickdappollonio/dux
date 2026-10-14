@@ -54,7 +54,7 @@ export function ProjectInfoDialog() {
         <InfoRow label="Current branch">
           {branch ? (
             <SimpleTooltip content={branch.tooltip ?? undefined}>
-              <InlineCode className={branch.warn ? "text-amber-500" : undefined}>
+              <InlineCode className={branch.warn ? "text-dux-warning" : undefined}>
                 {branch.branch}
               </InlineCode>
             </SimpleTooltip>

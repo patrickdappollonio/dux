@@ -154,6 +154,12 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        git just will not count its lines. Its value lives in :root/.dark
        below. */
     --color-dux-diff-excluded: var(--dux-diff-excluded);
+    /* The warning tone: something the user should know before acting (a pull
+       request left on an old branch name, uncommitted changes, a file changed
+       on disk), and the warning toast's icon. Paired with an icon wherever it
+       is used, so color is never the only signal. Its value lives in
+       :root/.dark below. */
+    --color-dux-warning: var(--dux-warning);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -393,6 +399,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        muted grey (`#8c8c8c`). Constant across light/dark since the web app
        is dark-only. */
     --dux-diff-excluded: #8c8c8c;
+    /* Warning tone, the amber the dialogs and banners have always shown
+       (Tailwind's amber-500), which reads clearly on the dark background.
+       Constant across light/dark since the web app is dark-only. */
+    --dux-warning: oklch(0.769 0.188 70.08);
     /* The phone action flap's OPAQUE body color: the tab strip's translucent
        `bg-muted/30` composited over the app background, written out as one
        opaque value. The flap grows out of the strip, so the two have to be the
@@ -439,6 +449,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-standalone: oklch(0.657 0.032 224);
     /* Diff-excluded marker color (see :root above). */
     --dux-diff-excluded: #8c8c8c;
+    /* Warning tone (see :root above). */
+    --dux-warning: oklch(0.769 0.188 70.08);
     /* The phone action flap's opaque body color (see :root above). */
     --dux-flap-bg: color-mix(in srgb, var(--muted) 30%, var(--background));
 }

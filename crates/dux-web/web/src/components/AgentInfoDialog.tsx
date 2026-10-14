@@ -41,7 +41,7 @@ function MissingDirectoryLine({
   const line = missingDirectoryInfoLine(workspace)
   if (line === null) return null
   return (
-    <p className="flex items-center gap-1.5 text-xs text-amber-500">
+    <p className="flex items-center gap-1.5 text-xs text-dux-warning">
       <TriangleAlert className="size-3.5 shrink-0" />
       {line}
     </p>
@@ -133,7 +133,7 @@ export function AgentInfoDialog() {
                 // longer matches the branch the agent was created on. Amber +
                 // icon to mirror the TUI's warning-toned drift line, so both
                 // surfaces flag it equally.
-                <p className="flex items-center gap-1.5 text-xs text-amber-500">
+                <p className="flex items-center gap-1.5 text-xs text-dux-warning">
                   <TriangleAlert className="size-3.5 shrink-0" />
                   The branch changed since creation.
                 </p>

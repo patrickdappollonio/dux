@@ -173,7 +173,7 @@ function PickerBody({
           />
         </div>
         {listing.kind === "loaded" && !listing.fetched && listing.fetchError ? (
-          <p className="mt-1 flex items-start gap-1.5 text-xs text-amber-500">
+          <p className="mt-1 flex items-start gap-1.5 text-xs text-dux-warning">
             <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
             Not fetched from origin just now:{" "}
             {listing.fetchError.replace(/\.$/, "")}.

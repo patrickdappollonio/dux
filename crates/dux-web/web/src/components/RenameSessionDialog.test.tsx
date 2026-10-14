@@ -219,7 +219,7 @@ describe("RenameSessionDialog", () => {
         "Renames feat/login on this machine only: pull request #42 and the pushed branch stay on the old name.",
       ),
     )
-    expect(note().className).toContain("text-amber-500")
+    expect(note().className).toContain("text-dux-warning")
   })
 
   it("warns about a pushed branch with no pull request", async () => {

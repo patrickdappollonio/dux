@@ -92,9 +92,9 @@ function WorktreeRowBody({
       </div>
       {entry.dirty ? (
         <SimpleTooltip content="This worktree has changes that are not committed anywhere.">
-          {/* Amber, the warning tone the toast layer already uses, and paired
+          {/* The warning tone the toast layer also uses, paired
              with an icon so colour is never the only signal. */}
-          <span className="flex shrink-0 items-center gap-1 text-xs text-amber-500">
+          <span className="flex shrink-0 items-center gap-1 text-xs text-dux-warning">
             <FileWarning className="size-3.5" />
             Uncommitted changes
           </span>

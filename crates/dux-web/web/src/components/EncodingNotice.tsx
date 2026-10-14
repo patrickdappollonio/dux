@@ -23,9 +23,9 @@ export function EncodingNotice({ notice, onDismiss }: EncodingNoticeProps) {
     <div
       // A live region: it appears on opening a file, unasked.
       role="status"
-      className="flex shrink-0 items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+      className="flex shrink-0 items-center gap-2 border-b border-dux-warning/40 bg-dux-warning/10 px-3 py-2 text-sm"
     >
-      <CircleAlert className="size-4 shrink-0 text-amber-500" />
+      <CircleAlert className="size-4 shrink-0 text-dux-warning" />
       <span className="min-w-0 flex-1">{renderProse(notice.message)}</span>
       {notice.dismissable && (
         // Ghost and icon-only: the one control here, with the sentence as its

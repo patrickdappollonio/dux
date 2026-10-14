@@ -1436,7 +1436,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               className={cn(
                 HEADER_CONTROL,
                 COLLAPSES_BELOW_XL,
-                "text-amber-500 max-md:hidden",
+                "text-dux-warning max-md:hidden",
               )}
               aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}

@@ -135,7 +135,7 @@ function DetailLine({ children }: { children: React.ReactNode }) {
 
 function Warning({ children }: { children: React.ReactNode }) {
   return (
-    <span className="flex shrink-0 items-center gap-1 text-amber-500">
+    <span className="flex shrink-0 items-center gap-1 text-dux-warning">
       <TriangleAlert className="size-3 shrink-0" />
       {children}
     </span>

@@ -159,7 +159,7 @@ export function RenameSessionDialog() {
             <p
               className={
                 warns
-                  ? "flex items-start gap-1.5 text-xs text-amber-500"
+                  ? "flex items-start gap-1.5 text-xs text-dux-warning"
                   : "text-xs text-muted-foreground"
               }
               data-testid="rename-branch-note"

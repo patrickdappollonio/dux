@@ -60,7 +60,7 @@ export function toastPlacement(isMobile: boolean): {
 const TONE_ICON = {
   success: "size-4 text-green-500",
   info: "size-4 text-sky-400",
-  warning: "size-4 text-amber-500",
+  warning: "size-4 text-dux-warning",
   error: "size-4 text-destructive",
   loading: "size-4 animate-spin text-muted-foreground",
 } as const

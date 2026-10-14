@@ -49,12 +49,12 @@ export function FileDiskBanner({
       // A live region: the banner appears without the user having done
       // anything, so a screen reader has to be told.
       role="status"
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-dux-warning/40 bg-dux-warning/10 px-3 py-2 text-sm"
     >
       {deleted ? (
-        <Trash2 className="size-4 shrink-0 text-amber-500" />
+        <Trash2 className="size-4 shrink-0 text-dux-warning" />
       ) : (
-        <CircleAlert className="size-4 shrink-0 text-amber-500" />
+        <CircleAlert className="size-4 shrink-0 text-dux-warning" />
       )}
       <span className="min-w-0 flex-1">
         {deleted ? (

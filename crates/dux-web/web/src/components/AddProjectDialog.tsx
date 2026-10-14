@@ -187,9 +187,9 @@ function InspectionMessages({
   return (
     <>
       {init ? (
-        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
           <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
             <div className="grid gap-1 text-sm">
               <span>{init.message}</span>
               <span className="text-xs text-muted-foreground">
@@ -200,17 +200,17 @@ function InspectionMessages({
         </div>
       ) : null}
       {blocked ? (
-        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
           <div className="flex items-start gap-2">
-            <Ban className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <Ban className="mt-0.5 size-4 shrink-0 text-dux-warning" />
             <span className="text-sm">{renderProse(blocked.messageProse)}</span>
           </div>
         </div>
       ) : null}
       {noCommits ? (
-        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
           <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
             <div className="grid gap-1 text-sm">
               <span>{noCommits.message}</span>
               <span className="text-xs text-muted-foreground">
@@ -221,18 +221,18 @@ function InspectionMessages({
         </div>
       ) : null}
       {branch ? (
-        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
           <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
             <div className="grid gap-1 text-sm">
               <span>{renderProse(branch.messageProse)}</span>
               {/* Warning tone only when worktrees will NOT branch from the
-                  default; amber matches the panel's own warning glyph. */}
+                  default; the same tone as the panel's own warning glyph. */}
               <span
                 data-tone={branch.worktreeTone}
                 className={
                   branch.worktreeTone === "warning"
-                    ? "text-amber-500"
+                    ? "text-dux-warning"
                     : "text-muted-foreground"
                 }
               >
