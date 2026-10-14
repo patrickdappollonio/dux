@@ -205,3 +205,32 @@ describe("an ordinary notification", () => {
     expect(toastEl().getAttribute("data-removed")).not.toBe("true")
   })
 })
+
+describe("a notification with an action button", () => {
+  it("leaves the toast to the press's handler, which replaces it on the same id", async () => {
+    render(<Toaster />)
+    let pressed = 0
+    act(() => {
+      notifyWarning("the copy was blocked", {
+        id: "copy-1",
+        sticky: true,
+        action: { label: "Copy", onClick: () => (pressed += 1) },
+      })
+    })
+    await screen.findByText("the copy was blocked")
+    act(() => {
+      screen.getByRole("button", { name: "Copy" }).click()
+    })
+    expect(pressed).toBe(1)
+    // The press alone must not close the toast: only its handler knows
+    // whether the press worked.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+
+    act(() => {
+      notifySuccess("copied it", { id: "copy-1" })
+    })
+    await screen.findByText("copied it")
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull()
+  })
+})

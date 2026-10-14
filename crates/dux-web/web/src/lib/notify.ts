@@ -15,6 +15,8 @@
 import { createElement, Fragment, type ReactNode } from "react"
 import { toast } from "sonner"
 
+import { Button } from "@/components/ui/button"
+
 import { authPaused, subscribeAuth } from "./authGate"
 import { type Prose, proseText, renderProse } from "./prose"
 
@@ -68,6 +70,26 @@ export interface NotifyOptions {
   /// a notification the user must act on outside the toast, or where something may
   /// have been lost or left half-done.
   sticky?: boolean
+  /// One button on the toast. Pressing it never closes the toast by itself:
+  /// only the handler knows whether the press worked, so it replaces or
+  /// dismisses the toast on its own `id`.
+  action?: NotifyAction
+}
+
+export interface NotifyAction {
+  label: string
+  onClick: () => void
+}
+
+// The shared button rather than sonner's own, so the action carries the app's
+// theme and focus ring. 40px tall for the touch floor; it sits beside the text,
+// and the toast's close button is its only interactive neighbour.
+function actionButton(action: NotifyAction): ReactNode {
+  return createElement(
+    Button,
+    { variant: "outline", className: "h-10 shrink-0", onClick: action.onClick },
+    action.label,
+  )
 }
 
 // The user's configured window, at module scope rather than threaded through call
@@ -110,8 +132,19 @@ function cancelBusyGuard(id: string): void {
 }
 
 // The one call into sonner for a final tone. Everything above resolves to this.
-function raiseFinal(tone: string, message: ReactNode, duration: number, id?: string): void {
-  const options = id === undefined ? { duration } : { id, duration }
+function raiseFinal(
+  tone: string,
+  message: ReactNode,
+  duration: number,
+  id?: string,
+  action?: NotifyAction,
+): void {
+  // sonner MERGES a raise into the toast already on its id, so a replacement
+  // names `action` even when it has none, or the old button would survive it.
+  const options =
+    id === undefined
+      ? { duration, ...(action ? { action: actionButton(action) } : {}) }
+      : { id, duration, action: action ? actionButton(action) : undefined }
   if (tone === "error") toast.error(message, options)
   else if (tone === "warning") toast.warning(message, options)
   else if (tone === "info") toast.info(message, options)
@@ -150,7 +183,7 @@ export function notify(tone: FinalTone, message: Notice, opts: NotifyOptions = {
   const duration = opts.sticky
     ? Infinity
     : statusToastDuration(tone, configuredStatusClearSeconds)
-  raiseFinal(tone, noticeBody(message), duration, opts.id)
+  raiseFinal(tone, noticeBody(message), duration, opts.id, opts.action)
 }
 
 /// A neutral, informational notification.

@@ -70,6 +70,8 @@ const SONNER_TEST_IMPORTERS = [
   // Mounts the real Toaster and pins sonner's loading-toast limitations, so it
   // has to raise through sonner to have anything to look at.
   "components/ui/sonner.test.tsx",
+  // A blocked agent copy: it asserts the toast's id, stickiness and button.
+  "lib/agentCopy.test.ts",
   // The favicon migration notice.
   "lib/favicon.dom.test.tsx",
   "lib/favicon.test.ts",

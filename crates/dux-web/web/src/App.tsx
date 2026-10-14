@@ -21,6 +21,7 @@ import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
 import { ConfirmStopTabDialog } from "@/components/ConfirmStopTabDialog"
 import { ConfirmDetachAgentDialog } from "@/components/ConfirmDetachAgentDialog"
 import { ConfirmForceReconnectDialog } from "@/components/ConfirmForceReconnectDialog"
+import { CopiedTextDialog } from "@/components/CopiedTextDialog"
 import { ConfirmForceStopAgentDialog } from "@/components/ConfirmForceStopAgentDialog"
 import { ConfirmRecreateWorkingCopyDialog } from "@/components/ConfirmRecreateWorkingCopyDialog"
 import { ConfirmUseExistingBranchDialog } from "@/components/ConfirmUseExistingBranchDialog"
@@ -130,6 +131,7 @@ function GlobalOverlays() {
       <DeleteProjectDialog />
       <CheckoutDefaultBranchDialog />
       <ChangeBaseBranchDialog />
+      <CopiedTextDialog />
       {/* Portals to the body and sits above every other surface, so DOM order
           here is irrelevant. */}
       <OfflineOverlay />

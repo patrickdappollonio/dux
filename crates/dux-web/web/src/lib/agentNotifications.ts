@@ -3,6 +3,8 @@
 // `crates/dux-core/src/attention.rs` so both surfaces agree on what is a notification.
 import type { Terminal } from "@xterm/xterm"
 
+import { copyKeepingFocus, reportBlockedCopy } from "./agentCopy"
+
 /** Whether an OSC 9 payload (the text after `9;`) is a progress report rather than a
  * notification: `4;<state>` with a 1-2 digit state. Matches Rust `is_progress_state`. */
 export function osc9IsProgress(data: string): boolean {
@@ -111,13 +113,15 @@ export interface AgentNotificationOptions {
   /** Live read of the `web_notifications` config bit, the only switch over desktop
    * notifications: `capabilities.passthrough` deliberately does not gate them. */
   enabled: () => boolean
-  /** Title shown on the desktop notification (e.g. the agent's name). */
+  /** Title shown on the desktop notification (e.g. the agent's name), and the
+   * name a blocked clipboard copy is credited to. */
   title: () => string
   /** Live read of `capabilities.clipboard_passthrough`, into which the server has already
    * resolved the `capabilities.passthrough` master switch. Defaults to "focused". */
   clipboardMode?: () => ClipboardPassthroughMode
   /** A stable per-session/tab id used as the Notification `tag` so a repeat from
-   * the same agent replaces the previous one instead of stacking. */
+   * the same agent replaces the previous one instead of stacking. The pane's
+   * blocked-copy toast is keyed by it for the same reason. */
   tag?: () => string
 }
 
@@ -154,14 +158,12 @@ export function registerAgentNotifications(
   let pendingClipboard: string | null = null
   const doClipboardWrite = (text: string) => {
     // Focus can change while a deferred write waits, and only a focused tab may write.
-    if (
-      typeof document !== "undefined" &&
-      document.hasFocus() &&
-      typeof navigator !== "undefined" &&
-      navigator.clipboard
-    ) {
-      void navigator.clipboard.writeText(text).catch(() => {})
-    }
+    if (typeof document === "undefined" || !document.hasFocus()) return
+    const source = opts.title()
+    const paneTag = opts.tag?.() ?? "pane"
+    void copyKeepingFocus(text).then((ok) => {
+      if (!ok) reportBlockedCopy(paneTag, source, text)
+    })
   }
   const writeClipboard = (text: string) => {
     const now = Date.now()
