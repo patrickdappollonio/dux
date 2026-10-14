@@ -79,7 +79,9 @@ impl Engine {
 
         // 2. Post the busy status before spawning so it is strictly ahead of any
         //    event the worker could send: mpsc is FIFO, so `process_worker_event`
-        //    sees busy then completion however fast the worker runs.
+        //    sees busy then completion however fast the worker runs. Only this
+        //    worker's own events are ordered behind it; another worker already
+        //    running on the shared channel can still post first.
         let worker_tx = self.worker_tx.clone();
         let mut busy_key = None;
         if let Some(mut busy) = spec.busy_status {

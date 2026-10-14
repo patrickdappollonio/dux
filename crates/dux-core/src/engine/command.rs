@@ -2188,22 +2188,12 @@ mod tests {
             .with_live_keys(engine.live_status_keys.clone());
         let t0 = std::time::Instant::now();
 
-        // Push goes through `spawn_status_op`; its busy rides the reaction.
-        let reaction = engine
-            .apply(Command::Push {
-                worktree_path: tmp.path().to_path_buf(),
-            })
-            .expect("apply succeeds");
-        let push_busy = match reaction {
-            EventReaction::Status(s) => s,
-            _ => panic!("expected a pending busy from the push dispatch"),
-        };
-        let push_key = push_busy.key.clone().expect("the push busy is keyed");
-        assert_eq!(push_busy.tone, StatusTone::Busy);
-        show(&mut status, &push_busy);
-
         // Pull goes through `spawn_command_worker`; its busy rides the worker
-        // channel, posted ahead of anything the worker can send.
+        // channel, posted ahead of anything that worker can send. It is
+        // dispatched first, while the channel is still empty: the push worker
+        // fails within milliseconds on this non-repository directory and posts
+        // its completion onto the same channel, so with push first that
+        // completion can land ahead of the pull's busy.
         engine
             .apply(Command::Pull {
                 repo_path: tmp.path().to_path_buf(),
@@ -2218,6 +2208,20 @@ mod tests {
         };
         let pull_key = pull_busy.key.clone().expect("the pull busy is keyed");
         show(&mut status, &pull_busy);
+
+        // Push goes through `spawn_status_op`; its busy rides the reaction.
+        let reaction = engine
+            .apply(Command::Push {
+                worktree_path: tmp.path().to_path_buf(),
+            })
+            .expect("apply succeeds");
+        let push_busy = match reaction {
+            EventReaction::Status(s) => s,
+            _ => panic!("expected a pending busy from the push dispatch"),
+        };
+        let push_key = push_busy.key.clone().expect("the push busy is keyed");
+        assert_eq!(push_busy.tone, StatusTone::Busy);
+        show(&mut status, &push_busy);
 
         assert!(engine.status_op_is_live(&push_key));
         assert!(engine.status_op_is_live(&pull_key));
