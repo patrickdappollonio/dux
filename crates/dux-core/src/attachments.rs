@@ -89,7 +89,7 @@ pub struct Target {
 }
 
 /// The random id a browser profile keeps for itself and presents on its
-/// events socket, so its tabs count as one browser.
+/// events and terminal sockets, so its tabs count as one browser.
 ///
 /// Untrusted and DISPLAY-ONLY: it feeds the browser counts and the listing's
 /// grouping and nothing else. No ownership, exemption, auth, presence-grace or
