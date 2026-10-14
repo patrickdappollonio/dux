@@ -170,6 +170,15 @@ describe("RenameSessionDialog", () => {
     expect(renamePayload(" next ", true, true)).toEqual({ title: "next", rename_branch: true })
   })
 
+  it("holds Save, and Enter, while a rename is on its way", () => {
+    seed("s1", managedSession, "feat/signin")
+    mockState = { ...mockState, renamePending: true }
+    renderDialog()
+    expect(saveButton().disabled).toBe(true)
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
+    expect(submitRename).not.toHaveBeenCalled()
+  })
+
   it("sends the branch flag with the title", async () => {
     await store.renameSession("s1", "next", true)
     expect(patch).toHaveBeenCalledWith("s1", { title: "next", rename_branch: true })

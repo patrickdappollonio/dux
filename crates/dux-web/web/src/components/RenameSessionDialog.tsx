@@ -36,7 +36,7 @@ import {
 // box, with a line saying what stays on the old name when the branch has an
 // open pull request or a pushed copy.
 export function RenameSessionDialog() {
-  const { renameTarget, renameDraft, renameBranch, spine } = useDux()
+  const { renameTarget, renameDraft, renameBranch, renamePending, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === renameTarget)
   const branch = session
     ? matchWorkspace<string | null>(session.workspace, {
@@ -88,7 +88,7 @@ export function RenameSessionDialog() {
     renameDraft.trim() !== "" &&
     !isValidAgentName(renameDraft.trim())
   const blocked = renameBlockedReason(renameDraft, renameBranch, branchNamed)
-  const canSave = !invalidNonEmpty && blocked === null
+  const canSave = !invalidNonEmpty && blocked === null && !renamePending
   const warns = openPr !== null || pushed
 
   function handleSubmit() {

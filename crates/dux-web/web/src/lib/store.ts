@@ -615,6 +615,9 @@ export interface DuxState {
   renameDraft: string
   // The dialog's "Also rename the git branch" box, unticked on every open.
   renameBranch: boolean
+  // A rename request is on its way. Save waits for it, because a second request
+  // races the first to the server and the loser is refused as already running.
+  renamePending: boolean
   // The session pending a provider swap, or null. The dialog pre-selects the
   // session's current provider; the swap takes effect on the next launch
   // (mirroring the TUI's `change-agent-provider`, which never kills a running
@@ -1108,6 +1111,7 @@ let state: DuxState = {
   renameTarget: null,
   renameDraft: "",
   renameBranch: false,
+  renamePending: false,
   changeProviderTarget: null,
   attachPullRequestTarget: null,
   attachPullRequestDraft: "",
@@ -5280,11 +5284,16 @@ export async function renameSession(
 // they typed and can retry or cancel.
 export async function submitRename(): Promise<void> {
   const id = state.renameTarget
-  if (!id) return
+  if (!id || state.renamePending) return
   const branchNamed = renameTargetBranchNamed()
   if (renameBlockedReason(state.renameDraft, state.renameBranch, branchNamed)) return
   const body = renamePayload(state.renameDraft, state.renameBranch, branchNamed)
-  if (await renameSession(id, body.title, body.rename_branch)) closeRename()
+  setState({ renamePending: true })
+  try {
+    if (await renameSession(id, body.title, body.rename_branch)) closeRename()
+  } finally {
+    setState({ renamePending: false })
+  }
 }
 
 // Open the attach-pull-request dialog for a session with an empty draft. The
