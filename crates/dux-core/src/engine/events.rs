@@ -2270,6 +2270,7 @@ impl Engine {
         session_id: &str,
     ) -> Option<FinishDeleteSessionOutcome> {
         let session = self.sessions.iter().find(|s| s.id == session_id).cloned()?;
+        self.stop_agent_restarts(session_id, true);
         // The session is being removed now, so drop any "closing" marker set at the
         // start of its delete (both the async and synchronous delete paths clear it
         // here, in addition to the async worktree-removal-completed path).
@@ -2698,6 +2699,9 @@ impl Engine {
             );
         }
 
+        // A working-copy recreate waiting to start this agent's tabs again
+        // starts none of them, and says the agent was deleted.
+        self.stop_agent_restarts(&session.id, true);
         self.begin_session_tab_shutdown(&session, worktree_removal);
 
         match busy_message {

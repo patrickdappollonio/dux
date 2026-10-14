@@ -701,17 +701,43 @@ pub struct PendingTabRestart {
     pub forced: bool,
     /// The grace the old processes were given, for the forced sentence.
     pub grace_seconds: u64,
-    /// Set when the agent was force-stopped while its tabs were shutting down:
-    /// somebody asked for it to stop, so nothing starts again.
-    pub cancelled: bool,
+    /// The tabs somebody stopped or closed, or whose agent they stopped, while
+    /// the old processes shut down: the stop is the newer request, so these do
+    /// not start again.
+    pub stopped: std::collections::HashSet<TabId>,
+    /// Set when the agent was deleted meanwhile: nothing starts again.
+    pub agent_deleted: bool,
     /// What happened to each tab so far; complete once every launch answered.
     pub report: crate::working_copy::TabRestartReport,
     /// Set once the launches have been dispatched.
     pub dispatched: bool,
-    /// The launches dispatched and not yet answered, each with its provider
-    /// and whether it resumes: a launch only on its way may still fail, so
-    /// nothing is reported until it has come up or failed.
-    pub launching: std::collections::HashMap<TabId, (String, bool)>,
+    /// The launches dispatched and not yet answered: a launch only on its way
+    /// may still fail, so nothing is reported until it has come up or failed.
+    pub launching: std::collections::HashMap<TabId, RestartLaunch>,
+    /// The tabs that came up resuming, each with its provider, waiting for the
+    /// resume fallback to know whether the conversation really continued.
+    pub resuming: std::collections::HashMap<TabId, String>,
+}
+
+/// One launch a restart dispatched and is waiting on.
+pub struct RestartLaunch {
+    pub provider: String,
+    /// Whether it resumes the conversation.
+    pub resume: bool,
+    /// Whether it is the fresh launch the resume fallback started after the
+    /// resume did not take.
+    pub fell_back: bool,
+}
+
+/// How a resumed restart turned out, once the resume fallback can no longer
+/// change it.
+enum ResumedRestart {
+    /// Running, with readable text on screen: the conversation continued.
+    Continued,
+    /// Exited after saying something, which its tab keeps on screen.
+    Ended,
+    /// Torn down by somebody's stop or close.
+    Stopped,
 }
 
 /// What one [`Engine::sweep_recreate_restarts`] pass produced: the launch
@@ -1402,7 +1428,10 @@ impl Engine {
         // Transport-facing (a wire command's path segment): named here, at the
         // door, before it touches any tab-keyed map.
         let tab_id = TabIdRef::new(tab_id);
-        if !self.providers.contains_key(tab_id) {
+        // A tab waiting for a working-copy recreate to start it again has no
+        // process here, but stopping it is a real stop: it stays stopped.
+        let restart_stopped = self.stop_tab_restart(tab_id);
+        if !self.providers.contains_key(tab_id) && !restart_stopped {
             return KillTabRuntimeOutcome {
                 killed: false,
                 session_id,
@@ -1607,8 +1636,13 @@ impl Engine {
         else {
             return DetachSessionOutcome::UnknownSession;
         };
+        // Tabs a working-copy recreate is restarting are dormant while their
+        // old processes shut down, so they are not live here, but stopping the
+        // agent is a stop of them too: they stay stopped, and the wait covers
+        // their old processes.
+        let restarting = self.stop_agent_restarts(session_id, false);
         let live_tabs = self.live_tab_ids(session_id);
-        if live_tabs.is_empty() {
+        if live_tabs.is_empty() && restarting.is_empty() {
             return DetachSessionOutcome::NotRunning { label };
         }
 
@@ -1616,6 +1650,7 @@ impl Engine {
         let pending_ids = live_tabs
             .iter()
             .map(|id| id.as_str().to_string())
+            .chain(restarting)
             .collect::<std::collections::HashSet<String>>();
         for id in &live_tabs {
             let owner = self.terminating_owner_for_tab(session_id, id.as_ref_id());
@@ -1711,11 +1746,7 @@ impl Engine {
         // A recreate restarting this agent's tabs must not start them again
         // once they are gone: the stop is the newer request. Its spinner is
         // still answered, by the reaper's pass over the entries killed above.
-        for restart in &mut self.pending_tab_restarts {
-            if restart.session_id == session_id {
-                restart.cancelled = true;
-            }
-        }
+        self.stop_agent_restarts(session_id, false);
 
         if stopped == 0 && overtaken == 0 {
             return ForceDetachOutcome::NotRunning { label };
@@ -2398,6 +2429,16 @@ impl Engine {
         let op = crate::engine::status_op(crate::working_copy::recreate_busy_message(&agent_label))
             .resolve_in_handler(move |outcome: &crate::engine::RecreateOutcome| {
                 match &outcome.result {
+                    Ok(_)
+                        if outcome
+                            .restart
+                            .as_ref()
+                            .is_some_and(|report| report.agent_deleted) =>
+                    {
+                        crate::engine::Final::info(
+                            crate::working_copy::recreate_agent_deleted_message(&agent_label),
+                        )
+                    }
                     Ok(branch) => {
                         let message = crate::working_copy::recreate_success_message(
                             &agent_label,
@@ -2412,7 +2453,7 @@ impl Engine {
                         if outcome
                             .restart
                             .as_ref()
-                            .is_some_and(|report| !report.failed.is_empty())
+                            .is_some_and(|report| report.needs_attention())
                         {
                             crate::engine::Final::warning(message)
                         } else {
@@ -2574,33 +2615,37 @@ impl Engine {
             tabs,
             forced: false,
             grace_seconds: self.individual_close_grace().as_secs(),
-            cancelled: false,
+            stopped: std::collections::HashSet::new(),
+            agent_deleted: false,
             report,
             dispatched: false,
             launching: std::collections::HashMap::new(),
+            resuming: std::collections::HashMap::new(),
         });
         crate::engine::EventReaction::Status(busy)
     }
 
     /// Start again every tab a recreate stopped whose last old process has
     /// reaped, and resolve a recreate's op once every launch it started has
-    /// come up or failed, with what happened to each. Called by both surfaces
-    /// right after [`Engine::reap_terminating_ptys`], with the size their
-    /// launches use.
+    /// come up or failed, and every resumed one is known to have continued its
+    /// conversation or fallen back to a fresh one, with what happened to each.
+    /// Called by both surfaces right after [`Engine::reap_terminating_ptys`],
+    /// with the size their launches use.
     ///
     /// Each tab goes through the same resume decision every launch makes, in
     /// strip order: the first of a CLI gets its conversation back, and a second
     /// tab of the same CLI starts fresh, because the first is already launching
-    /// by then. A tab closed, started by somebody else or refused meanwhile is
-    /// not started, and the final says so.
+    /// by then. A tab closed, stopped, started by somebody else or refused
+    /// meanwhile is not started, and the final says so.
     pub fn sweep_recreate_restarts(&mut self, pty_size: (u16, u16)) -> RecreateRestartSweep {
         let mut sweep = RecreateRestartSweep::default();
         let to_dispatch = |r: &PendingTabRestart| !r.dispatched && r.pending_ids.is_empty();
-        let answered = |r: &PendingTabRestart| r.dispatched && r.launching.is_empty();
+        let answered =
+            |r: &PendingTabRestart| r.dispatched && r.launching.is_empty() && r.resuming.is_empty();
         if !self
             .pending_tab_restarts
             .iter()
-            .any(|r| to_dispatch(r) || answered(r))
+            .any(|r| to_dispatch(r) || r.dispatched)
         {
             return sweep;
         }
@@ -2613,6 +2658,7 @@ impl Engine {
                     restart.forced.then_some(restart.grace_seconds);
                 self.dispatch_tab_restarts(&mut restart, pty_size, &mut sweep.launches);
             }
+            self.settle_resumed_restarts(&mut restart);
             if answered(&restart) {
                 sweep
                     .finals
@@ -2638,9 +2684,17 @@ impl Engine {
         pty_size: (u16, u16),
         launches: &mut Vec<crate::engine::EventReaction>,
     ) {
+        if restart.agent_deleted || self.session_by_id(&restart.session_id).is_none() {
+            restart.report.agent_deleted = true;
+            return;
+        }
         for (id, provider) in &restart.tabs {
             let name = provider.as_str().to_string();
-            let started = (!restart.cancelled && !self.tab_is_live(id.as_ref_id()))
+            if restart.stopped.contains(id) {
+                restart.report.stopped.push(name);
+                continue;
+            }
+            let started = (!self.tab_is_live(id.as_ref_id()))
                 .then(|| self.restart_tab_launch_request(id, provider, pty_size))
                 .flatten();
             let Some((request, resume)) = started else {
@@ -2665,11 +2719,84 @@ impl Engine {
             );
             launches.push(reaction);
             if launched {
-                restart.launching.insert(id.clone(), (name, resume));
+                restart.launching.insert(
+                    id.clone(),
+                    RestartLaunch {
+                        provider: name,
+                        resume,
+                        fell_back: false,
+                    },
+                );
             } else {
                 self.running_provider_pins.remove(id.as_ref_id());
                 restart.report.not_restarted.push(name);
             }
+        }
+    }
+
+    /// Settle each of a restart's resumed tabs whose resume the fallback can no
+    /// longer undo. A resume that exits saying nothing, or hangs with no
+    /// output, is relaunched fresh by [`Engine::sweep_resume_fallbacks`], which
+    /// tells the restart through [`Engine::note_restart_resume_fell_back`]; one
+    /// that has put readable text on screen never is, so that text is what says
+    /// the conversation continued.
+    fn settle_resumed_restarts(&mut self, restart: &mut PendingTabRestart) {
+        let resuming: Vec<TabId> = restart.resuming.keys().cloned().collect();
+        for id in resuming {
+            let tab = id.as_ref_id();
+            let outcome = match self.providers.get(tab) {
+                Some(client) if client.has_readable_output() => {
+                    if client.is_exited() {
+                        Some(ResumedRestart::Ended)
+                    } else {
+                        Some(ResumedRestart::Continued)
+                    }
+                }
+                Some(_) => None,
+                // Gone without the fallback relaunching it: somebody stopped
+                // or closed it.
+                None => Some(ResumedRestart::Stopped),
+            };
+            let Some(outcome) = outcome else { continue };
+            let Some(provider) = restart.resuming.remove(tab) else {
+                continue;
+            };
+            match outcome {
+                ResumedRestart::Continued => restart.report.continued.push(provider),
+                ResumedRestart::Ended => restart.report.ended.push(provider),
+                ResumedRestart::Stopped => restart.report.stopped.push(provider),
+            }
+        }
+    }
+
+    /// The resume fallback relaunched `tab_id` fresh: a restart waiting on its
+    /// resume now waits on that fresh launch instead, and says it fell back.
+    pub(crate) fn note_restart_resume_fell_back(&mut self, tab_id: &TabIdRef, launched: bool) {
+        let Some(restart) = self
+            .pending_tab_restarts
+            .iter_mut()
+            .find(|restart| restart.resuming.contains_key(tab_id))
+        else {
+            return;
+        };
+        let Some(provider) = restart.resuming.remove(tab_id) else {
+            return;
+        };
+        if launched {
+            restart.launching.insert(
+                tab_id.to_owned(),
+                RestartLaunch {
+                    provider,
+                    resume: false,
+                    fell_back: true,
+                },
+            );
+        } else {
+            restart.report.failed.push((
+                provider,
+                "its conversation could not be picked back up, and dux could not start it fresh"
+                    .to_string(),
+            ));
         }
     }
 
@@ -2700,8 +2827,11 @@ impl Engine {
     }
 
     /// Record the answer of a launch a recreate restart dispatched: up, or
-    /// failed with `error`. Any other launch is none of its business.
+    /// failed with `error`. Any other launch is none of its business. A launch
+    /// that came up resuming is not settled yet: it waits in `resuming` until
+    /// the resume fallback has had its say.
     pub(crate) fn note_restart_launch_answer(&mut self, tab_id: &TabIdRef, error: Option<&str>) {
+        let resuming = self.resume_fallback_candidates.contains_key(tab_id);
         let Some(restart) = self
             .pending_tab_restarts
             .iter_mut()
@@ -2709,21 +2839,117 @@ impl Engine {
         else {
             return;
         };
-        let Some((provider, resume)) = restart.launching.remove(tab_id) else {
+        let Some(launch) = restart.launching.remove(tab_id) else {
             return;
         };
         match error {
             Some(error) => {
-                restart.report.failed.push((provider, error.to_string()));
+                restart
+                    .report
+                    .failed
+                    .push((launch.provider, error.to_string()));
                 // The tab is dormant again, so it says what it launches next.
                 self.running_provider_pins.remove(tab_id);
             }
             None if !self.providers.contains_key(tab_id) => {
-                restart.report.not_restarted.push(provider)
+                restart.report.not_restarted.push(launch.provider)
             }
-            None if resume => restart.report.continued.push(provider),
-            None => restart.report.fresh.push(provider),
+            None if launch.fell_back => restart.report.fell_back.push(launch.provider),
+            None if launch.resume && resuming => {
+                restart.resuming.insert(tab_id.to_owned(), launch.provider);
+            }
+            None if launch.resume => restart.report.continued.push(launch.provider),
+            None => restart.report.fresh.push(launch.provider),
         }
+    }
+
+    /// The restart waiting to start `tab_id` again once its old process has
+    /// gone, when there is one: such a tab is the restart's to start, and no
+    /// other launch may start it meanwhile.
+    fn restart_awaiting(&self, tab_id: &TabIdRef) -> Option<&PendingTabRestart> {
+        self.pending_tab_restarts.iter().find(|restart| {
+            !restart.dispatched
+                && !restart.agent_deleted
+                && !restart.stopped.contains(tab_id)
+                && restart.tabs.iter().any(|(id, _)| id == tab_id)
+        })
+    }
+
+    /// Why a launch of `tab_id` is refused right now, when a working-copy
+    /// recreate is about to start it again: whatever asked, the tab's old
+    /// process is still shutting down and the restart starts it the moment it
+    /// has gone.
+    pub fn restart_launch_refusal(
+        &self,
+        tab_id: &TabIdRef,
+    ) -> Option<crate::status_text::StatusText> {
+        let restart = self.restart_awaiting(tab_id)?;
+        let (_, provider) = restart.tabs.iter().find(|(id, _)| id == tab_id)?;
+        let label = self
+            .session_by_id(&restart.session_id)
+            .map(|session| session.display_label())
+            .unwrap_or_else(|| restart.session_id.clone());
+        Some(crate::working_copy::restart_pending_launch_refusal(
+            &label,
+            provider.as_str(),
+        ))
+    }
+
+    /// Whether a working-copy recreate is about to start another of
+    /// `session_id`'s tabs again with `provider`, other than `tab_id`: that tab
+    /// is the one getting the conversation back, so a launch beside it starts
+    /// fresh, the same as beside a running one.
+    pub(crate) fn restart_will_resume(
+        &self,
+        session_id: &str,
+        tab_id: &TabIdRef,
+        provider: &crate::model::ProviderKind,
+    ) -> bool {
+        self.pending_tab_restarts.iter().any(|restart| {
+            restart.session_id == session_id
+                && !restart.dispatched
+                && !restart.agent_deleted
+                && restart.tabs.iter().any(|(id, running)| {
+                    id != tab_id && running == provider && !restart.stopped.contains(id)
+                })
+        })
+    }
+
+    /// A deliberate stop of `tab_id` (stopped or closed) while a working-copy
+    /// recreate waits to start it again: it stays stopped. Answers whether the
+    /// tab was waiting.
+    pub(crate) fn stop_tab_restart(&mut self, tab_id: &TabIdRef) -> bool {
+        let Some(restart) = self.pending_tab_restarts.iter_mut().find(|restart| {
+            !restart.dispatched
+                && !restart.agent_deleted
+                && !restart.stopped.contains(tab_id)
+                && restart.tabs.iter().any(|(id, _)| id == tab_id)
+        }) else {
+            return false;
+        };
+        restart.stopped.insert(tab_id.to_owned());
+        true
+    }
+
+    /// A deliberate stop or deletion of the whole agent while a working-copy
+    /// recreate waits to start its tabs again: none of them starts. Answers the
+    /// ids of the old processes still shutting down, so a stop can wait for
+    /// them too.
+    pub(crate) fn stop_agent_restarts(&mut self, session_id: &str, deleted: bool) -> Vec<String> {
+        let mut waiting = Vec::new();
+        for restart in &mut self.pending_tab_restarts {
+            if restart.session_id != session_id || restart.dispatched {
+                continue;
+            }
+            if deleted {
+                restart.agent_deleted = true;
+            }
+            for (id, _) in &restart.tabs {
+                restart.stopped.insert(id.clone());
+            }
+            waiting.extend(restart.pending_ids.iter().cloned());
+        }
+        waiting
     }
 
     /// The launch that starts one of an agent's tabs again with `provider`,
@@ -3142,7 +3368,8 @@ mod recreate_tests {
     /// The missing-copy agent with its slot tab running `slot` and each extra
     /// `(tab id, provider)` tab running too, every one a `cat` that exits on
     /// SIGTERM. Every CLI has run in this agent before, so a launch may resume
-    /// it, and every provider command is `true`, so a launch runs nothing real,
+    /// it, and every provider command is a shell that says something and then
+    /// waits, so a launch runs nothing real and a resume is seen to take,
     /// except Claude's, a path that still names Claude: a running Claude tab
     /// follows the folder and is never started again here.
     fn agent_running(
@@ -3152,11 +3379,12 @@ mod recreate_tests {
         let (mut engine, tmp) = engine_with_a_missing_working_copy();
         let cwd = tempfile::tempdir().expect("a directory for the stand-in processes");
         for (name, provider) in engine.config.providers.commands.iter_mut() {
-            provider.command = if name == "claude" {
-                cwd.path().join("claude").to_string_lossy().into_owned()
+            if name == "claude" {
+                provider.command = cwd.path().join("claude").to_string_lossy().into_owned();
             } else {
-                "true".to_string()
-            };
+                provider.command = "sh".to_string();
+                provider.args = vec!["-c".to_string(), "echo ready; exec cat".to_string()];
+            }
         }
         engine.sessions[0].provider = crate::model::ProviderKind::new(slot);
         for provider in ["claude", "codex", "opencode", "copilot"] {
@@ -3203,6 +3431,7 @@ mod recreate_tests {
         let mut launches = Vec::new();
         let mut launched = Vec::new();
         loop {
+            let _ = engine.sweep_resume_fallbacks((24, 80));
             let _ = engine.reap_terminating_ptys();
             while let Ok(event) = engine.worker_rx.try_recv() {
                 let request = match &event {
@@ -3840,6 +4069,264 @@ mod recreate_tests {
                 restart_tabs: false,
             })
             .expect("a recreate that stops nothing goes ahead");
+    }
+
+    /// The recreate is asked to restart the agent's tabs and its checkout has
+    /// landed, so the tabs it restarts are shutting down.
+    fn restart_under_way(engine: &mut Engine) {
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs");
+        checkout_lands(engine, false);
+    }
+
+    /// A polite stop of the agent while its tabs shut down for the restart is
+    /// the newer request, exactly as a force stop is: the stop waits for the
+    /// old processes, nothing starts again, and the final says it was stopped.
+    #[test]
+    fn a_polite_stop_during_the_restart_starts_nothing_again() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        restart_under_way(&mut engine);
+        assert!(
+            matches!(
+                engine.begin_detach_session("s1"),
+                DetachSessionOutcome::Started { .. }
+            ),
+            "the stop waits for the old process the restart is shutting down"
+        );
+
+        let sweep = restart_completes(&mut engine);
+        assert!(sweep.launches.is_empty(), "nothing is started again");
+        assert!(!engine.tab_is_live(TabIdRef::new("s1-slot")));
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains(
+                "dux did not restart the Codex tab, because it was stopped while its old \
+                 process shut down."
+            ),
+            "{message}"
+        );
+    }
+
+    /// Stopping one tab the restart is waiting on keeps that tab stopped; the
+    /// others still start again.
+    #[test]
+    fn stopping_a_tab_during_the_restart_keeps_it_stopped() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[("tab-b", "opencode")]);
+        restart_under_way(&mut engine);
+        assert!(
+            engine.kill_tab_runtime("tab-b").killed,
+            "a stop of a tab the restart holds is a stop"
+        );
+
+        let sweep = restart_completes(&mut engine);
+        assert!(engine.tab_is_live(TabIdRef::new("s1-slot")));
+        assert!(!engine.tab_is_live(TabIdRef::new("tab-b")));
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains(
+                "dux did not restart the Opencode tab, because it was stopped while its old \
+                 process shut down."
+            ),
+            "{message}"
+        );
+    }
+
+    /// Closing a tab the restart is waiting on closes it rather than leaving
+    /// it to be started again.
+    #[test]
+    fn closing_a_tab_during_the_restart_does_not_restart_it() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[("tab-b", "opencode")]);
+        restart_under_way(&mut engine);
+        engine.close_tab("s1", "tab-b").expect("the tab closes");
+
+        let sweep = restart_completes(&mut engine);
+        assert!(engine.tab_is_live(TabIdRef::new("s1-slot")));
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains(
+                "dux did not restart the Opencode tab, because it was stopped while its old \
+                 process shut down."
+            ),
+            "{message}"
+        );
+    }
+
+    /// Deleting the agent while its tabs shut down starts nothing, and the
+    /// final says the agent was deleted rather than telling the user to start
+    /// its tabs.
+    #[test]
+    fn deleting_the_agent_during_the_restart_says_it_was_deleted() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        restart_under_way(&mut engine);
+        let _ = engine.begin_delete_session("s1", false, None);
+
+        let sweep = restart_completes(&mut engine);
+        assert!(sweep.launches.is_empty(), "nothing is started again");
+        let message = final_message(&sweep.finals[0]);
+        assert_eq!(
+            message,
+            "Agent \"s1-title\" was deleted while dux was restarting its tabs in its recreated \
+             working copy, so none of them was started again."
+        );
+    }
+
+    /// Removing the agent's project removes the agent, which the restart
+    /// treats the same as deleting it.
+    #[test]
+    fn removing_the_project_during_the_restart_says_the_agent_was_deleted() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        let session = engine.sessions[0].clone();
+        engine.session_store.upsert_session(&session).unwrap();
+        restart_under_way(&mut engine);
+        engine
+            .apply(crate::engine::Command::RemoveProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+            .expect("the project is removed");
+
+        let sweep = restart_completes(&mut engine);
+        assert!(sweep.launches.is_empty(), "nothing is started again");
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains("was deleted while dux was restarting"),
+            "{message}"
+        );
+    }
+
+    /// While the restart waits for a tab's old process to go, the tab is the
+    /// restart's to start: an explicit start of the agent or of the tab is
+    /// refused, saying why, and the restart still starts it once the old
+    /// process has gone.
+    #[test]
+    fn a_tab_being_restarted_cannot_be_launched_by_anything_else() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[("tab-b", "opencode")]);
+        restart_under_way(&mut engine);
+
+        let session = engine.sessions[0].clone();
+        let slot = engine.build_agent_launch_request(
+            session,
+            true,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: "Reconnecting".into(),
+            },
+        );
+        let crate::engine::EventReaction::DispatchAgentLaunchView(view) = engine
+            .apply(crate::engine::Command::DispatchAgentLaunch {
+                request: Box::new(slot),
+            })
+            .expect("the dispatch answers")
+        else {
+            panic!("a launch answers with its view")
+        };
+        assert!(!view.launched, "the agent's tab is the restart's to start");
+        let status = view.status.expect("the refusal is said");
+        assert!(
+            status.message.contains(
+                "The Codex tab of agent \"s1-title\" is being restarted after its working copy \
+                 was recreated; it starts again by itself once its old process has exited."
+            ),
+            "{}",
+            status.message
+        );
+        let request = engine
+            .dormant_tab_launch_request("tab-b", (24, 80))
+            .expect("the tab has a launch");
+        let crate::engine::EventReaction::DispatchAgentLaunchView(view) = engine
+            .apply(crate::engine::Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("the dispatch answers")
+        else {
+            panic!("a launch answers with its view")
+        };
+        assert!(!view.launched, "the tab is the restart's to start");
+        let status = view.status.expect("the refusal is said");
+        assert!(
+            status.message.contains(
+                "The Opencode tab of agent \"s1-title\" is being restarted after its working \
+                 copy was recreated"
+            ),
+            "{}",
+            status.message
+        );
+        assert!(!engine.tab_is_live(TabIdRef::new("s1-slot")));
+        assert!(!engine.tab_is_live(TabIdRef::new("tab-b")));
+
+        let sweep = restart_completes(&mut engine);
+        let message = final_message(&sweep.finals[0]);
+        assert!(!message.contains("did not restart"), "{message}");
+        assert!(engine.tab_is_live(TabIdRef::new("s1-slot")));
+        assert!(engine.tab_is_live(TabIdRef::new("tab-b")));
+    }
+
+    /// A tab of the same CLI that is not being restarted can still start
+    /// meanwhile, but fresh: the tab being restarted is the one getting the
+    /// conversation back.
+    #[test]
+    fn a_launch_beside_a_tab_being_restarted_starts_fresh() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine.agent_tabs.insert(
+            TabId::new("tab-c"),
+            crate::engine::test_support::sample_tab("tab-c", "s1", "codex", 5),
+        );
+        restart_under_way(&mut engine);
+        let session = engine.sessions[0].clone();
+        assert!(
+            !engine.tab_resume_decision(
+                &session,
+                TabIdRef::new("tab-c"),
+                &crate::model::ProviderKind::new("codex"),
+                true
+            ),
+            "the old Codex process is still shutting down to be restarted"
+        );
+
+        let sweep = restart_completes(&mut engine);
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains("Restarted the Codex tab, which continues its conversation"),
+            "{message}"
+        );
+    }
+
+    /// A restarted tab that resumed is not reported as continuing its
+    /// conversation until the resume is known to have taken: a resume that
+    /// exits saying nothing is relaunched fresh by the resume fallback, and the
+    /// final says so, with the spinner up until then.
+    #[test]
+    fn a_resume_that_does_not_take_is_reported_as_a_fresh_start() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        let codex = engine
+            .config
+            .providers
+            .commands
+            .get_mut("codex")
+            .expect("codex is configured");
+        codex.command = "true".to_string();
+        codex.args = Vec::new();
+        restart_under_way(&mut engine);
+
+        let (sweep, launched) = restart_completes_launching(&mut engine);
+        assert_eq!(
+            launched.len(),
+            2,
+            "the resume and the fresh launch after it: {launched:?}"
+        );
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            !message.contains("continues its conversation"),
+            "the resume did not take: {message}"
+        );
+        assert!(
+            message.contains(
+                "The Codex tab could not pick its conversation back up, so dux started it with \
+                 a fresh conversation."
+            ),
+            "{message}"
+        );
     }
 }
 

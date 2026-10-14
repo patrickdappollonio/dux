@@ -5910,7 +5910,9 @@ impl Engine {
                 && self.tab_is_live(id.as_ref_id())
                 && self.tab_running_provider(session, &id) == *provider
         });
-        !others_same_provider
+        // A tab a working-copy recreate is about to start again is getting the
+        // conversation back, though its old process is still shutting down.
+        !others_same_provider && !self.restart_will_resume(&session.id, tab_id, provider)
     }
 
     /// The agent record for `session_id`, or `None`. A plain identity lookup by
@@ -6406,6 +6408,9 @@ impl Engine {
         // entry carries it, so a delete or a relaunch moments later still finds
         // this process to wait for.
         let owner = self.terminating_owner_for_tab(session_id, TabIdRef::new(tab_id));
+        // A tab a working-copy recreate waits to start again is closed, not
+        // restarted.
+        self.stop_tab_restart(TabIdRef::new(tab_id));
         let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
         {
             Some(

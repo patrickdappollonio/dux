@@ -478,6 +478,15 @@ pub struct TabRestartReport {
     /// Not started again: closed, already running again, or refused by the
     /// time its old process had gone.
     pub not_restarted: Vec<String>,
+    /// Not started again, because somebody stopped or closed the tab, or
+    /// stopped its agent, while the old process shut down.
+    pub stopped: Vec<String>,
+    /// Started again to pick its conversation back up, which did not take, so
+    /// it was started again with a fresh conversation.
+    pub fell_back: Vec<String>,
+    /// Started again to pick its conversation back up, and exited right away
+    /// after saying something, which its tab shows.
+    pub ended: Vec<String>,
     /// Started again, but the launch failed: the provider and why.
     pub failed: Vec<(String, String)>,
     /// Restartable tabs that came up while the copy was being recreated, after
@@ -489,6 +498,43 @@ pub struct TabRestartReport {
     /// The wait the old processes were given, when any of them outlasted it and
     /// was force-closed.
     pub forced_after_seconds: Option<u64>,
+    /// The agent was deleted while its tabs shut down, so nothing started.
+    pub agent_deleted: bool,
+}
+
+impl TabRestartReport {
+    /// Whether a tab dux was asked to restart is not running now for a reason
+    /// the user has to act on.
+    pub fn needs_attention(&self) -> bool {
+        !self.failed.is_empty() || !self.ended.is_empty()
+    }
+}
+
+/// Why a launch of a tab is refused while a working-copy recreate waits to
+/// start it again.
+pub fn restart_pending_launch_refusal(
+    agent_label: &str,
+    provider: &str,
+) -> crate::status_text::StatusText {
+    the_tabs("The ", &[provider.to_string()])
+        .text(" of agent ")
+        .quoted(agent_label)
+        .text(
+            " is being restarted after its working copy was recreated; it starts again by \
+             itself once its old process has exited.",
+        )
+        .into()
+}
+
+/// The final of a recreate whose agent was deleted while its tabs were
+/// shutting down to be restarted.
+pub fn recreate_agent_deleted_message(agent_label: &str) -> crate::status_text::StatusText {
+    crate::status_text![
+        "Agent ",
+        q(agent_label),
+        " was deleted while dux was restarting its tabs in its recreated working copy, so \
+         none of them was started again."
+    ]
 }
 
 /// The spinner while dux waits for the tabs it is restarting to shut down.
@@ -555,6 +601,29 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
              it yourself if you still want it running.",
         )
     });
+    let fell_back = (!report.fell_back.is_empty()).then(|| {
+        the_tabs("The ", &report.fell_back).text(if one(&report.fell_back) {
+            " could not pick its conversation back up, so dux started it with a fresh \
+             conversation."
+        } else {
+            " could not pick their conversations back up, so dux started them with fresh \
+             conversations."
+        })
+    });
+    let ended = (!report.ended.is_empty()).then(|| {
+        the_tabs("The ", &report.ended).text(if one(&report.ended) {
+            " started again but exited right away; its tab shows what it said."
+        } else {
+            " started again but exited right away; their tabs show what they said."
+        })
+    });
+    let stopped = (!report.stopped.is_empty()).then(|| {
+        the_tabs("dux did not restart the ", &report.stopped).text(if one(&report.stopped) {
+            ", because it was stopped while its old process shut down."
+        } else {
+            ", because they were stopped while their old processes shut down."
+        })
+    });
     let failed = report.failed.iter().map(|(provider, error)| {
         the_tabs("dux could not start the ", std::slice::from_ref(provider)).text(format!(
             " again: {}. Start it yourself once that is fixed.",
@@ -592,14 +661,21 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
     let left_running =
         (!live.left_running.is_empty()).then(|| left_running_prose(&live.left_running));
     sentences(
-        [follows, continued, fresh]
+        [follows, continued, fresh, fell_back, ended]
             .into_iter()
             .flatten()
             .chain(failed)
             .chain(
-                [not_restarted, exited, came_up_later, forced, left_running]
-                    .into_iter()
-                    .flatten(),
+                [
+                    stopped,
+                    not_restarted,
+                    exited,
+                    came_up_later,
+                    forced,
+                    left_running,
+                ]
+                .into_iter()
+                .flatten(),
             ),
     )
 }

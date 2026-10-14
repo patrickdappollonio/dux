@@ -845,6 +845,22 @@ impl Engine {
                         },
                     )));
                 }
+                // A tab a working-copy recreate is about to start again is the
+                // restart's to start: its old process is still shutting down,
+                // and a launch now would race the restart for the conversation.
+                if let Some(refusal) = self.restart_launch_refusal(&tab_id) {
+                    crate::logger::info(&format!(
+                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": a working-copy recreate is restarting it"
+                    ));
+                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            session_id,
+                            tab_id: tab_id_view,
+                            launched: false,
+                            status: Some(StatusUpdate::info(refusal)),
+                        },
+                    )));
+                }
                 // Pre-check in-flight so the View carries the exact "already
                 // launching" message regardless of the primitive's generic
                 // already-running fallback.

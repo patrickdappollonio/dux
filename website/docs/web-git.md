@@ -264,7 +264,9 @@ where it would normally name the project.
 > its contents. The terminal UI has the same action as its `recreate-working-copy` command.
 >
 > You can do it while the agent is running, and what happens next is the CLI's own answer.
-> A running Claude tab never notices, and carries on in the recreated folder with its
+> dux tells the CLIs apart by the command a provider runs, not by the provider's name, so a
+> provider of your own whose command is `claude` counts as Claude. A running Claude tab
+> never notices, and carries on in the recreated folder with its
 > conversation intact. Codex cannot follow the folder: it answers every turn with an
 > invalid-directory error from the moment the folder goes, and stays stuck after the
 > recreate until it is restarted. OpenCode, and any other CLI that can pick its
@@ -277,9 +279,13 @@ where it would normally name the project.
 > it picks its conversation back up in the recreated folder. Only one tab per CLI can get
 > its conversation back, so with two Codex tabs the second starts a fresh one. Each tab
 > comes back with the CLI it was running, even if you picked a different one for its next
-> start, because the conversation belongs to that CLI. The message afterwards waits until
-> every restarted tab has actually started, then says which continued, which started
-> fresh, and which could not be started and why. A tab that only started after you
+> start, because the conversation belongs to that CLI. While a tab waits to be restarted,
+> starting it yourself is refused with a message saying dux is restarting it; stopping or
+> closing that tab, stopping the agent, or deleting it means it is not started again. The
+> message afterwards waits until every restarted tab has actually started and, for one
+> picking its conversation back up, until it has shown it did, then says which continued,
+> which started fresh (including one whose conversation could not be picked back up), which
+> were stopped, and which could not be started and why. A tab that only started after you
 > confirmed is left running, and the message says so. Nothing is restarted if the
 > recreate fails, and nothing at all when the box is unticked.
 >
