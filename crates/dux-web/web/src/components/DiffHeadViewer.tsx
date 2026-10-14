@@ -3,7 +3,7 @@ import { Editor, type OnMount } from "@monaco-editor/react"
 import type { editor as MonacoEditor } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before the editor mounts.
-import { DIFF_THEME } from "@/lib/monacoSetup"
+import { DIFF_THEME, defineDiffTheme } from "@/lib/monacoSetup"
 
 interface DiffHeadViewerProps {
   // The head of git's own unified patch, already cut to length by the server.
@@ -57,6 +57,7 @@ export default function DiffHeadViewer({ text, banner }: DiffHeadViewerProps) {
           // vs-dark plus real diff colours; see DIFF_THEME. The web UI is
           // dark-only (main.tsx force-adds `.dark`), so there is one to define.
           theme={DIFF_THEME}
+          beforeMount={defineDiffTheme}
           value={text}
           language="diff"
           onMount={handleMount}

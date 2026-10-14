@@ -28,6 +28,7 @@ import {
   type DiffRule,
 } from "@/lib/diffGrammar"
 import { holdNewModelsInLf } from "@/lib/monacoModelEol"
+import { tokenHex } from "@/lib/tokenHex"
 
 // Self-host: point the wrapper at the bundled `monaco` instance and supply the
 // one worker via a Vite `?worker` import (a hashed chunk rust-embed bakes into
@@ -118,20 +119,26 @@ if (!monaco.languages.getLanguages().some((l) => l.id === "diff")) {
 // The theme the patch viewer renders under. vs-dark has no diff scopes, so its
 // defaults land on `string` (salmon) and `comment` (green): additions read as
 // removals and removals as additions, which is worse than no colour at all.
-// The two content colours are the web's own green-500 and red-500, the ones the
-// changed-files pane already counts additions and deletions in.
+// The two content colours are the `--dux-added` and `--dux-deleted` tokens the
+// changed-files pane counts additions and deletions in, resolved to hex because
+// Monaco's rules take nothing else. The viewer defines the theme just before it
+// mounts, when the stylesheet is certain to have applied, and each mount reads
+// the tokens again. The fallbacks are those tokens' Tailwind green-500 and
+// red-500.
 export const DIFF_THEME = "dux-diff"
-monaco.editor.defineTheme(DIFF_THEME, {
-  base: "vs-dark",
-  inherit: true,
-  rules: [
-    { token: DIFF_TOKEN.inserted, foreground: "22C55E" },
-    { token: DIFF_TOKEN.deleted, foreground: "EF4444" },
-    { token: DIFF_TOKEN.header, foreground: "9CA3AF", fontStyle: "bold" },
-    { token: DIFF_TOKEN.hunk, foreground: "38BDF8" },
-  ],
-  colors: {},
-})
+export function defineDiffTheme(): void {
+  monaco.editor.defineTheme(DIFF_THEME, {
+    base: "vs-dark",
+    inherit: true,
+    rules: [
+      { token: DIFF_TOKEN.inserted, foreground: tokenHex("--dux-added", "00C950") },
+      { token: DIFF_TOKEN.deleted, foreground: tokenHex("--dux-deleted", "FB2C36") },
+      { token: DIFF_TOKEN.header, foreground: "9CA3AF", fontStyle: "bold" },
+      { token: DIFF_TOKEN.hunk, foreground: "38BDF8" },
+    ],
+    colors: {},
+  })
+}
 
 export { monaco }
 
