@@ -1345,6 +1345,40 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
 
+/// Whether branch `name` has been pushed anywhere this clone knows of: it
+/// tracks a remote branch, or some remote-tracking ref carries its name.
+///
+/// Answered from this clone's refs, never by asking a remote, so it is as
+/// fresh as the last fetch or push. It shells out to git, so callers run it in
+/// a background worker. `for-each-ref` is plumbing; the branch is matched by
+/// comparing whole refnames here, because its own patterns also match every
+/// ref below a slash (`feat` would match `feat/x`).
+pub fn branch_is_pushed(repo_path: &Path, name: &str) -> Result<bool> {
+    let local = format!("refs/heads/{name}");
+    let listing = run_git_capture(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(upstream)",
+            &local,
+            "refs/remotes/",
+        ],
+        &format!("look for a pushed copy of branch \"{name}\""),
+    )?;
+    Ok(listing.lines().any(|line| {
+        let (refname, upstream) = line.split_once(' ').unwrap_or((line, ""));
+        if refname == local {
+            return upstream.starts_with("refs/remotes/");
+        }
+        // `refs/remotes/<remote>/<branch>`; a remote's own `HEAD` is a pointer,
+        // not a branch anybody pushed.
+        refname
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, branch)| branch == name && branch != "HEAD")
+    }))
+}
+
 /// Whether origin has branch `name` right now, asked of origin itself with
 /// `ls-remote` (plumbing) rather than this clone's tracking refs, which may
 /// never have been fetched. `Ok(false)` only when origin answered and has no
@@ -8299,6 +8333,34 @@ mod tests {
             &["remote", "add", "origin", bare.path().to_str().unwrap()],
         );
         assert!(has_origin_remote(repo.path()).unwrap());
+    }
+
+    /// A branch counts as pushed when a remote-tracking ref carries its name or
+    /// it tracks one; a branch whose name is only a PREFIX of a pushed one, or
+    /// that tracks another local branch, does not.
+    #[test]
+    fn branch_is_pushed_reads_tracking_refs_and_upstreams() {
+        let repo = init_test_repo();
+        let git = worktree_git(repo.path());
+        git(&["branch", "feat"]);
+        git(&["branch", "local-only"]);
+        git(&["branch", "tracks-local", "--track", "main"]);
+        git(&["branch", "upstreamed"]);
+        assert!(!branch_is_pushed(repo.path(), "feat").unwrap());
+
+        // A pushed copy under another name, and one under a longer name.
+        git(&["update-ref", "refs/remotes/origin/feat/more", "HEAD"]);
+        git(&["update-ref", "refs/remotes/fork/feat", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/elsewhere", "HEAD"]);
+        git(&["remote", "add", "origin", "/nowhere"]);
+        git(&["config", "branch.upstreamed.remote", "origin"]);
+        git(&["config", "branch.upstreamed.merge", "refs/heads/elsewhere"]);
+
+        assert!(branch_is_pushed(repo.path(), "feat").unwrap());
+        assert!(branch_is_pushed(repo.path(), "upstreamed").unwrap());
+        assert!(!branch_is_pushed(repo.path(), "local-only").unwrap());
+        assert!(!branch_is_pushed(repo.path(), "tracks-local").unwrap());
+        assert!(!branch_is_pushed(repo.path(), "fe").unwrap());
     }
 
     // ── rename_branch tests ──────────────────────────────────────

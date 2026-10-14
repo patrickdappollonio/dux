@@ -29,6 +29,7 @@ import {
   wireProse,
 } from "./prose"
 import { recreateConfirmProse } from "./recreateWorkingCopy"
+import { renameBranchNoteProse } from "./renameAgent"
 
 describe("a name's bidi controls", () => {
   it("are dropped by both chip builders", () => {
@@ -149,6 +150,12 @@ describe("the sentences both surfaces print", () => {
         return removeProjectProse(
           (args.project_name as string | null) ?? undefined,
           args.agent_count as number,
+        )
+      case "rename_branch_note":
+        return renameBranchNoteProse(
+          args.branch as string,
+          args.open_pr as number | null,
+          args.pushed as boolean,
         )
       case "attached_lead":
         return attachedLeadProse()

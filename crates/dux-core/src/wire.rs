@@ -433,15 +433,17 @@ pub enum WireCommand {
         session_id: String,
         name: String,
     },
-    /// Rename an agent session's display title. `title` is trimmed; an empty
-    /// title clears the custom name back to `None`, so the row reverts to
-    /// showing the branch name. A non-empty title is validated with the same
-    /// agent-name rules the TUI rename enforces. This is title-only: unlike the
-    /// TUI prompt (which can also rename the git branch via a checkbox), the web
-    /// rename never touches the branch. See `rename_session` for the rationale.
+    /// Rename an agent, the same act as the terminal UI's rename dialog. `title`
+    /// is trimmed; an empty title clears the custom name, so the row shows the
+    /// branch name again (a standalone agent's folder name). For an agent with a
+    /// branch a non-empty title is held to the agent-name rules. With
+    /// `rename_branch` the git branch is renamed to `title` as well, on a
+    /// background worker; it is refused with an empty title. Absent means false.
     RenameSession {
         session_id: String,
         title: String,
+        #[serde(default)]
+        rename_branch: bool,
     },
     /// Reconnect (relaunch) an agent session's provider. `force == false`
     /// resumes the prior conversation when the provider supports it (the
@@ -1897,8 +1899,12 @@ impl Engine {
     /// or one of its tabs.
     fn dispatch_agent_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
-            WireCommand::RenameSession { session_id, title } => {
-                let status = self.rename_session(&session_id, &title)?;
+            WireCommand::RenameSession {
+                session_id,
+                title,
+                rename_branch,
+            } => {
+                let status = self.rename_session(&session_id, &title, rename_branch)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2678,81 +2684,19 @@ impl Engine {
         }
     }
 
-    /// Rename an agent session's display title, mirroring the title half of the
-    /// TUI's `apply_rename_session`. The custom `title` is trimmed; a non-empty
-    /// title is validated with the same `is_valid_agent_name` backstop the TUI
-    /// enforces, and an empty title clears it back to `None` so the row reverts
-    /// to the branch name.
-    ///
-    /// Deliberately unlike the TUI prompt, which also renames the git branch by
-    /// default and rejects an empty name: the web rename is title-only, so
-    /// clearing the title is the only way back to the branch name.
-    fn rename_session(&mut self, session_id: &str, title: &str) -> anyhow::Result<WireStatus> {
-        let trimmed = title.trim();
-        // The refname rules apply only where the name can become a git branch.
-        // A STANDALONE agent's title is a label taken verbatim at creation
-        // (folder names legally contain characters a ref cannot), so validating
-        // it as a ref here made a title dux itself minted impossible to type
-        // back. Same rule as `Engine::prepare_branch_rename`.
-        let branch_named = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .map(|s| s.supports_branch_git())
-            .unwrap_or(true);
-        let new_title = if trimmed.is_empty() {
-            None
-        } else {
-            if branch_named && !crate::git::is_valid_agent_name(trimmed) {
-                anyhow::bail!(
-                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                     underscores and slashes; it must start with a letter or digit, must \
-                     not contain \"//\", and must not end with \"/\"."
-                );
-            }
-            Some(trimmed.to_string())
-        };
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|s| s.id == session_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        session.title = new_title.clone();
-        session.updated_at = chrono::Utc::now();
-        // Re-borrow immutably to persist (the mutable borrow above has ended).
-        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
-            self.session_store.upsert_session(session)?;
-        }
-        let message = match &new_title {
-            Some(name) => crate::status_text!["Renamed agent to ", q(name), "."],
-            None => {
-                // A standalone agent has no branch to fall back to; its label
-                // falls back to its folder's name instead, so the sentence has
-                // to name whichever one it actually landed on.
-                let session = self.sessions.iter().find(|s| s.id == session_id);
-                match session.and_then(|s| s.branch_name().map(str::to_string)) {
-                    Some(branch) => crate::status_text![
-                        "Cleared the custom name. Agent shows its branch name ",
-                        q(branch),
-                        " again."
-                    ],
-                    None => {
-                        let label = session
-                            .map(|s| s.display_label())
-                            .unwrap_or_else(|| session_id.to_string());
-                        crate::status_text![
-                            "Cleared the custom name. Agent shows its folder's name ",
-                            q(label),
-                            " again."
-                        ]
-                    }
-                }
-            }
-        };
-        // Loud on both arms: a rename lands on one row's label in a long list,
-        // which can sit outside the visible scroll area, and a clear lands on a
-        // fallback the user did not choose and that only this sentence names.
-        Ok(WireStatus::new("info", message))
+    /// Rename an agent through [`Engine::rename_agent`], the implementation the
+    /// terminal UI's dialog calls too, so the rules, the refusals and the
+    /// statuses are one set. The answer is the final of a rename that is done,
+    /// or the keyed busy of a branch rename now running.
+    fn rename_session(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        rename_branch: bool,
+    ) -> anyhow::Result<WireStatus> {
+        let reaction = self.rename_agent(session_id, title, rename_branch)?;
+        wire_status_from_reaction(&reaction)
+            .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))
     }
 
     /// Swap which provider a session uses, mirroring the TUI's
@@ -12523,6 +12467,7 @@ mod tests {
             WireCommand::RenameSession {
                 session_id: "s1".to_string(),
                 title: "My agent".to_string(),
+                rename_branch: false,
             }
         );
     }
@@ -12539,6 +12484,7 @@ mod tests {
             .apply_wire(WireCommand::RenameSession {
                 session_id: "s1".to_string(),
                 title: "  My-agent  ".to_string(),
+                rename_branch: false,
             })
             .expect("apply_wire");
         // Trimmed and stored in memory.
@@ -12580,6 +12526,7 @@ mod tests {
             .apply_wire(WireCommand::RenameSession {
                 session_id: "s1".to_string(),
                 title: "   ".to_string(),
+                rename_branch: false,
             })
             .expect("apply_wire");
         // Cleared back to None -> row shows the branch name again.
@@ -12611,10 +12558,92 @@ mod tests {
             .apply_wire(WireCommand::RenameSession {
                 session_id: "s1".to_string(),
                 title: "bad name!".to_string(),
+                rename_branch: false,
             })
             .map(|_| ())
             .unwrap_err();
-        assert!(err.to_string().contains("Invalid agent name"), "err: {err}");
+        assert_eq!(
+            err.to_string(),
+            crate::engine::branch_rename_refusal(
+                &crate::engine::BranchRenameRejection::MalformedName
+            ),
+            "the same refusal the terminal UI shows"
+        );
+    }
+
+    /// The branch flag is optional on the wire and means "title only" when
+    /// absent, so a client that never sends it renames exactly as before.
+    #[test]
+    fn wire_rename_session_branch_flag_round_trips_and_defaults_off() {
+        let with = WireCommand::RenameSession {
+            session_id: "s1".to_string(),
+            title: "next".to_string(),
+            rename_branch: true,
+        };
+        let json = serde_json::to_string(&with).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<WireCommand>(&json).expect("deserialize"),
+            with
+        );
+        let json = r#"{"command":"rename_session","args":{"session_id":"s1","title":"x"}}"#;
+        let WireCommand::RenameSession { rename_branch, .. } =
+            serde_json::from_str(json).expect("deserialize")
+        else {
+            panic!("a rename");
+        };
+        assert!(!rename_branch);
+    }
+
+    /// Ticking the branch box with an empty name is refused over the wire with
+    /// the terminal UI's sentence, and changes nothing.
+    #[test]
+    fn apply_wire_rename_session_refuses_a_branch_rename_to_nothing() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let err = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "  ".to_string(),
+                rename_branch: true,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            crate::engine::branch_rename_refusal(&crate::engine::BranchRenameRejection::EmptyName)
+        );
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("s1-title"));
+    }
+
+    /// With the box ticked the wire rename starts the branch rename and answers
+    /// with its keyed busy; the worker's completion carries the final.
+    #[test]
+    fn apply_wire_rename_session_with_the_branch_answers_a_keyed_busy() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let outcome = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "renamed".to_string(),
+                rename_branch: true,
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("a busy");
+        assert_eq!(status.tone, "busy");
+        assert!(status.key.is_some(), "the final replaces it by key");
+        assert!(
+            engine.is_in_flight(&crate::engine::InFlightKey::BranchRename("s1".into())),
+            "the worker runs"
+        );
+        // The fixture worktree does not exist, so git fails and the completion
+        // puts the name back.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker answers");
+        engine.process_worker_event(event);
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("s1-title"));
+        assert_eq!(engine.sessions[0].branch_name(), Some("feat"));
     }
 
     /// A STANDALONE agent's title is a label, not a refname, so the wire
@@ -12635,6 +12664,7 @@ mod tests {
             .apply_wire(WireCommand::RenameSession {
                 session_id: "sa1".to_string(),
                 title: "  My Notes (2026)  ".to_string(),
+                rename_branch: false,
             })
             .expect("a standalone rename is not a refname");
         assert_eq!(
@@ -12661,6 +12691,7 @@ mod tests {
             .apply_wire(WireCommand::RenameSession {
                 session_id: "ghost".to_string(),
                 title: "x".to_string(),
+                rename_branch: false,
             })
             .map(|_| ())
             .unwrap_err();

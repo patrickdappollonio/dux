@@ -5079,6 +5079,7 @@ mod tests {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            rename_pushed_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(

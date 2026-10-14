@@ -332,6 +332,11 @@ mod tests {
                 args["project_name"].as_str(),
                 args["agent_count"].as_u64().expect("agent_count") as usize,
             ),
+            "rename_branch_note" => crate::engine::rename_branch_note_prose(
+                &s("branch"),
+                args["open_pr"].as_u64(),
+                args["pushed"].as_bool().expect("pushed"),
+            ),
             "attached_lead" => crate::attached_prose::attached_lead_prose(),
             "attached_entry" => {
                 use crate::attachments::{Surface, TargetKind};

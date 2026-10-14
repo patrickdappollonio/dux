@@ -1,11 +1,15 @@
-//! End-to-end tests for the delete dialog's two session routes against a real
-//! router, a real git repository and real worktrees in a temp dir:
+//! End-to-end tests for the session routes that touch an agent's branch, against
+//! a real router, a real git repository and real worktrees in a temp dir:
 //!
 //! - `GET    /api/v1/sessions/:id/branch-unpushed`: the branches a delete would
 //!   remove and how much of their work exists only here.
 //! - `DELETE /api/v1/sessions/:id?delete_branch=`:  where an ABSENT answer and
 //!   an explicit `false` part company, which is the compatibility claim the
 //!   parameter rests on and the one a client actually enters through.
+//! - `GET    /api/v1/sessions/:id/branch-pushed`: whether a branch rename would
+//!   leave a pushed copy behind on the old name.
+//! - `PATCH  /api/v1/sessions/:id` with `rename_branch`: the rename dialog's
+//!   branch box, running `git branch -m` and its refusals.
 //!
 //! The route is where these matter: an HTTP caller reaches them without passing
 //! through either dialog, so neither the naming nor the default may live in a
@@ -510,4 +514,144 @@ async fn an_explicit_true_removes_every_branch_the_route_named() {
         gone, named,
         "the route must remove exactly the branches it named ({status})"
     );
+}
+
+async fn branch_pushed(addr: SocketAddr, id: &str) -> (u16, serde_json::Value) {
+    let resp = reqwest::get(format!("http://{addr}/api/v1/sessions/{id}/branch-pushed"))
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// A rename, scoped to an events connection so its statuses come back on it.
+async fn rename(
+    addr: SocketAddr,
+    id: &str,
+    body: serde_json::Value,
+    connection: &str,
+) -> (u16, String) {
+    let resp = reqwest::Client::new()
+        .patch(format!("http://{addr}/api/v1/sessions/{id}"))
+        .header("x-connection-id", connection)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap_or_default())
+}
+
+async fn session_title(addr: SocketAddr, id: &str) -> serde_json::Value {
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/sessions/{id}"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["title"].clone()
+}
+
+/// The rename dialog's warning reads whether the branch has a pushed copy, from
+/// this clone's refs; a standalone agent has no branch and is not answered.
+#[tokio::test]
+async fn branch_pushed_reads_the_clones_remote_tracking_refs() {
+    let f = boot().await;
+    let (status, body) = branch_pushed(f.addr, "duxs").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["pushed"], false, "{body}");
+
+    git(
+        &f.repo,
+        &["update-ref", "refs/remotes/origin/dux/made-this", "HEAD"],
+    );
+    let (_, body) = branch_pushed(f.addr, "duxs").await;
+    assert_eq!(body["pushed"], true, "{body}");
+
+    assert_eq!(branch_pushed(f.addr, "folder").await.0, 404);
+    assert_eq!(branch_pushed(f.addr, "nobody").await.0, 404);
+}
+
+/// With the box ticked the web rename runs `git branch -m` through the same
+/// engine path the terminal UI uses: the branch moves, the final says both
+/// names, and no custom title is left behind, so the label follows the branch.
+#[tokio::test]
+async fn a_rename_with_the_branch_box_renames_the_git_branch() {
+    let f = boot().await;
+    let (mut ws, connection) = events_socket(f.addr).await;
+    let (status, body) = rename(
+        f.addr,
+        "duxs",
+        serde_json::json!({ "title": "dux/renamed", "rename_branch": true }),
+        &connection,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let frame = next_frame(&mut ws, |v| {
+        v["event"] == "status"
+            && v["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("Renamed agent and its git branch"))
+    })
+    .await
+    .expect("the branch rename reports its outcome on the events socket");
+    assert_eq!(
+        frame["message"],
+        "Renamed agent and its git branch to \"dux/renamed\". The branch was called \"dux/made-this\"."
+    );
+    let listed = branches(&f.repo);
+    assert!(listed.contains(&"dux/renamed".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"dux/made-this".to_string()), "{listed:?}");
+    assert_eq!(session_title(f.addr, "duxs").await, serde_json::Value::Null);
+}
+
+/// An empty name cannot be a branch: the route refuses with the terminal UI's
+/// sentence and renames nothing.
+#[tokio::test]
+async fn a_branch_rename_to_an_empty_name_is_refused() {
+    let f = boot().await;
+    let (_ws, connection) = events_socket(f.addr).await;
+    let (status, body) = rename(
+        f.addr,
+        "duxs",
+        serde_json::json!({ "title": "  ", "rename_branch": true }),
+        &connection,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("untick \"Also rename the git branch\""),
+        "{body}"
+    );
+    assert!(branches(&f.repo).contains(&"dux/made-this".to_string()));
+    assert_eq!(session_title(f.addr, "duxs").await, "duxs");
+}
+
+/// Without the box the branch is left alone, and a standalone agent's name is
+/// taken verbatim, spaces and all, whatever the box says.
+#[tokio::test]
+async fn a_rename_without_the_box_leaves_the_branch_alone() {
+    let f = boot().await;
+    let (_ws, connection) = events_socket(f.addr).await;
+    let (status, body) = rename(
+        f.addr,
+        "duxs",
+        serde_json::json!({ "title": "shiny" }),
+        &connection,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(session_title(f.addr, "duxs").await, "shiny");
+    assert!(branches(&f.repo).contains(&"dux/made-this".to_string()));
+
+    let (status, body) = rename(
+        f.addr,
+        "folder",
+        serde_json::json!({ "title": "My Notes (2026)", "rename_branch": true }),
+        &connection,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(session_title(f.addr, "folder").await, "My Notes (2026)");
 }

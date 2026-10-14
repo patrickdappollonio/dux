@@ -89,6 +89,8 @@ export function existingBranchConflict(e: unknown): ExistingBranchConflict | nul
 // untouched. Setting `provider` triggers a pending reconnect server-side.
 export interface PatchSessionBody {
   title?: string
+  // Also rename the git branch to `title`; read only with a `title`.
+  rename_branch?: boolean
   provider?: string
   auto_reopen?: boolean
 }
@@ -174,6 +176,14 @@ export const sessionsApi = {
     request<BranchUnpushed>(
       "GET",
       `/api/v1/sessions/${encodeURIComponent(id)}/branch-unpushed`,
+    ),
+  // Whether renaming the agent's branch would leave a pushed copy behind on the
+  // old name. `null` when git could not answer; the dialog then warns about
+  // nothing it does not know.
+  branchPushed: (id: string) =>
+    request<{ pushed: boolean | null }>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/branch-pushed`,
     ),
   patch: (id: string, body: PatchSessionBody) =>
     request<{ provider_change?: string }>(

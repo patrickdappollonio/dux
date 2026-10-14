@@ -499,6 +499,8 @@ mod tests {
             rename_branch: false,
             focus: RenameSessionFocus::Input,
             branch_named: true,
+            open_pr: None,
+            pushed: false,
         }
     }
 

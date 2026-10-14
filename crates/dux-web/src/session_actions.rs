@@ -79,6 +79,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/sessions/{id}/branch-unpushed",
             axum::routing::get(session_branch_unpushed),
         )
+        .route(
+            "/api/v1/sessions/{id}/branch-pushed",
+            axum::routing::get(session_branch_pushed),
+        )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
         .route(
             "/api/v1/sessions/{id}/rerun-startup-command",
@@ -576,6 +580,35 @@ async fn session_branch_unpushed(
     .into_response()
 }
 
+/// What the rename dialog warns about under its "also rename the git branch" box.
+#[derive(Serialize)]
+struct BranchPushedResponse {
+    /// Whether the branch has a pushed copy this clone knows of, or `null` when
+    /// git could not answer; the dialog then warns only about what it does know.
+    pushed: Option<bool>,
+}
+
+/// Whether renaming this agent's branch would leave a pushed copy behind on its
+/// old name.
+///
+/// A read, run off the reactor because it shells out to git. A standalone agent
+/// has no branch and its dialog renders no checkbox, so it is answered as an
+/// unknown session, like the delete dialog's branch read.
+async fn session_branch_pushed(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let Some((worktree, branch)) = state.engine.rename_pushed_probe(id).await else {
+        return unknown_session();
+    };
+    let pushed = tokio::task::spawn_blocking(move || {
+        dux_core::git::branch_is_pushed(std::path::Path::new(&worktree), &branch).ok()
+    })
+    .await
+    .unwrap_or(None);
+    axum::Json(BranchPushedResponse { pushed }).into_response()
+}
+
 // ── Delete ───────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -636,13 +669,17 @@ async fn delete_session(
 // ── Patch (rename / provider / auto-reopen) ──────────────────────────────────
 
 /// Optional per-field session update. Any subset may be present; absent fields are
-/// untouched. `title` is title-only (never renames the git branch); an empty title
-/// clears the custom name back to the branch name. `provider` change is deferred to
-/// the next reconnect.
+/// untouched. `title` renames the agent, and an empty title clears the custom name
+/// back to the branch name (a standalone agent's folder name). `rename_branch`
+/// renames the git branch to `title` as well, the rename dialog's checkbox; it is
+/// read only with a `title` and absent means false. `provider` change is deferred
+/// to the next reconnect.
 #[derive(Deserialize)]
 struct PatchSessionBody {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    rename_branch: bool,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -687,6 +724,7 @@ async fn patch_session(
                 WireCommand::RenameSession {
                     session_id: id.clone(),
                     title,
+                    rename_branch: body.rename_branch,
                 },
                 scope.clone(),
             )

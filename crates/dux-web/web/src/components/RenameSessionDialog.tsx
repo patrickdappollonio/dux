@@ -1,4 +1,8 @@
+import { useEffect, useState } from "react"
+import { AlertTriangle } from "lucide-react"
+
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -10,46 +14,86 @@ import {
 import { Input } from "@/components/ui/input"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { folderName, matchWorkspace } from "@/lib/agentWorkspace"
+import { renderProse } from "@/lib/prose"
+import {
+  renameBlockedReason,
+  renameBranchNoteProse,
+} from "@/lib/renameAgent"
+import { sessionsApi } from "@/lib/sessionsApi"
 import {
   closeRename,
+  setRenameBranch,
   setRenameDraft,
   submitRename,
   useDux,
 } from "@/lib/store"
-import { workspaceBranchName } from "@/lib/agentWorkspace"
 
-// Rename a session's display title. The input pre-fills the current custom title
-// (empty when none), with the branch name as the placeholder so clearing the
-// field is obviously the "revert to branch name" action. A non-empty title is
-// validated as an agent name (same rules the server enforces); an empty title
-// clears the title back to the branch name. State lives in the store, mirroring
-// the new-agent dialog, so the input stays fully controlled.
+// Rename an agent: the same dialog the terminal UI shows. The field pre-fills the
+// current custom name (empty when none), with the branch name (a standalone
+// agent's folder name) as the placeholder, because an empty name goes back to
+// it. An agent with a branch also gets an unticked "Also rename the git branch"
+// box, with a line saying what stays on the old name when the branch has an
+// open pull request or a pushed copy.
 export function RenameSessionDialog() {
-  const { renameTarget, renameDraft, spine } = useDux()
+  const { renameTarget, renameDraft, renameBranch, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === renameTarget)
-  // A standalone agent has no branch, so a rename is a title change and
-  // nothing more: the "also rename the branch" affordance has nothing to
-  // rename. An empty string is the existing "no branch here" signal this
-  // dialog already understands.
-  const branchName = session
-    ? (workspaceBranchName(session.workspace) ?? "")
+  const branch = session
+    ? matchWorkspace<string | null>(session.workspace, {
+        managed: (w) => w.branch_name,
+        folder: () => null,
+      })
+    : null
+  const fallbackName = session
+    ? matchWorkspace(session.workspace, {
+        managed: (w) => w.branch_name,
+        folder: (w) => folderName(w.folder_path) ?? w.folder_label,
+      })
     : ""
-  // Closes the dialog when the agent vanishes from the ViewModel: renaming a
-  // deleted agent is moot, and the draft lives in the store so the store's
-  // close already handles it. See the hook.
+  const branchNamed = branch !== null
+  const openPr = session?.pr?.state === "open" ? session.pr.number : null
+
+  // Whether the branch has a pushed copy, tagged with the agent it was asked
+  // about so an answer that lands after the dialog moved on is ignored.
+  const [pushedAnswer, setPushedAnswer] = useState<{
+    id: string
+    pushed: boolean
+  } | null>(null)
+  const pushed = pushedAnswer?.id === renameTarget && pushedAnswer.pushed
+
   const open = useVanishedTargetGuard(
     renameTarget !== null,
     session !== undefined,
     closeRename,
   )
 
-  // Empty is allowed (clears the title). A non-empty invalid name disables save.
+  useEffect(() => {
+    if (!open || !branchNamed || !renameTarget) return
+    let live = true
+    const id = renameTarget
+    sessionsApi
+      .branchPushed(id)
+      .then((answer) => {
+        if (live) setPushedAnswer({ id, pushed: answer.pushed === true })
+      })
+      // No answer is no warning: the box still says what it does.
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [open, branchNamed, renameTarget])
+
   const invalidNonEmpty =
-    renameDraft.trim() !== "" && !isValidAgentName(renameDraft.trim())
+    branchNamed &&
+    renameDraft.trim() !== "" &&
+    !isValidAgentName(renameDraft.trim())
+  const blocked = renameBlockedReason(renameDraft, renameBranch, branchNamed)
+  const canSave = !invalidNonEmpty && blocked === null
+  const warns = openPr !== null || pushed
 
   function handleSubmit() {
-    if (invalidNonEmpty) return
-    submitRename()
+    if (!canSave) return
+    void submitRename()
   }
 
   return (
@@ -63,8 +107,9 @@ export function RenameSessionDialog() {
         <DialogHeader>
           <DialogTitle>Rename agent</DialogTitle>
           <DialogDescription>
-            Sets a custom display name for this agent; the git branch keeps
-            its name. Clear the field to revert to showing the branch name.
+            {branchNamed
+              ? "Sets the name this agent shows. Leave it empty to show its branch name again."
+              : "Sets the name this agent shows. Leave it empty to show its folder's name again."}
           </DialogDescription>
         </DialogHeader>
         <Input
@@ -76,6 +121,7 @@ export function RenameSessionDialog() {
             setRenameDraft(raw)
             // Keep the caret put when sanitization shrinks the string (same
             // approach as the new-agent input).
+            if (!branchNamed) return
             const sanitized = sanitizeAgentName(raw)
             if (sanitized !== raw) {
               const next = Math.max(0, caret - (raw.length - sanitized.length))
@@ -88,20 +134,52 @@ export function RenameSessionDialog() {
               handleSubmit()
             }
           }}
-          placeholder={branchName || "Branch name"}
+          placeholder={fallbackName}
+          aria-label="Agent name"
           aria-invalid={invalidNonEmpty}
           autoFocus
         />
-        <p className="text-xs text-muted-foreground">
-          Letters, digits, dashes, underscores and slashes. Leave empty to use
-          the branch name.
-        </p>
+        {branchNamed && (
+          <p className="text-xs text-muted-foreground">
+            Letters, digits, dashes, underscores and slashes.
+          </p>
+        )}
+        {branch !== null && (
+          <div className="grid gap-1">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="rename-branch"
+                checked={renameBranch}
+                onCheckedChange={(checked) => setRenameBranch(checked)}
+              />
+              <label htmlFor="rename-branch" className="text-sm">
+                Also rename the git branch
+              </label>
+            </div>
+            <p
+              className={
+                warns
+                  ? "flex items-start gap-1.5 text-xs text-amber-500"
+                  : "text-xs text-muted-foreground"
+              }
+              data-testid="rename-branch-note"
+            >
+              {warns && <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
+              <span>{renderProse(renameBranchNoteProse(branch, openPr, pushed))}</span>
+            </p>
+          </div>
+        )}
+        {blocked !== null && (
+          <p className="text-xs text-destructive" role="alert">
+            {blocked}
+          </p>
+        )}
         <div className="h-2" />
         <DialogFooter>
           <Button variant="outline" onClick={closeRename}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={invalidNonEmpty}>
+          <Button onClick={handleSubmit} disabled={!canSave}>
             Save
           </Button>
         </DialogFooter>
