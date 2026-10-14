@@ -172,6 +172,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
+        pending_tab_restarts: Vec::new(),
         gh_status: crate::model::GhStatus::Unknown,
         gh_probe: Default::default(),
         pr_statuses: std::collections::HashMap::new(),

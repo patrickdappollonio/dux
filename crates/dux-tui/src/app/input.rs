@@ -5007,17 +5007,36 @@ impl App {
     }
 
     fn handle_confirm_recreate_working_copy_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
-        let PromptState::ConfirmRecreateWorkingCopy { focus, .. } = &mut self.prompt else {
+        let PromptState::ConfirmRecreateWorkingCopy {
+            focus,
+            restart_offer,
+            restart_tabs,
+            ..
+        } = &mut self.prompt
+        else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let ring = [
+            (RecreateWorkingCopyFocus::Cancel, true),
+            (RecreateWorkingCopyFocus::Recreate, true),
+            (
+                RecreateWorkingCopyFocus::RestartCheckbox,
+                !restart_offer.is_empty(),
+            ),
+        ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
-            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_recreate_working_copy(confirm));
-            }
+            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
+                RecreateWorkingCopyFocus::RestartCheckbox => *restart_tabs = !*restart_tabs,
+                RecreateWorkingCopyFocus::Cancel => {
+                    return Some(self.resolve_confirm_recreate_working_copy(false));
+                }
+                RecreateWorkingCopyFocus::Recreate => {
+                    return Some(self.resolve_confirm_recreate_working_copy(true));
+                }
+            },
             ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
@@ -6986,7 +7005,9 @@ impl App {
             OverlayMouseLayout::ConfirmRecreateWorkingCopy {
                 cancel_button,
                 confirm_button,
-            } => click_target(
+                checkbox,
+            } => Self::checkbox_before_buttons_target(
+                checkbox,
                 &[
                     (
                         cancel_button,
@@ -8322,17 +8343,54 @@ impl App {
     /// The refusals are the engine's, in its own sentences, because the same
     /// act is an HTTP route and both surfaces have to say the same thing about
     /// an agent whose state moved while the dialog was up.
+    ///
+    /// A ticked restart stops tabs, so it reserves them through the attachment
+    /// guard like any stop, and reopens naming whoever is attached rather than
+    /// stopping a tab somebody else is using.
     pub(super) fn resolve_confirm_recreate_working_copy(&mut self, confirm: bool) -> bool {
-        let session_id = match &self.prompt {
-            PromptState::ConfirmRecreateWorkingCopy { session_id, .. } => session_id.clone(),
+        let (session_id, restart_tabs) = match &self.prompt {
+            PromptState::ConfirmRecreateWorkingCopy {
+                session_id,
+                restart_offer,
+                restart_tabs,
+                ..
+            } => (
+                session_id.clone(),
+                *restart_tabs && !restart_offer.is_empty(),
+            ),
             _ => return false,
         };
-        self.prompt = PromptState::None;
+        let asked = std::mem::replace(&mut self.prompt, PromptState::None);
         if !confirm {
             return false;
         }
-        match self.engine.begin_recreate_working_copy(&session_id) {
-            Ok(reaction) => self.apply_reaction(reaction),
+        let reservation = if restart_tabs {
+            let scope = self.engine.recreate_restart_scope(&session_id);
+            match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope)) {
+                Ok(reservation) => Some(reservation),
+                Err(refused) => {
+                    self.reopen_naming_attached(asked, refused);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+        match self
+            .engine
+            .begin_recreate_working_copy(&session_id, restart_tabs)
+        {
+            Ok(reaction) => {
+                // The tabs stop only once the checkout lands, under the same
+                // key, so nobody attaches to them until its final.
+                if let (Some(reservation), dux_core::engine::EventReaction::Status(status)) =
+                    (reservation, &reaction)
+                    && let Some(key) = &status.key
+                {
+                    reservation.until_final(key);
+                }
+                self.apply_reaction(reaction)
+            }
             Err(err) => self.set_error(format!("{err:#}")),
         }
         false
@@ -9281,6 +9339,19 @@ impl App {
                 {
                     *delete_branch = !*delete_branch;
                     *focus = DeleteAgentFocus::BranchCheckbox;
+                }
+            }
+            OverlayCheckboxId::RecreateRestartTabs => {
+                if let PromptState::ConfirmRecreateWorkingCopy {
+                    restart_offer,
+                    restart_tabs,
+                    focus,
+                    ..
+                } = &mut self.prompt
+                    && !restart_offer.is_empty()
+                {
+                    *restart_tabs = !*restart_tabs;
+                    *focus = RecreateWorkingCopyFocus::RestartCheckbox;
                 }
             }
             OverlayCheckboxId::DeleteWorktreeBranch => {

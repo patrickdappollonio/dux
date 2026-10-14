@@ -673,6 +673,48 @@ pub struct PendingDetach {
     pub scope: crate::statusline::StatusScope,
 }
 
+/// The tabs a recreate is restarting so they continue in the recreated copy:
+/// every one was SIGTERMed together when the checkout landed, and none starts
+/// again until the last of them has reaped, so a sibling of the same CLI still
+/// shutting down cannot take the conversation from the one that should get it.
+///
+/// The same barrier shape [`PendingDetach`] uses: [`Engine::reap_terminating_ptys`]
+/// drops each tab id as it reaps, and [`Engine::sweep_recreate_restarts`]
+/// starts the tabs and resolves the recreate's own op once the set is empty, so
+/// the one spinner the user saw spans the checkout and the restart.
+pub struct PendingTabRestart {
+    pub session_id: String,
+    /// The recreate's op, still unresolved: its final names the branch outcome
+    /// and every tab this restarted.
+    pub op: crate::engine::HandlerStatusOp<crate::engine::RecreateOutcome>,
+    /// The checkout's own answer.
+    pub branch: crate::working_copy::RecreatedBranch,
+    /// The tabs live when the checkout landed, for the sentences about the ones
+    /// this leaves alone.
+    pub live: crate::working_copy::RunningTabs,
+    /// The tabs to start again, in strip order, each with the provider it was
+    /// running.
+    pub tabs: Vec<(TabId, crate::model::ProviderKind)>,
+    /// The tab ids still to be reaped.
+    pub pending_ids: std::collections::HashSet<String>,
+    /// True once any of the old processes had to be force-killed.
+    pub forced: bool,
+    /// The grace the old processes were given, for the forced sentence.
+    pub grace_seconds: u64,
+    /// Set when the agent was force-stopped while its tabs were shutting down:
+    /// somebody asked for it to stop, so nothing starts again.
+    pub cancelled: bool,
+}
+
+/// What one [`Engine::sweep_recreate_restarts`] pass produced: the launch
+/// reactions to apply through the surface's own launch pipeline, and the finals
+/// of the recreates whose restart is complete.
+#[derive(Default)]
+pub struct RecreateRestartSweep {
+    pub launches: Vec<crate::engine::EventReaction>,
+    pub finals: Vec<crate::engine::ResolvedFinal>,
+}
+
 /// What [`Engine::begin_detach_session`] did, so a surface can raise the busy or
 /// say why there was nothing to do without re-deriving either.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1658,6 +1700,14 @@ impl Engine {
             }
             !mine
         });
+        // A recreate restarting this agent's tabs must not start them again
+        // once they are gone: the stop is the newer request. Its spinner is
+        // still answered, by the reaper's pass over the entries killed above.
+        for restart in &mut self.pending_tab_restarts {
+            if restart.session_id == session_id {
+                restart.cancelled = true;
+            }
+        }
 
         if stopped == 0 && overtaken == 0 {
             return ForceDetachOutcome::NotRunning { label };
@@ -1779,6 +1829,17 @@ impl Engine {
                 }
             }
             self.pending_group_removals = still_pending;
+        }
+
+        // Restart barrier: the tabs a recreate restarts start again only once
+        // the last of their old processes is gone, which
+        // `sweep_recreate_restarts` checks right after this pass.
+        for id in &reaped_ids {
+            for restart in &mut self.pending_tab_restarts {
+                if restart.pending_ids.remove(id) && forced_ids.contains(id) {
+                    restart.forced = true;
+                }
+            }
         }
 
         // Detach barrier: one request covers every tab the agent had, so its
@@ -2132,11 +2193,15 @@ pub struct RecreateWorkingCopyInputs {
     /// directory. The confirmation promises exactly that, so it has to be asked
     /// rather than assumed.
     pub conversation_resumes: bool,
-    /// The providers the confirmation's running-tab paragraph is written from:
-    /// the providers of the tabs that are live, or the slot tab's alone when
-    /// none is. The CLIs answer a folder going differently, and the one that
-    /// answers is the one that is running.
-    pub running_providers: Vec<String>,
+    /// The tabs the confirmation's running-tab paragraph is written from: the
+    /// tabs that are live, or the slot tab alone when none is. The CLIs answer
+    /// a folder going differently, and the one that answers is the one that is
+    /// running.
+    pub running_tabs: crate::working_copy::RunningTabs,
+    /// The providers of the tabs the confirmation offers to restart, one per
+    /// tab in strip order: the running ones that cannot follow the folder and
+    /// can pick their conversation back up. Empty means no checkbox.
+    pub restart_offer: Vec<String>,
 }
 
 impl Engine {
@@ -2166,20 +2231,81 @@ impl Engine {
             worktree_path: std::path::PathBuf::from(&managed.worktree_path),
             branch_name: managed.branch_name.clone(),
             source_branch: managed.source_branch.clone(),
-            conversation_resumes: crate::config::provider_config(&self.config, &session.provider)
-                .supports_session_resume(),
-            running_providers: match self.live_tab_providers(session_id) {
-                live if live.is_empty() => vec![session.provider.as_str().to_string()],
+            conversation_resumes: self.provider_resumes(&session.provider),
+            running_tabs: match self.recreate_running_tabs(session_id) {
+                live if live.is_empty() => {
+                    let mut slot = crate::working_copy::RunningTabs::default();
+                    slot.push(
+                        session.provider.as_str(),
+                        self.provider_resumes(&session.provider),
+                    );
+                    slot
+                }
                 live => live,
             },
+            restart_offer: self
+                .recreate_restart_targets(session_id)
+                .into_iter()
+                .map(|(_, provider)| provider.as_str().to_string())
+                .collect(),
         })
+    }
+
+    /// Whether `provider` picks its conversation back up in the same directory.
+    fn provider_resumes(&self, provider: &crate::model::ProviderKind) -> bool {
+        crate::config::provider_config(&self.config, provider).supports_session_resume()
+    }
+
+    /// The agent's live tabs, in strip order, sorted by what each does with a
+    /// recreated working copy.
+    pub fn recreate_running_tabs(&self, session_id: &str) -> crate::working_copy::RunningTabs {
+        let mut running = crate::working_copy::RunningTabs::default();
+        let Some(session) = self.session_by_id(session_id) else {
+            return running;
+        };
+        for id in self.ordered_tab_ids_for_session(crate::ids::SessionIdRef::new(session_id)) {
+            if self.tab_is_live(id.as_ref_id()) {
+                let provider = self.tab_running_provider(session, id.as_ref_id());
+                running.push(provider.as_str(), self.provider_resumes(&provider));
+            }
+        }
+        running
+    }
+
+    /// The tabs a recreate restarts when asked to, in strip order: those with a
+    /// process running whose CLI cannot follow the folder and can pick its
+    /// conversation back up. A launch still on its way has no process to stop.
+    pub fn recreate_restart_targets(
+        &self,
+        session_id: &str,
+    ) -> Vec<(TabId, crate::model::ProviderKind)> {
+        let Some(session) = self.session_by_id(session_id) else {
+            return Vec::new();
+        };
+        self.ordered_tab_ids_for_session(crate::ids::SessionIdRef::new(session_id))
+            .into_iter()
+            .filter(|id| self.providers.contains_key(id.as_ref_id()))
+            .map(|id| {
+                let provider = self.tab_running_provider(session, id.as_ref_id());
+                (id, provider)
+            })
+            .filter(|(_, provider)| {
+                crate::working_copy::RunningTabFate::of(
+                    provider.as_str(),
+                    self.provider_resumes(provider),
+                ) == crate::working_copy::RunningTabFate::Restartable
+            })
+            .collect()
     }
 
     /// Put the agent's working copy back where it was, off the engine thread.
     ///
-    /// Answers with the keyed busy to show, or a refusal sentence. Nothing is
-    /// launched and nothing is stopped: a dormant tab stays dormant, and a tab
-    /// that was running is left running, which the final says out loud.
+    /// Answers with the keyed busy to show, or a refusal sentence. A dormant tab
+    /// stays dormant. A running tab is left running, which the final says out
+    /// loud, unless `restart_tabs` is set: then, once the checkout has landed and
+    /// only if it succeeded, the running tabs whose CLI cannot follow the folder
+    /// and can pick its conversation back up are stopped politely and started
+    /// again (see [`Engine::sweep_recreate_restarts`]).
     ///
     /// A second press while the first is still working is refused here rather
     /// than left to git: the verdict that gates the action only refreshes when
@@ -2187,6 +2313,7 @@ impl Engine {
     pub fn begin_recreate_working_copy(
         &mut self,
         session_id: &str,
+        restart_tabs: bool,
     ) -> anyhow::Result<crate::engine::EventReaction> {
         let in_flight = crate::engine::InFlightKey::RecreateWorkingCopy(session_id.to_string());
         if self.is_in_flight(&in_flight) {
@@ -2258,7 +2385,8 @@ impl Engine {
                             &worktree_path,
                             &branch_name,
                             branch,
-                            &outcome.live_providers,
+                            &outcome.live,
+                            outcome.restart.as_ref(),
                         ))
                     }
                     Err(err) => crate::engine::Final::error(crate::status_text![
@@ -2277,7 +2405,10 @@ impl Engine {
             .with_scope(self.current_origin.clone());
         let pending = self.begin_status_op(&op);
         let status_key = op.id().to_string();
-        self.pending_recreate_ops.insert(session_id.to_string(), op);
+        self.pending_recreate_ops.insert(
+            session_id.to_string(),
+            crate::engine::PendingRecreate { op, restart_tabs },
+        );
 
         let completed_session = session_id.to_string();
         let panic_session = completed_session.clone();
@@ -2320,12 +2451,183 @@ impl Engine {
         }
         Ok(crate::engine::EventReaction::Status(pending))
     }
+
+    /// Answer a recreate whose checkout has landed: resolve its op, or, when
+    /// the checkout succeeded and the confirmation asked for it, stop the tabs
+    /// that cannot follow the folder and keep the op open until they start
+    /// again.
+    ///
+    /// The stop is the polite one every detach uses (SIGTERM, the configured
+    /// grace, then the reaper's force), and EVERY tab is stopped before any
+    /// starts: a same-CLI sibling still running would make the first restart
+    /// fresh rather than give it the conversation back.
+    pub(crate) fn settle_recreate(
+        &mut self,
+        session_id: &str,
+        pending: crate::engine::PendingRecreate,
+        result: Result<crate::working_copy::RecreatedBranch, String>,
+    ) -> crate::engine::EventReaction {
+        let live = self.recreate_running_tabs(session_id);
+        let crate::engine::PendingRecreate { op, restart_tabs } = pending;
+        let tabs = match &result {
+            Ok(_) if restart_tabs => self.recreate_restart_targets(session_id),
+            _ => Vec::new(),
+        };
+        let (Ok(branch), false) = (&result, tabs.is_empty()) else {
+            return op
+                .resolve(&crate::engine::RecreateOutcome {
+                    result,
+                    live,
+                    restart: None,
+                })
+                .into_reaction();
+        };
+        let label = self
+            .session_by_id(session_id)
+            .map(|session| session.display_label())
+            .unwrap_or_else(|| session_id.to_string());
+        for (id, _) in &tabs {
+            let owner = self.terminating_owner_for_tab(session_id, id.as_ref_id());
+            self.begin_close_provider(id, label.clone(), Some(owner));
+            // The rest of the tab-keyed runtime goes through the shared
+            // teardown, which finds `providers` already empty.
+            self.clear_tab_runtime(id.as_ref_id());
+        }
+        let providers: Vec<String> = tabs
+            .iter()
+            .map(|(_, provider)| provider.as_str().to_string())
+            .collect();
+        let busy = op.progress(crate::working_copy::recreate_restart_busy_message(
+            &label, &providers,
+        ));
+        self.pending_tab_restarts.push(PendingTabRestart {
+            session_id: session_id.to_string(),
+            op,
+            branch: branch.clone(),
+            live,
+            pending_ids: tabs.iter().map(|(id, _)| id.as_str().to_string()).collect(),
+            tabs,
+            forced: false,
+            grace_seconds: self.individual_close_grace().as_secs(),
+            cancelled: false,
+        });
+        crate::engine::EventReaction::Status(busy)
+    }
+
+    /// Start again every tab a recreate stopped whose last old process has
+    /// reaped, and resolve that recreate's op with what happened to each. Called
+    /// by both surfaces right after [`Engine::reap_terminating_ptys`], with the
+    /// size their launches use.
+    ///
+    /// Each tab goes through the same resume decision every launch makes, in
+    /// strip order: the first of a CLI gets its conversation back, and a second
+    /// tab of the same CLI starts fresh, because the first is already launching
+    /// by then. A tab closed, started by somebody else or refused meanwhile is
+    /// not started, and the final says so.
+    pub fn sweep_recreate_restarts(&mut self, pty_size: (u16, u16)) -> RecreateRestartSweep {
+        let mut sweep = RecreateRestartSweep::default();
+        if self
+            .pending_tab_restarts
+            .iter()
+            .all(|r| !r.pending_ids.is_empty())
+        {
+            return sweep;
+        }
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_tab_restarts)
+            .into_iter()
+            .partition(|restart| restart.pending_ids.is_empty());
+        self.pending_tab_restarts = waiting;
+        for restart in ready {
+            let mut report = crate::working_copy::TabRestartReport {
+                forced_after_seconds: restart.forced.then_some(restart.grace_seconds),
+                ..Default::default()
+            };
+            for (id, provider) in &restart.tabs {
+                let provider = provider.as_str().to_string();
+                let started = (!restart.cancelled && !self.tab_is_live(id.as_ref_id()))
+                    .then(|| self.restart_tab_launch_request(id, pty_size))
+                    .flatten();
+                let Some((request, resume)) = started else {
+                    report.not_restarted.push(provider);
+                    continue;
+                };
+                let reaction = match self.apply(crate::engine::Command::DispatchAgentLaunch {
+                    request: Box::new(request),
+                }) {
+                    Ok(reaction) => reaction,
+                    Err(err) => crate::engine::EventReaction::Status(
+                        crate::engine::StatusUpdate::error(format!("{err:#}")),
+                    ),
+                };
+                let launched = matches!(
+                    &reaction,
+                    crate::engine::EventReaction::DispatchAgentLaunchView(view) if view.launched
+                );
+                sweep.launches.push(reaction);
+                match (launched, resume) {
+                    (false, _) => report.not_restarted.push(provider),
+                    (true, true) => report.continued.push(provider),
+                    (true, false) => report.fresh.push(provider),
+                }
+            }
+            sweep
+                .finals
+                .push(restart.op.resolve(&crate::engine::RecreateOutcome {
+                    result: Ok(restart.branch),
+                    live: restart.live,
+                    restart: Some(report),
+                }));
+        }
+        sweep
+    }
+
+    /// The launch that starts one of an agent's tabs again, with whether it
+    /// resumes: the agent's own launch for its slot tab, the dormant-tab launch
+    /// for an extra one, so the resume decision and the completion words are
+    /// the ones a manual start gets. `None` when the tab or its agent is gone.
+    fn restart_tab_launch_request(
+        &self,
+        tab_id: &TabIdRef,
+        pty_size: (u16, u16),
+    ) -> Option<(crate::worker::AgentLaunchRequest, bool)> {
+        if let Some(session) = self.session_for_slot_tab(tab_id).cloned() {
+            let resume =
+                self.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true);
+            let status_message = self.agent_reconnect_status_message(&session, resume);
+            let request = self
+                .build_agent_launch_request(
+                    session,
+                    resume,
+                    pty_size,
+                    crate::worker::AgentLaunchKind::Reconnect { status_message },
+                )
+                .quiet_status_on(if resume {
+                    crate::statusline::QuietSurfaces::BOTH
+                } else {
+                    crate::statusline::QuietSurfaces::LOUD
+                });
+            return Some((request, resume));
+        }
+        let request = self.dormant_tab_launch_request(tab_id.as_str(), pty_size)?;
+        let resume = request.resume;
+        Some((request, resume))
+    }
 }
 
 #[cfg(test)]
 mod recreate_tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+
+    /// Every provider the running tabs name, whatever their fate.
+    fn every_provider(tabs: &crate::working_copy::RunningTabs) -> Vec<String> {
+        tabs.follows
+            .iter()
+            .chain(&tabs.restartable)
+            .chain(&tabs.left_running)
+            .cloned()
+            .collect()
+    }
 
     /// An engine with one managed agent whose working copy has been deleted.
     fn engine_with_a_missing_working_copy() -> (Engine, crate::test_scratch::ScratchDir) {
@@ -2378,7 +2680,7 @@ mod recreate_tests {
             .insert("sa1".to_string(), crate::git::FolderRepoStatus::Missing);
 
         assert!(engine.recreate_working_copy_inputs("sa1").is_none());
-        let Err(refusal) = engine.begin_recreate_working_copy("sa1") else {
+        let Err(refusal) = engine.begin_recreate_working_copy("sa1", false) else {
             panic!("and the dispatch refuses it too")
         };
         assert!(
@@ -2394,7 +2696,7 @@ mod recreate_tests {
         let (mut engine, _tmp) = engine_with_a_missing_working_copy();
         engine.projects.clear();
 
-        let Err(refusal) = engine.begin_recreate_working_copy("s1") else {
+        let Err(refusal) = engine.begin_recreate_working_copy("s1", false) else {
             panic!("no repository to check out from")
         };
         let message = format!("{refusal:#}");
@@ -2416,9 +2718,12 @@ mod recreate_tests {
             let inputs = engine
                 .recreate_working_copy_inputs("s1")
                 .expect("a live tab is no bar to putting the directory back");
-            assert_eq!(inputs.running_providers, vec![provider.to_string()]);
+            assert_eq!(
+                every_provider(&inputs.running_tabs),
+                vec![provider.to_string()]
+            );
             assert!(
-                engine.begin_recreate_working_copy("s1").is_ok(),
+                engine.begin_recreate_working_copy("s1", false).is_ok(),
                 "and the dispatch runs it"
             );
         }
@@ -2450,7 +2755,7 @@ mod recreate_tests {
                 .recreate_working_copy_inputs("s1")
                 .expect("a managed agent whose copy is gone");
             assert_eq!(
-                inputs.running_providers,
+                every_provider(&inputs.running_tabs),
                 vec![extra.to_string()],
                 "only the tab that is running has an answer to give"
             );
@@ -2467,7 +2772,15 @@ mod recreate_tests {
         let inputs = engine
             .recreate_working_copy_inputs("s1")
             .expect("a managed agent whose copy is gone");
-        assert_eq!(inputs.running_providers, vec!["codex".to_string()]);
+        assert_eq!(
+            inputs.running_tabs.restartable,
+            vec!["codex".to_string()],
+            "the dormant slot is what the body is written from"
+        );
+        assert!(
+            inputs.restart_offer.is_empty(),
+            "but nothing is running, so there is nothing to restart"
+        );
     }
 
     /// The final's last sentence is about what is running when the checkout
@@ -2482,7 +2795,7 @@ mod recreate_tests {
             .to_owned();
         engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(tab.clone()));
         engine
-            .begin_recreate_working_copy("s1")
+            .begin_recreate_working_copy("s1", false)
             .expect("the press dispatches under a running tab");
 
         // The tab ends by itself while git works.
@@ -2516,7 +2829,7 @@ mod recreate_tests {
             .to_owned();
         engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(tab));
         engine
-            .begin_recreate_working_copy("s1")
+            .begin_recreate_working_copy("s1", false)
             .expect("the press dispatches under a running tab");
 
         let reaction =
@@ -2529,8 +2842,8 @@ mod recreate_tests {
         };
         assert!(
             status.message.ends_with(
-                "A running Codex tab cannot follow the folder: stop it and start the agent again \
-                 to continue in the recreated copy."
+                "A running Codex tab cannot follow the folder by itself; restarting it continues \
+                 its conversation in the recreated copy."
             ),
             "{}",
             status.message
@@ -2544,10 +2857,10 @@ mod recreate_tests {
     fn a_second_press_is_refused_while_the_first_recreate_runs() {
         let (mut engine, _tmp) = engine_with_a_missing_working_copy();
         engine
-            .begin_recreate_working_copy("s1")
+            .begin_recreate_working_copy("s1", false)
             .expect("the first press dispatches");
 
-        let Err(err) = engine.begin_recreate_working_copy("s1") else {
+        let Err(err) = engine.begin_recreate_working_copy("s1", false) else {
             panic!("the second press is refused")
         };
         assert!(format!("{err:#}").contains("already recreating"), "{err:#}");
@@ -2660,7 +2973,7 @@ mod recreate_tests {
         let (mut engine, _tmp) = engine_with_a_missing_working_copy();
 
         let reaction = engine
-            .begin_recreate_working_copy("s1")
+            .begin_recreate_working_copy("s1", false)
             .expect("the dispatch runs");
         let crate::engine::EventReaction::Status(status) = reaction else {
             panic!("a dispatch owes a busy")
@@ -2676,6 +2989,392 @@ mod recreate_tests {
             .key
             .expect("a busy is keyed so its final replaces it");
         assert!(engine.status_op_is_live(&key));
+    }
+
+    /// The missing-copy agent with its slot tab running `slot` and each extra
+    /// `(tab id, provider)` tab running too, every one a `cat` that exits on
+    /// SIGTERM. Every CLI has run in this agent before, so a launch may resume
+    /// it, and every provider command is `true`, so a launch runs nothing real.
+    fn agent_running(
+        slot: &str,
+        extras: &[(&str, &str)],
+    ) -> (Engine, crate::test_scratch::ScratchDir, tempfile::TempDir) {
+        let (mut engine, tmp) = engine_with_a_missing_working_copy();
+        for provider in engine.config.providers.commands.values_mut() {
+            provider.command = "true".to_string();
+        }
+        engine.sessions[0].provider = crate::model::ProviderKind::new(slot);
+        for provider in ["claude", "codex", "opencode", "copilot"] {
+            engine.sessions[0].mark_provider_started(&crate::model::ProviderKind::new(provider));
+        }
+        let cwd = tempfile::tempdir().expect("a directory for the stand-in processes");
+        let spawn = || {
+            PtyClient::spawn_with_env("cat", &[], cwd.path(), 24, 80, 1000, &[]).expect("spawn cat")
+        };
+        engine.providers.insert(TabId::new("s1-slot"), spawn());
+        for (order, (id, provider)) in extras.iter().enumerate() {
+            engine.agent_tabs.insert(
+                TabId::new(*id),
+                crate::engine::test_support::sample_tab(id, "s1", provider, order as i64 + 1),
+            );
+            engine.providers.insert(TabId::new(*id), spawn());
+        }
+        (engine, tmp, cwd)
+    }
+
+    /// The checkout lands, successfully unless `failed`, and the reaction to it.
+    fn checkout_lands(engine: &mut Engine, failed: bool) -> crate::engine::EventReaction {
+        engine.process_worker_event(crate::worker::WorkerEvent::WorkingCopyRecreated {
+            session_id: "s1".to_string(),
+            outcome: if failed {
+                Err("the checkout failed".to_string())
+            } else {
+                Ok(crate::working_copy::RecreatedBranch::CheckedOut)
+            },
+        })
+    }
+
+    /// Reap and sweep, as both surfaces do every tick, until the restart has
+    /// started its tabs and answered its spinner.
+    fn restart_completes(engine: &mut Engine) -> RecreateRestartSweep {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let _ = engine.reap_terminating_ptys();
+            let sweep = engine.sweep_recreate_restarts((24, 80));
+            if !sweep.finals.is_empty() {
+                return sweep;
+            }
+            assert!(Instant::now() < deadline, "the old processes never reaped");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn final_message(outcome: &crate::engine::ResolvedFinal) -> String {
+        match &outcome.outcome {
+            crate::engine::Final::Message { text, .. } => text.to_string(),
+            crate::engine::Final::Clear => panic!("expected a message, got a clear"),
+        }
+    }
+
+    /// The checkbox is offered only for a running CLI that cannot follow the
+    /// folder and can pick its conversation back up: never for Claude, which
+    /// follows it, and never for Copilot, which would lose its conversation and
+    /// is named as left running instead.
+    #[test]
+    fn the_restart_is_offered_for_running_clis_that_can_continue() {
+        let inputs = |slot: &str, extras: &[(&str, &str)]| {
+            let (engine, _tmp, _cwd) = agent_running(slot, extras);
+            engine
+                .recreate_working_copy_inputs("s1")
+                .expect("a managed agent whose copy is gone")
+        };
+
+        let claude = inputs("claude", &[]);
+        assert!(claude.restart_offer.is_empty(), "Claude follows the folder");
+
+        let codex = inputs("codex", &[]);
+        assert_eq!(codex.restart_offer, vec!["codex".to_string()]);
+
+        let with_copilot = inputs("codex", &[("tab-b", "copilot")]);
+        assert_eq!(with_copilot.restart_offer, vec!["codex".to_string()]);
+        assert_eq!(
+            with_copilot.running_tabs.left_running,
+            vec!["copilot".to_string()],
+            "the confirmation names Copilot as left running"
+        );
+
+        let two_codex = inputs("codex", &[("tab-b", "codex")]);
+        assert_eq!(
+            two_codex.restart_offer,
+            vec!["codex".to_string(), "codex".to_string()],
+            "one entry per tab, in strip order"
+        );
+
+        let opencode = inputs("claude", &[("tab-b", "opencode")]);
+        assert_eq!(opencode.restart_offer, vec!["opencode".to_string()]);
+    }
+
+    /// The browser asks no CLI question of its own: the agent's view carries the
+    /// same sorted tabs and the same offer the terminal UI's dialog is built
+    /// from, and nothing while the working copy is there.
+    #[test]
+    fn the_agents_view_carries_the_recreate_offer() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[("tab-b", "copilot")]);
+        let view = engine.session_view("s1").expect("the agent");
+        let crate::viewmodel::AgentWorkspaceView::Managed {
+            recreate: Some(recreate),
+            ..
+        } = view.workspace
+        else {
+            panic!(
+                "a missing copy carries its recreate view: {:?}",
+                view.workspace
+            )
+        };
+        assert_eq!(recreate.restart_offer, vec!["codex".to_string()]);
+        assert_eq!(recreate.running.left_running, vec!["copilot".to_string()]);
+
+        engine
+            .folder_repo_statuses
+            .insert("s1".to_string(), crate::git::FolderRepoStatus::WorkingRepo);
+        let view = engine.session_view("s1").expect("the agent");
+        assert!(matches!(
+            view.workspace,
+            crate::viewmodel::AgentWorkspaceView::Managed { recreate: None, .. }
+        ));
+    }
+
+    /// Ticked: every restartable tab is stopped politely before any starts,
+    /// then each starts again through the ordinary resume decision. The first
+    /// Codex tab gets the conversation back and the second starts fresh, the
+    /// Copilot and Claude tabs are untouched, and the one spinner the user saw
+    /// is answered by a final that says all of it.
+    #[test]
+    fn a_ticked_recreate_stops_every_tab_before_starting_any_again() {
+        let (mut engine, _tmp, _cwd) = agent_running(
+            "codex",
+            &[
+                ("tab-b", "codex"),
+                ("tab-c", "copilot"),
+                ("tab-d", "claude"),
+            ],
+        );
+        let crate::engine::EventReaction::Status(busy) = engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs")
+        else {
+            panic!("a dispatch owes a busy")
+        };
+        let key = busy.key.expect("keyed");
+
+        let crate::engine::EventReaction::Status(restarting) = checkout_lands(&mut engine, false)
+        else {
+            panic!("the checkout hands its spinner on to the restart")
+        };
+        assert_eq!(restarting.tone, crate::statusline::StatusTone::Busy);
+        assert_eq!(
+            restarting.key.as_deref(),
+            Some(key.as_str()),
+            "the same spinner"
+        );
+        assert!(
+            restarting.message.contains("restarting its Codex tabs"),
+            "{}",
+            restarting.message
+        );
+
+        for stopped in ["s1-slot", "tab-b"] {
+            assert!(!engine.providers.contains_key(TabIdRef::new(stopped)));
+            assert!(
+                !engine.tab_is_live(TabIdRef::new(stopped)),
+                "nothing starts before every old process has gone"
+            );
+        }
+        assert_eq!(
+            engine.terminating_ptys.len(),
+            2,
+            "both asked to go, politely"
+        );
+        for untouched in ["tab-c", "tab-d"] {
+            assert!(engine.providers.contains_key(TabIdRef::new(untouched)));
+        }
+        assert!(
+            engine.sweep_recreate_restarts((24, 80)).launches.is_empty(),
+            "the barrier holds until the reaper has seen them go"
+        );
+
+        let sweep = restart_completes(&mut engine);
+        assert_eq!(sweep.launches.len(), 2);
+        for restarted in ["s1-slot", "tab-b"] {
+            assert!(
+                engine.tab_is_live(TabIdRef::new(restarted)),
+                "{restarted} is starting again"
+            );
+        }
+        assert_eq!(sweep.finals.len(), 1);
+        assert_eq!(
+            sweep.finals[0].key, key,
+            "the final answers the same spinner"
+        );
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains(
+                "Restarted the Codex tab, which continues its conversation in the recreated copy."
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "The Codex tab started a fresh conversation instead, because only one tab per \
+                 CLI can pick its conversation back up."
+            ),
+            "{message}"
+        );
+        assert!(message.contains("Copilot tab is left running"), "{message}");
+        assert!(message.contains("Claude tab keeps working"), "{message}");
+        assert!(engine.pending_tab_restarts.is_empty());
+    }
+
+    /// Force-stopping the agent while its tabs shut down is the newer request:
+    /// nothing starts again, and the spinner is still answered, saying so.
+    #[test]
+    fn a_force_stop_during_the_restart_starts_nothing_again() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs");
+        checkout_lands(&mut engine, false);
+        engine.force_detach_session("s1");
+
+        let sweep = restart_completes(&mut engine);
+        assert!(sweep.launches.is_empty(), "nothing is started again");
+        assert!(!engine.tab_is_live(TabIdRef::new("s1-slot")));
+        let message = final_message(&sweep.finals[0]);
+        assert!(
+            message.contains("dux did not restart the Codex tab"),
+            "{message}"
+        );
+    }
+
+    /// A failed checkout stops nothing: the tabs it would have restarted are
+    /// still running, and the final is the failure.
+    #[test]
+    fn a_failed_recreate_restarts_nothing() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine
+            .begin_recreate_working_copy("s1", true)
+            .expect("the dispatch runs");
+
+        let crate::engine::EventReaction::Status(status) = checkout_lands(&mut engine, true) else {
+            panic!("the failure answers the spinner")
+        };
+        assert_eq!(status.tone, crate::statusline::StatusTone::Error);
+        assert!(engine.providers.contains_key(TabIdRef::new("s1-slot")));
+        assert!(engine.terminating_ptys.is_empty());
+        assert!(engine.pending_tab_restarts.is_empty());
+    }
+
+    /// Unticked is the old behaviour: the Codex tab is left running and the
+    /// final says what restarting it would do.
+    #[test]
+    fn an_unticked_recreate_leaves_the_tabs_running() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine
+            .begin_recreate_working_copy("s1", false)
+            .expect("the dispatch runs");
+
+        let crate::engine::EventReaction::Status(status) = checkout_lands(&mut engine, false)
+        else {
+            panic!("the checkout answers its own spinner")
+        };
+        assert_eq!(status.tone, crate::statusline::StatusTone::Info);
+        assert!(
+            status.message.ends_with(
+                "A running Codex tab cannot follow the folder by itself; restarting it continues \
+                 its conversation in the recreated copy."
+            ),
+            "{}",
+            status.message
+        );
+        assert!(engine.providers.contains_key(TabIdRef::new("s1-slot")));
+        assert!(engine.terminating_ptys.is_empty());
+    }
+
+    /// The restart stops tabs, so it goes through the attachment guard like any
+    /// other stop: refused, naming who, while somebody else is attached to a tab
+    /// it would restart, and nothing is checked out. Unticked it stops nothing
+    /// and is not guarded. Allowed, what it would stop stays reserved until the
+    /// recreate's final.
+    #[test]
+    fn a_ticked_recreate_honours_the_attachment_guard() {
+        use crate::attachments::{ConnectionFacts, Surface, Target, TargetKind};
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine.attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox".to_string()),
+                address: Some("192.168.1.5".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        let slot = || Target {
+            kind: TargetKind::Tab,
+            id: "s1-slot".to_string(),
+            agent: Some("s1".to_string()),
+        };
+        let attached = engine
+            .attachments
+            .attach("e1", slot(), None, None)
+            .expect("attach");
+        let recreate = |restart_tabs| crate::wire::WireCommand::RecreateWorkingCopy {
+            session_id: "s1".to_string(),
+            restart_tabs,
+        };
+
+        let refused = match engine.apply_wire(recreate(true)) {
+            Ok(_) => panic!("the restart went ahead over somebody attached"),
+            Err(refused) => refused.to_string(),
+        };
+        assert!(refused.contains("192.168.1.5"), "{refused}");
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::RecreateWorkingCopy(
+                "s1".to_string()
+            )),
+            "nothing was checked out"
+        );
+
+        engine.attachments.detach(
+            attached,
+            crate::attachments::Ending::Deliberate,
+            Instant::now(),
+            Duration::ZERO,
+        );
+        engine
+            .apply_wire(recreate(true))
+            .expect("nobody is attached any more");
+        assert!(
+            engine.attachments.attach("e1", slot(), None, None).is_err(),
+            "the tab it will restart stays reserved until the recreate's final"
+        );
+    }
+
+    #[test]
+    fn an_unticked_recreate_is_not_guarded() {
+        use crate::attachments::{ConnectionFacts, Surface, Target, TargetKind};
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        engine.attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox".to_string()),
+                address: Some("192.168.1.5".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        engine
+            .attachments
+            .attach(
+                "e1",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "s1-slot".to_string(),
+                    agent: Some("s1".to_string()),
+                },
+                None,
+                None,
+            )
+            .expect("attach");
+        engine
+            .apply_wire(crate::wire::WireCommand::RecreateWorkingCopy {
+                session_id: "s1".to_string(),
+                restart_tabs: false,
+            })
+            .expect("a recreate that stops nothing goes ahead");
     }
 }
 

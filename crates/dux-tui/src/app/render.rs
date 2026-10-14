@@ -8290,18 +8290,23 @@ impl App {
     }
 
     /// The recreate-working-copy confirmation. Prose plus a Cancel/Recreate
-    /// pair, the Confirm family, Cancel focused.
+    /// pair, the Confirm family, Cancel focused, and the restart checkbox
+    /// whenever a running tab can be restarted to continue in the new copy.
     ///
-    /// The body is `dux_core::working_copy::recreate_confirm_body`, the same
-    /// sentence the browser's dialog renders.
+    /// The body is `dux_core::working_copy::recreate_confirm_body` and the
+    /// checkbox `recreate_restart_checkbox_prose`, the same words the browser's
+    /// dialog renders.
     fn render_confirm_recreate_working_copy_prompt(&mut self, frame: &mut Frame) {
         let PromptState::ConfirmRecreateWorkingCopy {
             worktree_path,
             branch_name,
             source_branch,
             conversation_resumes,
-            running_providers,
+            running_tabs,
+            restart_offer,
+            restart_tabs,
             focus,
+            attached,
             ..
         } = &self.prompt
         else {
@@ -8312,34 +8317,79 @@ impl App {
             branch_name,
             source_branch,
             *conversation_resumes,
-            running_providers,
+            running_tabs,
         );
+        let inner_width = confirm_inner_width(frame.area());
         // Sized to the wrapped prose by the shared frame: the sentence about
         // what is lost has to be readable on an 80x24 terminal.
-        let lines = self.prose_body(&body);
-        let (cancel, act) = confirm_focus_buttons(
-            *focus,
-            ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
-            (
-                "Recreate",
-                ButtonKind::Danger,
-                ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
-            ),
-        );
+        let mut lines = self.prose_body(&body);
+        // Only a ticked restart stops anything, so only it is guarded.
+        let attached: &[dux_core::attachments::Blocker] =
+            if *restart_tabs { attached } else { &[] };
+        lines.extend(self.attached_section(attached, inner_width));
+        let checkbox_label = (!restart_offer.is_empty())
+            .then(|| dux_core::working_copy::recreate_restart_checkbox_prose(restart_offer));
+        let checkbox_state = if *focus == RecreateWorkingCopyFocus::RestartCheckbox {
+            CheckboxState::Focused
+        } else {
+            CheckboxState::Normal
+        };
+        let checkbox_height = checkbox_label.as_ref().map_or(0, |label| {
+            let checkbox = Checkbox::with_prose(label, &self.theme)
+                .checked(*restart_tabs)
+                .state(checkbox_state);
+            checkbox
+                .layout(
+                    inner_width,
+                    checkbox.marker_style(Style::default()),
+                    checkbox.label_style(Style::default()),
+                )
+                .height
+        });
+        let confirm_label = guarded_confirm_label("Recreate", attached);
+        let restart_tabs = *restart_tabs;
+        let focus = *focus;
+        // The frame keeps a blank row between the checkbox and the buttons, so
+        // the checkbox never sits flush against the destructive button.
         let layout = self.render_confirm_dialog(
             frame,
             ConfirmDialog {
                 title: "Recreate Working Copy",
                 body: lines,
-                controls_height: 0,
-                cancel,
-                act,
+                controls_height: checkbox_height,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
+                    focus == RecreateWorkingCopyFocus::Cancel,
+                ),
+                act: ConfirmButton::new(
+                    &confirm_label,
+                    ButtonKind::Danger,
+                    ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
+                    focus == RecreateWorkingCopyFocus::Recreate,
+                ),
                 reserve_labels: &[],
             },
         );
+        let checkbox = checkbox_label.map(|label| {
+            let (rect, _) = self.render_overlay_prose_checkbox(
+                frame,
+                layout.controls,
+                &label,
+                restart_tabs,
+                checkbox_state,
+                None,
+            );
+            OverlayCheckbox {
+                id: OverlayCheckboxId::RecreateRestartTabs,
+                rect,
+            }
+        });
         self.overlay_layout.active = OverlayMouseLayout::ConfirmRecreateWorkingCopy {
             cancel_button: layout.cancel,
             confirm_button: layout.act,
+            checkbox,
         };
     }
 

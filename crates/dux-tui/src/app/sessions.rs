@@ -2145,8 +2145,13 @@ impl App {
             branch_name: inputs.branch_name,
             source_branch: inputs.source_branch,
             conversation_resumes: inputs.conversation_resumes,
-            running_providers: inputs.running_providers,
-            focus: ConfirmFocus::Cancel, // Cancel is the safe default
+            running_tabs: inputs.running_tabs,
+            // Ticked whenever it is offered: a tab that cannot follow the
+            // folder is stuck until it is restarted.
+            restart_tabs: !inputs.restart_offer.is_empty(),
+            restart_offer: inputs.restart_offer,
+            focus: RecreateWorkingCopyFocus::Cancel, // Cancel is the safe default
+            attached: Vec::new(),
         };
         Ok(())
     }
@@ -4975,6 +4980,7 @@ mod tests {
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
+            pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
@@ -5344,6 +5350,7 @@ mod tests {
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
+            pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
@@ -6359,14 +6366,18 @@ mod tests {
             branch_name,
             source_branch,
             conversation_resumes,
-            running_providers,
+            running_tabs,
             focus,
             ..
         } = &app.prompt
         else {
             panic!("a missing working copy raises the confirmation")
         };
-        assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
+        assert_eq!(
+            *focus,
+            RecreateWorkingCopyFocus::Cancel,
+            "Cancel is the safe default"
+        );
         assert!(
             *conversation_resumes,
             "the fixture agent runs codex, which resumes per directory"
@@ -6376,7 +6387,7 @@ mod tests {
             branch_name,
             source_branch,
             *conversation_resumes,
-            running_providers,
+            running_tabs,
         );
         assert!(body.contains("are gone either way"), "{body}");
         assert!(body.contains("same path"), "{body}");
@@ -6406,12 +6417,15 @@ mod tests {
             .expect("dispatch");
 
         let PromptState::ConfirmRecreateWorkingCopy {
-            running_providers, ..
+            running_tabs,
+            restart_offer,
+            ..
         } = &app.prompt
         else {
             panic!("a running agent is confirmed like any other")
         };
-        assert_eq!(running_providers, &vec!["claude".to_string()]);
+        assert_eq!(running_tabs.follows, vec!["claude".to_string()]);
+        assert!(restart_offer.is_empty(), "Claude follows the folder");
     }
 
     /// The body follows the tab that is RUNNING: a dormant claude slot beside a
@@ -6450,19 +6464,19 @@ mod tests {
             branch_name,
             source_branch,
             conversation_resumes,
-            running_providers,
+            running_tabs,
             ..
         } = &app.prompt
         else {
             panic!("a running agent is confirmed like any other")
         };
-        assert_eq!(running_providers, &vec!["codex".to_string()]);
+        assert_eq!(running_tabs.restartable, vec!["codex".to_string()]);
         let body = dux_core::working_copy::recreate_confirm_body(
             worktree_path,
             branch_name,
             source_branch,
             *conversation_resumes,
-            running_providers,
+            running_tabs,
         );
         assert!(body.contains("A running Codex tab cannot follow"), "{body}");
     }

@@ -265,10 +265,25 @@ where it would normally name the project.
 >
 > You can do it while the agent is running, and what happens next is the CLI's own answer.
 > A running Claude tab never notices, and carries on in the recreated folder with its
-> conversation intact. Every other CLI is the cautious case: Codex answers every turn with
-> an invalid-directory error from the moment the folder goes and stays stuck after the
-> recreate, so stop the tab and start the agent again to continue there. The confirmation
-> says which of the two you are getting.
+> conversation intact. Codex cannot follow the folder: it answers every turn with an
+> invalid-directory error from the moment the folder goes, and stays stuck after the
+> recreate until it is restarted. OpenCode, and any other CLI that can pick its
+> conversation back up, gets the same cautious treatment.
+>
+> For those, the confirmation has a **Restart the Codex tab so it continues in the new
+> copy** box, ticked by default and naming the CLIs it would restart. Leave it ticked and,
+> once the working copy is back, dux asks those tabs to shut down, gives them the
+> configured shutdown wait, closes any that are still there, and starts each one again so
+> it picks its conversation back up in the recreated folder. Only one tab per CLI can get
+> its conversation back, so with two Codex tabs the second starts a fresh one, and the
+> message afterwards says which tabs continued and which started fresh. Nothing is
+> restarted if the recreate fails, and nothing at all when the box is unticked.
+>
+> A CLI that cannot pick a conversation back up, such as Copilot, is never restarted,
+> because that would lose its conversation: the confirmation says it is left running.
+> If it cannot follow the folder, stop and start that tab yourself. Restarting stops tabs,
+> so if someone else is connected to one of them the confirmation names them first, the
+> same way stopping a tab does.
 
 If the branch is gone locally but still on the remote, dux creates it again from
 `origin/<branch>`, holding everything that had been pushed. If it is gone everywhere, dux

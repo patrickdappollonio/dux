@@ -211,11 +211,19 @@ export const sessionsApi = {
     ),
   // Check the agent's branch out again at the path its working copy used to
   // occupy. Answers with a keyed busy on the status stream; a refusal is a 400
-  // and throws.
-  recreateWorkingCopy: (id: string) =>
+  // and throws. `restartTabs` also restarts the running tabs that cannot follow
+  // the folder, which stops them, so it is guarded like a stop: somebody else
+  // attached is a 409 unless `accepted` names who the dialog showed.
+  recreateWorkingCopy: (
+    id: string,
+    restartTabs: boolean,
+    accepted: readonly string[] | null = null,
+  ) =>
     request<void>(
       "POST",
-      `/api/v1/sessions/${encodeURIComponent(id)}/recreate-working-copy`,
+      `/api/v1/sessions/${encodeURIComponent(id)}/recreate-working-copy` +
+        forceConnectedQuery(accepted, true),
+      { restart_tabs: restartTabs },
     ),
   // Attaches a pull request from the raw typed reference. Replies 202 with the keyed
   // status op id, and the outcome rides the status stream; a synchronous refusal is a

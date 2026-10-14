@@ -236,9 +236,33 @@ impl Engine {
             }
             WireCommand::CloseAgentTab { tab_id, .. }
             | WireCommand::StopAgentTab { tab_id, .. } => Self::pty_scope(tab_id),
+            WireCommand::RecreateWorkingCopy {
+                session_id,
+                restart_tabs: true,
+            } => {
+                let scope = self.recreate_restart_scope(session_id);
+                if scope.is_empty() {
+                    return Ok(None);
+                }
+                scope
+            }
             _ => return Ok(None),
         };
         self.reserve_destruction(scope).map(Some)
+    }
+
+    /// What a recreate asked to restart its tabs would stop: each running tab
+    /// whose CLI cannot follow the folder and can pick its conversation back
+    /// up, the ones [`Engine::recreate_restart_targets`] names.
+    pub fn recreate_restart_scope(&self, session_id: &str) -> Scope {
+        Scope {
+            ptys: self
+                .recreate_restart_targets(session_id)
+                .into_iter()
+                .map(|(tab, _)| tab.as_str().to_string())
+                .collect(),
+            agents: Default::default(),
+        }
     }
 
     /// Everybody but the terminal UI attached to anything in this workspace:

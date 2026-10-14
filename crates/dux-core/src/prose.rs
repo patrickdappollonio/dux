@@ -269,6 +269,19 @@ mod tests {
         );
     }
 
+    /// A fixture argument that is a list of strings; absent is empty.
+    fn strings(value: &Value) -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().expect("a string").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Merge adjacent strings, the normalization the fixture's note promises,
     /// so neither side is bound to the other's split of its constant words.
     fn merged(segments: &Value) -> Value {
@@ -294,17 +307,19 @@ mod tests {
             }
             "recreate_confirm" => {
                 let worktree = std::path::PathBuf::from(s("worktree_label"));
-                let providers: Vec<String> = args["providers"]
-                    .as_array()
-                    .expect("providers")
-                    .iter()
-                    .map(|p| p.as_str().expect("provider").to_string())
-                    .collect();
+                let running = crate::working_copy::RunningTabs {
+                    follows: strings(&args["running"]["follows"]),
+                    restartable: strings(&args["running"]["restartable"]),
+                    left_running: strings(&args["running"]["left_running"]),
+                };
                 let resumes = args["conversation_resumes"].as_bool().expect("resumes");
                 let (branch, source) = (s("branch_name"), s("source_branch"));
                 crate::working_copy::recreate_confirm_prose(
-                    &worktree, &branch, &source, resumes, &providers,
+                    &worktree, &branch, &source, resumes, &running,
                 )
+            }
+            "recreate_restart_checkbox" => {
+                crate::working_copy::recreate_restart_checkbox_prose(&strings(&args["restartable"]))
             }
             "checkout_default_branch_confirm" => {
                 let project = s("project_name");

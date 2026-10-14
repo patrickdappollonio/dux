@@ -515,6 +515,10 @@ pub enum AgentWorkspaceView {
         /// directory-scoped resume (copilot ships with none) would have it
         /// promising something that cannot happen.
         conversation_resumes: bool,
+        /// What the recreate confirmation says about the running tabs and
+        /// offers to restart, decided here so the browser asks no CLI question
+        /// of its own. `None` while the working copy is there.
+        recreate: Option<RecreateView>,
     },
     Folder {
         /// The folder as it exists on the SERVER's filesystem.
@@ -538,6 +542,18 @@ pub enum AgentWorkspaceView {
     },
 }
 
+/// The recreate confirmation's view of an agent whose working copy is gone.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecreateView {
+    /// The running tabs sorted by what each does once the copy is back, or the
+    /// slot tab alone when none is running: what the running-tab paragraph is
+    /// written from.
+    pub running: crate::working_copy::RunningTabs,
+    /// The providers of the running tabs the confirmation offers to restart,
+    /// one per tab in strip order. Empty means the dialog has no checkbox.
+    pub restart_offer: Vec<String>,
+}
+
 impl AgentWorkspaceView {
     /// Project the model workspace, folding in the live repository verdict a
     /// folder needs (the model does not carry it: it is engine state, refreshed
@@ -546,6 +562,7 @@ impl AgentWorkspaceView {
         workspace: &crate::model::AgentWorkspace,
         repo_status: crate::git::FolderRepoStatus,
         conversation_resumes: bool,
+        recreate: Option<RecreateView>,
     ) -> Self {
         match workspace {
             crate::model::AgentWorkspace::Managed(managed) => {
@@ -562,6 +579,7 @@ impl AgentWorkspaceView {
                     quiet_reason: crate::working_copy::quiet_reason(repo_status, worktree, true)
                         .unwrap_or_default(),
                     conversation_resumes,
+                    recreate,
                 }
             }
             crate::model::AgentWorkspace::Folder(folder) => Self::Folder {
@@ -1176,6 +1194,7 @@ impl SessionView {
         detachable: bool,
         repo_status: crate::git::FolderRepoStatus,
         conversation_resumes: bool,
+        recreate: Option<RecreateView>,
     ) -> Self {
         Self {
             id: s.id.clone(),
@@ -1185,6 +1204,7 @@ impl SessionView {
                 &s.workspace,
                 repo_status,
                 conversation_resumes,
+                recreate,
             ),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
@@ -1424,6 +1444,11 @@ impl Engine {
             self.is_detachable(&s.id),
             self.folder_repo_status(&s.id),
             crate::config::provider_config(&self.config, &s.provider).supports_session_resume(),
+            self.recreate_working_copy_inputs(&s.id)
+                .map(|inputs| RecreateView {
+                    running: inputs.running_tabs,
+                    restart_offer: inputs.restart_offer,
+                }),
         )
     }
 
@@ -1673,6 +1698,7 @@ mod tests {
                 quiet_reason: String::new(),
                 // The fixture agent runs claude, which resumes per directory.
                 conversation_resumes: true,
+                recreate: None,
             }
         );
         assert_eq!(spine.sessions[0].status, "detached");

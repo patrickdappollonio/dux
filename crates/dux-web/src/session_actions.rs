@@ -51,9 +51,9 @@ use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
     Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT,
     ForceConnectedQuery, OperationQuery, await_new_session, await_session_for_op, create_failed,
-    delete_operation_response, delete_wire_response, dispatch_guarded, id_within_bound,
-    idempotency_key, operation_accepted, outcome_is_error, refusal, require_configured_provider,
-    scope_from_headers, unknown_session,
+    delete_operation_response, delete_wire_response, dispatch_guarded, dispatch_guarded_unrecorded,
+    id_within_bound, idempotency_key, operation_accepted, outcome_is_error, refusal,
+    require_configured_provider, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -936,28 +936,50 @@ async fn kill_session(
     }
 }
 
+/// Body of `POST /api/v1/sessions/:id/recreate-working-copy`. Optional: no body
+/// recreates the copy and leaves every running tab alone.
+#[derive(Deserialize)]
+struct RecreateWorkingCopyBody {
+    /// The confirmation's restart checkbox: once the checkout succeeds, stop
+    /// the running tabs that cannot follow the folder and can pick their
+    /// conversation back up, and start them again.
+    #[serde(default)]
+    restart_tabs: bool,
+}
+
 /// Check a managed agent's branch out again at the path its working copy used
 /// to occupy.
 ///
 /// Like the kill route and unlike the git-mutation routes, it calls no
 /// `resolve_worktree`: a directory that is gone is precisely the case this
 /// exists for, and resolving one would refuse every legitimate request.
+///
+/// A recreate that restarts tabs stops them, so it goes through the attachment
+/// guard like a stop: a 409 naming who is attached, unless `force_connected`.
 async fn recreate_working_copy(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(force_connected): Query<ForceConnectedQuery>,
+    client: crate::server::SocketClient,
     headers: HeaderMap,
+    body: Option<Json<RecreateWorkingCopyBody>>,
 ) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::RecreateWorkingCopy { session_id: id },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
+    let restart_tabs = body.is_some_and(|Json(body)| body.restart_tabs);
+    let command = WireCommand::RecreateWorkingCopy {
+        session_id: id,
+        restart_tabs,
+    };
+    let result =
+        match dispatch_guarded_unrecorded(&state, command, &headers, &force_connected, &client)
+            .await
+        {
+            Ok(result) => result,
+            Err(refused) => return refused.into_response(),
+        };
+    match result {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -1398,6 +1420,108 @@ mod tests {
             let text = String::from_utf8_lossy(&bytes);
             assert_eq!(got, status, "{method} {uri}: {text}");
             assert!(text.contains(says), "{method} {uri}: {text}");
+        }
+    }
+
+    /// The recreate route reads `restart_tabs` from an optional body. Ticked, it
+    /// stops the running Codex tab, so it is a 409 naming whoever is attached
+    /// to that tab, like any stop. With no body it is false, so a client that
+    /// predates the field keeps today's behaviour: nothing is stopped, nothing
+    /// is guarded, and the recreate goes ahead.
+    #[tokio::test]
+    async fn the_recreate_route_guards_a_restart_and_defaults_to_none() {
+        use dux_core::attachments::{ConnectionFacts, Surface, Target, TargetKind};
+
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        let mut agent = crate::test_support::sample_agent("s1");
+        agent.provider = dux_core::model::ProviderKind::new("codex");
+        engine.sessions.push(agent);
+        engine.projects.push(dux_core::model::Project {
+            id: "p1".to_string(),
+            name: "p1".to_string(),
+            path: tmp.path().join("repo").to_string_lossy().into_owned(),
+            explicit_default_provider: None,
+            default_provider: dux_core::model::ProviderKind::new("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: dux_core::model::ProjectBranchStatus::Leading,
+            path_missing: false,
+            created_at: None,
+        });
+        engine
+            .folder_repo_statuses
+            .insert("s1".to_string(), dux_core::git::FolderRepoStatus::Missing);
+        let running = dux_core::pty::PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            tmp.path(),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn the running tab");
+        engine
+            .providers
+            .insert(dux_core::ids::TabId::new("s1-slot"), running);
+        engine.attachments.register(
+            "e-phone",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox-on-a-phone".to_string()),
+                address: Some("10.1.2.3".parse().unwrap()),
+                verified: false,
+                events: true,
+            },
+            None,
+        );
+        engine
+            .attachments
+            .attach(
+                "e-phone",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "s1-slot".to_string(),
+                    agent: Some("s1".to_string()),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        for (body, status, says) in [
+            (
+                r#"{"restart_tabs":true}"#,
+                StatusCode::CONFLICT,
+                r#""address":"10.1.2.3""#,
+            ),
+            ("", StatusCode::OK, ""),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/sessions/s1/recreate-working-copy");
+            if !body.is_empty() {
+                request = request.header("content-type", "application/json");
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let got = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert_eq!(got, status, "{body:?}: {text}");
+            assert!(text.contains(says), "{body:?}: {text}");
         }
     }
 

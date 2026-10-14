@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest"
 
-import type { AgentWorkspaceWire } from "./agentWorkspace"
-import type { SessionView } from "./types"
+import type { AgentWorkspaceWire, RunningTabs } from "./agentWorkspace"
 import {
   canRecreateWorkingCopy,
   recreateConfirmProse,
-  recreateRunningProviders,
+  recreateRestartCheckboxProse,
   recreateRunningTabClause,
+  recreateView,
 } from "./recreateWorkingCopy"
 import { chip, proseText, quotedChip } from "./prose"
 
 const recreateText = (...args: Parameters<typeof recreateConfirmProse>) =>
   proseText(recreateConfirmProse(...args))
 
-const managed: AgentWorkspaceWire = {
+/** Running tabs as the server sorts them. */
+function running(over: Partial<RunningTabs>): RunningTabs {
+  return { follows: [], restartable: [], left_running: [], ...over }
+}
+
+const managed: Extract<AgentWorkspaceWire, { kind: "managed" }> = {
   kind: "managed",
   project_id: "p1",
   branch_name: "feat",
@@ -47,7 +52,13 @@ describe("canRecreateWorkingCopy", () => {
 // The web draws the path and every branch as a chip.
 describe("the recreate body as names in prose", () => {
   it("marks the path and each branch", () => {
-    const prose = recreateConfirmProse("~/wt", "feat", "main", true, ["codex"])
+    const prose = recreateConfirmProse(
+      "~/wt",
+      "feat",
+      "main",
+      true,
+      running({ restartable: ["codex"] }),
+    )
     for (const name of [
       chip("~/wt"),
       quotedChip("feat"),
@@ -58,15 +69,21 @@ describe("the recreate body as names in prose", () => {
     }
   })
 
-  it("marks every provider named in the running-tab sentence", () => {
-    const cautious = recreateConfirmProse("~/wt", "feat", "main", true, [
-      "codex",
-      "opencode",
-    ])
-    expect(cautious).toContainEqual(chip("Codex"))
-    expect(cautious).toContainEqual(chip("Opencode"))
-    const calm = recreateConfirmProse("~/wt", "feat", "main", true, ["claude"])
-    expect(calm).toContainEqual(chip("Claude"))
+  it("marks every provider named in the running-tab sentences", () => {
+    const prose = recreateConfirmProse(
+      "~/wt",
+      "feat",
+      "main",
+      true,
+      running({
+        follows: ["claude"],
+        restartable: ["codex", "opencode"],
+        left_running: ["copilot"],
+      }),
+    )
+    for (const name of ["Claude", "Codex", "Opencode", "Copilot"]) {
+      expect(prose).toContainEqual(chip(name))
+    }
   })
 })
 
@@ -75,9 +92,13 @@ describe("the recreate body's words", () => {
   // UI's by the shared fixture in prose.test.tsx.
   it("reads the same as the terminal UI's", () => {
     expect(
-      recreateText("~/worktrees/repo/feat", "feat", "main", true, [
-        "claude",
-      ]),
+      recreateText(
+        "~/worktrees/repo/feat",
+        "feat",
+        "main",
+        true,
+        running({ follows: ["claude"] }),
+      ),
     ).toBe(
       "Recreate the working copy for this agent at ~/worktrees/repo/feat?\n\n" +
         'If branch "feat" still exists locally, dux checks it out there again. ' +
@@ -99,89 +120,94 @@ describe("the recreate body's words", () => {
   // A provider with no directory-scoped resume (copilot ships with none) is
   // told so rather than promised a resume the same path cannot buy it.
   it("says the conversation will not resume when the provider cannot", () => {
-    const body = recreateText("~/wt", "feat", "main", false, ["copilot"])
+    const body = recreateText(
+      "~/wt",
+      "feat",
+      "main",
+      false,
+      running({ left_running: ["copilot"] }),
+    )
     expect(body).toContain("will not resume")
     expect(body).not.toContain("may resume")
     expect(body).toContain("are gone either way")
   })
 
-  // Measured per CLI: Claude follows the folder on its own, Codex is stuck
-  // until it is quit and resumed, and an unmeasured provider gets the cautious
-  // answer.
-  it("says what a running tab does, per provider", () => {
-    expect(
-      recreateText("~/wt", "feat", "main", true, ["claude"]),
-    ).toContain("A running Claude tab keeps working in the recreated copy by itself.")
-    for (const provider of ["codex", "opencode", "copilot"]) {
-      const body = recreateText("~/wt", "feat", "main", true, [provider])
-      expect(body).toContain(
-        "cannot follow the folder: stop it and start the agent again",
-      )
-      expect(body).not.toContain("keeps working in the recreated copy")
-    }
-    expect(recreateRunningTabClause(["codex"])).toBe(
-      "A running Codex tab cannot follow the folder: stop it and start the " +
-        "agent again to continue in the recreated copy.",
-    )
-  })
-
-  // One stuck CLI among the running tabs makes the whole sentence the cautious
-  // one, and it names every tab the user has to stop.
-  it("is cautious when any running tab is not claude", () => {
-    expect(recreateRunningTabClause(["claude", "codex"])).toBe(
-      "A running Codex tab cannot follow the folder: stop it and start the " +
-        "agent again to continue in the recreated copy.",
-    )
-    expect(recreateRunningTabClause(["codex", "opencode"])).toBe(
-      "A running Codex or Opencode tab cannot follow the folder: stop it and " +
-        "start the agent again to continue in the recreated copy.",
-    )
-    expect(recreateRunningTabClause(["codex", "opencode", "copilot"])).toBe(
-      "A running Codex, Opencode or Copilot tab cannot follow the folder: " +
-        "stop it and start the agent again to continue in the recreated copy.",
-    )
-    expect(recreateRunningTabClause(["claude"])).toBe(
+  // One sentence per fate, each naming every provider it is about: Claude
+  // follows the folder, a CLI that can resume continues once restarted, and
+  // one that cannot is left running with what to do about it.
+  it("says what each running tab does", () => {
+    expect(recreateRunningTabClause(running({ follows: ["claude"] }))).toBe(
       "A running Claude tab keeps working in the recreated copy by itself.",
+    )
+    expect(
+      recreateRunningTabClause(
+        running({ restartable: ["codex", "opencode", "codex"] }),
+      ),
+    ).toBe(
+      "A running Codex or Opencode tab cannot follow the folder by itself; " +
+        "restarting it continues its conversation in the recreated copy.",
+    )
+    expect(
+      recreateRunningTabClause(running({ left_running: ["copilot"] })),
+    ).toBe(
+      "A running Copilot tab is left running, because restarting it would " +
+        "lose its conversation; if it cannot follow the folder, stop it and " +
+        "start it again yourself.",
     )
   })
 })
 
-describe("recreateRunningProviders", () => {
-  const session = (
-    tabs: { provider: string; has_live_process: boolean }[],
-  ): SessionView =>
-    ({ provider: "claude", tabs }) as unknown as SessionView
-
-  // The sentence is about the CLI that is running, and the agent's own provider
-  // is only the slot tab's.
-  it("names the live tabs, not the agent's provider mirror", () => {
+describe("recreateRestartCheckboxProse", () => {
+  it("names each provider once and reads plural by tab count", () => {
+    expect(proseText(recreateRestartCheckboxProse(["codex"]))).toBe(
+      "Restart the Codex tab so it continues in the new copy",
+    )
     expect(
-      recreateRunningProviders(
-        session([
-          { provider: "claude", has_live_process: false },
-          { provider: "codex", has_live_process: true },
-        ]),
-      ),
-    ).toEqual(["codex"])
+      proseText(recreateRestartCheckboxProse(["codex", "opencode"])),
+    ).toBe(
+      "Restart the Codex and Opencode tabs so they continue in the new copy",
+    )
+    expect(proseText(recreateRestartCheckboxProse(["codex", "codex"]))).toBe(
+      "Restart the Codex tabs so they continue in the new copy",
+    )
+    expect(recreateRestartCheckboxProse(["codex", "opencode"])).toEqual([
+      "Restart the ",
+      chip("Codex"),
+      " and ",
+      chip("Opencode"),
+      " tabs so they continue in the new copy",
+    ])
+  })
+})
 
-    expect(
-      recreateRunningProviders(
-        session([
-          { provider: "claude", has_live_process: true },
-          { provider: "codex", has_live_process: true },
-          { provider: "codex", has_live_process: true },
-        ]),
-      ),
-    ).toEqual(["claude", "codex"])
+describe("recreateView", () => {
+  // The server decides which CLI follows and which can resume; the browser
+  // reads its answer.
+  it("reads the server's sorted tabs and offer", () => {
+    const view = {
+      running: running({ restartable: ["codex"], left_running: ["copilot"] }),
+      restart_offer: ["codex"],
+    }
+    expect(recreateView({ ...managed, recreate: view }, "claude")).toBe(view)
   })
 
-  // With nothing running the dialog still says what starting a tab would mean.
-  it("falls back to the agent's own provider when nothing runs", () => {
+  // A server that predates the field: the agent's own provider, no offer.
+  it("falls back to the agent's provider with no restart offer", () => {
+    expect(recreateView(managed, "claude")).toEqual({
+      running: running({ follows: ["claude"] }),
+      restart_offer: [],
+    })
     expect(
-      recreateRunningProviders(
-        session([{ provider: "codex", has_live_process: false }]),
-      ),
-    ).toEqual(["claude"])
-    expect(recreateRunningProviders(session([]))).toEqual(["claude"])
+      recreateView({ ...managed, conversation_resumes: true }, "codex"),
+    ).toEqual({
+      running: running({ restartable: ["codex"] }),
+      restart_offer: [],
+    })
+    expect(
+      recreateView({ ...managed, conversation_resumes: false }, "copilot"),
+    ).toEqual({
+      running: running({ left_running: ["copilot"] }),
+      restart_offer: [],
+    })
   })
 })

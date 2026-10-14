@@ -189,8 +189,15 @@ fn the_recreate_dialog_chips_the_path_the_branches_and_the_provider() {
             branch_name: "feat-rc".to_string(),
             source_branch: "trunk-rc".to_string(),
             conversation_resumes: true,
-            running_providers: vec!["gemini".to_string()],
-            focus: ConfirmFocus::Cancel,
+            running_tabs: dux_core::working_copy::RunningTabs {
+                follows: Vec::new(),
+                restartable: vec!["gemini".to_string()],
+                left_running: Vec::new(),
+            },
+            restart_offer: Vec::new(),
+            restart_tabs: false,
+            focus: RecreateWorkingCopyFocus::Cancel,
+            attached: Vec::new(),
         },
     );
     assert_chipped(&app, &buf, "/srv/wt/repo/feat-rc");

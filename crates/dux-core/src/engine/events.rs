@@ -4448,17 +4448,12 @@ impl Engine {
         ) {
             self.record_branch_minted_by_recreate(session_id);
         }
-        let live_providers = self.live_tab_providers(session_id);
-        let Some(op) = self.pending_recreate_ops.remove(session_id) else {
+        let Some(pending) = self.pending_recreate_ops.remove(session_id) else {
             // No op means no spinner is waiting on this checkout, which only a
             // synthesised completion reaches. There is nothing to answer.
             return EventReaction::Nothing;
         };
-        op.resolve(&crate::engine::RecreateOutcome {
-            result: outcome,
-            live_providers,
-        })
-        .into_reaction()
+        self.settle_recreate(session_id, pending, outcome)
     }
 
     /// Record that the branch under this agent is one dux minted, in the record

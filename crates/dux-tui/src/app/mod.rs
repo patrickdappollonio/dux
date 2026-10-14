@@ -2361,6 +2361,16 @@ impl ConfirmDeleteWorktreePrompt {
     }
 }
 
+/// Which control has focus in the recreate-working-copy confirmation. The
+/// checkbox stop exists only while the dialog offers to restart tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RecreateWorkingCopyFocus {
+    #[default]
+    Cancel,
+    Recreate,
+    RestartCheckbox,
+}
+
 /// Which control has focus in the worktree-removal confirmation. Mirrors
 /// [`DeleteAgentFocus`], including the conditional checkbox stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2856,11 +2866,18 @@ pub(crate) enum PromptState {
         /// same directory. Captured when the dialog opens, like everything else
         /// it promises.
         conversation_resumes: bool,
-        /// The providers of the tabs running in the directory that is gone, or
-        /// the slot tab's when none is: what the body says about them differs
-        /// per CLI.
-        running_providers: Vec<String>,
-        focus: ConfirmFocus, // Cancel (default) or Recreate
+        /// The tabs running in the directory that is gone, or the slot tab
+        /// alone when none is: what the body says about them differs per CLI.
+        running_tabs: dux_core::working_copy::RunningTabs,
+        /// The providers of the running tabs the restart checkbox would
+        /// restart, one per tab. Empty means the dialog has no checkbox.
+        restart_offer: Vec<String>,
+        /// The restart checkbox, ticked by default whenever it is offered.
+        restart_tabs: bool,
+        focus: RecreateWorkingCopyFocus,
+        /// Who confirming would cut off, named once the guard refuses it. Only
+        /// a ticked restart stops anything, so only it can be refused.
+        attached: Vec<dux_core::attachments::Blocker>,
     },
     /// Asked before "check out the default branch" runs anything, the same
     /// question the browser's dialog asks: the checkout moves HEAD in the user's
@@ -3679,6 +3696,8 @@ pub(crate) enum OverlayCheckboxId {
     NameNewAgentCopyChanges,
     CloneProjectRandomizedPetName,
     ConfigReloadRecoverOldConfig,
+    /// The recreate-working-copy dialog's "restart the tabs" box.
+    RecreateRestartTabs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3834,6 +3853,7 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmRecreateWorkingCopy {
         cancel_button: Rect,
         confirm_button: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
     ConfirmCheckoutDefaultBranch {
         cancel_button: Rect,
@@ -4425,6 +4445,7 @@ impl App {
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
+            pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: HashMap::new(),

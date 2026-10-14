@@ -311,8 +311,15 @@ pub enum WireCommand {
     ///
     /// Answers with a keyed BUSY: git runs off the engine thread and the final
     /// names what happened to the branch.
+    ///
+    /// `restart_tabs` is the confirmation's restart checkbox: once the checkout
+    /// succeeds, the running tabs whose CLI cannot follow the folder and can
+    /// pick its conversation back up are stopped politely and started again.
+    /// Absent is false, so a client that predates it keeps the old behaviour.
     RecreateWorkingCopy {
         session_id: String,
+        #[serde(default)]
+        restart_tabs: bool,
     },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
@@ -1772,7 +1779,17 @@ impl Engine {
         self.admit_wire(&command)?;
         // The changes this dispatches to an engine method directly; the ones
         // it turns into a `Command` are guarded in `Engine::apply`.
-        let _reservation = self.guard_wire(&command)?;
+        let reservation = self.guard_wire(&command)?;
+        // A recreate stops the tabs it restarts only once its checkout lands,
+        // under the same key its busy runs on, so what it reserved stays
+        // reserved until that key's final.
+        let holds_until_final = matches!(
+            command,
+            WireCommand::RecreateWorkingCopy {
+                restart_tabs: true,
+                ..
+            }
+        );
         let set = match &command {
             WireCommand::UpdateMacros { .. }
             | WireCommand::SetMacro { .. }
@@ -1783,6 +1800,15 @@ impl Engine {
             _ => None,
         };
         let mut outcome = self.apply_wire_inner(command)?;
+        if holds_until_final
+            && let Some(reservation) = reservation
+            && let Some(key) = outcome
+                .status
+                .as_ref()
+                .and_then(|status| status.key.clone())
+        {
+            reservation.until_final(&key);
+        }
         outcome.version = set.map(|set| match set {
             StaleSet::Macros => macros_version(&self.config.macros),
             StaleSet::GlobalEnv => global_env_version(&self.config.env),
@@ -1952,8 +1978,11 @@ impl Engine {
                     status,
                 )))
             }
-            WireCommand::RecreateWorkingCopy { session_id } => {
-                let status = self.recreate_working_copy_wire(&session_id)?;
+            WireCommand::RecreateWorkingCopy {
+                session_id,
+                restart_tabs,
+            } => {
+                let status = self.recreate_working_copy_wire(&session_id, restart_tabs)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2635,7 +2664,11 @@ impl Engine {
     /// Refusals are errors rather than a quiet no-op: this is also an HTTP route
     /// and a palette command, so an id that should never have reached here has
     /// to be answered in a sentence.
-    fn recreate_working_copy_wire(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+    fn recreate_working_copy_wire(
+        &mut self,
+        session_id: &str,
+        restart_tabs: bool,
+    ) -> anyhow::Result<WireStatus> {
         // An id nobody has is a 404, not a refusal about an agent: without this
         // bail every unknown id fell through to "dux only recreates a working
         // copy it manages", which is a sentence about an agent that is not
@@ -2643,7 +2676,7 @@ impl Engine {
         if !self.sessions.iter().any(|s| s.id == session_id) {
             anyhow::bail!("unknown session: {session_id}");
         }
-        let reaction = self.begin_recreate_working_copy(session_id)?;
+        let reaction = self.begin_recreate_working_copy(session_id, restart_tabs)?;
         wire_status_from_reaction(&reaction)
             .ok_or_else(|| anyhow::anyhow!("recreating the working copy raised no status"))
     }

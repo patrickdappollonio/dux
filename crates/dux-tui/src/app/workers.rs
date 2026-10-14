@@ -429,6 +429,23 @@ impl App {
             self.notify_companion(&reaction);
             self.apply_routed_reaction(reaction, &routing);
         }
+        // Tabs a recreate stopped start again once the pass above has seen the
+        // last of them go, through the same launch path a resume fallback
+        // takes, and the recreate's spinner is answered by its final.
+        let restarts = self
+            .engine
+            .sweep_recreate_restarts(self.pty_size_for_launch());
+        for reaction in restarts.launches.into_iter().chain(
+            restarts
+                .finals
+                .into_iter()
+                .map(|outcome| outcome.into_reaction()),
+        ) {
+            self.mark_frame_dirty();
+            let routing = self.companion_routing();
+            self.notify_companion(&reaction);
+            self.apply_routed_reaction(reaction, &routing);
+        }
     }
 
     fn disarm_tui_launch_for_failed_event(&mut self, event: &WorkerEvent) {

@@ -698,8 +698,9 @@ pub(super) mod tests {
         ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, DeleteAgentFocus,
         DeleteWorktreeFocus, KillRunningAction, KillRunningFocus, KillRunningPrompt,
         MacroEditFocus, MacroEditState, ManageWorktreesPrompt, NameNewAgentFocus,
-        PendingMacroDelete, PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus,
-        SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt,
+        PendingMacroDelete, PickProjectWorktreePrompt, ProjectChooserIntent,
+        RecreateWorkingCopyFocus, RenameSessionFocus, SearchableList, StartupCommandLogFocus,
+        StartupCommandLogPrompt,
     };
     use crate::model::ProviderKind;
     use dux_core::worker::{BranchWarningKind, CreateAgentRequest};
@@ -1109,8 +1110,15 @@ pub(super) mod tests {
                     branch_name: "feat".to_string(),
                     source_branch: "main".to_string(),
                     conversation_resumes: true,
-                    running_providers: vec!["claude".to_string()],
-                    focus: ConfirmFocus::Cancel,
+                    running_tabs: dux_core::working_copy::RunningTabs {
+                        follows: vec!["claude".to_string()],
+                        restartable: Vec::new(),
+                        left_running: Vec::new(),
+                    },
+                    restart_offer: Vec::new(),
+                    restart_tabs: false,
+                    focus: RecreateWorkingCopyFocus::Cancel,
+                    attached: Vec::new(),
                 },
             ),
             (

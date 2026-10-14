@@ -43,9 +43,11 @@
         "branch_name": "feat/login",
         "source_branch": "main",
         "conversation_resumes": true,
-        "providers": [
-          "claude"
-        ]
+        "running": {
+          "follows": [
+            "claude"
+          ]
+        }
       },
       "segments": [
         "Recreate the working copy for this agent at ",
@@ -77,19 +79,26 @@
       ]
     },
     {
-      "what": "recreating a working copy under several CLIs that cannot follow the folder",
+      "what": "recreating a working copy under a CLI that follows, two that restart and one left running",
       "sentence": "recreate_confirm",
       "args": {
         "worktree_label": "/srv/worktrees/dux/fix",
         "branch_name": "fix",
         "source_branch": "develop",
         "conversation_resumes": false,
-        "providers": [
-          "codex",
-          "opencode",
-          "claude",
-          "copilot"
-        ]
+        "running": {
+          "follows": [
+            "claude"
+          ],
+          "restartable": [
+            "codex",
+            "opencode",
+            "codex"
+          ],
+          "left_running": [
+            "copilot"
+          ]
+        }
       },
       "segments": [
         "Recreate the working copy for this agent at ",
@@ -114,20 +123,66 @@
         },
         ", and the commits that branch held are not coming back.\n\nAny code changes that were in the old directory are gone either way: this puts the directory back, not its contents. The conversation will not resume: this agent's CLI has no way to pick a conversation back up, so it starts fresh wherever it runs.\n\nA running ",
         {
-          "name": "Codex",
+          "name": "Claude",
           "quoted": false
         },
-        ", ",
+        " tab keeps working in the recreated copy by itself. A running ",
         {
-          "name": "Opencode",
+          "name": "Codex",
           "quoted": false
         },
         " or ",
         {
+          "name": "Opencode",
+          "quoted": false
+        },
+        " tab cannot follow the folder by itself; restarting it continues its conversation in the recreated copy. A running ",
+        {
           "name": "Copilot",
           "quoted": false
         },
-        " tab cannot follow the folder: stop it and start the agent again to continue in the recreated copy. A terminal still open in the old directory keeps working in a directory that is gone; close it and open one in the recreated copy."
+        " tab is left running, because restarting it would lose its conversation; if it cannot follow the folder, stop it and start it again yourself. A terminal still open in the old directory keeps working in a directory that is gone; close it and open one in the recreated copy."
+      ]
+    },
+    {
+      "what": "the recreate confirmation's checkbox restarting one tab",
+      "sentence": "recreate_restart_checkbox",
+      "args": {
+        "restartable": [
+          "codex"
+        ]
+      },
+      "segments": [
+        "Restart the ",
+        {
+          "name": "Codex",
+          "quoted": false
+        },
+        " tab so it continues in the new copy"
+      ]
+    },
+    {
+      "what": "the recreate confirmation's checkbox restarting tabs of two CLIs",
+      "sentence": "recreate_restart_checkbox",
+      "args": {
+        "restartable": [
+          "codex",
+          "opencode",
+          "codex"
+        ]
+      },
+      "segments": [
+        "Restart the ",
+        {
+          "name": "Codex",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "Opencode",
+          "quoted": false
+        },
+        " tabs so they continue in the new copy"
       ]
     },
     {
