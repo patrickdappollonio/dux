@@ -243,6 +243,7 @@ describe("store macros commands", () => {
       compose: opts.compose
         ? { insert: (text) => inserted.push(text), target: () => null }
         : null,
+      typingSurface: () => null,
     })
     return { sent, inserted }
   }

@@ -1660,27 +1660,12 @@ describe("TerminalPane macro trigger", () => {
     expect(screen.queryByTestId("macro-popover")).toBeNull()
   })
 
-  it("registers its typing surface so the header's picker can return focus to it", async () => {
-    // Without this, closing the header picker hands focus back to the trigger
-    // and the Enter that was meant to submit the macro re-opens the menu, and the
-    // exact bug the pane's old `finalFocus` prop existed to prevent.
-    const { getTerminalFocusElement, peekTerminalFocusTarget } = await import(
-      "@/lib/terminalFocus"
-    )
-    // Deliberately no assertion that the slot starts empty: it is module-global
-    // state shared by every test in this file, so a pane a neighbouring test
-    // left mounted would make that assertion order-dependent. What matters is
-    // that THIS pane claims the slot and gives it back.
-    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(peekTerminalFocusTarget()).not.toBeNull()
-    expect(getTerminalFocusElement()).toBe(TermStub.instances.at(-1)!.textarea)
-    view.unmount()
-    expect(peekTerminalFocusTarget()).toBeNull()
-  })
-
-  it("does not let an older pane's cleanup retire the newer focus target", async () => {
-    const { getTerminalFocusElement } = await import("@/lib/terminalFocus")
+  it("publishes its own typing surface under its own pty id", () => {
+    // The header's picker returns focus here after a pick, so the Enter that
+    // submits the macro reaches this pane rather than re-opening the menu, and
+    // with two panes mounted each answers for itself, never the last mounted.
     const first = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const firstTextarea = TermStub.instances.at(-1)!.textarea
     const second = render(
       <TerminalPane
         kind="terminal"
@@ -1690,12 +1675,13 @@ describe("TerminalPane macro trigger", () => {
     )
     const secondTextarea = TermStub.instances.at(-1)!.textarea
 
-    expect(getTerminalFocusElement()).toBe(secondTextarea)
-    first.unmount()
-    expect(getTerminalFocusElement()).toBe(secondTextarea)
+    expect(paneMacroTargetFor("s1")?.typingSurface()).toBe(firstTextarea)
+    expect(paneMacroTargetFor("t1")?.typingSurface()).toBe(secondTextarea)
 
+    first.unmount()
+    expect(paneMacroTargetFor("s1")).toBeNull()
+    expect(paneMacroTargetFor("t1")?.typingSurface()).toBe(secondTextarea)
     second.unmount()
-    expect(getTerminalFocusElement()).toBeNull()
   })
 })
 
@@ -2065,6 +2051,12 @@ describe("TerminalPane compose macro insert sink", () => {
     // The sink's focus target is the compose textarea itself (the macro
     // popover hands it to Base UI as the close-focus target).
     expect(sink?.target()).toBe(composeTextarea())
+  })
+
+  it("publishes the compose box as its typing surface while the bar is up", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(paneMacroTargetFor("s1")?.typingSurface()).toBe(composeTextarea())
   })
 
   it("does not register the sink on desktop", () => {

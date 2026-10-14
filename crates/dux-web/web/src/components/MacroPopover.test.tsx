@@ -43,7 +43,13 @@ const target: SelectedTarget = {
 // Base UI runs its open/close transitions and focus moves on timers; a short
 // settle lets them land (the idiom the dropdown-menu tests use).
 function ownerPane(over: Partial<PaneMacroTarget> = {}): PaneMacroTarget {
-  return { takeoverCard: false, send: () => {}, compose: null, ...over }
+  return {
+    takeoverCard: false,
+    send: () => {},
+    compose: null,
+    typingSurface: () => null,
+    ...over,
+  }
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 40))
@@ -233,6 +239,60 @@ describe("MacroPopover pick focus routing", () => {
   })
 })
 
+// With two panes mounted (an agent and its companion terminal), the desktop
+// trigger in the header must hand focus back to the pane the macro went to,
+// not to whichever pane mounted last, or the Enter meant to submit the macro
+// types into the other terminal.
+describe("MacroPopover returns focus to the pane the macro was sent to", () => {
+  function textarea(): HTMLTextAreaElement {
+    const el = document.createElement("textarea")
+    document.body.appendChild(el)
+    return el
+  }
+
+  it("a pick sent to the first pane's terminal focuses that terminal", async () => {
+    const first = textarea()
+    const second = textarea()
+    registerPaneMacroTarget("s1", ownerPane({ typingSurface: () => first }))
+    registerPaneMacroTarget("t9", ownerPane({ typingSurface: () => second }))
+    runMacro.mockReturnValue("pty")
+
+    render(<MacroPopover target={target} />)
+    await openAndPick()
+
+    expect(document.activeElement).toBe(first)
+    first.remove()
+    second.remove()
+  })
+
+  it("a pick sent to the first pane's compose box focuses that box", async () => {
+    const first = textarea()
+    const second = textarea()
+    registerPaneMacroTarget(
+      "s1",
+      ownerPane({
+        compose: { insert: () => {}, target: () => first },
+        typingSurface: () => first,
+      }),
+    )
+    registerPaneMacroTarget(
+      "t9",
+      ownerPane({
+        compose: { insert: () => {}, target: () => second },
+        typingSurface: () => second,
+      }),
+    )
+    runMacro.mockReturnValue("compose")
+
+    render(<MacroPopover target={target} />)
+    await openAndPick()
+
+    expect(document.activeElement).toBe(first)
+    first.remove()
+    second.remove()
+  })
+})
+
 // While the take-over card covers the pane a Macros control belongs to, this tab
 // is not driving the pty: the control stays on screen at its full size, cannot
 // be pressed, and says why through the shared tooltip. Both card states, another
@@ -240,7 +300,7 @@ describe("MacroPopover pick focus routing", () => {
 describe("MacroPopover under the take-over card", () => {
   const isDisabled = (el: HTMLElement) => (el as HTMLButtonElement).disabled
   const covered = () =>
-    registerPaneMacroTarget("s1", { takeoverCard: true, send: null, compose: null })
+    registerPaneMacroTarget("s1", { ...ownerPane(), takeoverCard: true, send: null })
 
   it.each(["labeled", "icon", "pill"] as const)(
     "the %s trigger is disabled and opens nothing",
@@ -292,7 +352,7 @@ describe("MacroPopover under the take-over card", () => {
   })
 
   it("reads the card of its own pane, not another mounted one", () => {
-    registerPaneMacroTarget("t9", { takeoverCard: true, send: null, compose: null })
+    registerPaneMacroTarget("t9", { ...ownerPane(), takeoverCard: true, send: null })
     render(<MacroPopover target={target} />)
     expect(isDisabled(screen.getByRole("button", { name: "Run a macro" }))).toBe(false)
   })

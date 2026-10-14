@@ -25,10 +25,6 @@ import {
   inputMenuSurfaceSwitchOffered,
   terminalKeysApply,
 } from "@/lib/composebar"
-import {
-  peekTerminalFocusTarget,
-  setTerminalFocusTarget,
-} from "@/lib/terminalFocus"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -443,18 +439,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeInputRef,
     termRef,
   ])
-  // The desktop macro picker lives in the header, outside this pane, so it needs
-  // a registered close-focus target; the surface is resolved at call time.
-  useEffect(() => {
-    const target = () =>
-      live.current.composeActive && composeInputRef.current
-        ? composeInputRef.current
-        : (termRef.current?.textarea ?? null)
-    setTerminalFocusTarget(target)
-    return () => {
-      if (peekTerminalFocusTarget() === target) setTerminalFocusTarget(null)
-    }
-  }, [live, composeInputRef, termRef])
   // The compose bar renders outside the terminal container, so the container's
   // capture listener cannot see a paste that lands in the box.
   useEffect(() => {
@@ -552,6 +536,12 @@ export function TerminalPane(props: TerminalPaneProps) {
               target: () => composeInputRef.current,
             }
           : null,
+        // Resolved at call time, so a compose bar coming or going needs no
+        // republish.
+        typingSurface: () =>
+          live.current.composeActive && composeInputRef.current
+            ? composeInputRef.current
+            : (termRef.current?.textarea ?? null),
       }),
     // `insertComposeText` reads only refs and the stable setter, so listing it
     // would republish on every keystroke.

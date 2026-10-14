@@ -29,6 +29,11 @@ export interface PaneMacroTarget {
   send: ((bytes: Uint8Array) => void) | null
   /// The compose draft, or null while the compose bar is not the typing surface.
   compose: ComposeInsertSink | null
+  /// This pane's typing surface, resolved at call time: the compose box while it
+  /// is up, otherwise the terminal. The desktop picker returns focus here when it
+  /// closes, because the macro was pasted without submitting and the Enter that
+  /// submits it must reach this pane, not the trigger and not another pane.
+  typingSurface: () => HTMLElement | null
 }
 
 const targets = createKeyedRegistry<PaneMacroTarget>()

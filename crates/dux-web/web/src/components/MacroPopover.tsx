@@ -24,7 +24,6 @@ import { macrosForTarget } from "@/lib/macros"
 import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
 import { cn } from "@/lib/utils"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
-import { getTerminalFocusElement } from "@/lib/terminalFocus"
 import type { SelectedTarget } from "@/lib/store"
 
 // A quick-picker for sending a text macro to the pane it belongs to: a
@@ -86,13 +85,13 @@ export function MacroPopover({
   // Where focus lands when the popover closes: into the compose draft for a
   // pick that landed there, because Base UI owns focus during a close and would
   // otherwise yank the keyboard back to the trigger. Otherwise the caller's
-  // finalFocus, else the mounted terminal pane's typing surface for the desktop
+  // finalFocus, else this target's pane's typing surface for the desktop
   // labelled trigger, else Base UI's return-to-trigger.
   //
   // The desktop trigger sits in the header outside `TerminalPane` and has no
-  // ref to hand in, so the pane registers its surface on the module-scope
-  // `terminalFocus` hand-off. That fallback is not applied to the `icon`
-  // variant, where focusing a terminal textarea pops the soft keyboard.
+  // ref to hand in, so it reads the surface the pane published under its own
+  // pty id. That fallback is not applied to the `icon` variant, where focusing
+  // a terminal textarea pops the soft keyboard.
   function resolveFinalFocus(): HTMLElement | boolean | null {
     if (pickedIntoComposeRef.current) {
       pickedIntoComposeRef.current = false
@@ -100,7 +99,7 @@ export function MacroPopover({
       if (composeTarget) return composeTarget
     }
     if (finalFocus) return finalFocus()
-    if (variant === "labeled") return getTerminalFocusElement() ?? true
+    if (variant === "labeled") return pane?.typingSurface() ?? true
     return true
   }
 

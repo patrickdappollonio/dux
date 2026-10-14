@@ -210,7 +210,7 @@ export function transparentShadow(shadow: string | null | undefined): string | n
 }
 
 // The docked flap's element, registered at module level as `layoutGesture.ts`
-// and `terminalFocus.ts` do: the flap is a sibling of the pane and the pill is
+// does: the flap is a sibling of the pane and the pill is
 // inside it, so a prop chain would cross the whole terminal component. What
 // travels is a measurement, not control.
 let flapElement: HTMLElement | null = null
