@@ -18,6 +18,7 @@ import {
   xtermScrollbarWidth,
 } from "./constants"
 import { createLinkPress, type LinkPress } from "./linkPress"
+import type { OwnershipVerdict } from "./channels"
 import type { LiveSettings } from "./liveValues"
 import type { ResizeCoordinator } from "./resizeCoordinator"
 import { attachWebglRenderer } from "./webglRenderer"
@@ -42,6 +43,7 @@ type CreateTerminalSetupOptions = {
   host: HTMLDivElement
   id: string
   live: LiveSettings
+  ownership: OwnershipVerdict
 }
 
 function resolveTerminalBackground(): string {
@@ -69,7 +71,7 @@ function resolveTerminalBackground(): string {
 export function createTerminalSetup(
   options: CreateTerminalSetupOptions,
 ): TerminalSetup {
-  const { host, id, live } = options
+  const { host, id, live, ownership } = options
   const background = resolveTerminalBackground()
   host.style.background = background
 
@@ -112,6 +114,7 @@ export function createTerminalSetup(
     title: () => live.current.notifyTitle,
     clipboardMode: () => live.current.clipboardPassthrough,
     tag: () => `dux-agent-${id}`,
+    ownsInput: () => ownership.read(),
   })
   const disposeOsc8Gate = term.parser.registerOscHandler(
     8,

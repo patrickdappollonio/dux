@@ -123,6 +123,11 @@ export interface AgentNotificationOptions {
    * the same agent replaces the previous one instead of stacking. The pane's
    * blocked-copy toast is keyed by it for the same reason. */
   tag?: () => string
+  /** Live read of whether this tab owns the pane's input. Every tab watching a
+   * pane sees the same copy, and only the owner's user asked for it, so only the
+   * owner's tab raises the toast for a copy its browser refused. Defaults to
+   * owning. */
+  ownsInput?: () => boolean
 }
 
 /** Register the OSC handlers on a viewer terminal; the returned disposer removes them all.
@@ -162,7 +167,7 @@ export function registerAgentNotifications(
     const source = opts.title()
     const paneTag = opts.tag?.() ?? "pane"
     void copyKeepingFocus(text).then((ok) => {
-      if (!ok) reportBlockedCopy(paneTag, source, text)
+      if (!ok && (opts.ownsInput?.() ?? true)) reportBlockedCopy(paneTag, source, text)
     })
   }
   const writeClipboard = (text: string) => {

@@ -264,6 +264,27 @@ describe("an agent's clipboard copy", () => {
     expect((options.action as ReactElement<{ children: string }>).props.children).toBe("Copy")
   })
 
+  it("raises the blocked-copy toast only in the tab that owns the pane's input", async () => {
+    for (const ownsInput of [true, false]) {
+      vi.clearAllMocks()
+      const { doc } = fakeDocument({ hasFocus: true, execCommand: false })
+      vi.stubGlobal("document", doc)
+      vi.stubGlobal("navigator", {})
+      const { term, handlers } = stubTerm()
+      registerAgentNotifications(term, {
+        enabled: () => false,
+        title: () => "fix-login",
+        tag: () => "dux-agent-7",
+        ownsInput: () => ownsInput,
+      })
+      handlers[52](HELLO)
+      await settle()
+      // A watching tab still tries the write; only the toast is the owner's.
+      expect(doc.execCommand).toHaveBeenCalledWith("copy")
+      expect(toast.warning).toHaveBeenCalledTimes(ownsInput ? 1 : 0)
+    }
+  })
+
   it("never writes under mode off, or while the window is unfocused", async () => {
     for (const [mode, hasFocus] of [
       ["off", true],

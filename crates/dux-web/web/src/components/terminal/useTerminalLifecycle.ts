@@ -210,7 +210,7 @@ export function useTerminalLifecycle(
     const container = containerRef.current
     if (!host || !container) return
 
-    const terminalSetup = createTerminalSetup({ host, id, live })
+    const terminalSetup = createTerminalSetup({ host, id, live, ownership })
     const { term, links, isMac } = terminalSetup
     // Opening the socket is the subscription: it launches the tab if it is not
     // running, with resume decided server-side. A dormant tab is never
