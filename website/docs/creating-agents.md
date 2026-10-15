@@ -637,9 +637,10 @@ opens the same folder browser. Any folder is accepted: it does not have to be a 
 repository, and dux initializes nothing in it.
 
 Both surfaces then ask what to call the agent. The name is optional: leave it empty and
-the agent is named after the folder, or type one and it is used as you typed it, interior
-spaces and punctuation included; surrounding whitespace is trimmed, and a blank name means
-the folder's name. Backing out of that question creates nothing and leaves the folder
+the agent is named after the folder, turned into a valid agent name (`My Notes! (2026)`
+becomes `My-Notes-2026`). A name you type follows the same rules as any agent's name, even
+though no branch is created: letters, digits, `-`, `_` and `/`, with spaces becoming dashes
+as you type. Backing out of that question creates nothing and leaves the folder
 untouched.
 
 > [!NOTE]

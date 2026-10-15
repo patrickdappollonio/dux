@@ -65,24 +65,24 @@ impl App {
     ///
     /// A name the agent-name rules refuse (the char map lets a trailing `/`
     /// through, mid-typing) keeps the prompt open with the refusal, as the
-    /// New agent prompt does and as the web's disabled Create button does.
-    /// Every other refusal closes it, mirroring the web dialog, which closes on
+    /// New agent prompt does and as the web's disabled Create button does, so
+    /// it is checked here before the engine is asked anything. Every refusal
+    /// the engine gives closes it, mirroring the web dialog, which closes on
     /// Create and reports the server's refusal as a toast rather than holding
     /// the folder hostage behind an open form.
     pub(crate) fn confirm_standalone_agent_name(&mut self) {
+        let PromptState::NameStandaloneAgent { input, .. } = &self.prompt else {
+            return;
+        };
+        let typed = input.text.trim();
+        if !typed.is_empty() && !crate::git::is_valid_agent_name(typed) {
+            let refusal = crate::git::invalid_agent_name_refusal(typed);
+            self.set_error(refusal);
+            return;
+        }
         let Some(planned) = self.planned_standalone_agent_create() else {
             return;
         };
-        let invalid_name = matches!(
-            &self.prompt,
-            PromptState::NameStandaloneAgent { input, .. }
-                if !input.text.trim().is_empty()
-                    && !crate::git::is_valid_agent_name(input.text.trim())
-        );
-        if invalid_name && let Err(err) = planned {
-            self.set_error(err.to_string());
-            return;
-        }
         self.prompt = PromptState::None;
         match planned {
             Ok((request, busy_message)) => {
