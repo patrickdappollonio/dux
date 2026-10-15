@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useSearchPick } from "@/hooks/use-search-pick"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
 import { changeBaseBranchProse } from "@/lib/changeBaseBranch"
@@ -30,6 +31,7 @@ import {
   type ChangeBaseBranchListing,
 } from "@/lib/store"
 import type { BranchChoiceView, ProjectView, SessionView } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // "Change base branch…": pick any branch of the project, local or only on
 // origin, as the one new agents start from. The server switches the project
@@ -133,6 +135,17 @@ function PickerBody({
     if (q === "") return branches
     return branches.filter((b) => b.name.toLowerCase().includes(q))
   }, [listing, query])
+  // A held branch cannot be picked, so the keyboard skips it as a click would.
+  const pickable = useMemo(
+    () => filtered.filter((b) => b.held_by === null),
+    [filtered],
+  )
+  const pick = useSearchPick({
+    query,
+    items: pickable,
+    keyOf: branchKey,
+    onPick: (branch) => onPick(branch.name),
+  })
 
   // A held branch is named by what holds it: the agent whose worktree it is,
   // or, for a worktree no agent owns, its folder. Either is a name in a
@@ -168,6 +181,7 @@ function PickerBody({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search branches"
             aria-label="Search branches"
+            {...pick.fieldProps}
             className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
             autoFocus
           />
@@ -208,7 +222,9 @@ function PickerBody({
           ) : (
             filtered.map((branch) => (
               <BranchRow
-                key={`${branch.location}:${branch.name}`}
+                key={branchKey(branch)}
+                id={pick.rowId(branchKey(branch))}
+                active={pick.activeKey === branchKey(branch)}
                 branch={branch}
                 isBase={branch.name === project.leading_branch}
                 heldBy={branch.held_by === null ? null : holder(branch.held_by)}
@@ -222,12 +238,21 @@ function PickerBody({
   )
 }
 
+function branchKey(branch: BranchChoiceView): string {
+  return `${branch.location}:${branch.name}`
+}
+
 function BranchRow({
+  id,
+  active,
   branch,
   isBase,
   heldBy,
   onPick,
 }: {
+  id: string
+  // The row Enter in the search field would pick, lit like a hovered one.
+  active: boolean
   branch: BranchChoiceView
   isBase: boolean
   heldBy: ReactNode | null
@@ -243,11 +268,15 @@ function BranchRow({
   return (
     <button
       type="button"
+      id={id}
       data-testid="branch-row"
       data-branch={branch.name}
       disabled={heldBy !== null}
       onClick={() => onPick(branch.name)}
-      className="flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent max-md:min-h-10"
+      className={cn(
+        "flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent max-md:min-h-10",
+        active && "bg-accent/60",
+      )}
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate font-mono text-sm">

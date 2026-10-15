@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useSearchPick } from "@/hooks/use-search-pick"
 import { openAddProject } from "@/lib/store"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
@@ -45,8 +46,9 @@ export interface ProjectListRow {
  * when they open, so a list that re-sorts under the pointer cannot land a click
  * on the wrong project).
  *
- * `onPick` is what a row click does. Without one, a row click opens that row's
- * menu, which is the same menu its `⋯` opens.
+ * `onPick` is what a row click does, and what Enter in the search field does to
+ * the active match. Without one, a row click opens that row's menu, which is
+ * the same menu its `⋯` opens, and the search field only filters.
  *
  * `footerAction`, when given, sits beside "Add a new project…" as an equal
  * second door (the New agent picker's standalone agent); without one the footer
@@ -78,6 +80,14 @@ export function ProjectList({
     return rows.filter((row) => row.name.toLowerCase().includes(q))
   }, [rows, query])
 
+  const pick = useSearchPick({
+    query,
+    // A list without `onPick` has nothing for Enter to do.
+    items: onPick ? filtered : [],
+    keyOf: (row) => row.id,
+    onPick: (row) => onPick?.(row.id),
+  })
+
   return (
     <>
       <DialogHeader className="shrink-0 p-4 pb-3">
@@ -90,6 +100,7 @@ export function ProjectList({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search projects"
             aria-label="Search projects"
+            {...pick.fieldProps}
             className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
             autoFocus
           />
@@ -123,6 +134,8 @@ export function ProjectList({
                 key={row.id}
                 row={row}
                 onPick={onPick}
+                pickId={pick.rowId(row.id)}
+                active={pick.activeKey === row.id}
                 menuOpen={menuOpenId === row.id}
                 setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
                 menu={menu}
@@ -202,12 +215,17 @@ function FooterButton({ title, icon: Icon, onSelect }: ProjectListFooterAction) 
 function ProjectRow({
   row,
   onPick,
+  pickId,
+  active,
   menuOpen,
   setMenuOpen,
   menu,
 }: {
   row: ProjectListRow
   onPick?: (id: string) => void
+  pickId: string
+  // The row Enter in the search field would pick, lit like a hovered one.
+  active: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   menu: (id: string) => ReactNode
@@ -230,10 +248,12 @@ function ProjectRow({
       className={cn(
         "group/project-row flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
         "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
+        active && "bg-accent/60",
       )}
     >
       <button
         type="button"
+        id={pickId}
         // Named by the project alone; the count and the second line describe
         // it, so a screen reader says the name first and the rest after.
         aria-labelledby={nameId}

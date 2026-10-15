@@ -119,6 +119,7 @@ import { uploadDroppedFile } from "@/lib/fileDropApi"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useObjectUrl } from "@/hooks/use-object-url"
+import { useSearchPick } from "@/hooks/use-search-pick"
 import type { MonacoInstance } from "@/components/CodeEditor"
 import { DeleteEntryDialog } from "@/components/DeleteEntryDialog"
 import type { DeleteEntryTarget } from "@/components/DeleteEntryDialog"
@@ -828,6 +829,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       .filter((f) => f.toLowerCase().includes(needle))
       .slice(0, MAX_SEARCH_RESULTS)
   }, [search, searchIndex])
+  const searchPick = useSearchPick({
+    query: search,
+    // While the index loads the list shows a spinner, not these rows.
+    items: searchLoading ? [] : filtered,
+    keyOf: (path) => path,
+    onPick: (path) => requestOpen(path),
+  })
 
   // Refetch the search index (a capped flat walk of the worktree). Called on
   // mount, after every create/rename/delete mutation, and on each of the
@@ -1824,6 +1832,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search files…"
+                    {...searchPick.fieldProps}
                     className="h-8 pl-7 text-sm"
                   />
                 </div>
@@ -1881,11 +1890,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         {filtered.map((p) => (
                           <button
                             key={p}
+                            id={searchPick.rowId(p)}
                             type="button"
                             onClick={() => requestOpen(p)}
                             className={cn(
                               "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
-                              p === openPath && "bg-muted",
+                              (p === openPath || p === searchPick.activeKey) &&
+                                "bg-muted",
                             )}
                           >
                             {changedMap.get(p) && (

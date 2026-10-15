@@ -39,6 +39,7 @@ import {
   terminalRowKey,
   useRevealSelectedRow,
 } from "@/hooks/use-reveal-selected-row"
+import { useSearchPick } from "@/hooks/use-search-pick"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -278,6 +279,8 @@ function AgentFlatRow({
   handlers,
   sortable,
   query,
+  pickId,
+  picked = false,
 }: {
   session: SessionView
   projectName: string
@@ -286,6 +289,10 @@ function AgentFlatRow({
   sortable: boolean
   // The live search query, for the match highlight ("" renders plain).
   query: string
+  // The row's id for the search field's active descendant, and whether it is
+  // the row Enter there would pick, lit like a hovered one.
+  pickId?: string
+  picked?: boolean
 }) {
   const label = sessionLabel(session)
   const agentSelected =
@@ -339,7 +346,8 @@ function AgentFlatRow({
           // ⋯; the button below is transparent and fills the row.
           "group/flat-row relative flex items-stretch rounded-md pr-1 transition-colors",
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-          agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
+          (agentSelected || picked) &&
+            "bg-sidebar-accent text-sidebar-accent-foreground",
         )}
       >
         <SimpleTooltip
@@ -356,6 +364,7 @@ function AgentFlatRow({
           <button
             {...dragProps}
             type="button"
+            id={pickId}
             onClick={() => handlers.onSelectSession(session.id)}
             className={cn(
               "flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-11",
@@ -527,6 +536,8 @@ function TerminalFlatRow({
   onSelect,
   sortable,
   query,
+  pickId,
+  picked = false,
 }: {
   terminal: TerminalView
   siblings: readonly TerminalView[]
@@ -537,6 +548,10 @@ function TerminalFlatRow({
   sortable: boolean
   // The live search query, for the match highlight ("" renders plain).
   query: string
+  // The row's id for the search field's active descendant, and whether it is
+  // the row Enter there would pick, lit like a hovered one.
+  pickId?: string
+  picked?: boolean
 }) {
   // An idle terminal reads a plain "Terminal" here; a running one shows its
   // foreground app. `terminalTitle` still names it for the other surfaces.
@@ -582,7 +597,7 @@ function TerminalFlatRow({
       className={cn(
         "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-        active && "bg-sidebar-accent text-sidebar-accent-foreground",
+        (active || picked) && "bg-sidebar-accent text-sidebar-accent-foreground",
         // The same drag-lift cue as the agent row wrapper.
         isDragging && "z-10 shadow-lg",
       )}
@@ -590,6 +605,7 @@ function TerminalFlatRow({
       <button
         {...dragProps}
         type="button"
+        id={pickId}
         onClick={() => onSelect(terminal.id, owner)}
         className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
       >
@@ -681,6 +697,10 @@ function TerminalsSection({
   sensors,
   onDragEnd,
   query,
+  open,
+  onToggle,
+  pickedKey,
+  pickId,
 }: {
   terminals: FlatTerminal[]
   selectedTarget: SelectedTarget | null
@@ -689,8 +709,12 @@ function TerminalsSection({
   onDragEnd: (event: DragEndEvent) => void
   // The live search query, forwarded to each row's match highlight.
   query: string
+  // Held by the list, which needs to know which rows the search can reach.
+  open: boolean
+  onToggle: () => void
+  pickedKey: string | null
+  pickId: (key: string) => string
 }) {
-  const [open, setOpen] = useState(true)
   if (terminals.length === 0) return null
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
@@ -703,7 +727,7 @@ function TerminalsSection({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={onToggle}
           aria-expanded={open}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
         >
@@ -767,6 +791,8 @@ function TerminalsSection({
                   onSelect={onSelect}
                   sortable
                   query={query}
+                  pickId={pickId(terminalRowKey(ft.terminal.id))}
+                  picked={pickedKey === terminalRowKey(ft.terminal.id)}
                 />
               ))}
             </div>
@@ -785,13 +811,73 @@ function QuietTail({
   selectedTarget,
   handlers,
   query,
-  searchHit,
-  anyActive,
+  open,
+  onToggle,
+  pickedKey,
+  pickId,
 }: {
   sessions: SessionView[]
   projectName: (id: string) => string
   selectedTarget: SelectedTarget | null
   handlers: FlatSelectHandlers
+  query: string
+  // From `useQuietTailOpen`, held by the list, which needs to know which rows
+  // the search can reach.
+  open: boolean
+  onToggle: () => void
+  pickedKey: string | null
+  pickId: (key: string) => string
+}) {
+  if (sessions.length === 0) return null
+  return (
+    <div className="mt-2 border-t border-border/50 pt-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
+      >
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+        />
+        <span>Inactive</span>
+        {/* Right after the word, like every other section count. The Inactive
+            divider deliberately gains NO button beside it: there is no such
+            thing as creating a dormant agent. */}
+        <span className={SECTION_COUNT_PILL}>{sessions.length}</span>
+      </button>
+      {open ? (
+        <div className="mt-1 flex flex-col gap-1">
+          {sessions.map((session) => (
+            <AgentFlatRow
+              key={session.id}
+              session={session}
+              projectName={projectName(
+                workspaceProjectId(session.workspace) ?? "",
+              )}
+              selectedTarget={selectedTarget}
+              handlers={handlers}
+              sortable={false}
+              query={query}
+              pickId={pickId(agentRowKey(session.id))}
+              picked={pickedKey === agentRowKey(session.id)}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// Whether the Quiet tail is open, and its toggle.
+function useQuietTailOpen({
+  query,
+  searchHit,
+  anyActive,
+}: {
   query: string
   searchHit: boolean
   // Whether ANY agent in the workspace is active (pre-search, whole list).
@@ -829,46 +915,7 @@ function QuietTail({
       setManualChoice(true)
     }
   }
-  if (sessions.length === 0) return null
-  return (
-    <div className="mt-2 border-t border-border/50 pt-2">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-expanded={effectiveOpen}
-        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
-      >
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 transition-transform",
-            effectiveOpen && "rotate-90",
-          )}
-        />
-        <span>Inactive</span>
-        {/* Right after the word, like every other section count. The Inactive
-            divider deliberately gains NO button beside it: there is no such
-            thing as creating a dormant agent. */}
-        <span className={SECTION_COUNT_PILL}>{sessions.length}</span>
-      </button>
-      {effectiveOpen ? (
-        <div className="mt-1 flex flex-col gap-1">
-          {sessions.map((session) => (
-            <AgentFlatRow
-              key={session.id}
-              session={session}
-              projectName={projectName(
-                workspaceProjectId(session.workspace) ?? "",
-              )}
-              selectedTarget={selectedTarget}
-              handlers={handlers}
-              sortable={false}
-              query={query}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
+  return { open: effectiveOpen, toggle }
 }
 
 // The sort control: a small dropdown listing the flat-list sort options. Default
@@ -1065,6 +1112,11 @@ function flatAgentListModel(dux: DuxState) {
   }
 }
 
+// A row Enter in the search field can pick.
+type SearchPickRow =
+  | { kind: "agent"; session: SessionView }
+  | { kind: "terminal"; terminal: FlatTerminal }
+
 export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   const dux = useDux()
   const {
@@ -1093,6 +1145,39 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
     useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
   )
+
+  const [terminalsOpen, setTerminalsOpen] = useState(true)
+  const quietTail = useQuietTailOpen({
+    query,
+    // A live query with a quiet hit derives the section open (see the
+    // QuietTail doc); an empty query never forces anything.
+    searchHit: query.trim() !== "" && visibleQuiet.length > 0,
+    // Keyed on the FULL list, not the filtered one: a search that hides every
+    // active agent must not resurrect the auto-open.
+    anyActive: main.length > 0,
+  })
+  // Enter in the search field selects a row the way a click would, so it walks
+  // only the rows on screen, in the order they are shown.
+  const searchPick = useSearchPick<SearchPickRow>({
+    query,
+    items: [
+      ...visibleMain.map((session) => ({ kind: "agent" as const, session })),
+      ...(terminalsOpen
+        ? flatTerminals.map((terminal) => ({ kind: "terminal" as const, terminal }))
+        : []),
+      ...(quietTail.open
+        ? visibleQuiet.map((session) => ({ kind: "agent" as const, session }))
+        : []),
+    ],
+    keyOf: (row) =>
+      row.kind === "agent"
+        ? agentRowKey(row.session.id)
+        : terminalRowKey(row.terminal.terminal.id),
+    onPick: (row) =>
+      row.kind === "agent"
+        ? handlers.onSelectSession(row.session.id)
+        : handlers.onSelectTerminal(row.terminal.terminal.id, row.terminal.owner),
+  })
 
   // Move the dragged terminal to the slot the active sort DISPLAYS, over the
   // complete order and never the filtered subset, then flip the sort to manual.
@@ -1175,6 +1260,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             onChange={(event) => setAgentSearch(event.target.value)}
             placeholder="Search agents and terminals"
             aria-label="Search agents and terminals"
+            {...searchPick.fieldProps}
             className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
@@ -1251,6 +1337,8 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                       handlers={handlers}
                       sortable
                       query={query}
+                      pickId={searchPick.rowId(agentRowKey(session.id))}
+                      picked={searchPick.activeKey === agentRowKey(session.id)}
                     />
                   ))}
                 </div>
@@ -1269,6 +1357,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
               sensors={sensors}
               onDragEnd={handleTerminalDragEnd}
               query={query}
+              open={terminalsOpen}
+              onToggle={() => setTerminalsOpen((v) => !v)}
+              pickedKey={searchPick.activeKey}
+              pickId={searchPick.rowId}
             />
 
             <QuietTail
@@ -1277,12 +1369,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
               selectedTarget={selectedTarget}
               handlers={handlers}
               query={query}
-              // A live query with a quiet hit derives the section open (see the
-              // QuietTail doc); an empty query never forces anything.
-              searchHit={query.trim() !== "" && visibleQuiet.length > 0}
-              // Keyed on the FULL list, not the filtered one: a search that
-              // hides every active agent must not resurrect the auto-open.
-              anyActive={main.length > 0}
+              open={quietTail.open}
+              onToggle={quietTail.toggle}
+              pickedKey={searchPick.activeKey}
+              pickId={searchPick.rowId}
             />
           </>
         )}

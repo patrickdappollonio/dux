@@ -126,6 +126,55 @@ describe("NewAgentPickerDialog", () => {
     expect(closeNewAgentPicker).toHaveBeenCalledTimes(1)
   })
 
+  describe("picking from the search field", () => {
+    function seedFront() {
+      mockState = {
+        newAgentPickerOpen: true,
+        newAgentPickerIntent: "new",
+        spine: {
+          projects: [
+            { id: "p1", name: "front-door", default_provider: "claude" },
+            { id: "p2", name: "backend", default_provider: "claude" },
+            { id: "p3", name: "frontier", default_provider: "claude" },
+          ],
+          sessions: [],
+        },
+      } as unknown as DuxState
+    }
+
+    function typeQuery(value: string): HTMLElement {
+      const search = screen.getByLabelText("Search projects")
+      fireEvent.change(search, { target: { value } })
+      return search
+    }
+
+    it("opens the first match on Enter", () => {
+      seedFront()
+      render(<NewAgentPickerDialog />)
+      fireEvent.keyDown(typeQuery("front"), { key: "Enter" })
+      expect(openCreateAgent).toHaveBeenCalledTimes(1)
+      expect(openCreateAgent).toHaveBeenCalledWith("p1")
+    })
+
+    it("moves to the second match with Down, then opens it on Enter", () => {
+      seedFront()
+      render(<NewAgentPickerDialog />)
+      const search = typeQuery("front")
+      fireEvent.keyDown(search, { key: "ArrowDown" })
+      fireEvent.keyDown(search, { key: "Enter" })
+      expect(openCreateAgent).toHaveBeenCalledTimes(1)
+      expect(openCreateAgent).toHaveBeenCalledWith("p3")
+    })
+
+    it("does nothing on Enter when nothing matches", () => {
+      seedFront()
+      render(<NewAgentPickerDialog />)
+      fireEvent.keyDown(typeQuery("zzz"), { key: "Enter" })
+      expect(openCreateAgent).not.toHaveBeenCalled()
+      expect(closeNewAgentPicker).not.toHaveBeenCalled()
+    })
+  })
+
   it("does not render a provider selector or a Create button in the new intent", () => {
     seed("new")
     render(<NewAgentPickerDialog />)

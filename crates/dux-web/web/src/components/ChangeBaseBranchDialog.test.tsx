@@ -223,6 +223,19 @@ describe("ChangeBaseBranchDialog", () => {
     ).toEqual(["release"])
   })
 
+  // A held branch cannot be picked, so Enter skips it for the first branch that can.
+  it("picks the first pickable match on Enter, skipping a held branch", async () => {
+    await openFor()
+    const search = screen.getByLabelText("Search branches")
+    fireEvent.change(search, { target: { value: "e" } })
+    expect(
+      screen.getAllByTestId("branch-row").map((r) => r.getAttribute("data-branch")),
+    ).toEqual(["develop", "release"])
+    fireEvent.keyDown(search, { key: "Enter" })
+    const body = await screen.findByText(/This switches the source checkout for/)
+    expect(body.textContent).toContain("After the switch, they branch from release.")
+  })
+
   it("confirms with the shared prose and posts the choice", async () => {
     await openFor()
     fireEvent.click(branchRow("release"))
