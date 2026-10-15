@@ -2547,10 +2547,12 @@ fn add_worktree_retrying_a_pruned_admin_folder(
     repo_path: &Path,
     worktree_path: &Path,
     branch: &str,
+    before_each_add: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
     // Read before the add runs, because the prune can remove the very
     // `worktrees` folder these name.
     let admin_roots = admin_folder_roots(repo_path);
+    before_each_add()?;
     let first = run_worktree_add(worktree_add_command(repo_path, worktree_path, branch))?;
     if first.status.success() {
         return Ok(());
@@ -2586,6 +2588,7 @@ fn add_worktree_retrying_a_pruned_admin_folder(
          git maintenance run), so dux is retrying it once. git said: {git_error}",
         worktree_path.display()
     ));
+    before_each_add()?;
     let second = run_worktree_add(worktree_add_command(repo_path, worktree_path, branch))?;
     if !second.status.success() {
         return Err(anyhow!(
@@ -2604,8 +2607,9 @@ fn add_worktree_retrying_a_pruned_admin_folder(
 /// step. `worktree add` then exits 0 and leaves a folder whose `.git` file
 /// points at nothing, which every git command inside it answers with "not a
 /// git repository". The folder is removed before the second add only when it
-/// is provably the one this add made: nothing was at the path beforehand, and
-/// [`AddedWorktree`] pins it the moment the add returns. A folder that was
+/// is provably the one dux made: when the path is free, dux creates the empty
+/// folder itself ([`OwnedFolder`]) and git checks out into it, so ownership is
+/// settled before git runs rather than inferred afterwards. A folder that was
 /// already there is never touched. A branch minted for the add stays for the
 /// second attempt, which only attaches it, and the caller rolls it back if
 /// that attempt fails too.
@@ -2628,8 +2632,7 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
         fs::symlink_metadata(&target),
         Err(err) if err.kind() == io::ErrorKind::NotFound
     );
-    add_worktree_retrying_a_pruned_admin_folder(repo_path, &target, branch)?;
-    let added = path_was_free.then(|| AddedWorktree::pin(repo_path, &parent, &target));
+    let owned = add_into_owned_folder(repo_path, &parent, &target, branch, path_was_free)?;
     if worktree_is_readable(&target) {
         return Ok(());
     }
@@ -2643,39 +2646,82 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
             worktree_path.display()
         )
     };
-    let Some(added) = added else {
+    let Some(owned) = owned else {
         return Err(unreadable(
             "The folder was already there before dux added the working copy, so git checked \
              the copy out into it and it now holds a checkout git cannot read. dux did not \
              remove it because dux did not create it, so check it before you try again.",
         ));
     };
-    added
-        .and_then(|added| remove_unreadable_worktree(repo_path, &added))
-        .map_err(|why| {
-            unreadable(&format!(
-                "dux did not remove the folder because {why}, so check it before you try again."
-            ))
-        })?;
+    remove_unreadable_worktree(repo_path, &owned).map_err(|why| {
+        unreadable(&format!(
+            "dux did not remove the folder because {why}, so check it before you try again."
+        ))
+    })?;
     logger::warn(&format!(
         "git reported the working copy at {} as created but cannot read it (its admin folder \
          was removed during the add), so dux removed the folder and is adding it once more",
         worktree_path.display()
     ));
-    add_worktree_retrying_a_pruned_admin_folder(repo_path, &target, branch)?;
-    let added = AddedWorktree::pin(repo_path, &parent, &target);
+    let owned = add_into_owned_folder(repo_path, &parent, &target, branch, true)?
+        .expect("an owned add always returns the folder it made");
     if worktree_is_readable(&target) {
         return Ok(());
     }
-    Err(
-        match added.and_then(|added| remove_unreadable_worktree(repo_path, &added)) {
-            Ok(()) => unreadable("dux tried twice and removed the folder it made both times."),
-            Err(why) => unreadable(&format!(
-                "dux tried twice and left the second folder in place because {why}, so check \
-                 it before you try again."
-            )),
-        },
-    )
+    Err(match remove_unreadable_worktree(repo_path, &owned) {
+        Ok(()) => unreadable("dux tried twice and removed the folder it made both times."),
+        Err(why) => unreadable(&format!(
+            "dux tried twice and left the second folder in place because {why}, so check it \
+             before you try again."
+        )),
+    })
+}
+
+/// Run the add, into an empty folder dux creates first when `own` is set, and
+/// hand that folder back once the add has proved to have filled it. A failed
+/// add discards the folder dux made; a folder found swapped after the add
+/// fails it without anything being deleted.
+fn add_into_owned_folder(
+    repo_path: &Path,
+    parent: &Path,
+    target: &Path,
+    branch: &str,
+    own: bool,
+) -> Result<Option<OwnedFolder>> {
+    let mut owned = None;
+    let added = add_worktree_retrying_a_pruned_admin_folder(repo_path, target, branch, &mut || {
+        if own {
+            owned =
+                Some(OwnedFolder::create(parent, target).with_context(|| {
+                    format!("failed to create the folder {}", target.display())
+                })?);
+        }
+        Ok(())
+    });
+    if let Err(err) = added {
+        if let Some(folder) = &owned
+            && let Err(why) = remove_unreadable_worktree(repo_path, folder)
+        {
+            logger::warn(&format!(
+                "git worktree add for {} failed, and dux left the empty folder it made for it \
+                 because {why}",
+                target.display()
+            ));
+        }
+        return Err(err);
+    }
+    if let Some(folder) = &owned {
+        folder.confirm_checkout(repo_path).map_err(|why| {
+            anyhow!(
+                "git reported the working copy at {} as created, but dux removed nothing there \
+                 because {why}. Another program may be moving folders in {}; check that folder \
+                 before you try again.",
+                target.display(),
+                parent.display()
+            )
+        })?;
+    }
+    Ok(owned)
 }
 
 /// Whether git, run inside `worktree_path`, finds a working copy whose top
@@ -2712,9 +2758,10 @@ fn git_printed_path(dir: &Path, args: &[&str]) -> Option<PathBuf> {
     (!printed.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(printed)))
 }
 
-/// The folder one `worktree add` made, pinned so a cleanup removes that
-/// folder and nothing that comes to stand at its path later.
-struct AddedWorktree {
+/// The empty folder dux created for a `worktree add` to fill, pinned by its
+/// device and inode so a cleanup removes that folder and nothing that comes to
+/// stand at its path later.
+struct OwnedFolder {
     /// The canonical folder it was made in.
     parent: PathBuf,
     path: PathBuf,
@@ -2722,21 +2769,46 @@ struct AddedWorktree {
     inode: u64,
 }
 
-impl AddedWorktree {
-    /// Pin the folder at `path`, inside the canonical `parent`, right after the
-    /// add returns. It counts as the add's only when it is a real folder whose
-    /// `.git` file points into this repository's `worktrees/` admin folder,
-    /// which is what git writes into a copy it has just made, and it is still
-    /// the same folder once that file has been read.
-    fn pin(repo_path: &Path, parent: &Path, path: &Path) -> Result<Self, String> {
+impl OwnedFolder {
+    /// Create the folder at `path`, inside the canonical `parent`. Only the
+    /// final component is created, so an occupied path fails rather than being
+    /// adopted.
+    fn create(parent: &Path, path: &Path) -> io::Result<Self> {
         use std::os::unix::fs::MetadataExt;
-        let identity = || match fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_dir() => Ok((meta.dev(), meta.ino())),
-            Ok(_) => Err("something other than a folder is at that path".to_string()),
-            Err(err) => Err(format!("it could not be read ({err})")),
-        };
-        let (device, inode) = identity()?;
-        let admin = admin_folder_named_by_dot_git(path)?;
+        fs::create_dir(path)?;
+        let meta = fs::symlink_metadata(path)?;
+        if !meta.file_type().is_dir() {
+            return Err(io::Error::other(
+                "the new folder was replaced as it was made",
+            ));
+        }
+        Ok(Self {
+            parent: parent.to_path_buf(),
+            path: path.to_path_buf(),
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+
+    /// Whether `path` is this folder itself: a real directory, never followed
+    /// through a symlink, with the pinned device and inode.
+    fn is_at(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(path).is_ok_and(|meta| {
+            meta.file_type().is_dir() && (meta.dev(), meta.ino()) == (self.device, self.inode)
+        })
+    }
+
+    /// After the add: the path still holds this folder, its `.git` file points
+    /// into this repository's `worktrees/` admin folder as git writes it into a
+    /// copy it has just made, and it is still this folder once that file has
+    /// been read.
+    fn confirm_checkout(&self, repo_path: &Path) -> Result<(), String> {
+        let moved = || "the folder at that path is no longer the one dux made for it".to_string();
+        if !self.is_at(&self.path) {
+            return Err(moved());
+        }
+        let admin = admin_folder_named_by_dot_git(&self.path)?;
         let roots = admin_worktrees_folders(repo_path);
         if roots.is_empty() {
             return Err("git could not name this repository's own folder".to_string());
@@ -2747,15 +2819,50 @@ impl AddedWorktree {
         {
             return Err("its .git file does not point at this repository".to_string());
         }
-        if identity()? != (device, inode) {
-            return Err("the folder at that path changed while dux was checking it".to_string());
+        if !self.is_at(&self.path) {
+            return Err(moved());
         }
-        Ok(Self {
-            parent: parent.to_path_buf(),
-            path: path.to_path_buf(),
-            device,
-            inode,
-        })
+        Ok(())
+    }
+
+    /// Remove this folder by identity: move whatever is at the path aside to a
+    /// fresh sibling name only dux uses (an atomic rename that never replaces
+    /// anything), then delete it only if what moved is this folder. Anything
+    /// else is moved back and left. The aside name is dux's own, so the delete
+    /// cannot reach a folder another program swapped in at the path.
+    fn discard(&self) -> Result<(), String> {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        use rustix::io::Errno;
+        let Some(name) = self.path.file_name() else {
+            return Err("the path names no folder".to_string());
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let mut aside = std::ffi::OsString::from(".");
+        aside.push(name);
+        aside.push(format!(".dux-discard-{}-{nanos}", std::process::id()));
+        let aside = self.parent.join(aside);
+        match renameat_with(CWD, &self.path, CWD, &aside, RenameFlags::NOREPLACE) {
+            Ok(()) => {}
+            Err(err) if err == Errno::NOENT => return Ok(()),
+            Err(err) => {
+                return Err(format!("moving it aside failed ({})", io::Error::from(err)));
+            }
+        }
+        if self.is_at(&aside) {
+            return fs::remove_dir_all(&aside)
+                .map_err(|err| format!("removing it from {} failed ({err})", aside.display()));
+        }
+        match renameat_with(CWD, &aside, CWD, &self.path, RenameFlags::NOREPLACE) {
+            Ok(()) => Err("the folder at that path is no longer the one dux made".to_string()),
+            Err(err) => Err(format!(
+                "the folder at that path is no longer the one dux made, and moving it back \
+                 from {} failed ({})",
+                aside.display(),
+                io::Error::from(err)
+            )),
+        }
     }
 }
 
@@ -2803,15 +2910,14 @@ fn admin_worktrees_folders(repo_path: &Path) -> Vec<PathBuf> {
     folders
 }
 
-/// Remove the folder an add made and git cannot read, or say why it was left.
-/// It goes only while git has no registration for it, its parent still
-/// resolves to the canonical folder it was made in, and the path still holds a
-/// real directory with the device and inode pinned when the add returned:
-/// anything swapped in since, or reached through a retargeted symlink, stays.
-/// `remove_dir_all` does not follow symlinks inside the folder.
-fn remove_unreadable_worktree(repo_path: &Path, added: &AddedWorktree) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    match registration_at(repo_path, &added.path) {
+/// Remove the folder dux made for an add, or say why it was left. It goes only
+/// while git has no registration for it and its parent still resolves to the
+/// canonical folder it was made in, and then only by identity
+/// ([`OwnedFolder::discard`]): anything swapped in since, or reached through a
+/// retargeted symlink, stays. `remove_dir_all` does not follow symlinks inside
+/// the folder.
+fn remove_unreadable_worktree(repo_path: &Path, owned: &OwnedFolder) -> Result<(), String> {
+    match registration_at(repo_path, &owned.path) {
         Ok(false) => {}
         Ok(true) => return Err("git still has a working copy registered there".to_string()),
         Err(err) => {
@@ -2820,22 +2926,12 @@ fn remove_unreadable_worktree(repo_path: &Path, added: &AddedWorktree) -> Result
             ));
         }
     }
-    match added.parent.canonicalize() {
-        Ok(parent) if parent == added.parent => {}
+    match owned.parent.canonicalize() {
+        Ok(parent) if parent == owned.parent => {}
         Ok(_) => return Err("the folder it sits in now resolves somewhere else".to_string()),
         Err(err) => return Err(format!("the folder it sits in could not be read ({err})")),
     }
-    match fs::symlink_metadata(&added.path) {
-        Ok(meta)
-            if meta.file_type().is_dir()
-                && (meta.dev(), meta.ino()) == (added.device, added.inode) => {}
-        Ok(_) => {
-            return Err("the folder at that path is no longer the one the add made".to_string());
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("it could not be read ({err})")),
-    }
-    fs::remove_dir_all(&added.path).map_err(|err| format!("removing it failed ({err})"))
+    owned.discard()
 }
 
 /// The repository's `<common dir>/worktrees/` in every form git may print it:
@@ -9482,27 +9578,35 @@ mod tests {
         }
     }
 
-    /// The cleanup removes the folder the add made and nothing that has come
-    /// to stand at its path since: a different folder there is left alone.
+    /// The cleanup removes the folder dux made for the add and nothing that has
+    /// come to stand at its path since, even an older copy of this same
+    /// repository that git no longer has a record of.
     #[test]
-    fn a_folder_swapped_in_after_the_add_is_never_removed() {
+    fn an_older_copy_swapped_in_after_the_add_is_never_removed() {
         let repo = init_test_repo();
         let _hooks = strike_admin_folder_after_checkout(repo.path(), false);
+        run_git(repo.path(), &["branch", "older"]);
         run_git(repo.path(), &["branch", "swapped"]);
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().canonicalize().unwrap();
+        let older = parent.join("older");
+        add_worktree_retrying_a_pruned_admin_folder(repo.path(), &older, "older", &mut || Ok(()))
+            .unwrap();
+        fs::write(older.join("keep"), "older copy").unwrap();
+
         let path = parent.join("swapped");
-        add_worktree_retrying_a_pruned_admin_folder(repo.path(), &path, "swapped").unwrap();
-        let added = AddedWorktree::pin(repo.path(), &parent, &path)
-            .expect("the folder the add just made is pinned");
-
+        let owned = OwnedFolder::create(&parent, &path).unwrap();
+        add_worktree_retrying_a_pruned_admin_folder(repo.path(), &path, "swapped", &mut || Ok(()))
+            .unwrap();
         fs::rename(&path, parent.join("moved-away")).unwrap();
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("keep"), "theirs").unwrap();
+        fs::rename(&older, &path).unwrap();
 
-        remove_unreadable_worktree(repo.path(), &added)
-            .expect_err("a different folder at the path must not be removed");
-        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "theirs");
+        owned
+            .confirm_checkout(repo.path())
+            .expect_err("the older copy is not the folder dux made");
+        remove_unreadable_worktree(repo.path(), &owned)
+            .expect_err("the older copy must not be removed");
+        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "older copy");
     }
 
     /// A failed attach removes the branch dux minted for it, unless something
