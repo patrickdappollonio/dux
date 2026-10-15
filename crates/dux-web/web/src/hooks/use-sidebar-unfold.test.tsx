@@ -71,6 +71,8 @@ function Host({ open }: { open: boolean }) {
             }
           }}
         />
+        {/* The same row in the layout that is not on screen, which runs no cue. */}
+        <div data-sidebar-row="agent:s1" />
       </div>
     </div>
   )
@@ -120,6 +122,14 @@ describe("useSidebarUnfold carrying the working cue's clock", () => {
     rowCues = [cue(5000, 3)]
     frame()
     expect(rowCues[0].startTime).toBe(5000)
+  })
+
+  it("keeps correcting the row on screen whatever its hidden twin in the other layout runs", () => {
+    openFromRail()
+    // The browser replaces the shown row's animations again a frame later.
+    rowCues = [cue(7000)]
+    frame()
+    expect(rowCues[0].startTime).toBe(1000)
   })
 
   it("leaves a new working cycle on its own clock", () => {

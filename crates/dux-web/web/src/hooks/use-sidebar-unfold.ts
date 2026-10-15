@@ -62,10 +62,12 @@ function readCueClocks(root: Element | null): Map<string, number> {
 // bounce that has begun settling is sized to end against its own start time,
 // so moving that would end it at once, and a cue that went away and came back
 // is a new cycle on a clock of its own. Either way the row is let go for good.
+// Rows are tracked by element, not key: the layout that is not on screen keeps
+// the same keys on rows that run no cue, and must not let go of the shown ones.
 function applyCueClocks(root: Element | null, clocks: Map<string, number>) {
   if (!root || clocks.size === 0) return
-  const pending = new Map(clocks)
-  const seen = new Set<string>()
+  const seen = new WeakSet<Element>()
+  const released = new WeakSet<Element>()
   // Frames as well as time: a page that is not painting steadily (a busy main
   // thread) can spend the whole fade in one frame.
   const until = performance.now() + CONTENT_FADE_MS
@@ -73,20 +75,19 @@ function applyCueClocks(root: Element | null, clocks: Map<string, number>) {
   const apply = () => {
     frames += 1
     for (const row of root.querySelectorAll<HTMLElement>("[data-sidebar-row]")) {
-      const key = row.dataset.sidebarRow ?? ""
-      const start = pending.get(key)
-      if (start === undefined) continue
+      const start = clocks.get(row.dataset.sidebarRow ?? "")
+      if (start === undefined || released.has(row)) continue
       const animations = cueAnimations(row)
       const bounce = animations.find(
         (a) => a.animationName === WORKING_BOUNCE_NAME,
       )
       if (!bounce) {
-        if (seen.has(key)) pending.delete(key)
+        if (seen.has(row)) released.add(row)
         continue
       }
-      seen.add(key)
+      seen.add(row)
       if (bounce.effect?.getTiming().iterations !== Infinity) {
-        pending.delete(key)
+        released.add(row)
         continue
       }
       for (const animation of animations) {
@@ -94,7 +95,6 @@ function applyCueClocks(root: Element | null, clocks: Map<string, number>) {
         if (animation.startTime !== start) animation.startTime = start
       }
     }
-    if (pending.size === 0) return
     if (frames < 8 || performance.now() < until) requestAnimationFrame(apply)
   }
   requestAnimationFrame(apply)
