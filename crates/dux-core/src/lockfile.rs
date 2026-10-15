@@ -474,11 +474,28 @@ mod tests {
         assert!(lock.open_control_socket(&file).is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep me");
 
+        // A socket that accepts but never answers is a dead dux's listener
+        // still held open by a child that inherited it, so it is replaced too.
+        let silent = tmp.path().join("silent.sock");
+        let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
+        lock.open_control_socket(&silent)
+            .expect("a socket that never answers is replaced");
+
         let live = tmp.path().join("live.sock");
-        let _serving = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        let serving = std::os::unix::net::UnixListener::bind(&live).unwrap();
         let serving_ino = fs::symlink_metadata(&live).unwrap().ino();
-        assert!(lock.open_control_socket(&live).is_err());
+        let answering = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = serving.accept().unwrap();
+            let _ = stream.read(&mut [0; 1024]);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+        });
+        assert!(matches!(
+            lock.open_control_socket(&live),
+            Err(crate::control_socket::Unavailable::InUse { .. })
+        ));
         assert_eq!(fs::symlink_metadata(&live).unwrap().ino(), serving_ino);
+        answering.join().unwrap();
 
         // Only a refused connection proves a socket dead: one dux cannot even
         // try (its mode lets nobody connect) is left where it is.

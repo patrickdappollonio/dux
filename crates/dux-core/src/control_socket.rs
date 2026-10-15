@@ -14,10 +14,11 @@
 //! checked by whoever serves it, so the socket needs no password.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The longest socket path the platform accepts, in bytes. `sun_path` holds
 /// 104 bytes on macOS and 108 on Linux, and the terminating NUL takes one.
@@ -211,10 +212,19 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
         });
     }
     match UnixStream::connect(path) {
-        Ok(_) => {
-            return Err(Unavailable::InUse {
-                path: path.to_path_buf(),
-            });
+        Ok(stream) => {
+            if answers(stream) {
+                return Err(Unavailable::InUse {
+                    path: path.to_path_buf(),
+                });
+            }
+            crate::logger::warn(&format!(
+                "replacing the leftover control socket {}: it accepted a connection but no \
+                 dux answered on it within {} ms, so it is a dead dux's listener that another \
+                 process still holds open",
+                path.display(),
+                ANSWER_WAIT.as_millis()
+            ));
         }
         // Only a refusal proves nothing listens there any more.
         Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
@@ -230,6 +240,43 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
         step: "removing the leftover socket",
         err,
     })
+}
+
+/// How long a leftover socket that accepts a connection has to answer before
+/// it counts as dead.
+const ANSWER_WAIT: Duration = Duration::from_millis(500);
+
+/// A request every serving dux answers on its control socket from
+/// process-local data, with no engine round-trip.
+const ANSWER_PROBE: &[u8] =
+    b"GET /api/v1/build HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+/// Whether whatever accepted `stream` answers a request within [`ANSWER_WAIT`].
+///
+/// A dux that died can leave its listener open in a child that inherited it
+/// (on macOS a socket's close-on-exec flag is set after the socket is made, so
+/// a process spawned in between keeps it), and the kernel then accepts
+/// connections nobody will ever read. Only an answer proves a dux serves there.
+fn answers(mut stream: UnixStream) -> bool {
+    let deadline = Instant::now() + ANSWER_WAIT;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    if stream.set_write_timeout(Some(ANSWER_WAIT)).is_err() {
+        return true;
+    }
+    // A write that fails means the other end is gone; the read below says so.
+    let _ = stream.write_all(ANSWER_PROBE);
+    let mut byte = [0u8; 1];
+    loop {
+        let wait = remaining();
+        if wait.is_zero() || stream.set_read_timeout(Some(wait)).is_err() {
+            return false;
+        }
+        match stream.read(&mut byte) {
+            Ok(read) => return read > 0,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// The sentence a start without the socket shows on its status line and
