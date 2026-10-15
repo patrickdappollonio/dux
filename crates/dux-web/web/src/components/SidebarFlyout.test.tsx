@@ -276,6 +276,40 @@ describe("AppSidebar floating sidebar from the collapsed rail", () => {
     expect(floating()).toBe(true)
   })
 
+  it("reopens when the pointer comes back over the panel while it folds away", () => {
+    // jsdom has no Web Animations API; without one the panel closes at once and
+    // there is no fold to come back to.
+    const folds: { playbackRate: number; onfinish: (() => void) | null }[] = []
+    const proto = HTMLElement.prototype as unknown as { animate?: unknown }
+    proto.animate = () => {
+      const animation = {
+        playbackRate: 1,
+        onfinish: null,
+        reverse() {
+          this.playbackRate *= -1
+        },
+        cancel() {},
+      }
+      folds.push(animation)
+      return animation
+    }
+    try {
+      render(tree())
+      hover(railIcon("live-work (Repo)"))
+      advance(150)
+      fireEvent.pointerLeave(container(), { pointerType: "mouse" })
+      advance(300)
+      // Folding: still laid out over the page until the fold finishes.
+      expect(floating()).toBe(true)
+
+      fireEvent.pointerEnter(container(), { pointerType: "mouse" })
+      act(() => folds[0].onfinish?.())
+      expect(floating()).toBe(true)
+    } finally {
+      delete proto.animate
+    }
+  })
+
   it("shows no tooltip card on a mouse hover, and a keyboard focus opens no panel", () => {
     render(tree())
     hover(railIcon("Terminal (~/work)"))

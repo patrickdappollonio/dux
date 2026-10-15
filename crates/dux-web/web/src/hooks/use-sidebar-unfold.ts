@@ -57,8 +57,15 @@ function readCueClocks(root: Element | null): Map<string, number> {
 // over its first frames, and a start time set on a replaced one is lost. So the
 // clocks are handed over on every frame of the contents' fade-in, which starts
 // at opacity 0 and so hides the first frame or two of any restarted cue.
+//
+// Only while the row is still in the working cycle the clock was read from: a
+// bounce that has begun settling is sized to end against its own start time,
+// so moving that would end it at once, and a cue that went away and came back
+// is a new cycle on a clock of its own. Either way the row is let go for good.
 function applyCueClocks(root: Element | null, clocks: Map<string, number>) {
   if (!root || clocks.size === 0) return
+  const pending = new Map(clocks)
+  const seen = new Set<string>()
   // Frames as well as time: a page that is not painting steadily (a busy main
   // thread) can spend the whole fade in one frame.
   const until = performance.now() + CONTENT_FADE_MS
@@ -66,12 +73,28 @@ function applyCueClocks(root: Element | null, clocks: Map<string, number>) {
   const apply = () => {
     frames += 1
     for (const row of root.querySelectorAll<HTMLElement>("[data-sidebar-row]")) {
-      const start = clocks.get(row.dataset.sidebarRow ?? "")
+      const key = row.dataset.sidebarRow ?? ""
+      const start = pending.get(key)
       if (start === undefined) continue
-      for (const animation of cueAnimations(row)) {
+      const animations = cueAnimations(row)
+      const bounce = animations.find(
+        (a) => a.animationName === WORKING_BOUNCE_NAME,
+      )
+      if (!bounce) {
+        if (seen.has(key)) pending.delete(key)
+        continue
+      }
+      seen.add(key)
+      if (bounce.effect?.getTiming().iterations !== Infinity) {
+        pending.delete(key)
+        continue
+      }
+      for (const animation of animations) {
+        if (animation.effect?.getTiming().iterations !== Infinity) continue
         if (animation.startTime !== start) animation.startTime = start
       }
     }
+    if (pending.size === 0) return
     if (frames < 8 || performance.now() < until) requestAnimationFrame(apply)
   }
   requestAnimationFrame(apply)
@@ -105,6 +128,8 @@ export function useSidebarUnfold(enabled: boolean, wantOpen: boolean) {
   const animations = useRef<Animation[]>([])
   const clocks = useRef<Map<string, number> | null>(null)
   const prevPhase = useRef<Phase>(phase)
+  // Whether what is running is the reduced-motion fade rather than the fold.
+  const fadedIn = useRef(false)
 
   const cancelAll = useCallback(() => {
     for (const animation of animations.current) animation.cancel()
@@ -129,11 +154,24 @@ export function useSidebarUnfold(enabled: boolean, wantOpen: boolean) {
       }
       setPhase("open")
     } else if (!wantOpen && phase === "open") {
-      const master = animations.current[0]
+      let master = animations.current[0]
       if (!master || typeof master.reverse !== "function") {
         clocks.current = readCueClocks(container.current)
         setPhase("closed")
         return
+      }
+      const el = container.current
+      if (el && reducedMotion() && !fadedIn.current) {
+        // Reduced motion came on while it was open: no fold, just the fade.
+        cancelAll()
+        const fade = el.animate([{ opacity: 0 }, { opacity: 1 }], {
+          duration: CONTENT_FADE_MS,
+          easing: "ease-out",
+          fill: "both",
+        })
+        animations.current = [fade]
+        fadedIn.current = true
+        master = fade
       }
       for (const animation of animations.current) {
         if (animation.playbackRate > 0) animation.reverse()
@@ -146,7 +184,7 @@ export function useSidebarUnfold(enabled: boolean, wantOpen: boolean) {
       setPhase("closing")
     }
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [enabled, wantOpen, phase])
+  }, [enabled, wantOpen, phase, cancelAll])
 
   // Runs on the commit that swapped the layout, before it is painted.
   useLayoutEffect(() => {
@@ -165,7 +203,8 @@ export function useSidebarUnfold(enabled: boolean, wantOpen: boolean) {
         easing: "ease-out",
         fill: "both" as const,
       }
-      if (reducedMotion()) {
+      fadedIn.current = reducedMotion()
+      if (fadedIn.current) {
         animations.current = [
           el.animate([{ opacity: 0 }, { opacity: 1 }], {
             ...timing,

@@ -153,6 +153,11 @@ function SidebarProvider({
   )
 }
 
+function assignRef<T>(ref: React.Ref<T> | undefined, el: T | null) {
+  if (typeof ref === "function") ref(el)
+  else if (ref) ref.current = el
+}
+
 function Sidebar({
   side = "left",
   variant = "sidebar",
@@ -161,7 +166,6 @@ function Sidebar({
   className,
   children,
   dir,
-  ref,
   ...props
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right"
@@ -177,13 +181,15 @@ function Sidebar({
     state === "collapsed" && !isMobile,
     floatOpen,
   )
+  // The caller's ref stays in `props`, so every layout below forwards it as
+  // before; the desktop container also needs the element for the unfold.
+  const forwardedRef = props.ref
   const containerRef = React.useCallback(
     (el: HTMLDivElement | null) => {
       attachContainer(el)
-      if (typeof ref === "function") ref(el)
-      else if (ref) ref.current = el
+      assignRef(forwardedRef, el)
     },
-    [attachContainer, ref],
+    [attachContainer, forwardedRef],
   )
 
   if (collapsible === "none") {

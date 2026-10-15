@@ -115,6 +115,12 @@ export function useSidebarFloat(enabled: boolean) {
       if (event.pointerType !== "mouse") return
       inside.current = true
       window.clearTimeout(closeTimer.current)
+      // Closed but still folding away (laid out floating until the fold ends):
+      // the pointer caught it on the way out, so it unfolds again from there.
+      if (!openNow.current && panel.closest("[data-floating]")) {
+        cancelOpening()
+        setOpen(true)
+      }
     }
     const onLeave = (event: PointerEvent) => {
       if (event.pointerType !== "mouse") return
