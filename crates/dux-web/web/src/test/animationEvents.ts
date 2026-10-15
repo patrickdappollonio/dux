@@ -46,15 +46,15 @@ export function fireAnimationCancel(el: Element, animationName: string) {
 }
 
 // The landed look's timing, read off the frame's classes because jsdom has no
-// stylesheet: the color must ease over a real duration, and the blink must be
-// delayed by at least that long, with `!` so the blink's own `animation`
-// shorthand cannot reset the delay to zero.
+// stylesheet: the color eases in over 200ms, and the blink is delayed by those
+// same 200ms, with `!` so the blink's own `animation` shorthand cannot reset
+// the delay to zero.
 export function expectLookEasesIn(className: string, message: string) {
   const colorMs = Number(/(?:^|\s)duration-(\d+)(?=\s|$)/.exec(className)?.[1])
   const blinkDelayMs = Number(/(?:^|\s)\[animation-delay:(\d+)ms\]!(?=\s|$)/.exec(className)?.[1])
   expect(className, message).toMatch(/(?:^|\s)transition-colors(?=\s|$)/)
-  expect(colorMs, message).toBeGreaterThanOrEqual(150)
-  expect(blinkDelayMs, message).toBeGreaterThanOrEqual(colorMs)
+  expect(colorMs, message).toBe(200)
+  expect(blinkDelayMs, message).toBe(200)
 }
 
 // Plays the browser's part in a stopped glyph easing back to full opacity:
