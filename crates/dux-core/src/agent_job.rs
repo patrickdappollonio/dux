@@ -732,7 +732,8 @@ impl CreatePlanContext<'_> {
                 containment,
                 HeadContainment::Lacks | HeadContainment::Unknown(_)
             );
-        if !needs_copy {
+        let not_local = matches!(containment, HeadContainment::NotLocal);
+        if !needs_copy && !not_local {
             return BusyBranchCheck::Free;
         }
         // Before another copy: an agent of the project whose branch already
@@ -753,6 +754,9 @@ impl CreatePlanContext<'_> {
                 " contains the pull request's head commit. Open a new tab in that agent instead of creating a second one."
             ]);
             return BusyBranchCheck::Refused;
+        }
+        if !needs_copy {
+            return BusyBranchCheck::Free;
         }
         let reason = match (holder, containment) {
             (Some(holder), _) => FreshCopyReason::Busy(holder),
@@ -1000,10 +1004,12 @@ impl CreatePlanContext<'_> {
             let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
             // A local branch is reused only when it holds the pull request's
             // own code, so the pull request's head is fetched first. Without
-            // a local branch there is nothing to compare, and the fetch below
-            // is the one that brings the code in.
+            // a local branch there is nothing to compare, but the head is still
+            // fetched when the project has agents, because one of them may
+            // already have the code.
             let mut head_commit = None;
-            let containment = if git::local_branch_exists(&repo_path, &resolved_name) {
+            let local = git::local_branch_exists(&repo_path, &resolved_name);
+            let containment = if local || !agents.is_empty() {
                 match git::fetch_pull_request_head_commit(&repo_path, number) {
                     Err(err) => {
                         logger::error(&format!(
@@ -1018,6 +1024,10 @@ impl CreatePlanContext<'_> {
                             format!(": {}", err)
                         ]);
                         return None;
+                    }
+                    Ok(commit) if !local => {
+                        head_commit = Some(commit);
+                        HeadContainment::NotLocal
                     }
                     Ok(commit) => {
                         head_commit = Some(commit.clone());
@@ -2935,6 +2945,33 @@ mod tests {
             crate::model::BranchProvenance::CreatedByDux,
             "no local branch existed first, so this one is dux's to delete"
         );
+
+        // The user's local branch is gone but an agent still has the code under
+        // another name: it is pointed to, not copied.
+        let agent_folder = PathBuf::from(session.directory());
+        git_in(
+            &agent_folder,
+            &["branch", "-m", "pr-head", "pr-head-renamed"],
+        );
+        let mut again = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { agents, .. } = &mut again {
+            agents.push(crate::worker::AgentAtWorktree {
+                name: "earlier".to_string(),
+                worktree_path: agent_folder.clone(),
+            });
+        }
+        let refused = drive_create_job_run(repo.path(), again);
+        let folder = crate::home_path::shorten_home(&agent_folder);
+        assert_eq!(
+            refused.failure.as_deref(),
+            Some(
+                format!(
+                    "Agent \"earlier\" already has the code of PR #42: its branch \"pr-head-renamed\" at \"{folder}\" contains the pull request's head commit. Open a new tab in that agent instead of creating a second one."
+                )
+                .as_str()
+            )
+        );
+        assert!(!crate::git::local_branch_exists(repo.path(), "pr-head"));
     }
 
     #[test]
