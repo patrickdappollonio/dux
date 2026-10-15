@@ -227,6 +227,9 @@ enum FreshCopyReason {
     /// It is a local branch that does not contain the pull request's head
     /// commit, so it is not the pull request's code.
     Diverged,
+    /// Git could not say whether it contains the head commit (carries git's
+    /// reason), so it is left alone as well.
+    Unknown(String),
 }
 
 impl FreshCopy {
@@ -260,7 +263,7 @@ enum HeadContainment {
     Contains,
     /// The local branch does not contain it.
     Lacks,
-    /// Git could not say; carries the reason, ending in a full stop.
+    /// Git could not say; carries git's reason.
     Unknown(String),
 }
 
@@ -666,6 +669,7 @@ impl CreatePlanContext<'_> {
         head_branch: &str,
         number: u64,
         agents: &[crate::worker::AgentAtWorktree],
+        head_commit: Option<&str>,
         containment: &HeadContainment,
     ) -> BusyBranchCheck {
         let holder = match git::worktree_holding_branch(repo_path, resolved_name) {
@@ -723,35 +727,37 @@ impl CreatePlanContext<'_> {
             }
             return BusyBranchCheck::Free;
         }
-        let reason = match holder {
-            Some(holder) => {
-                let holding_agent = agents
-                    .iter()
-                    .find(|agent| git::same_folder(&agent.worktree_path, &holder.worktree.path));
-                if let Some(agent) = holding_agent
-                    && matches!(containment, HeadContainment::Contains)
-                {
-                    self.send_failure(crate::status_text![
-                        "Agent ",
-                        q(agent.name.clone()),
-                        " already has the code of PR ",
-                        n(format!("#{}", number)),
-                        ": its branch ",
-                        q(resolved_name),
-                        " at ",
-                        q(crate::home_path::shorten_home(&holder.worktree.path)),
-                        " contains the pull request's head commit. Open a new tab in that agent instead of creating a second one."
-                    ]);
-                    return BusyBranchCheck::Refused;
-                }
-                FreshCopyReason::Busy(holder)
-            }
-            None => match containment {
-                HeadContainment::NotLocal | HeadContainment::Contains => {
-                    return BusyBranchCheck::Free;
-                }
-                HeadContainment::Lacks | HeadContainment::Unknown(_) => FreshCopyReason::Diverged,
-            },
+        let needs_copy = holder.is_some()
+            || matches!(
+                containment,
+                HeadContainment::Lacks | HeadContainment::Unknown(_)
+            );
+        if !needs_copy {
+            return BusyBranchCheck::Free;
+        }
+        // Before another copy: an agent of the project whose branch already
+        // contains the head commit has the code, whatever its branch is called.
+        if let Some(commit) = head_commit
+            && let Some((agent, branch, folder)) =
+                self.agent_with_head_commit(repo_path, agents, commit)
+        {
+            self.send_failure(crate::status_text![
+                "Agent ",
+                q(agent),
+                " already has the code of PR ",
+                n(format!("#{}", number)),
+                ": its branch ",
+                q(branch),
+                " at ",
+                q(crate::home_path::shorten_home(&folder)),
+                " contains the pull request's head commit. Open a new tab in that agent instead of creating a second one."
+            ]);
+            return BusyBranchCheck::Refused;
+        }
+        let reason = match (holder, containment) {
+            (Some(holder), _) => FreshCopyReason::Busy(holder),
+            (None, HeadContainment::Unknown(reason)) => FreshCopyReason::Unknown(reason.clone()),
+            (None, _) => FreshCopyReason::Diverged,
         };
         let free = (1..=REVIEW_NAME_LIMIT)
             .map(|n| review_name(resolved_name, n))
@@ -765,6 +771,9 @@ impl CreatePlanContext<'_> {
                 FreshCopyReason::Diverged => {
                     crate::status_text![" does not contain the pull request's head commit"]
                 }
+                FreshCopyReason::Unknown(reason) => crate::status_text![format!(
+                    ": dux could not check whether it holds the pull request's latest commit ({reason})"
+                )],
             };
             self.send_failure(crate::status_text![
                 "Branch ",
@@ -785,6 +794,40 @@ impl CreatePlanContext<'_> {
             busy_branch: resolved_name.to_string(),
             reason,
             new_branch,
+        })
+    }
+
+    /// The first agent of the request's project whose working copy has a
+    /// branch containing `commit`, as its name, that branch and its folder.
+    /// An agent whose folder is gone is skipped: it is not one to point the
+    /// user to. Answers `None` when git cannot list the worktrees (logged).
+    fn agent_with_head_commit(
+        &self,
+        repo_path: &Path,
+        agents: &[crate::worker::AgentAtWorktree],
+        commit: &str,
+    ) -> Option<(String, String, PathBuf)> {
+        let worktrees = match git::list_worktrees(repo_path) {
+            Ok(worktrees) => worktrees,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not list the worktrees of {} to find an agent with the pull request's code: {err:#}",
+                    repo_path.display()
+                ));
+                return None;
+            }
+        };
+        agents.iter().find_map(|agent| {
+            std::fs::symlink_metadata(&agent.worktree_path).ok()?;
+            let branch = worktrees
+                .iter()
+                .find(|w| git::same_folder(&w.path, &agent.worktree_path))?
+                .branch_name
+                .clone()?;
+            git::branch_contains_commit(repo_path, commit, &branch)
+                .ok()
+                .filter(|contains| *contains)?;
+            Some((agent.name.clone(), branch, agent.worktree_path.clone()))
         })
     }
 
@@ -856,6 +899,18 @@ impl CreatePlanContext<'_> {
                     ": your local branch ",
                     q(copy.busy_branch),
                     " does not contain the pull request's head commit, so dux left it as it is."
+                ]);
+                return None;
+            }
+            FreshCopyReason::Unknown(reason) => {
+                self.creation_notes.push(crate::status_text![
+                    "Fresh copy of PR ",
+                    n(format!("#{}", number)),
+                    " on its own branch ",
+                    q(copy.new_branch),
+                    ": dux could not check whether your local branch ",
+                    q(copy.busy_branch),
+                    format!(" holds the pull request's latest commit ({reason}), so it left it as it is.")
                 ]);
                 return None;
             }
@@ -947,6 +1002,7 @@ impl CreatePlanContext<'_> {
             // own code, so the pull request's head is fetched first. Without
             // a local branch there is nothing to compare, and the fetch below
             // is the one that brings the code in.
+            let mut head_commit = None;
             let containment = if git::local_branch_exists(&repo_path, &resolved_name) {
                 match git::fetch_pull_request_head_commit(&repo_path, number) {
                     Err(err) => {
@@ -964,6 +1020,7 @@ impl CreatePlanContext<'_> {
                         return None;
                     }
                     Ok(commit) => {
+                        head_commit = Some(commit.clone());
                         match git::branch_contains_commit(&repo_path, &commit, &resolved_name) {
                             Ok(true) => HeadContainment::Contains,
                             Ok(false) => HeadContainment::Lacks,
@@ -986,6 +1043,7 @@ impl CreatePlanContext<'_> {
                 &head_branch,
                 number,
                 &agents,
+                head_commit.as_deref(),
                 &containment,
             ) {
                 BusyBranchCheck::Refused => return None,
@@ -2940,6 +2998,27 @@ mod tests {
             !run.status_warns,
             "a diverged copy is never behind the branch"
         );
+
+        // A local branch git cannot read is not reported as lacking the
+        // commit: the copy says dux could not check.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let blob = git_stdout(repo.path(), &["hash-object", "-w", "/dev/null"]);
+        std::fs::write(
+            repo.path().join(".git/refs/heads/pr-head"),
+            format!("{blob}\n"),
+        )
+        .unwrap();
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let session = run.session.expect("a session");
+        assert_eq!(session.branch_name().unwrap(), "pr-head-review");
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.contains(
+                "dux could not check whether your local branch \"pr-head\" holds the pull request's latest commit ("
+            ) && message.ends_with("), so it left it as it is."),
+            "{message}"
+        );
+        assert!(!message.contains("does not contain"), "{message}");
     }
 
     #[test]
@@ -3259,6 +3338,31 @@ mod tests {
             run.session.expect("a session").branch_name().unwrap(),
             "pr-head-review-2"
         );
+
+        // An earlier copy is an agent that already has the code, whichever
+        // branch name it sits on: it is pointed to instead of a third copy.
+        let mut with_earlier_copy = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { agents, .. } = &mut with_earlier_copy {
+            agents.push(crate::worker::AgentAtWorktree {
+                name: "reviewer".to_string(),
+                worktree_path: holder.clone(),
+            });
+            agents.push(crate::worker::AgentAtWorktree {
+                name: "first-copy".to_string(),
+                worktree_path: copy.to_path_buf(),
+            });
+        }
+        let refused = drive_create_job_run(repo.path(), with_earlier_copy);
+        let copy_folder = crate::home_path::shorten_home(copy);
+        assert_eq!(
+            refused.failure.as_deref(),
+            Some(
+                format!(
+                    "Agent \"first-copy\" already has the code of PR #42: its branch \"pr-head-review\" at \"{copy_folder}\" contains the pull request's head commit. Open a new tab in that agent instead of creating a second one."
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
@@ -3336,7 +3440,15 @@ mod tests {
         let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
         std::fs::remove_dir_all(&holder).unwrap();
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        // An agent whose folder is gone is not one to point the user to.
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { agents, .. } = &mut request {
+            agents.push(crate::worker::AgentAtWorktree {
+                name: "reviewer".to_string(),
+                worktree_path: holder.clone(),
+            });
+        }
+        let run = drive_create_job_run(repo.path(), request);
 
         assert!(
             run.failure.is_none(),
@@ -3731,12 +3843,26 @@ mod tests {
         git_in(repo.path(), &["fetch", "origin"]);
         git_in(repo.path(), &["branch", "--", "pr-head", "origin/pr-head"]);
         git_in(origin.path(), &["update-ref", "-d", "refs/pull/42/head"]);
+        // A fetch can leave its check ref behind when it fails.
+        git_in(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/dux/pull-request-check/42",
+                "refs/heads/pr-head",
+            ],
+        );
         let worktrees_before = worktree_paths(repo.path());
         let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
         let failure = run.failure.expect("the create must stop");
         assert!(
             failure.starts_with("Failed to fetch PR #42 from owner/repo: git fetch failed:"),
             "{failure}"
+        );
+        assert_eq!(
+            git_stdout(repo.path(), &["for-each-ref", "refs/dux"]),
+            "",
+            "the check ref is removed even when the fetch fails"
         );
         assert_eq!(worktree_paths(repo.path()), worktrees_before);
     }

@@ -2355,32 +2355,34 @@ pub fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -> Resul
     let repo = repo_path.to_string_lossy();
     let check_ref = format!("refs/dux/pull-request-check/{pr_number}");
     let refspec = format!("+pull/{pr_number}/head:{check_ref}");
-    let output = git_without_auto_maintenance()
+    let fetched = git_without_auto_maintenance()
         .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
+        .output();
+    let commit = match fetched {
+        Err(err) => Err(err.into()),
+        Ok(output) if !output.status.success() => Err(anyhow!(
             "git fetch failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let commit = run_git_capture(
-        repo_path,
-        &["rev-parse", "--verify", "--end-of-options", &check_ref],
-        "read the fetched pull request head",
-    );
+        )),
+        Ok(_) => run_git_capture(
+            repo_path,
+            &["rev-parse", "--verify", "--end-of-options", &check_ref],
+            "read the fetched pull request head",
+        ),
+    };
+    // A fetch may write the ref and then fail, so the ref goes on every path.
     let deleted = Command::new("git")
         .args(["-C", repo.as_ref(), "update-ref", "-d", &check_ref])
         .stdin(Stdio::null())
         .output();
     match deleted {
         Ok(out) if out.status.success() => {}
-        Ok(out) => crate::logger::error(&format!(
+        Ok(out) => crate::logger::warn(&format!(
             "could not delete {check_ref} in {}: {}",
             repo_path.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         )),
-        Err(err) => crate::logger::error(&format!(
+        Err(err) => crate::logger::warn(&format!(
             "could not delete {check_ref} in {}: {err}",
             repo_path.display()
         )),

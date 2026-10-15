@@ -3766,8 +3766,9 @@ impl Engine {
     /// the create worker does its own last-mile
     /// `use_existing_branch || local_branch_exists(...)` check, so a head branch
     /// that already exists locally and contains the pull request's head commit
-    /// is attached rather than re-fetched, with no pre-computation here. A lookup FAILURE instead produces an error `Status`;
-    /// other reactions return `[]`.
+    /// is attached rather than re-fetched, with no pre-computation here. A
+    /// lookup FAILURE instead produces an error `Status`; other reactions
+    /// return `[]`.
     pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
             EventReaction::OpenNewAgentPromptForPr { pr, status_op_id } => {
