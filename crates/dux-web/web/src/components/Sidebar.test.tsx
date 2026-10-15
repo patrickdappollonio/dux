@@ -10,7 +10,11 @@ import {
   SIDEBAR_RESIZING_NO_TRANSITION,
 } from "@/lib/paneDivider"
 import type { DuxState } from "@/lib/store"
-import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
+import {
+  fireAnimationIteration,
+  fireAnimationStart,
+  stubGlyphEase,
+} from "@/test/animationEvents"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
 // Control exactly what the store hands the component: override only `useDux`
@@ -1966,8 +1970,9 @@ describe("AppSidebar collapsed icon rail", () => {
       icon?.closest("[data-slot='working-glyph']")?.getAttribute("class"),
     ).not.toContain("animate-working")
     expect(
-      icon?.closest("[aria-label='Needs attention']")?.getAttribute("class"),
+      icon?.closest("[data-slot='working-glyph']")?.getAttribute("class"),
     ).toContain("motion-safe:animate-attention-pulse")
+    expect(icon?.closest("[aria-label='Needs attention']")).toBeTruthy()
   })
 
   it("scrolls internally in icon mode instead of relying on SidebarContent's clipped overflow", () => {
@@ -2300,15 +2305,18 @@ describe("AppSidebar collapsed rail lists live work only", () => {
 
 // USER-LOCKED. The collapsed rail's working agent icon bounces with the pulse
 // and finishes its bounce at rest on every stop, a hand-over to a higher state
-// (needs-you, typing) included, like the sidebar list. This guard is named by
-// CLAUDE.md's "Locked by the user" section. Do not edit, weaken or delete it, or
-// change what it pins, without the user's explicit request.
+// (needs-you, typing) included, like the sidebar list: it eases back to full
+// opacity, and the higher state's color and blink on the icon wait until it
+// has landed. This guard is named by CLAUDE.md's "Locked by the user" section.
+// Do not edit, weaken or delete it, or change what it pins, without the user's
+// explicit request.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (collapsed rail)", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
-    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
-    "its bounce at rest on every stop, a hand-over to a higher state included). " +
-    "Do not change it without the user's explicit request."
+    "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
+    "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
+    "a higher state included, and takes that state's look only once it has " +
+    "landed). Do not change it without the user's explicit request."
   const BOUNCE = "motion-safe:animate-working-bounce"
   const PULSE = "motion-safe:animate-working-pulse"
 
@@ -2352,24 +2360,33 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     expect(frame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
   })
 
-  // A higher state is there at once (its blink, its tint, its label) and the
-  // pulse is gone at once, but the bounce in flight still finishes at rest.
-  for (const [name, over, label] of [
-    ["needs-you", { needs_attention: true }, "Needs attention"],
-    ["typing", { typing: true }, "Typing"],
+  // A higher state's label is there at once and the pulse is gone at once, but
+  // the bounce in flight still finishes at rest, the icon eases back to full
+  // opacity, and only then does the state's own look (its blink, its tint)
+  // ease in.
+  for (const [name, over, label, look] of [
+    ["needs-you", { needs_attention: true }, "Needs attention", "animate-attention-pulse"],
+    ["typing", { typing: true }, "Typing", "text-dux-typing"],
   ] as const) {
-    it(`finishes the rail icon's bounce when ${name} takes it over`, () => {
+    it(`lands the rail icon before ${name}'s look takes it over`, async () => {
       mockState = railState(true)
       const { rerender } = render(tree())
+      const ease = stubGlyphEase(icon())
       fireAnimationStart(frame(), "working-bounce")
 
       mockState = railState(true, over)
       rerender(tree())
+      const withLook = () => icon().closest(`[class*='${look}']`)
       expect(button().querySelector(`[aria-label='${label}']`), LOCKED).toBeTruthy()
       expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+      expect(ease.animate, LOCKED).toHaveBeenCalledTimes(1)
+      expect(withLook(), LOCKED).toBeNull()
       expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
       fireAnimationIteration(frame(), "working-bounce")
       expect(frame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+      expect(withLook(), LOCKED).toBeNull()
+      await ease.eased()
+      expect(withLook()?.getAttribute("class"), LOCKED).toContain("transition-colors")
     })
   }
 })

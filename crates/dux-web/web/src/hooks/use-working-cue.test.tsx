@@ -17,11 +17,11 @@ import {
 // The bounce and the pulse live on two elements, a frame and the glyph inside
 // it, so dropping the pulse is a style change on the glyph alone and can never
 // restart, re-time or jump the bounce running on the frame.
-function Probe({ working, handover = false }: { working: boolean; handover?: boolean }) {
+function Probe({ working }: { working: boolean }) {
   const { bouncing, pulsing, attachBounce, attachPulse, handlers } = useWorkingCue<
     HTMLSpanElement,
     HTMLSpanElement
-  >(working, handover)
+  >(working)
   return (
     <span
       ref={attachBounce}
@@ -92,7 +92,7 @@ function withAnimations(el: Element, animations: () => unknown[]) {
 }
 
 function withAnimate(el: Element) {
-  const fade = { cancel: vi.fn() }
+  const fade = { cancel: vi.fn(), finished: new Promise<void>(() => {}) }
   const animate = vi.fn(() => fade)
   Object.defineProperty(el, "animate", { configurable: true, value: animate })
   return { animate, fade }
@@ -228,31 +228,6 @@ describe("useWorkingCue", () => {
     withAnimations(glyph(), () => [pulse.animation])
     rerender(<Probe working />)
     expect(pulse.clockWrites).toEqual([])
-  })
-
-  // A higher state taking over brings its own blink with it, and an ease back
-  // under a blinking ancestor is two opacity animations multiplying, which is
-  // exactly what the pulse yields to avoid. So a hand-over snaps to full.
-  it("snaps to full opacity on a hand-over, with no ease", () => {
-    const pulse = fakeAnimation("working-pulse", 0)
-    const { rerender } = render(<Probe working />)
-    withAnimations(glyph(), () => [pulse.animation])
-    const { animate } = withAnimate(glyph())
-    rerender(<Probe working={false} handover />)
-    expect(animate).not.toHaveBeenCalled()
-    expect(pulsing()).toBe(false)
-  })
-
-  it("cuts a plain stop's ease short when a higher state arrives mid-ease", () => {
-    const pulse = fakeAnimation("working-pulse", 0)
-    const { rerender } = render(<Probe working />)
-    withAnimations(glyph(), () => [pulse.animation])
-    const { animate, fade } = withAnimate(glyph())
-    rerender(<Probe working={false} />)
-    expect(animate).toHaveBeenCalledTimes(1)
-    expect(fade.cancel).not.toHaveBeenCalled()
-    rerender(<Probe working={false} handover />)
-    expect(fade.cancel).toHaveBeenCalled()
   })
 })
 

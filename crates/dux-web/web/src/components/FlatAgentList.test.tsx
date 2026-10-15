@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DragEndEvent } from "@dnd-kit/core"
-import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
+import {
+  fireAnimationIteration,
+  fireAnimationStart,
+  stubGlyphEase,
+} from "@/test/animationEvents"
 import type { DuxState } from "@/lib/store"
 import type { SessionView, TerminalView } from "@/lib/types"
 
@@ -1886,10 +1890,10 @@ describe("FlatAgentList working cue", () => {
     const glyph = container.querySelector("svg.lucide-bot")!
     expect(glyph.getAttribute("class")).not.toContain(PULSE)
     expect(frameOf(glyph).getAttribute("class")).not.toContain(BOUNCE)
-    // The wrapper is the one thing animating, and it is the attention blink.
-    expect(
-      glyph.closest("[aria-label='Needs attention']")?.getAttribute("class"),
-    ).toContain("motion-safe:animate-attention-pulse")
+    // The frame is the one thing animating, and it is the attention blink.
+    expect(frameOf(glyph).getAttribute("class")).toContain(
+      "motion-safe:animate-attention-pulse",
+    )
   })
 
   it("pulses a running terminal row the same way", () => {
@@ -2210,29 +2214,6 @@ describe("FlatAgentList working cue timing", () => {
     expect(wordPulse.startTime).toBe(1000)
     expect(bounce.startTime).toBe(1000)
   })
-
-  // A plain stop eases the glyph back to full; a higher state taking over
-  // snaps it, because its own blink is already running around the glyph.
-  it("eases the glyph back on a plain stop and snaps it on a hand-over", () => {
-    const glyphPulse = fake("working-pulse", 0)
-    stub("getAnimations", function (this: Element) {
-      return this.matches("svg.lucide-bot") ? [glyphPulse] : []
-    })
-    const animate = vi.fn(() => ({ cancel: vi.fn() }))
-    stub("animate", animate)
-
-    mockState = withAlpha({ working: true })
-    const { rerender } = render(<FlatAgentList handlers={handlers} />)
-    mockState = withAlpha({ working: true, needs_attention: true })
-    rerender(<FlatAgentList handlers={handlers} />)
-    expect(animate).not.toHaveBeenCalled()
-
-    mockState = withAlpha({ working: true })
-    rerender(<FlatAgentList handlers={handlers} />)
-    mockState = withAlpha({})
-    rerender(<FlatAgentList handlers={handlers} />)
-    expect(animate).toHaveBeenCalledTimes(1)
-  })
 })
 
 
@@ -2242,16 +2223,23 @@ describe("FlatAgentList working cue timing", () => {
 // hand-over to a higher state (needs-you, typing), where only the pulse yields
 // at once and the bounce in flight still finishes (user, 2026-09-28: "finish
 // the bounce of course but you can add the icon at any time, what we care to
-// maintain is the bounce so it doesn't teleport"). It was deleted
-// once by an autonomous pass that rewrote the tenet to allow it; this guard is
-// what CLAUDE.md's "Locked by the user" section names. Do not edit, weaken or
-// delete it, or change what it pins, without the user's explicit request.
+// maintain is the bounce so it doesn't teleport"). A hand-over also eases the
+// glyph's opacity back like a plain stop, and the higher state's look on the
+// glyph (the attention color and blink) waits until it has landed and then
+// eases in (user, 2026-10-14: "it just paints the icon in the middle of a
+// bounce and it's not transitioned colour but a flat \"bang!\""). It was
+// deleted once by an autonomous pass that rewrote the tenet to allow it; this
+// guard is what CLAUDE.md's "Locked by the user" section names. Do not edit,
+// weaken or delete it, or change what it pins, without the user's explicit
+// request.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
-    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
-    "its bounce at rest on every stop, a hand-over to a higher state included). " +
-    "Do not change it without the user's explicit request."
+    "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
+    "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
+    "a higher state included, and takes that state's look only once it has " +
+    "landed). Do not change it without the user's explicit request."
+  const ATTENTION = "[class*='animate-attention-pulse']"
   // The bounce rides a frame around the glyph and the pulse rides the glyph,
   // so dropping the pulse can never restart the bounce.
   const BOUNCE = "motion-safe:animate-working-bounce"
@@ -2312,10 +2300,11 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     }
   })
 
-  // A higher state taking over is a stop like any other for the bounce: it
-  // finishes at rest. Everything else about the new state is there at once:
-  // the word, the attention blink, the typing caret, and the pulse is gone.
-  it("finishes the bounce when needs-you or typing takes the glyph over", () => {
+  // A higher state taking over is a stop like any other for the glyph: the
+  // bounce finishes at rest and the opacity eases back to full. The word, its
+  // dots and the label a screen reader hears switch at once; the glyph's
+  // attention look waits for the landing and then eases in.
+  it("lands the glyph before a higher state's look when needs-you or typing takes over", async () => {
     mockState = stateWith(
       [makeSession({ id: "alpha", title: "Alpha", working: true })],
       [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
@@ -2323,6 +2312,7 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
     const bot = () => container.querySelector("svg.lucide-bot")!
     const term = () => container.querySelector("svg.lucide-square-terminal")!
+    const eases = [stubGlyphEase(bot()), stubGlyphEase(term())]
     for (const glyph of [bot(), term()]) fireAnimationStart(frameOf(glyph), "working-bounce")
 
     mockState = stateWith(
@@ -2343,11 +2333,18 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     expect(screen.queryByText("Running"), LOCKED).toBeNull()
     expect(container.querySelectorAll(".working-dots"), LOCKED).toHaveLength(0)
     expect(bot().closest("[aria-label='Needs attention']"), LOCKED).toBeTruthy()
-    for (const glyph of [bot(), term()]) {
+    for (const [i, glyph] of [bot(), term()].entries()) {
       expect(glyph.getAttribute("class"), LOCKED).not.toContain(PULSE)
+      expect(eases[i].animate, LOCKED).toHaveBeenCalledTimes(1)
       expect(frameOf(glyph).getAttribute("class"), LOCKED).toContain(BOUNCE)
       fireAnimationIteration(frameOf(glyph), "working-bounce")
       expect(frameOf(glyph).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
     }
+    // Landed but still easing back to full: no blink yet.
+    expect(bot().closest(ATTENTION), LOCKED).toBeNull()
+    for (const ease of eases) await ease.eased()
+    const look = bot().closest(ATTENTION)?.getAttribute("class") ?? ""
+    expect(look, LOCKED).toContain("text-cyan-100")
+    expect(look, LOCKED).toContain("transition-colors")
   })
 })

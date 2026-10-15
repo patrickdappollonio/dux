@@ -364,20 +364,20 @@ function AgentFlatRow({
           >
             <span
               aria-label={attention ? "Needs attention" : undefined}
-              className={cn(
-                "mt-0.5 inline-flex shrink-0",
-                attention
-                  ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-                  : "text-sidebar-accent-foreground",
-              )}
+              className="mt-0.5 inline-flex shrink-0"
             >
               {/* `working` is already resolved through the ladder, so a higher
-                  state taking over is a stop like any other: the pulse yields
-                  at once and the bounce in flight finishes at rest. */}
+                  state taking over is a stop like any other: the pulse yields,
+                  the glyph lands at rest, and only then does the attention
+                  look ease in. The label above is there at once. */}
               <WorkingGlyph
                 icon={Bot}
                 working={working}
-                handover={attention || typing}
+                look={
+                  attention
+                    ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                    : "text-sidebar-accent-foreground"
+                }
                 frameRef={frameRef}
                 className="size-4.5"
               />
@@ -596,7 +596,6 @@ function TerminalFlatRow({
         <WorkingGlyph
           icon={SquareTerminal}
           working={working}
-          handover={terminal.typing}
           frameRef={frameRef}
           frameClassName="mt-0.5"
           className="size-4 text-muted-foreground"

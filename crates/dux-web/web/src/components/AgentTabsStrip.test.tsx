@@ -5,7 +5,11 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { ONLY_TAB_CLOSE_REFUSAL } from "@/lib/agentTabs"
-import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
+import {
+  fireAnimationIteration,
+  fireAnimationStart,
+  stubGlyphEase,
+} from "@/test/animationEvents"
 
 let mockState: DuxState
 const addTabMock = vi.fn()
@@ -276,16 +280,17 @@ describe("AgentTabsStrip working cue ladder", () => {
 })
 
 // USER-LOCKED. A working tab's pill icon bounces with the pulse and finishes its
-// bounce at rest on every stop, a hand-over to needs-you included, like the
-// sidebar list. This guard is named by CLAUDE.md's "Locked by the user"
-// section. Do not edit, weaken or delete it, or change what it pins, without
-// the user's explicit request.
+// bounce at rest on every stop, a hand-over to needs-you included, easing back
+// to full opacity like the sidebar list. This guard is named by CLAUDE.md's
+// "Locked by the user" section. Do not edit, weaken or delete it, or change
+// what it pins, without the user's explicit request.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (agent tab strip)", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
-    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
-    "its bounce at rest on every stop, a hand-over to a higher state included). " +
-    "Do not change it without the user's explicit request."
+    "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
+    "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
+    "a higher state included, and takes that state's look only once it has " +
+    "landed). Do not change it without the user's explicit request."
   const BOUNCE = "motion-safe:animate-working-bounce"
   const PULSE = "motion-safe:animate-working-pulse"
 
@@ -314,13 +319,15 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
   })
 
   // A turn ending on a prompt: the attention dot is there at once and the
-  // pulse is gone at once, but the bounce in flight still finishes at rest.
-  it("finishes the bounce when needs-you takes the tab over", () => {
+  // pulse is gone at once, but the bounce in flight still finishes at rest and
+  // the icon eases back to full opacity rather than snapping.
+  it("finishes the bounce and eases the icon when needs-you takes the tab over", () => {
     const { container, rerender } = render(
       <AgentTabsStrip session={withWorking(true)} activeTabId="s1" maxTabs={20} />,
     )
     const pill = () => container.querySelectorAll("[role='tab']")[1]
     const icon = () => pill().querySelector("svg.lucide-bot")!
+    const ease = stubGlyphEase(icon())
     fireAnimationStart(frameOf(icon()), "working-bounce")
 
     rerender(
@@ -328,6 +335,7 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     )
     expect(pill().querySelector("[aria-label='Needs attention']"), LOCKED).toBeTruthy()
     expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+    expect(ease.animate, LOCKED).toHaveBeenCalledTimes(1)
     expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)

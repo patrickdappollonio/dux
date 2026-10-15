@@ -1,4 +1,5 @@
 import { act } from "@testing-library/react"
+import { vi } from "vitest"
 
 // jsdom ships no `AnimationEvent`, which changes two things Testing Library's
 // `fireEvent.animation*` gets wrong for a React handler: the event falls back
@@ -42,4 +43,27 @@ export function fireAnimationCancel(el: Element, animationName: string) {
   act(() => {
     el.dispatchEvent(event)
   })
+}
+
+// Plays the browser's part in a stopped glyph easing back to full opacity:
+// jsdom has neither `getAnimations` nor `animate`, so this glyph reports a
+// running pulse and records the ease it is asked for. `eased` resolves that
+// ease, the moment the glyph is back at full opacity.
+export function stubGlyphEase(glyph: Element) {
+  let finish!: () => void
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  const animate = vi.fn(() => ({ cancel: vi.fn(), finished }))
+  Object.defineProperty(glyph, "getAnimations", {
+    configurable: true,
+    value: () => [{ animationName: "working-pulse" }],
+  })
+  Object.defineProperty(glyph, "animate", { configurable: true, value: animate })
+  return {
+    animate,
+    eased: async () => {
+      await act(async () => finish())
+    },
+  }
 }

@@ -68,29 +68,29 @@ export function useWorkingPulseAnchor(
 /**
  * Drives one working glyph: `bouncing` keys the bounce class on the frame that
  * `attachBounce` and `handlers` go on, and `pulsing` keys the pulse class on the
- * glyph that `attachPulse` goes on.
+ * glyph that `attachPulse` goes on. `fading` is true while the glyph is still
+ * easing back to full opacity after a stop.
  *
  * `working` is the cue's one flag, already resolved through the state word's
- * ladder by the caller, so a higher state taking over is `working` turning
- * false with `handover` true. The pulse follows `working` exactly; the bounce
- * settles through `useSettlingAnimation` on every stop, which is also what
- * makes a cancelled animation, a hidden tab and reduced motion stop at once.
+ * ladder by the caller, so a higher state taking over is just `working` turning
+ * false. The pulse follows `working` exactly; the bounce settles through
+ * `useSettlingAnimation` on every stop, which is also what makes a cancelled
+ * animation, a hidden tab and reduced motion stop at once.
  *
  * Removing a CSS animation starts no CSS transition from its animated value
- * (the opacity snaps straight to full in Chromium), so on a plain stop the
- * pulse is held for one layout pass, long enough to read the opacity it had
- * reached and ease the glyph from there back to full with a script animation,
- * and then dropped before anything is painted. A hand-over snaps instead, and
- * cuts short an ease already running: the higher state's own blink is running
- * around the glyph, and an ease under it would be two opacity animations
- * multiplying, which is the very thing the pulse yields to avoid.
+ * (the opacity snaps straight to full in Chromium), so on every stop, a
+ * hand-over included, the pulse is held for one layout pass, long enough to
+ * read the opacity it had reached and ease the glyph from there back to full
+ * with a script animation, and then dropped before anything is painted. A
+ * higher state's own look waits for `bouncing` and `fading` to clear (see
+ * `WorkingGlyph`), so the ease never runs under an attention blink.
  */
 export function useWorkingCue<B extends Element, G extends Element>(
   working: boolean,
-  handover = false,
 ): {
   bouncing: boolean
   pulsing: boolean
+  fading: boolean
   attachBounce: (el: B | null) => void
   attachPulse: (el: G | null) => void
   handlers: SettlingAnimationHandlers
@@ -99,6 +99,7 @@ export function useWorkingCue<B extends Element, G extends Element>(
   const [frame, setFrame] = React.useState<B | null>(null)
   const [glyph, setGlyph] = React.useState<G | null>(null)
   const fade = React.useRef<Animation | null>(null)
+  const [fading, setFading] = React.useState(false)
 
   const [prevWorking, setPrevWorking] = React.useState(working)
   const [leaving, setLeaving] = React.useState(false)
@@ -118,32 +119,45 @@ export function useWorkingCue<B extends Element, G extends Element>(
   React.useLayoutEffect(() => {
     if (!leaving) return
     const pulse = findAnimation(glyph, WORKING_PULSE_NAME)
-    if (
-      glyph &&
-      pulse &&
-      !handover &&
-      !pageHidden() &&
-      typeof glyph.animate === "function"
-    ) {
+    if (glyph && pulse && !pageHidden() && typeof glyph.animate === "function") {
       const from = window.getComputedStyle(glyph).opacity
-      fade.current = glyph.animate([{ opacity: from }, { opacity: "1" }], {
+      const animation = glyph.animate([{ opacity: from }, { opacity: "1" }], {
         duration: WORKING_PULSE_FADE_MS,
         easing: "ease-out",
       })
+      fade.current = animation
+      // A cancel rejects the promise, and a cancelled ease is just as done.
+      const done = () => {
+        if (fade.current !== animation) return
+        fade.current = null
+        setFading(false)
+      }
+      animation.finished.then(done, done)
     }
     // Deliberate: the pulse's value can only be read while its class is still
-    // on, and the class has to leave before the first paint, so the update
-    // belongs in this layout effect rather than after it.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // on, and the class has to leave before the first paint, so the updates
+    // belong in this layout effect rather than after it.
+    setFading(fade.current !== null)
     setLeaving(false)
-  }, [leaving, glyph, handover])
+  }, [leaving, glyph])
 
-  // Resuming, or a higher state arriving, ends an ease still running.
+  // Resuming ends an ease still running, and so does the tab going hidden,
+  // where nothing is painted to ease.
   React.useLayoutEffect(() => {
-    if (!working && !handover) return
+    if (!working) return
     fade.current?.cancel()
     fade.current = null
-  }, [working, handover])
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFading(false)
+  }, [working])
+  React.useEffect(() => {
+    if (!fading) return
+    const onVisibility = () => {
+      if (pageHidden()) fade.current?.cancel()
+    }
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => document.removeEventListener("visibilitychange", onVisibility)
+  }, [fading])
 
   React.useLayoutEffect(() => {
     if (working) anchorPulse(frame, glyph)
@@ -161,6 +175,7 @@ export function useWorkingCue<B extends Element, G extends Element>(
   return {
     bouncing: bounce.running,
     pulsing: working || leavingNow,
+    fading,
     attachBounce,
     attachPulse: setGlyph,
     handlers: bounce.handlers,

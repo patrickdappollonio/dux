@@ -131,24 +131,24 @@ function CollapsedAgentIcon({
             aria-label={
               attention ? "Needs attention" : typing ? "Typing" : undefined
             }
-            className={cn(
-              "inline-flex shrink-0",
-              attention
-                ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-                : // Typing tints the rail icon violet (no pulse) so the icon-only
-                  // rail still distinguishes typing from working.
-                  typing
-                  ? "text-dux-typing"
-                  : "text-sidebar-accent-foreground",
-            )}
+            className="inline-flex shrink-0"
           >
             {/* The same glyph cue as the sidebar list's row: every stop, a
                 higher state taking over included, finishes the bounce at rest
-                while the pulse yields at once. */}
+                while the pulse yields at once, and the new look eases in once
+                the glyph has landed. */}
             <WorkingGlyph
               icon={Bot}
               working={working}
-              handover={attention || typing}
+              look={
+                attention
+                  ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                  : // Typing tints the rail icon violet (no pulse) so the
+                    // icon-only rail still distinguishes typing from working.
+                    typing
+                    ? "text-dux-typing"
+                    : "text-sidebar-accent-foreground"
+              }
               className="size-4.5!"
             />
           </span>
@@ -197,17 +197,14 @@ function CollapsedTerminalIcon({
         >
           <span
             aria-label={terminal.typing ? "Typing" : undefined}
-            className={cn(
-              "inline-flex shrink-0",
-              terminal.typing
-                ? "text-dux-typing"
-                : "text-sidebar-accent-foreground",
-            )}
+            className="inline-flex shrink-0"
           >
             <WorkingGlyph
               icon={SquareTerminal}
               working={working}
-              handover={terminal.typing}
+              look={
+                terminal.typing ? "text-dux-typing" : "text-sidebar-accent-foreground"
+              }
               className="size-4.5!"
             />
           </span>
