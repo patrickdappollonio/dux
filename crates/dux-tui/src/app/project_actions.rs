@@ -659,20 +659,24 @@ impl App {
                         prompt.fetch_note = listing.fetch_error();
                         prompt.branches = listing.branches;
                         prompt.holders = holders;
-                        // `selected` indexes the VISIBLE rows: a search typed
-                        // while the list was loading already narrows them.
-                        let visible = prompt
-                            .list
-                            .visible_indices(&prompt.branches, branch_choice_matches);
-                        prompt.list.selected = prompt
-                            .current_base
-                            .as_deref()
-                            .and_then(|base| {
-                                visible
-                                    .iter()
-                                    .position(|index| prompt.branches[*index].name == base)
-                            })
-                            .unwrap_or(0);
+                        // A search typed while the list was loading already
+                        // narrows the rows, and a query highlights its first
+                        // match, so only an empty query starts on the current
+                        // base.
+                        prompt.list.selected = if prompt.list.filter.text.trim().is_empty() {
+                            prompt
+                                .current_base
+                                .as_deref()
+                                .and_then(|base| {
+                                    prompt
+                                        .branches
+                                        .iter()
+                                        .position(|branch| branch.name == base)
+                                })
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
                         BranchListingOutcome::Loaded
                     }
                     Err(error) => {
@@ -1015,13 +1019,14 @@ mod tests {
         }
     }
 
-    /// A listing that lands while a search is narrowing the rows selects
-    /// within the visible rows, so Enter picks what is highlighted.
+    /// A listing that lands while a search is narrowing the rows highlights
+    /// the first match, even when the current base also matches further down,
+    /// so Enter picks the top row as it does once the list is loaded.
     #[test]
     fn a_listing_that_lands_mid_search_selects_among_the_visible_rows() {
         let mut app = test_app(default_bindings());
         app.prompt = picker(&app, true, Vec::new());
-        type_search(&mut app, "rel");
+        type_search(&mut app, "e");
         press(&mut app, KeyCode::Enter);
         let project_id = app.engine.projects[0].id.clone();
         let (tx, rx) = mpsc::channel();
@@ -1046,8 +1051,8 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         match &app.prompt {
-            PromptState::ConfirmChangeBaseBranch(confirm) => assert_eq!(confirm.branch, "release"),
-            other => panic!("Enter picks the one visible row, got {other:?}"),
+            PromptState::ConfirmChangeBaseBranch(confirm) => assert_eq!(confirm.branch, "beta"),
+            other => panic!("Enter picks the first match, got {other:?}"),
         }
     }
 
