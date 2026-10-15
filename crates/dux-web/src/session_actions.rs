@@ -2375,7 +2375,8 @@ async fn resolve_pull_request_reference(
         Ok((resolution, lookup)) => {
             let (clone, clone_unavailable) = match lookup {
                 Some(Ok(clone)) => (Some(clone), None),
-                Some(Err(sentence)) => (None, Some(sentence)),
+                // Relayed `gh` text, so its bidirectional-text controls go.
+                Some(Err(sentence)) => (None, Some(dux_core::bidi::strip_bidi_controls(&sentence))),
                 None => (None, None),
             };
             Json(ResolvePullRequestReply {

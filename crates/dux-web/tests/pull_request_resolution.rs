@@ -48,7 +48,7 @@ async fn boot(
     projects: &[(&str, &str, &str)],
     hosts: &[&str],
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
-    boot_with_lookup(projects, hosts, Err("no pull request answers here")).await
+    boot_with_lookup(projects, hosts, Err("no pull request answers here\u{202E}")).await
 }
 
 /// [`boot`] with `gh pr view` answering `pull_request`: its JSON, or a message
@@ -173,6 +173,10 @@ async fn a_pasted_pull_request_link_resolves_to_the_project_that_repository_is_o
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["number"], 17);
     assert_eq!(value["repository"], "github.com/acme/widget");
+    // The lookup only runs when no project matches; this boot's lookup fails,
+    // so running it here would put a sentence on the reply.
+    assert!(value.get("clone").is_none(), "{body}");
+    assert!(value.get("clone_unavailable").is_none(), "{body}");
 }
 
 #[tokio::test]

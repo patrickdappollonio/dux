@@ -2091,7 +2091,8 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// The project list, host policy and gh-availability flag the pull-request
+    /// The project list, host policy, per-host git protocols, the program the
+    /// pull request lookup runs and the gh-availability flag the pull-request
     /// reference resolver needs. See
     /// [`EngineRequest::PullRequestResolutionInputs`].
     pub async fn pull_request_resolution_inputs(&self) -> Option<PullRequestResolutionInputs> {

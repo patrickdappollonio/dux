@@ -155,8 +155,12 @@ pub fn pull_request_clone_offer(
     if !policy.allows(&host) {
         return None;
     }
+    // `git@host:port:owner/repo.git` is not an address, so a host with a port
+    // is cloned over https whatever its protocol setting says.
     let address = match protocols.get(&host) {
-        Some(GitProtocol::Ssh) => format!("git@{host}:{owner_repo}.git"),
+        Some(GitProtocol::Ssh) if !host.contains(':') => {
+            format!("git@{host}:{owner_repo}.git")
+        }
         _ => format!("https://{host}/{owner_repo}.git"),
     };
     Some(PullRequestCloneOffer {
@@ -1660,6 +1664,17 @@ mod resolution_tests {
             .unwrap()
             .address,
             "git@ghe.example:acme/widget.git"
+        );
+        assert_eq!(
+            offer(
+                "https://ghe.example:8443/acme/widget/pull/4",
+                &allowed(&["ghe.example:8443"]),
+                &[("ghe.example:8443", Ssh)]
+            )
+            .unwrap()
+            .address,
+            "https://ghe.example:8443/acme/widget.git",
+            "a host with a port cannot be written as an scp-style address"
         );
     }
 
