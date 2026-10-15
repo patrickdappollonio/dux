@@ -529,6 +529,18 @@ mod tests {
             .expect("a silent socket whose listener died is replaced");
         drop(held);
 
+        // A live dux between binding its socket and serving it is silent too,
+        // and its socket is left alone because the process that listens on it
+        // is still there.
+        let starting = tmp.path().join("starting.sock");
+        let _starting = std::os::unix::net::UnixListener::bind(&starting).unwrap();
+        let starting_ino = fs::symlink_metadata(&starting).unwrap().ino();
+        assert!(matches!(
+            lock.open_control_socket(&starting),
+            Err(crate::control_socket::Unavailable::InUse { .. })
+        ));
+        assert_eq!(fs::symlink_metadata(&starting).unwrap().ino(), starting_ino);
+
         let live = tmp.path().join("live.sock");
         let serving = std::os::unix::net::UnixListener::bind(&live).unwrap();
         let serving_ino = fs::symlink_metadata(&live).unwrap().ino();

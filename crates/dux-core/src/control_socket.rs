@@ -34,8 +34,8 @@ pub enum Unavailable {
     LineBreak,
     /// Something that is not a socket is at the path. dux never removes it.
     NotASocket { path: PathBuf },
-    /// A socket at the path answers, or hangs up on a connection: a live
-    /// process accepts on it.
+    /// A socket at the path answers, hangs up on a connection, or was listened
+    /// on by a process that is still running: a live process holds it.
     InUse { path: PathBuf },
     /// The socket's folder is not this user's alone, so somebody else could swap
     /// the file under dux between its steps.
@@ -194,7 +194,7 @@ fn in_private_folder(path: &Path) -> bool {
 }
 
 /// Remove a socket nobody serves on any more. A path that is not a socket, or
-/// a socket that still answers, is refused rather than removed.
+/// a socket a live process still holds, is refused rather than removed.
 fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -213,22 +213,26 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
         });
     }
     match UnixStream::connect(path) {
-        Ok(stream) => {
-            if probe(stream) != Probe::Silent {
+        Ok(mut stream) => {
+            // A live dux that has bound its socket but is not serving it yet
+            // (starting up, or handing it between cores) is silent too; the
+            // process that listened on it being alive is what tells it apart.
+            let silent = probe(&mut stream) == Probe::Silent;
+            if !silent || listener_pid(&stream).is_some_and(crate::file_drop::process_can_answer) {
                 return Err(Unavailable::InUse {
                     path: path.to_path_buf(),
                 });
             }
             crate::logger::warn(&format!(
                 "replacing the leftover control socket {}: it accepted a connection but no \
-                 dux answered on it within {} ms, so it is a dead dux's listener that another \
-                 process still holds open",
+                 dux answered on it within {} ms and no live process listened on it, so it is a \
+                 dead dux's listener that another process still holds open",
                 path.display(),
                 ANSWER_WAIT.as_millis()
             ));
         }
-        // A refusal proves nothing listens there any more; silence is the
-        // other proof, handled above.
+        // A refusal proves nothing listens there any more, as does the silence
+        // handled above.
         Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
         Err(err) => {
             return Err(Unavailable::Unproven {
@@ -271,7 +275,7 @@ enum Probe {
 /// a process spawned in between keeps it), and the kernel then accepts
 /// connections nobody will ever read or close. Silence is the only sign of
 /// that: anything that answers or hangs up is a process looking at the socket.
-fn probe(mut stream: UnixStream) -> Probe {
+fn probe(stream: &mut UnixStream) -> Probe {
     let deadline = Instant::now() + ANSWER_WAIT;
     let remaining = || deadline.saturating_duration_since(Instant::now());
     if stream.set_write_timeout(Some(ANSWER_WAIT)).is_err() {
@@ -300,6 +304,58 @@ fn probe(mut stream: UnixStream) -> Probe {
             Err(_) => return Probe::Closed,
         }
     }
+}
+
+/// The process that called listen() on the socket `stream` is connected to,
+/// even while nothing has accepted the connection: Linux copies the listener's
+/// credentials, taken at listen(), into the connecting socket, and macOS hands
+/// the embryonic connection the listener's last owner, the process that last
+/// listened, accepted or polled on it. A process that merely inherited the
+/// listener and never touched it is neither. A dead listener's pid that has
+/// since been reused reads as alive, which leaves the socket alone. `None`
+/// when it cannot be read.
+#[cfg(target_os = "linux")]
+fn listener_pid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
+    // the descriptor is open for as long as `stream` is borrowed.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+    (read == 0 && cred.pid > 0).then_some(cred.pid as u32)
+}
+
+/// The process that called listen() on the socket `stream` is connected to;
+/// see the Linux version.
+#[cfg(target_os = "macos")]
+fn listener_pid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `pid` and `len` are valid for writes of the sizes passed, and
+    // the descriptor is open for as long as `stream` is borrowed.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            std::ptr::addr_of_mut!(pid).cast::<libc::c_void>(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+    (read == 0 && pid > 0).then_some(pid as u32)
 }
 
 /// The sentence a start without the socket shows on its status line and
