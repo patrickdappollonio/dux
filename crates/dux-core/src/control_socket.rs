@@ -34,7 +34,8 @@ pub enum Unavailable {
     LineBreak,
     /// Something that is not a socket is at the path. dux never removes it.
     NotASocket { path: PathBuf },
-    /// A socket at the path answers: another process is serving on it.
+    /// A socket at the path answers, or hangs up on a connection: a live
+    /// process accepts on it.
     InUse { path: PathBuf },
     /// The socket's folder is not this user's alone, so somebody else could swap
     /// the file under dux between its steps.
@@ -213,7 +214,7 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
     }
     match UnixStream::connect(path) {
         Ok(stream) => {
-            if answers(stream) {
+            if probe(stream) != Probe::Silent {
                 return Err(Unavailable::InUse {
                     path: path.to_path_buf(),
                 });
@@ -226,7 +227,8 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
                 ANSWER_WAIT.as_millis()
             ));
         }
-        // Only a refusal proves nothing listens there any more.
+        // A refusal proves nothing listens there any more; silence is the
+        // other proof, handled above.
         Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {}
         Err(err) => {
             return Err(Unavailable::Unproven {
@@ -251,17 +253,29 @@ const ANSWER_WAIT: Duration = Duration::from_millis(500);
 const ANSWER_PROBE: &[u8] =
     b"GET /api/v1/build HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
-/// Whether whatever accepted `stream` answers a request within [`ANSWER_WAIT`].
+/// What a leftover socket that accepted a connection did with it.
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    /// It sent something back.
+    Answered,
+    /// It hung up or reset the connection, which takes a live process.
+    Closed,
+    /// Nothing came back within [`ANSWER_WAIT`].
+    Silent,
+}
+
+/// Send `stream` a request and wait up to [`ANSWER_WAIT`] for what comes back.
 ///
 /// A dux that died can leave its listener open in a child that inherited it
 /// (on macOS a socket's close-on-exec flag is set after the socket is made, so
 /// a process spawned in between keeps it), and the kernel then accepts
-/// connections nobody will ever read. Only an answer proves a dux serves there.
-fn answers(mut stream: UnixStream) -> bool {
+/// connections nobody will ever read or close. Silence is the only sign of
+/// that: anything that answers or hangs up is a process looking at the socket.
+fn probe(mut stream: UnixStream) -> Probe {
     let deadline = Instant::now() + ANSWER_WAIT;
     let remaining = || deadline.saturating_duration_since(Instant::now());
     if stream.set_write_timeout(Some(ANSWER_WAIT)).is_err() {
-        return true;
+        return Probe::Closed;
     }
     // A write that fails means the other end is gone; the read below says so.
     let _ = stream.write_all(ANSWER_PROBE);
@@ -269,12 +283,21 @@ fn answers(mut stream: UnixStream) -> bool {
     loop {
         let wait = remaining();
         if wait.is_zero() || stream.set_read_timeout(Some(wait)).is_err() {
-            return false;
+            return Probe::Silent;
         }
         match stream.read(&mut byte) {
-            Ok(read) => return read > 0,
+            Ok(0) => return Probe::Closed,
+            Ok(_) => return Probe::Answered,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return false,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Probe::Silent;
+            }
+            Err(_) => return Probe::Closed,
         }
     }
 }

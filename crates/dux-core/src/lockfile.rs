@@ -365,6 +365,36 @@ mod tests {
         tmp
     }
 
+    /// Call listen() on `listener` again from a forked child, then reap it, so
+    /// the process the kernel names as the listener is one that has exited.
+    fn listen_from_a_child_that_exits(listener: &std::os::unix::net::UnixListener) {
+        use std::os::fd::AsRawFd;
+        let fd = listener.as_raw_fd();
+        // SAFETY: the child calls only async-signal-safe functions (listen and
+        // _exit) before it exits, so forking from a threaded test is sound.
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            // SAFETY: see above.
+            unsafe {
+                let code = if libc::listen(fd, 128) == 0 { 0 } else { 1 };
+                libc::_exit(code);
+            }
+        }
+        let mut status = 0;
+        // SAFETY: `child` is this process's own child and `status` is writable.
+        let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(reaped, child);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "the child's listen() failed"
+        );
+    }
+
     #[test]
     fn acquire_writes_own_pid_and_the_control_socket_to_the_lockfile() {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -474,12 +504,30 @@ mod tests {
         assert!(lock.open_control_socket(&file).is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep me");
 
-        // A socket that accepts but never answers is a dead dux's listener
-        // still held open by a child that inherited it, so it is replaced too.
-        let silent = tmp.path().join("silent.sock");
-        let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
-        lock.open_control_socket(&silent)
-            .expect("a socket that never answers is replaced");
+        // A process that accepts and hangs up is alive: only silence can come
+        // from nobody.
+        let hangs_up = tmp.path().join("hangs-up.sock");
+        let hanging = std::os::unix::net::UnixListener::bind(&hangs_up).unwrap();
+        let hangs_up_ino = fs::symlink_metadata(&hangs_up).unwrap().ino();
+        let closing = std::thread::spawn(move || drop(hanging.accept().unwrap()));
+        assert!(matches!(
+            lock.open_control_socket(&hangs_up),
+            Err(crate::control_socket::Unavailable::InUse { .. })
+        ));
+        assert_eq!(fs::symlink_metadata(&hangs_up).unwrap().ino(), hangs_up_ino);
+        closing.join().unwrap();
+
+        // A socket that accepts but never answers, whose listening process is
+        // gone, is a dead dux's listener held open by a process that inherited
+        // it, so it is replaced. The kernel names whoever last called listen()
+        // as the listener's peer, so a child that listens and exits stands in
+        // for the dead dux while this process keeps the socket open.
+        let orphaned = tmp.path().join("orphaned.sock");
+        let held = std::os::unix::net::UnixListener::bind(&orphaned).unwrap();
+        listen_from_a_child_that_exits(&held);
+        lock.open_control_socket(&orphaned)
+            .expect("a silent socket whose listener died is replaced");
+        drop(held);
 
         let live = tmp.path().join("live.sock");
         let serving = std::os::unix::net::UnixListener::bind(&live).unwrap();
