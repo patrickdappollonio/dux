@@ -217,8 +217,13 @@ fn remove_dead_socket(path: &Path) -> Result<(), Unavailable> {
             // A live dux that has bound its socket but is not serving it yet
             // (starting up, or handing it between cores) is silent too; the
             // process that listened on it being alive is what tells it apart.
-            let silent = probe(&mut stream) == Probe::Silent;
-            if !silent || listener_pid(&stream).is_some_and(crate::file_drop::process_can_answer) {
+            // Its pid is read before the probe because macOS stops answering
+            // once the other end hangs up; a hang-up before this read is one
+            // the probe then sees.
+            let listener = listener_pid(&stream);
+            if probe(&mut stream) != Probe::Silent
+                || listener.is_some_and(crate::file_drop::process_can_answer)
+            {
                 return Err(Unavailable::InUse {
                     path: path.to_path_buf(),
                 });
