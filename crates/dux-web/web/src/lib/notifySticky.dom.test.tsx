@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { Toaster } from "@/components/ui/sonner"
 
@@ -272,33 +272,45 @@ describe("the countdown bar", () => {
   // sonner only resets a toast's remaining time when its duration changes, so a
   // toast that was paused once and then replaced with the same duration would
   // resume from the remainder left at that pause and vanish early.
-  it("restarts the full window when a once-paused toast is replaced on its id", async () => {
-    setStatusClearSeconds(0.6)
-    render(<Toaster />)
-    act(() => {
-      notifySuccess("first copy", { id: "same" })
-    })
-    await screen.findByText("first copy")
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    const stack = document.querySelector("[data-sonner-toaster]") as HTMLElement
-    // Hovering expands the stack, which is what pauses sonner's timers; about
-    // 300ms of the 600ms window is left at this pause.
-    act(() => {
-      fireEvent.mouseEnter(stack)
-    })
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    act(() => {
-      fireEvent.mouseLeave(stack)
-    })
-    act(() => {
-      notifySuccess("second copy", { id: "same" })
-    })
-    await screen.findByText("second copy")
-    // Past the old remainder, well short of a fresh window.
-    await new Promise((resolve) => setTimeout(resolve, 450))
-    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
-    await waitFor(() => expect(toastEl().getAttribute("data-removed")).toBe("true"), {
-      timeout: 1000,
-    })
+  it("restarts the full window when a once-paused toast is replaced on its id", () => {
+    // Fake timers and a fake clock, so the boundaries below are exact: sonner
+    // measures a pause with `Date` and delivers every raise on a timeout.
+    vi.useFakeTimers()
+    try {
+      const advance = (ms: number) =>
+        act(() => {
+          vi.advanceTimersByTime(ms)
+        })
+      setStatusClearSeconds(6)
+      render(<Toaster />)
+      act(() => {
+        notifySuccess("first copy", { id: "same" })
+      })
+      advance(0)
+      screen.getByText("first copy")
+      advance(3000)
+      // Hovering expands the stack, which is what pauses sonner's timers, with
+      // 3000ms of the 6000ms window left.
+      const stack = document.querySelector("[data-sonner-toaster]") as HTMLElement
+      act(() => {
+        fireEvent.mouseEnter(stack)
+      })
+      advance(500)
+      act(() => {
+        fireEvent.mouseLeave(stack)
+      })
+      act(() => {
+        notifySuccess("second copy", { id: "same" })
+      })
+      advance(0)
+      screen.getByText("second copy")
+      // Well past the old remainder, just short of a fresh window.
+      advance(5900)
+      expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+      advance(200)
+      expect(toastEl().getAttribute("data-removed")).toBe("true")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
