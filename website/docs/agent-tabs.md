@@ -182,7 +182,7 @@ back to life just because you looked at it.
 If the agent's only tab stops while you are looking at it (you quit the provider, or
 stopped the tab), the web stays on the agent rather than sending you home, and the tab
 shows the idle screen described below. It does not start again until you click *Start
-session* or click the agent's row (or the tab's pill) again.
+session* or click the agent's row again.
 
 The terminal UI never starts anything just because you looked at it, the first tab
 included. A dormant extra tab shows a *Tab not running* card naming the key that launches

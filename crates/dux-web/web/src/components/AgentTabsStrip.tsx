@@ -164,6 +164,10 @@ function TabPill({
       tabIndex={0}
       onClick={select}
       onKeyDown={(e) => {
+        // Only a press on the pill itself: Enter and Space from the ⋯ trigger
+        // and its menu items bubble here too (through the menu's portal), and
+        // must not select the tab or start one resting on the idle screen.
+        if (e.target !== e.currentTarget) return
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault()
           select()

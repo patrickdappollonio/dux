@@ -15,6 +15,7 @@ let mockState: DuxState
 const addTabMock = vi.fn()
 const openCloseTabMock = vi.fn()
 const openStopTabMock = vi.fn()
+const clickTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -23,6 +24,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     addTab: (...args: unknown[]) => addTabMock(...args),
     openCloseTab: (...args: unknown[]) => openCloseTabMock(...args),
     openStopTab: (...args: unknown[]) => openStopTabMock(...args),
+    clickTab: (...args: unknown[]) => clickTabMock(...args),
   }
 })
 
@@ -68,6 +70,7 @@ beforeEach(() => {
   addTabMock.mockClear()
   openCloseTabMock.mockClear()
   openStopTabMock.mockClear()
+  clickTabMock.mockClear()
   mockState = {
     bootstrap: { available_providers: ["claude", "codex", "opencode"] },
     spine: {
@@ -185,6 +188,19 @@ describe("AgentTabsStrip", () => {
     const menu = within(await screen.findByRole("menu"))
     expect(menu.getByText("Close tab…")).toBeTruthy()
     expect(menu.queryByText("Stop tab…")).toBeNull()
+  })
+
+  it("selects a tab on Enter on its pill, never on Enter inside its ⋯", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const trigger = screen.getAllByLabelText("Tab actions")[0]
+    fireEvent.keyDown(trigger, { key: "Enter" })
+    fireEvent.click(trigger)
+    const item = within(await screen.findByRole("menu")).getByText("Close tab…")
+    fireEvent.keyDown(item, { key: "Enter" })
+    expect(clickTabMock).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(screen.getAllByRole("tab")[0], { key: "Enter" })
+    expect(clickTabMock).toHaveBeenCalledWith("s1", "s1")
   })
 
   it("marks the flagged tab's pill with an attention dot", () => {
