@@ -2407,42 +2407,95 @@ pub fn add_worktree_new_branch_at(
     // The empty old value makes the update create-only: it fails rather than
     // move a branch that already exists. The message is the one `git branch`
     // writes to the reflog.
-    run_git_capture(
+    run_ref_update(
         repo_path,
         &[
             "update-ref",
+            "--no-deref",
             "-m",
             &format!("branch: Created from {start_point}"),
             &refname,
             &start,
             "",
         ],
-        &format!("create branch '{branch_name}'"),
-    )?;
+    )
+    .with_context(|| format!("failed to create branch '{branch_name}'"))?;
     if let Err(err) =
         add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch_name)
     {
-        // A failed add normally leaves no worktree behind, and then the branch
-        // minted above is removed, but only while it is still at the commit it
-        // was created at. A worktree git kept despite failing holds the branch,
-        // so it stays.
-        if matches!(registration_at(repo_path, worktree_path), Ok(false))
-            && let Err(remove_err) = run_git_capture(
-                repo_path,
-                &["update-ref", "-d", &refname, &start],
-                &format!("remove branch '{branch_name}'"),
-            )
-        {
-            logger::warn(&format!(
-                "could not remove branch {branch_name}, which dux created for a worktree add \
-                 that failed: {remove_err:#}"
-            ));
-        }
+        remove_branch_minted_for_failed_add(repo_path, &refname, &start);
         return Err(err);
     }
     Ok(worktree_path
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf()))
+}
+
+/// A ref update under the same overrides as every tree-moving command
+/// ([`tree_move`]): no background maintenance, no submodule recursion.
+fn run_ref_update(repo_path: &Path, args: &[&str]) -> Result<()> {
+    let output = git_without_auto_maintenance()
+        .args(["-c", "submodule.recurse=false", "-C"])
+        .arg(repo_path)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git update-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the branch [`add_worktree_new_branch_at`] created once its worktree
+/// add has failed for good, so a failed create leaves no branch behind.
+///
+/// Kept whenever there is any doubt: while ANY worktree has it checked out
+/// (another process may have checked it out since; a ref update has no such
+/// guard of its own, and deleting it would leave that worktree on a branch
+/// that is gone), when the worktree list cannot be read, and when it no longer
+/// points at the commit it was created at (the old-value guard). `--no-deref`
+/// so a symbolic ref swapped in at that name is removed as itself rather than
+/// followed. A checkout landing between the list and the delete is not caught;
+/// `git branch -D` checks the same way.
+fn remove_branch_minted_for_failed_add(repo_path: &Path, refname: &str, created_at: &str) {
+    let kept = |why: String| {
+        logger::warn(&format!(
+            "dux kept {refname}, which it created for a worktree add that failed, because {why}"
+        ));
+    };
+    let listed = match Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(listed) if listed.status.success() => listed,
+        Ok(listed) => {
+            return kept(format!(
+                "git worktree list failed: {}",
+                String::from_utf8_lossy(&listed.stderr).trim()
+            ));
+        }
+        Err(err) => return kept(format!("git worktree list could not run: {err}")),
+    };
+    let checked_out = format!("branch {refname}");
+    if listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|field| field == checked_out.as_bytes())
+    {
+        return kept("a worktree has it checked out".to_string());
+    }
+    if let Err(err) = run_ref_update(
+        repo_path,
+        &["update-ref", "--no-deref", "-d", refname, created_at],
+    ) {
+        kept(format!("{err:#}"));
+    }
 }
 
 fn worktree_add_command(repo_path: &Path, worktree_path: &Path, branch: &str) -> Command {
@@ -8982,6 +9035,10 @@ mod tests {
             Some("fresh"),
         )
         .expect("the retry should land the worktree");
+        assert!(
+            WORKTREE_ADD_FAULT.with(|slot| slot.borrow().is_none()),
+            "the first add must have run through the injected fault"
+        );
 
         assert_eq!(
             current_branch_opt(&worktree).unwrap().as_deref(),
