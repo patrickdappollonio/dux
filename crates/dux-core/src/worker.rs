@@ -352,6 +352,15 @@ pub struct AgentLaunchFailedData {
     pub message: String,
 }
 
+/// A managed agent and the folder it works in, carried on a pull request
+/// create so the job can name the agent that already holds the pull request's
+/// code.
+#[derive(Clone, Debug)]
+pub struct AgentAtWorktree {
+    pub name: String,
+    pub worktree_path: PathBuf,
+}
+
 #[derive(Clone, Debug)]
 pub enum CreateAgentRequest {
     NewProject {
@@ -375,6 +384,11 @@ pub enum CreateAgentRequest {
         head_branch: String,
         custom_name: Option<String>,
         use_existing_branch: bool,
+        /// Every managed agent of the project, as the engine knows them when
+        /// the create is dispatched, so the job can tell a branch held by an
+        /// agent from one held by anything else. Empty from every constructor;
+        /// the dispatch fills it.
+        agents: Vec<AgentAtWorktree>,
     },
     ForkSession {
         project: Project,

@@ -17025,6 +17025,7 @@ not_a_real_action = ["x"]
                 head_branch: "feature/pr-42".to_string(),
                 custom_name: Some("feature/pr-42".to_string()),
                 use_existing_branch: false,
+                agents: Vec::new(),
             },
             input: TextInput::with_text("feature/pr-42".to_string()),
             randomize_name: false,

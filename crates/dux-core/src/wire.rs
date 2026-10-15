@@ -3764,9 +3764,9 @@ impl Engine {
     ///
     /// `use_existing_branch` is `false`, exactly as the TUI's PR path sets it:
     /// the create worker does its own last-mile
-    /// `use_existing_branch || branch_exists(...)` check, so a head branch that
-    /// already exists locally is attached rather than re-fetched, with no
-    /// pre-computation here. A lookup FAILURE instead produces an error `Status`;
+    /// `use_existing_branch || local_branch_exists(...)` check, so a head branch
+    /// that already exists locally and contains the pull request's head commit
+    /// is attached rather than re-fetched, with no pre-computation here. A lookup FAILURE instead produces an error `Status`;
     /// other reactions return `[]`.
     pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
@@ -3837,6 +3837,7 @@ impl Engine {
                     head_branch: pr.head_ref_name.clone(),
                     custom_name,
                     use_existing_branch: false,
+                    agents: Vec::new(),
                 };
                 // The nested create dispatch mints its own busy from
                 // `current_origin`, but by now (a worker-completion tick) it has

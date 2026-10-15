@@ -1389,6 +1389,7 @@ impl App {
             head_branch: pr.head_ref_name.clone(),
             custom_name: Some(dux_core::bidi::strip_bidi_controls(&pr.head_ref_name)),
             use_existing_branch: false,
+            agents: Vec::new(),
         };
         if let Err(err) = self.open_name_new_agent_prompt(request) {
             self.set_error(format!("{err:#}"));

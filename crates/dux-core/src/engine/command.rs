@@ -593,7 +593,7 @@ impl Engine {
             } => self.delete_project_with_worktrees(&project_id, &project_name),
 
             Command::DispatchCreateAgentRequest {
-                request,
+                mut request,
                 busy_message,
                 term_size,
             } => {
@@ -645,6 +645,25 @@ impl Engine {
                     }
                     _ => None,
                 };
+                // A pull request create tells a branch an agent holds from one
+                // anything else holds, so it needs the project's agents as they
+                // are now. Every pull request create passes through here.
+                if let crate::worker::CreateAgentRequest::PullRequest {
+                    project, agents, ..
+                } = request.as_mut()
+                {
+                    *agents = self
+                        .sessions
+                        .iter()
+                        .filter(|session| session.project_id() == Some(project.id.as_str()))
+                        .filter_map(|session| {
+                            Some(crate::worker::AgentAtWorktree {
+                                name: session.display_label(),
+                                worktree_path: PathBuf::from(session.managed_worktree()?),
+                            })
+                        })
+                        .collect();
+                }
                 // Mint the shared create-agent `HandlerStatusOp`: its opaque id
                 // correlates the dispatch busy, every progress re-emit and the
                 // final the launch-ready and launch-failed handlers resolve from

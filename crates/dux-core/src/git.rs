@@ -1872,29 +1872,50 @@ pub fn branch_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) ->
 /// Whether the commit named by the object id `commit` is in the history of
 /// the local branch `branch` (the tip itself counts).
 ///
-/// Answers only yes or no, and every doubt is a no: a `commit` that is not a
-/// full hexadecimal object id, a commit this clone does not have, a branch that
-/// does not exist, and git failing to run are all refusals, because the caller
-/// adopts something on a yes. It shells out to git, so callers run it in a
-/// background worker. The branch is passed fully qualified as
-/// `refs/heads/<name>`, which cannot begin with a dash, the object id is hex
-/// and cannot either, and the trailing `--` pins the pathspec boundary.
+/// Answers only yes or no, and every doubt is a no: see
+/// [`branch_contains_commit`] for the cases. The caller adopts something on a
+/// yes. It shells out to git, so callers run it in a background worker.
 pub fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str) -> bool {
+    branch_contains_commit(repo_path, commit, branch).unwrap_or(false)
+}
+
+/// Whether the local branch `branch` contains the commit named by the object
+/// id `commit`: the commit is the branch's tip or behind it.
+///
+/// Yes and no are answers; anything else is an error, so a caller that must
+/// tell "does not contain it" from "could not check" can: a `commit` that is
+/// not a full hexadecimal object id, a commit this clone does not have, a
+/// branch that does not exist, and git failing to run. It shells out to git, so
+/// callers run it in a background worker. The branch is passed fully qualified
+/// as `refs/heads/<name>`, which cannot begin with a dash, the object id is hex
+/// and cannot either, and the trailing `--` pins the pathspec boundary.
+pub fn branch_contains_commit(repo_path: &Path, commit: &str, branch: &str) -> Result<bool> {
     let is_object_id =
         matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit());
     if !is_object_id {
-        return false;
+        return Err(anyhow!("\"{commit}\" is not a full commit id"));
     }
     let branch_ref = format!("refs/heads/{branch}");
-    Command::new("git")
+    let out = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(["merge-base", "--is-ancestor", commit, &branch_ref, "--"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.code() == Some(0))
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to ask whether \"{branch}\" contains {commit} for {}",
+                repo_path.display()
+            )
+        })?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "git could not tell whether \"{branch}\" contains {commit}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
 /// Whether any local or `origin` remote-tracking branch lives BELOW `name`,
@@ -1996,7 +2017,7 @@ pub fn worktree_holding_branch(repo_path: &Path, name: &str) -> Result<Option<Br
 /// Whether two paths name the same folder: compared canonically, so a symlink
 /// or a relative spelling cannot tell them apart, and lexically when either
 /// cannot be canonicalized (a worktree whose folder is gone).
-fn same_folder(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => normalize_lexically(a) == normalize_lexically(b),
@@ -2320,6 +2341,51 @@ pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &s
         ));
     }
     Ok(())
+}
+
+/// Fetch the pull request's head into a ref only dux writes and return its
+/// object id, so a caller can compare it with a local branch before deciding
+/// whether to reuse that branch.
+///
+/// The ref (`refs/dux/pull-request-check/<N>`) is deleted again before this
+/// returns; a failed delete is logged and does not fail the call. One create
+/// runs at a time, so two calls never share the ref. It shells out to git and
+/// talks to the network, so callers run it in a background worker.
+pub fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -> Result<String> {
+    let repo = repo_path.to_string_lossy();
+    let check_ref = format!("refs/dux/pull-request-check/{pr_number}");
+    let refspec = format!("+pull/{pr_number}/head:{check_ref}");
+    let output = git_without_auto_maintenance()
+        .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let commit = run_git_capture(
+        repo_path,
+        &["rev-parse", "--verify", "--end-of-options", &check_ref],
+        "read the fetched pull request head",
+    );
+    let deleted = Command::new("git")
+        .args(["-C", repo.as_ref(), "update-ref", "-d", &check_ref])
+        .stdin(Stdio::null())
+        .output();
+    match deleted {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => crate::logger::error(&format!(
+            "could not delete {check_ref} in {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(err) => crate::logger::error(&format!(
+            "could not delete {check_ref} in {}: {err}",
+            repo_path.display()
+        )),
+    }
+    commit
 }
 
 pub fn create_worktree_from_start_point(
@@ -10733,6 +10799,14 @@ mod tests {
             "only an object id is a head commit"
         );
         assert!(!commit_is_in_branch_history(repo.path(), &tip, "missing"));
+
+        assert!(branch_contains_commit(repo.path(), &tip, "feature").unwrap());
+        assert!(branch_contains_commit(repo.path(), &older, "feature").unwrap());
+        assert!(!branch_contains_commit(repo.path(), &elsewhere, "feature").unwrap());
+        assert!(
+            branch_contains_commit(repo.path(), &tip, "missing").is_err(),
+            "a branch that does not exist is a failed check, not a no"
+        );
     }
 
     #[test]

@@ -418,16 +418,27 @@ browser the reference and the name are two fields in one dialog. The name you co
 what the fetch targets: dux fetches the PR's head ref into that local branch, then
 creates a worktree on it.
 
-If the branch already exists locally, from a previous fetch say, dux attaches to it
-without fetching again, and the delete dialog later offers that branch unticked, the way
-it does for any branch you had first. Otherwise the local branch is dux's own, whether
-dux fetched the pull request head or checked out a copy your project had already fetched
-from the remote, and the box is ticked by default. Nothing dux does to it reaches the
-remote: the branch on GitHub, and the pull request itself, are untouched either way.
+If the branch already exists locally, from a previous fetch say, dux first fetches the
+pull request's head and checks that your branch contains it. When it does, dux attaches
+to it, and the delete dialog later offers that branch unticked, the way it does for any
+branch you had first. When it does not, dux leaves your branch alone and makes a fresh
+copy instead, as below, and says so. With no local branch of that name, dux fetches the
+pull request head into a new local branch, even when your project already has a branch of
+that name on the remote, because a pull request from a fork often shares its branch name
+with an unrelated branch there. That local branch is dux's own, and the box is ticked by
+default. Nothing dux does to it reaches the remote: the branch on GitHub, and the pull
+request itself, are untouched either way. If dux cannot fetch the pull request, nothing
+is created and the message says why.
 
-If the pull request's branch is already checked out somewhere, say by another agent you
-started on it, by your project folder, or by a worktree in the middle of a rebase or a
-bisect, git will not check it out a second time. dux makes a fresh copy instead: it
+If another agent already has the pull request's branch checked out and that branch
+contains the pull request's code, dux creates nothing. It tells you which agent has it and
+where, and suggests opening a new tab in that agent, which works in the same folder on the
+same code. An agent on that branch that does not have the pull request's code yet gets the
+fresh copy below.
+
+If the pull request's branch is already checked out somewhere, say by your project
+folder, or by a worktree in the middle of a rebase or a bisect, git will not check it out
+a second time. dux makes a fresh copy instead: it
 fetches the pull request into a new branch named after it, `feat-x-review` for a branch
 called `feat-x` (then `feat-x-review-2` and so on, up to `-review-20`), in a clean
 worktree, which is handy when you want a second agent to review the work with none of the
@@ -446,7 +457,8 @@ as a warning, and you can attach the pull request to the agent yourself.
 > copy is not an older version of the busy branch and nothing in it is simply missing.
 
 A name you typed yourself that is checked out elsewhere, and is not the pull request's
-branch, is refused with the place it is checked out, so you can pick another.
+branch, is refused with the place it is checked out, so you can pick another. So is a
+name you typed that is already a local branch without the pull request's code.
 
 ### How PR status stays fresh
 
