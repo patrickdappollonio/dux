@@ -2603,18 +2603,34 @@ fn add_worktree_retrying_a_pruned_admin_folder(
 /// `git maintenance`) can delete `.git/worktrees/<name>` after git's checkout
 /// step. `worktree add` then exits 0 and leaves a folder whose `.git` file
 /// points at nothing, which every git command inside it answers with "not a
-/// git repository". The folder is removed before the second add only when this
-/// add made it (nothing was at the path beforehand) and git has no
-/// registration for it; a folder that was already there is never touched. A
-/// branch minted for the add stays for the second attempt, which only attaches
-/// it, and the caller rolls it back if that attempt fails too.
+/// git repository". The folder is removed before the second add only when it
+/// is provably the one this add made: nothing was at the path beforehand, and
+/// [`AddedWorktree`] pins it the moment the add returns. A folder that was
+/// already there is never touched. A branch minted for the add stays for the
+/// second attempt, which only attaches it, and the caller rolls it back if
+/// that attempt fails too.
 fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
+    // Every step works on the path under the folder's canonical parent, so a
+    // symlink in the parent chain retargeted mid-way cannot point the cleanup
+    // at another directory without the parent check in the removal seeing it.
+    let name = worktree_path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} does not name a folder", worktree_path.display()))?;
+    let parent = match worktree_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let parent = parent
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", parent.display()))?;
+    let target = parent.join(name);
     let path_was_free = matches!(
-        fs::symlink_metadata(worktree_path),
+        fs::symlink_metadata(&target),
         Err(err) if err.kind() == io::ErrorKind::NotFound
     );
-    add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch)?;
-    if worktree_is_readable(worktree_path) {
+    add_worktree_retrying_a_pruned_admin_folder(repo_path, &target, branch)?;
+    let added = path_was_free.then(|| AddedWorktree::pin(repo_path, &parent, &target));
+    if worktree_is_readable(&target) {
         return Ok(());
     }
     let unreadable = |what_dux_did: &str| {
@@ -2627,32 +2643,39 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
             worktree_path.display()
         )
     };
-    if !path_was_free {
+    let Some(added) = added else {
         return Err(unreadable(
-            "The folder was there before dux added the working copy, so dux left it as it is.",
+            "The folder was already there before dux added the working copy, so git checked \
+             the copy out into it and it now holds a checkout git cannot read. dux did not \
+             remove it because dux did not create it, so check it before you try again.",
         ));
-    }
-    remove_unreadable_worktree(repo_path, worktree_path).map_err(|why| {
-        unreadable(&format!(
-            "dux did not remove the folder because {why}, so check it before you try again."
-        ))
-    })?;
+    };
+    added
+        .and_then(|added| remove_unreadable_worktree(repo_path, &added))
+        .map_err(|why| {
+            unreadable(&format!(
+                "dux did not remove the folder because {why}, so check it before you try again."
+            ))
+        })?;
     logger::warn(&format!(
         "git reported the working copy at {} as created but cannot read it (its admin folder \
          was removed during the add), so dux removed the folder and is adding it once more",
         worktree_path.display()
     ));
-    add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch)?;
-    if worktree_is_readable(worktree_path) {
+    add_worktree_retrying_a_pruned_admin_folder(repo_path, &target, branch)?;
+    let added = AddedWorktree::pin(repo_path, &parent, &target);
+    if worktree_is_readable(&target) {
         return Ok(());
     }
-    Err(match remove_unreadable_worktree(repo_path, worktree_path) {
-        Ok(()) => unreadable("dux tried twice and removed the folder it made both times."),
-        Err(why) => unreadable(&format!(
-            "dux tried twice and left the second folder in place because {why}, so check it \
-             before you try again."
-        )),
-    })
+    Err(
+        match added.and_then(|added| remove_unreadable_worktree(repo_path, &added)) {
+            Ok(()) => unreadable("dux tried twice and removed the folder it made both times."),
+            Err(why) => unreadable(&format!(
+                "dux tried twice and left the second folder in place because {why}, so check \
+                 it before you try again."
+            )),
+        },
+    )
 }
 
 /// Whether git, run inside `worktree_path`, finds a working copy whose top
@@ -2689,19 +2712,106 @@ fn git_printed_path(dir: &Path, args: &[&str]) -> Option<PathBuf> {
     (!printed.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(printed)))
 }
 
-/// Remove the folder an add just made and git cannot read, or say why it was
-/// left. Only a real directory is removed (never a symlink standing at the
-/// path), and only while git has no registration for it, so a copy something
-/// else registered in the meantime stays. `remove_dir_all` does not follow
-/// symlinks inside the folder.
-fn remove_unreadable_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(worktree_path) {
-        Ok(meta) if meta.file_type().is_dir() => {}
-        Ok(_) => return Err("something other than a folder is at that path".to_string()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("it could not be read ({err})")),
+/// The folder one `worktree add` made, pinned so a cleanup removes that
+/// folder and nothing that comes to stand at its path later.
+struct AddedWorktree {
+    /// The canonical folder it was made in.
+    parent: PathBuf,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl AddedWorktree {
+    /// Pin the folder at `path`, inside the canonical `parent`, right after the
+    /// add returns. It counts as the add's only when it is a real folder whose
+    /// `.git` file points into this repository's `worktrees/` admin folder,
+    /// which is what git writes into a copy it has just made, and it is still
+    /// the same folder once that file has been read.
+    fn pin(repo_path: &Path, parent: &Path, path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        let identity = || match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_dir() => Ok((meta.dev(), meta.ino())),
+            Ok(_) => Err("something other than a folder is at that path".to_string()),
+            Err(err) => Err(format!("it could not be read ({err})")),
+        };
+        let (device, inode) = identity()?;
+        let admin = admin_folder_named_by_dot_git(path)?;
+        let roots = admin_worktrees_folders(repo_path);
+        if roots.is_empty() {
+            return Err("git could not name this repository's own folder".to_string());
+        }
+        if !roots
+            .iter()
+            .any(|root| admin.parent() == Some(root.as_path()))
+        {
+            return Err("its .git file does not point at this repository".to_string());
+        }
+        if identity()? != (device, inode) {
+            return Err("the folder at that path changed while dux was checking it".to_string());
+        }
+        Ok(Self {
+            parent: parent.to_path_buf(),
+            path: path.to_path_buf(),
+            device,
+            inode,
+        })
     }
-    match registration_at(repo_path, worktree_path) {
+}
+
+/// The admin folder a working copy's `.git` file names, read as raw bytes and
+/// never through a symlink. A relative record (git's
+/// `worktree.useRelativePaths`) is resolved against the copy itself.
+fn admin_folder_named_by_dot_git(worktree: &Path) -> Result<PathBuf, String> {
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStrExt;
+    let not_git_file = || "its .git entry is not the file git writes into a working copy";
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(worktree.join(".git"))
+        .map_err(|_| not_git_file().to_string())?;
+    if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
+        return Err(not_git_file().to_string());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| format!("its .git file could not be read ({err})"))?;
+    let recorded = bytes
+        .strip_prefix(b"gitdir: ")
+        .map(|rest| rest.strip_suffix(b"\n").unwrap_or(rest))
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(|| not_git_file().to_string())?;
+    Ok(normalize_lexically(
+        &worktree.join(std::ffi::OsStr::from_bytes(recorded)),
+    ))
+}
+
+/// This repository's `<common dir>/worktrees` as git names it and, when it
+/// still exists, canonical. Empty when git cannot say.
+fn admin_worktrees_folders(repo_path: &Path) -> Vec<PathBuf> {
+    let Some(common) = git_printed_path(
+        repo_path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) else {
+        return Vec::new();
+    };
+    let mut folders = vec![normalize_lexically(&common.join("worktrees"))];
+    if let Ok(canonical) = common.canonicalize() {
+        folders.push(canonical.join("worktrees"));
+    }
+    folders
+}
+
+/// Remove the folder an add made and git cannot read, or say why it was left.
+/// It goes only while git has no registration for it, its parent still
+/// resolves to the canonical folder it was made in, and the path still holds a
+/// real directory with the device and inode pinned when the add returned:
+/// anything swapped in since, or reached through a retargeted symlink, stays.
+/// `remove_dir_all` does not follow symlinks inside the folder.
+fn remove_unreadable_worktree(repo_path: &Path, added: &AddedWorktree) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    match registration_at(repo_path, &added.path) {
         Ok(false) => {}
         Ok(true) => return Err("git still has a working copy registered there".to_string()),
         Err(err) => {
@@ -2710,7 +2820,22 @@ fn remove_unreadable_worktree(repo_path: &Path, worktree_path: &Path) -> Result<
             ));
         }
     }
-    fs::remove_dir_all(worktree_path).map_err(|err| format!("removing it failed ({err})"))
+    match added.parent.canonicalize() {
+        Ok(parent) if parent == added.parent => {}
+        Ok(_) => return Err("the folder it sits in now resolves somewhere else".to_string()),
+        Err(err) => return Err(format!("the folder it sits in could not be read ({err})")),
+    }
+    match fs::symlink_metadata(&added.path) {
+        Ok(meta)
+            if meta.file_type().is_dir()
+                && (meta.dev(), meta.ino()) == (added.device, added.inode) => {}
+        Ok(_) => {
+            return Err("the folder at that path is no longer the one the add made".to_string());
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("it could not be read ({err})")),
+    }
+    fs::remove_dir_all(&added.path).map_err(|err| format!("removing it failed ({err})"))
 }
 
 /// The repository's `<common dir>/worktrees/` in every form git may print it:
@@ -9355,6 +9480,29 @@ mod tests {
             add_worktree_new_branch_at(repo.path(), &raw, "raw", None)
                 .expect("a name that is not UTF-8 is still a folder git can read");
         }
+    }
+
+    /// The cleanup removes the folder the add made and nothing that has come
+    /// to stand at its path since: a different folder there is left alone.
+    #[test]
+    fn a_folder_swapped_in_after_the_add_is_never_removed() {
+        let repo = init_test_repo();
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), false);
+        run_git(repo.path(), &["branch", "swapped"]);
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let path = parent.join("swapped");
+        add_worktree_retrying_a_pruned_admin_folder(repo.path(), &path, "swapped").unwrap();
+        let added = AddedWorktree::pin(repo.path(), &parent, &path)
+            .expect("the folder the add just made is pinned");
+
+        fs::rename(&path, parent.join("moved-away")).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), "theirs").unwrap();
+
+        remove_unreadable_worktree(repo.path(), &added)
+            .expect_err("a different folder at the path must not be removed");
+        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "theirs");
     }
 
     /// A failed attach removes the branch dux minted for it, unless something
