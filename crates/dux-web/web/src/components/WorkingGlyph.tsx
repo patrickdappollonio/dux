@@ -10,9 +10,11 @@ import { cn } from "@/lib/utils"
 
 // How a held look arrives once the glyph has landed: the color eases in, and
 // any animation the look carries (the attention blink) starts only after it,
-// so the landing reads as one movement rather than a step.
+// so the landing reads as one movement rather than a step. The delay is
+// important because the look's `animate-*` class sets the `animation`
+// shorthand, which would otherwise reset it to zero.
 const LANDED_LOOK_EASE =
-  "transition-colors duration-200 ease-out [animation-delay:200ms] motion-reduce:transition-none motion-reduce:[animation-delay:0ms]"
+  "transition-colors duration-200 ease-out [animation-delay:200ms]! motion-reduce:transition-none"
 
 /**
  * The one working glyph: the icon pulses while `working`, and a frame around
