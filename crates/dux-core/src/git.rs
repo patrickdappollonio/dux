@@ -2468,7 +2468,7 @@ fn run_worktree_add(mut command: Command) -> io::Result<std::process::Output> {
 /// `git worktree add`, retried ONCE when the attempt lost the race against a
 /// worktree prune.
 ///
-/// Since git 2.54 a detached `git maintenance run --auto`, which any fetch,
+/// Since git 2.54 a detached `git maintenance run --auto`, which a fetch,
 /// commit or merge in the repository can start, prunes worktrees. `worktree
 /// add` creates `.git/worktrees/<name>` and only then writes the `locked` file
 /// that keeps a prune off it, so a prune landing in between deletes the folder
@@ -2476,27 +2476,31 @@ fn run_worktree_add(mut command: Command) -> io::Result<std::process::Output> {
 /// ([`git_without_auto_maintenance`]), but an agent CLI running git in a
 /// sibling worktree still can. Every other failure is returned as it is.
 ///
-/// Before the retry only what the failed attempt itself made is undone, and
-/// only where it can be shown to be that: see [`undo_pruned_worktree_add`] for
-/// the folder and the registration, and [`retry_of_pruned_worktree_add`] for
-/// the branch a `-b` attempt leaves behind.
+/// dux deletes nothing to make room for the retry: no file, folder,
+/// registration or branch. Measured on git 2.53 with a loop deleting admin
+/// folders during adds (standing in for the 2.54 prune), git removes the
+/// checkout folder and admin folder it created on its way out, so
+/// the retry runs only when nothing is left at the target path and no
+/// registration names it. The branch a `-b` attempt leaves is attached rather
+/// than recreated ([`retry_of_pruned_worktree_add`]).
 fn add_worktree_retrying_a_pruned_admin_folder(
     repo_path: &Path,
     worktree_path: &Path,
     add: WorktreeAdd,
 ) -> Result<()> {
-    let path_existed = fs::symlink_metadata(worktree_path).is_ok();
-    // What a branch this attempt mints will point at, read before the attempt
-    // so a later move of HEAD cannot pass for it.
-    let new_branch_before = match add {
+    // Everything that tells this attempt's leftovers from anything else is
+    // read BEFORE it runs; without it there is no retry.
+    let scope = AdminFolderScope::before_add(repo_path, worktree_path);
+    let new_branch = match add {
         WorktreeAdd::Existing(_) => None,
-        WorktreeAdd::NewBranch { branch, start } => Some((
-            local_branch_exists(repo_path, branch),
-            match start {
+        WorktreeAdd::NewBranch { branch, start } => Some(NewBranchBefore {
+            existed: local_branch_exists(repo_path, branch),
+            start: match start {
                 Some(start) => Some(start.to_string()),
                 None => resolve_commit(repo_path, "HEAD"),
             },
-        )),
+            attempt_started: unix_seconds_now(),
+        }),
     };
     let first = run_worktree_add(worktree_add_command(repo_path, worktree_path, add))?;
     if first.status.success() {
@@ -2504,23 +2508,32 @@ fn add_worktree_retrying_a_pruned_admin_folder(
     }
     let git_error = String::from_utf8_lossy(&first.stderr).trim().to_string();
     let failed = || anyhow!("git worktree add failed: {git_error}");
-    if !lost_the_prune_race(repo_path, &git_error) {
+    if !scope
+        .as_ref()
+        .is_some_and(|scope| scope.lost_the_prune_race(&git_error))
+    {
         return Err(failed());
     }
-    if let Err(err) = undo_pruned_worktree_add(repo_path, worktree_path, path_existed) {
+    let declined = |why: &str| {
         logger::warn(&format!(
             "git worktree add for {} lost a race with a worktree prune, and dux did not retry \
-             it: {err:#}",
+             it because {why}. git said: {git_error}",
             worktree_path.display()
         ));
+    };
+    if !matches!(
+        fs::symlink_metadata(worktree_path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound
+    ) {
+        declined("something is still at the worktree path");
         return Err(failed());
     }
-    let Some(retry) = retry_of_pruned_worktree_add(repo_path, add, new_branch_before) else {
-        logger::warn(&format!(
-            "git worktree add for {} lost a race with a worktree prune, and dux did not retry \
-             it because the branch it was creating is not the one that attempt left: {git_error}",
-            worktree_path.display()
-        ));
+    if !matches!(registration_at(repo_path, worktree_path), Ok(false)) {
+        declined("git still has a working copy registered at the worktree path");
+        return Err(failed());
+    }
+    let Some(retry) = retry_of_pruned_worktree_add(repo_path, add, new_branch) else {
+        declined("dux cannot show that the branch it was creating is the one that attempt left");
         return Err(failed());
     };
     logger::warn(&format!(
@@ -2538,95 +2551,141 @@ fn add_worktree_retrying_a_pruned_admin_folder(
     Ok(())
 }
 
-/// Whether git's stderr says the add's own admin folder was taken from under
-/// it. Each message names that folder (`<common dir>/worktrees/<name>`), so a
-/// match is scoped to it and cannot be a problem with the checkout or the
-/// branch; the one message that names only the worktree, "could not find
-/// created worktree", is said of nothing else.
-fn lost_the_prune_race(repo_path: &Path, git_error: &str) -> bool {
-    let Ok(common_dir) = run_git_capture(
-        repo_path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        "find the git directory",
-    ) else {
-        return false;
-    };
-    let common_dir = PathBuf::from(common_dir);
-    let mut admin_roots = vec![common_dir.join("worktrees")];
-    if let Ok(canonical) = common_dir.canonicalize() {
-        admin_roots.push(canonical.join("worktrees"));
-    }
-    git_error.lines().any(|line| {
-        if line.contains("could not find created worktree") {
-            return true;
-        }
-        let names_admin_folder = admin_roots
-            .iter()
-            .any(|root| line.contains(&format!("{}/", root.display())));
-        names_admin_folder
-            && (line.contains("cannot open '")
-                || line.contains("could not open '")
-                || line.contains("not a git repository"))
-    })
+/// Where THIS add's admin folder can be named, read before the add runs.
+struct AdminFolderScope {
+    /// `<common dir>/worktrees` as git may print it: as `rev-parse` reports it
+    /// (relative to the repository for a main checkout, which is how
+    /// `git -C <repo> worktree add` names it), absolute, and canonical.
+    roots: Vec<String>,
+    /// The name git derives from the worktree path's last component; when
+    /// that is taken git appends a number.
+    base_name: String,
+    /// Admin folders already there before the add, which are never this add's.
+    taken: HashSet<String>,
 }
 
-/// Undo what a `worktree add` that lost the prune race made, and nothing else.
-///
-/// Measured on git 2.53, by deleting `.git/worktrees/*` in a loop during adds:
-/// git removes the checkout folder it created and its admin folder itself on
-/// the way out, so usually there is nothing left to undo. What is checked
-/// regardless:
-///
-/// - The checkout folder only if it was NOT there before the attempt, is a
-///   real directory (never followed through a link), and holds nothing but
-///   the `.git` file `worktree add` writes first. Anything more is left alone
-///   and the retry is refused.
-/// - The registration only for this path and only when git calls it prunable
-///   ([`forget_missing_worktree_registration`]), which a live one never is.
-fn undo_pruned_worktree_add(
-    repo_path: &Path,
-    worktree_path: &Path,
-    path_existed: bool,
-) -> Result<()> {
-    if !path_existed {
-        match fs::symlink_metadata(worktree_path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Ok(meta) if meta.is_dir() => remove_unfinished_checkout(worktree_path)?,
-            Ok(_) => {
-                return Err(anyhow!(
-                    "{} is not a directory, so dux left it alone",
-                    worktree_path.display()
-                ));
-            }
-            Err(err) => {
-                return Err(anyhow!("could not read {}: {err}", worktree_path.display()));
-            }
+impl AdminFolderScope {
+    fn before_add(repo_path: &Path, worktree_path: &Path) -> Option<Self> {
+        let printed = run_git_capture(
+            repo_path,
+            &["rev-parse", "--git-common-dir"],
+            "find the git directory",
+        )
+        .ok()?;
+        let absolute = PathBuf::from(
+            run_git_capture(
+                repo_path,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                "find the git directory",
+            )
+            .ok()?,
+        );
+        let mut roots = vec![
+            format!("{printed}/worktrees/"),
+            format!("{}/worktrees/", absolute.display()),
+        ];
+        if let Ok(canonical) = absolute.canonicalize() {
+            roots.push(format!("{}/worktrees/", canonical.display()));
         }
+        let taken = match fs::read_dir(absolute.join("worktrees")) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<io::Result<HashSet<_>>>()
+                .ok()?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => HashSet::new(),
+            Err(_) => return None,
+        };
+        Some(Self {
+            roots,
+            base_name: worktree_path.file_name()?.to_string_lossy().into_owned(),
+            taken,
+        })
     }
-    forget_missing_worktree_registration(repo_path, worktree_path)
+
+    /// Whether `name` can be the admin folder this add made.
+    fn is_own_name(&self, name: &str) -> bool {
+        let Some(suffix) = name.strip_prefix(self.base_name.as_str()) else {
+            return false;
+        };
+        suffix.bytes().all(|byte| byte.is_ascii_digit()) && !self.taken.contains(name)
+    }
+
+    /// Whether git's stderr says THIS add's admin folder was taken from under
+    /// it. A line counts only when it names that folder (a sibling's never
+    /// matches) in one of the ways git fails to use a folder that is gone, or
+    /// is git's own whole-line "could not find created worktree" for its name.
+    /// Messages that name no path are never read as the race.
+    fn lost_the_prune_race(&self, git_error: &str) -> bool {
+        const GONE: [&str; 5] = [
+            "could not open '",
+            "cannot open '",
+            "could not create directory of '",
+            "Unable to create '",
+            "not a git repository",
+        ];
+        git_error.lines().any(|line| {
+            let line = line.trim_end();
+            if let Some(name) = line
+                .strip_prefix("fatal: could not find created worktree '")
+                .or_else(|| line.strip_prefix("error: could not find created worktree '"))
+                .and_then(|rest| rest.strip_suffix('\''))
+            {
+                return self.is_own_name(name);
+            }
+            GONE.iter().any(|gone| line.contains(gone)) && self.names_own_folder(line)
+        })
+    }
+
+    fn names_own_folder(&self, line: &str) -> bool {
+        self.roots.iter().any(|root| {
+            line.match_indices(root.as_str()).any(|(at, _)| {
+                // The root has to start a path, so `.git/worktrees/` is never
+                // read inside some other repository's absolute path.
+                let starts_a_path = line[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|before| matches!(before, ' ' | '\'' | '"'));
+                let name = line[at + root.len()..]
+                    .split(['/', '\'', '"', ' '])
+                    .next()
+                    .unwrap_or("");
+                starts_a_path && self.is_own_name(name)
+            })
+        })
+    }
 }
 
-fn remove_unfinished_checkout(worktree_path: &Path) -> Result<()> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(worktree_path)? {
-        entries.push(entry?);
-    }
-    let only_git_file = match entries.as_slice() {
-        [] => true,
-        [entry] => entry.file_name() == ".git" && entry.file_type()?.is_file(),
-        _ => false,
-    };
-    if !only_git_file {
+/// Whether git has a worktree registered at `worktree_path`.
+fn registration_at(repo_path: &Path, worktree_path: &Path) -> Result<bool> {
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()?;
+    if !listed.status.success() {
         return Err(anyhow!(
-            "{} already holds files, so dux left it alone",
-            worktree_path.display()
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&listed.stderr).trim()
         ));
     }
-    if let [entry] = entries.as_slice() {
-        fs::remove_file(entry.path())?;
-    }
-    fs::remove_dir(worktree_path)?;
-    Ok(())
+    Ok(parse_worktree_registrations(&listed.stdout)
+        .iter()
+        .any(|entry| same_worktree_path(&entry.path, worktree_path)))
+}
+
+/// What a `-b` add's branch looked like before the add ran.
+struct NewBranchBefore {
+    existed: bool,
+    /// The commit the branch is to start from.
+    start: Option<String>,
+    /// Whole seconds, as a reflog records them.
+    attempt_started: u64,
+}
+
+fn unix_seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The add to run again after a lost prune race, or `None` when it is not safe
@@ -2638,26 +2697,61 @@ fn remove_unfinished_checkout(worktree_path: &Path) -> Result<()> {
 ///
 /// A `-b` add creates its branch BEFORE the folder, so a failed one leaves the
 /// branch, and running the same add again would fail with "already exists".
-/// It is ATTACHED instead, which deletes nothing, but only when it is provably
-/// the branch this attempt minted: absent before the attempt and pointing at
-/// exactly the commit it was to start from. Anything else is somebody else's
-/// branch and no retry runs.
+/// It is ATTACHED instead, which deletes nothing, and only when it is shown to
+/// be the branch this attempt minted: absent before the attempt, and its
+/// reflog holding exactly one entry, a creation at the start commit made after
+/// the attempt began. No reflog (`core.logAllRefUpdates` off), or anything
+/// more in it, means no retry. A window remains between this check and the
+/// attach in which somebody else could move the branch; the attach would then
+/// check out their commit, which is the same thing a plain existing-branch
+/// add of that name does.
 fn retry_of_pruned_worktree_add<'a>(
     repo_path: &Path,
     add: WorktreeAdd<'a>,
-    new_branch_before: Option<(bool, Option<String>)>,
+    new_branch: Option<NewBranchBefore>,
 ) -> Option<WorktreeAdd<'a>> {
     let WorktreeAdd::NewBranch { branch, .. } = add else {
         return Some(add);
     };
-    let (existed_before, expected) = new_branch_before?;
-    match resolve_commit(repo_path, &format!("refs/heads/{branch}")) {
-        None => Some(add),
-        Some(now) if !existed_before && expected.as_deref() == Some(now.as_str()) => {
-            Some(WorktreeAdd::Existing(branch))
-        }
-        Some(_) => None,
+    let before = new_branch?;
+    let refname = format!("refs/heads/{branch}");
+    let Some(now) = resolve_commit(repo_path, &refname) else {
+        return Some(add);
+    };
+    if before.existed || before.start.as_deref() != Some(now.as_str()) {
+        return None;
     }
+    let reflog = run_git_capture(
+        repo_path,
+        &[
+            "log",
+            "--walk-reflogs",
+            "--no-show-signature",
+            "--date=unix",
+            "--format=%H %gd %gs",
+            &refname,
+            "--",
+        ],
+        "read the branch's reflog",
+    )
+    .ok()?;
+    let mut entries = reflog.lines();
+    let (only, None) = (entries.next()?, entries.next()) else {
+        return None;
+    };
+    let (commit, rest) = only.split_once(' ')?;
+    let (selector, subject) = rest.split_once(' ')?;
+    // `<branch>@{<seconds>}`, the name shortened however git likes.
+    let created_at: u64 = selector
+        .rsplit_once("@{")?
+        .1
+        .strip_suffix('}')?
+        .parse()
+        .ok()?;
+    (commit == now
+        && subject.starts_with("branch: Created from")
+        && created_at >= before.attempt_started)
+        .then_some(WorktreeAdd::Existing(branch))
 }
 
 /// The commit `rev` names, or `None` when it names none.
@@ -8965,8 +9059,11 @@ mod tests {
     /// admin folder; the add dies, git cleans up the checkout folder, and the
     /// `-b` branch it already created stays. The first add here really runs and
     /// really loses its admin folder (a hook deletes it), so git leaves exactly
-    /// that; only the stderr is swapped for the line a real prune race prints,
-    /// because the hook can only strike after the moment a prune can.
+    /// that. Only the stderr is swapped, because a hook can strike no earlier
+    /// than git's checkout step, after the `locked` write a prune races: it is
+    /// replaced with what git 2.53 prints when the folder vanishes before that
+    /// write under `git -C <repo> worktree add` (captured with fault injection),
+    /// which names the folder RELATIVE to the repository.
     #[test]
     fn worktree_add_that_loses_the_prune_race_is_retried_once() {
         let repo = init_test_repo();
@@ -9013,9 +9110,15 @@ mod tests {
                     .env("GIT_CONFIG_VALUE_0", &hooks_path)
                     .output()?;
                 assert!(!output.status.success(), "the struck add should fail");
-                let admin = fs::read_to_string(&struck).unwrap();
+                let admin = PathBuf::from(fs::read_to_string(&struck).unwrap());
+                let name = admin.file_name().unwrap().to_string_lossy().into_owned();
                 Ok(std::process::Output {
-                    stderr: format!("fatal: not a git repository: {admin}\n").into_bytes(),
+                    stderr: format!(
+                        "Preparing worktree (new branch 'fresh')\n\
+                         fatal: could not open '.git/worktrees/{name}/locked' for writing: \
+                         No such file or directory\n"
+                    )
+                    .into_bytes(),
                     ..output
                 })
             }));
