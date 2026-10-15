@@ -9071,6 +9071,76 @@ mod tests {
         );
     }
 
+    /// A failed attach removes the branch dux minted for it, unless something
+    /// checked that branch out in the meantime: deleting it then would leave
+    /// that worktree on a branch that no longer exists.
+    #[test]
+    fn a_failed_worktree_add_keeps_its_minted_branch_only_while_it_is_checked_out() {
+        let repo = init_test_repo();
+        let head = head_commit(repo.path()).unwrap();
+        let branch_exists = |name: &str| {
+            test_support::git_command()
+                .args(["rev-parse", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{name}"))
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        };
+
+        // Something already sits at the path, so the add fails with the branch
+        // checked out nowhere.
+        let occupied = repo.path().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("file"), "x").unwrap();
+        add_worktree_new_branch_at(repo.path(), &occupied, "orphan", None)
+            .expect_err("an occupied path fails the add");
+        assert!(
+            !branch_exists("orphan"),
+            "the minted branch must be removed"
+        );
+
+        // Another worktree checks the branch out between dux creating it and
+        // attaching it, so dux's own attach then fails for real.
+        let other = repo.path().join("other");
+        let other_for_fault = other.clone();
+        let repo_for_fault = repo.path().to_path_buf();
+        WORKTREE_ADD_FAULT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |command: &mut Command| {
+                run_git(
+                    &repo_for_fault,
+                    &[
+                        "worktree",
+                        "add",
+                        other_for_fault.to_str().unwrap(),
+                        "--",
+                        "taken",
+                    ],
+                );
+                command.output()
+            }));
+        });
+        let ours = repo.path().join("ours");
+        add_worktree_new_branch_at(repo.path(), &ours, "taken", None)
+            .expect_err("a branch checked out elsewhere cannot be attached");
+        assert!(
+            WORKTREE_ADD_FAULT.with(|slot| slot.borrow().is_none()),
+            "the add must have run through the injected checkout"
+        );
+        assert!(!ours.exists(), "the failed add leaves nothing at its path");
+        assert!(branch_exists("taken"), "a checked-out branch must be kept");
+        assert_eq!(
+            run_git_capture(repo.path(), &["rev-parse", "refs/heads/taken"], "read").unwrap(),
+            head
+        );
+        assert_eq!(
+            current_branch_opt(&other).unwrap().as_deref(),
+            Some("taken"),
+            "the other worktree must still be on its branch"
+        );
+        assert_eq!(head_commit(&other).unwrap(), head);
+    }
+
     #[test]
     fn switch_branch_reads_an_option_looking_branch_as_a_ref() {
         let repo = init_test_repo();
