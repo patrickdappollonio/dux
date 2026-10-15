@@ -4300,8 +4300,13 @@ function restoreSessionScopedReconnect(
 // `SessionView.last_focused_tab`) by routing through `selectTab` when that tab
 // is still live, so the wiring matches an explicit tab click. A read of the
 // memory only: `selectTab` owns persisting an actual switch.
+//
+// Every caller is a user's request for the agent, so it also lets go of a tab
+// resting on the idle screen after a clean exit (`endedInViewTab`): clicking the
+// agent already in view is how the user asks for it to start again.
 export function selectSession(id: string | null): void {
-  selectSessionRoute(id, undefined)
+  const extra = id === null ? undefined : { endedInViewTab: null }
+  selectSessionRoute(id, undefined, undefined, extra)
 }
 
 // The screen half of a route commit. A selection carries it so the target and
@@ -4493,6 +4498,13 @@ export function selectTab(
   if (prev !== sessionId) void restartChanges(sessionId)
   if (opts?.persist === false) return
   persistFocusedTab(sessionId, isSlotTabOf(sessionId, tabId) ? null : tabId)
+}
+
+// A click on a pill in the tab strip. Like `selectSession`, it is a request for
+// the tab, so a tab resting on the idle screen after a clean exit lets go and
+// can start again; `selectTab` itself keeps the rest for its internal callers.
+export function clickTab(sessionId: string, tabId: string): void {
+  selectTab(sessionId, tabId, { extra: { endedInViewTab: null } })
 }
 
 // Per-session bookkeeping for the fire-and-forget focus-tab PUT: only the

@@ -373,6 +373,30 @@ describe("a clean exit of the viewed agent keeps the user on it", () => {
     mod.selectSession(null)
     expect(mod.getSnapshot().endedInViewTab).toBeNull()
   })
+
+  it("lets a click on the agent already in view start it again", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "active" },
+    ])
+    await consumeBootOpen(mod)
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine?.sessions[0]?.status).toBe("detached")
+    })
+    mod.settleSlotTabExit("s1", "s1")
+    expect(mod.getSnapshot().endedInViewTab).toBe("s1")
+
+    // The sidebar row click on the same agent is a request for it, so the rest
+    // lets go and the tab can launch.
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().endedInViewTab).toBeNull()
+
+    // The same holds for a click on its pill in the tab strip.
+    mod.settleSlotTabExit("s1", "s1")
+    mod.clickTab("s1", "s1")
+    expect(mod.getSnapshot().endedInViewTab).toBeNull()
+  })
 })
 
 describe("reconnect deep-link guard rails", () => {

@@ -21,10 +21,10 @@ import {
 } from "@/lib/agentTabs"
 import {
   addTab,
+  clickTab,
   openCloseTab,
   openStopTab,
   retargetTab,
-  selectTab,
   useDux,
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
@@ -154,7 +154,7 @@ function TabPill({
   const soleTab = session.tabs.length <= 1
 
   function select() {
-    selectTab(session.id, tab.id)
+    clickTab(session.id, tab.id)
   }
 
   return (
