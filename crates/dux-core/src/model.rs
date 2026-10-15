@@ -727,10 +727,9 @@ impl AgentSession {
         }
         match &self.workspace {
             AgentWorkspace::Managed(managed) => managed.branch_name.clone(),
-            AgentWorkspace::Folder(folder) => std::path::Path::new(&folder.folder_path)
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| folder.folder_path.clone()),
+            AgentWorkspace::Folder(folder) => crate::git::standalone_agent_name_from_folder(
+                std::path::Path::new(&folder.folder_path),
+            ),
         }
     }
 
@@ -1662,12 +1661,15 @@ mod tests {
             ("/home/someone/notes/", "notes"),
             // A trailing "." is not a name of its own.
             ("/home/someone/notes/.", "notes"),
+            // The folder's name is converted into a valid agent name, the same
+            // one creation gives an agent nobody named.
+            ("/home/someone/My Notes", "My-Notes"),
             // A path whose last component is ".." has no name at all, so the
-            // label falls back to the whole path rather than the word "..".
-            ("/home/someone/notes/..", "/home/someone/notes/.."),
+            // label is the fixed fallback rather than the word "..".
+            ("/home/someone/notes/..", "standalone-agent"),
             // Nor has the root, nor the empty string.
-            ("/", "/"),
-            ("", ""),
+            ("/", "standalone-agent"),
+            ("", "standalone-agent"),
         ] {
             assert_eq!(
                 folder_session(None, path).display_label(),

@@ -172,7 +172,6 @@ import type {
 import { supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   renameBlockedReason,
-  renameDraftValue,
   renamePayload,
 } from "@/lib/renameAgent"
 
@@ -5254,7 +5253,7 @@ function renameTargetBranchNamed(): boolean {
 }
 
 export function setRenameDraft(raw: string): void {
-  setState({ renameDraft: renameDraftValue(raw, renameTargetBranchNamed()) })
+  setState({ renameDraft: sanitizeAgentName(raw) })
 }
 
 export function setRenameBranch(renameBranch: boolean): void {

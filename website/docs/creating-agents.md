@@ -54,10 +54,11 @@ to make pet names the default for every new agent, turn it on permanently:
 enable_randomized_pet_name_by_default = true
 ```
 
-A standalone agent has no branch, so its name is a plain label taken exactly as you type
-it, punctuation included. Leave it empty (at creation, or when renaming later) and dux
-names it after the folder rather than
-inventing a pet name.
+A standalone agent has no branch, but its name follows the same rules anyway: the same
+characters, and spaces still become dashes. Leave it empty (at creation, or when renaming
+later) and dux names it after the folder rather than inventing a pet name, turning the
+folder's name into a valid one along the way: `My Notes! (2026)` becomes `My-Notes-2026`,
+and a folder with nothing usable in its name gives `standalone-agent`.
 
 This is the naming prompt in the terminal UI, with the pet-name checkbox ticked and the
 generated name filled in:
@@ -70,11 +71,12 @@ Rename an agent from its `⋯` menu in the browser, or with `rename-agent` in th
 UI. Both open the same dialog and follow the same rules.
 
 - **The name is what the agent shows.** The field holds the custom name you gave it, empty
-  when there is none, with the name it falls back to shown faintly behind it. For an agent
-  with a branch, the name follows the same rules as a branch name whether or not you also
-  rename the branch.
+  when there is none, with the name it falls back to shown faintly behind it. The name
+  follows the same rules as a branch name whether or not you also rename the branch, and
+  so does a standalone agent's, which has no branch at all.
 - **Leave it empty to go back.** An agent with a branch shows its branch name again; a
-  standalone agent shows its folder's name.
+  standalone agent shows its folder's name, turned into a valid name the same way as at
+  creation.
 - **Also rename the git branch** is a checkbox under the field, unticked by default, for
   agents that have a branch. Tick it and dux renames the branch to the new name as well.
   The name can't be empty then, because a branch can't be renamed to nothing. Once the
@@ -86,8 +88,7 @@ UI. Both open the same dialog and follow the same rules.
 > request, or a copy pushed to a remote, both stay on the old name, and the checkbox says
 > so before you tick it. Push the renamed branch and update the pull request yourself.
 
-A standalone agent has no branch, so its dialog has no checkbox, and any name you type is
-kept exactly as written.
+A standalone agent has no branch, so its dialog has no checkbox.
 
 ## Creating a new agent from scratch
 

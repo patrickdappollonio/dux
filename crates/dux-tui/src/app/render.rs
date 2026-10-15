@@ -14444,16 +14444,13 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.engine.sessions[0].title = Some("My Notes".to_string());
+        app.engine.sessions[0].title = Some("My-Notes".to_string());
         app.engine.sessions[0].workspace =
             dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
                 folder_path: "/home/someone/My Notes".to_string(),
             });
         app.open_rename_session().expect("open the rename modal");
 
-        // The pre-filled name survives verbatim: the refname char map, which
-        // rewrites a space to a dash, must not be attached here or the name dux
-        // itself derived from the folder could not be submitted as shown.
         let PromptState::RenameSession {
             input,
             rename_branch,
@@ -14463,7 +14460,7 @@ mod tests {
         else {
             panic!("expected the rename modal, got {:?}", app.prompt);
         };
-        assert_eq!(input.text, "My Notes");
+        assert_eq!(input.text, "My-Notes");
         assert!(!*branch_named, "a standalone agent has no branch");
         assert!(!*rename_branch, "so no branch rename is requested");
 
@@ -14483,7 +14480,7 @@ mod tests {
             "the branch checkbox must be absent, not present-and-inert; got:\n{rendered}"
         );
         assert!(
-            rendered.contains("My Notes"),
+            rendered.contains("My-Notes"),
             "and the pre-filled name is on screen; got:\n{rendered}"
         );
 

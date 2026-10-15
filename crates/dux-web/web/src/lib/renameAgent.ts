@@ -2,7 +2,6 @@
 // read the same answers. The terminal UI's dialog follows the same rules
 // through `dux_core::engine::rename_agent`.
 
-import { sanitizeAgentName } from "./agentName"
 import { chip, type Prose } from "./prose"
 
 /**
@@ -37,13 +36,6 @@ export function renameBranchNoteProse(
     ]
   }
   return [...lead, " to the new name."]
-}
-
-/** What the name field holds after a keystroke. Only a name that can become a
- * branch is held to the refname characters; a standalone agent's name is a
- * label and is kept exactly as typed. */
-export function renameDraftValue(raw: string, branchNamed: boolean): string {
-  return branchNamed ? sanitizeAgentName(raw) : raw
 }
 
 /** Why the dialog cannot confirm, or `null` when it can. */

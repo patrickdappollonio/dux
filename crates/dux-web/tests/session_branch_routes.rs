@@ -630,7 +630,7 @@ async fn a_branch_rename_to_an_empty_name_is_refused() {
 }
 
 /// Without the box the branch is left alone, and a standalone agent's name is
-/// taken verbatim, spaces and all, whatever the box says.
+/// held to the agent-name rules, whatever the box says.
 #[tokio::test]
 async fn a_rename_without_the_box_leaves_the_branch_alone() {
     let f = boot().await;
@@ -653,6 +653,15 @@ async fn a_rename_without_the_box_leaves_the_branch_alone() {
         &connection,
     )
     .await;
+    assert_eq!(status, 400, "{body}");
+
+    let (status, body) = rename(
+        f.addr,
+        "folder",
+        serde_json::json!({ "title": "My-Notes-2026", "rename_branch": true }),
+        &connection,
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(session_title(f.addr, "folder").await, "My Notes (2026)");
+    assert_eq!(session_title(f.addr, "folder").await, "My-Notes-2026");
 }

@@ -38,7 +38,7 @@ impl App {
     pub(crate) fn open_standalone_agent_name_prompt(&mut self, path: String) {
         self.prompt = PromptState::NameStandaloneAgent {
             folder: path,
-            input: TextInput::new(),
+            input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
         };
     }
 
@@ -54,22 +54,35 @@ impl App {
         let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
             return None;
         };
-        // The typed name travels verbatim: no branch is created here, so the
-        // ref-name rules deliberately do not apply, and an empty field means
-        // the folder's own name. The provider is the global default,
-        // retargetable afterwards.
+        // No branch is created here, but the name follows the agent-name rules
+        // the engine enforces, and an empty field means the folder's own name
+        // converted into one. The provider is the global default, retargetable
+        // afterwards.
         Some(self.engine.plan_standalone_agent(folder, &input.text, None))
     }
 
     /// Confirm on the standalone name field: create the agent and close.
     ///
-    /// The prompt closes either way, refusal included, mirroring the web
-    /// dialog, which closes on Create and reports the server's refusal as a
-    /// toast rather than holding the folder hostage behind an open form.
+    /// A name the agent-name rules refuse (the char map lets a trailing `/`
+    /// through, mid-typing) keeps the prompt open with the refusal, as the
+    /// New agent prompt does and as the web's disabled Create button does.
+    /// Every other refusal closes it, mirroring the web dialog, which closes on
+    /// Create and reports the server's refusal as a toast rather than holding
+    /// the folder hostage behind an open form.
     pub(crate) fn confirm_standalone_agent_name(&mut self) {
         let Some(planned) = self.planned_standalone_agent_create() else {
             return;
         };
+        let invalid_name = matches!(
+            &self.prompt,
+            PromptState::NameStandaloneAgent { input, .. }
+                if !input.text.trim().is_empty()
+                    && !crate::git::is_valid_agent_name(input.text.trim())
+        );
+        if invalid_name && let Err(err) = planned {
+            self.set_error(err.to_string());
+            return;
+        }
         self.prompt = PromptState::None;
         match planned {
             Ok((request, busy_message)) => {

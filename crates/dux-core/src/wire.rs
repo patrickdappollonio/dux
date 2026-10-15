@@ -3697,11 +3697,7 @@ impl Engine {
             None
         } else {
             if !crate::git::is_valid_agent_name(trimmed) {
-                anyhow::bail!(
-                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                     underscores and slashes; it must start with a letter or digit, must \
-                     not contain \"//\", and must not end with \"/\"."
-                );
+                anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(trimmed));
             }
             Some(trimmed.to_string())
         };
@@ -4969,11 +4965,7 @@ impl Engine {
             None
         } else {
             if !crate::git::is_valid_agent_name(trimmed) {
-                anyhow::bail!(
-                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                     underscores and slashes; it must start with a letter or digit, must \
-                     not contain \"//\", and must not end with \"/\"."
-                );
+                anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(trimmed));
             }
             Some(trimmed.to_string())
         };
@@ -5034,11 +5026,7 @@ impl Engine {
             anyhow::bail!("Agent name cannot be empty.");
         }
         if !crate::git::is_valid_agent_name(trimmed) {
-            anyhow::bail!(
-                "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                 underscores and slashes; it must start with a letter or digit, must \
-                 not contain \"//\", and must not end with \"/\"."
-            );
+            anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(trimmed));
         }
         let name = trimmed.to_string();
         let busy_message = crate::status_text![
@@ -5092,11 +5080,7 @@ impl Engine {
             anyhow::bail!("Agent name cannot be empty.");
         }
         if !crate::git::is_valid_agent_name(trimmed) {
-            anyhow::bail!(
-                "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                 underscores and slashes; it must start with a letter or digit, must \
-                 not contain \"//\", and must not end with \"/\"."
-            );
+            anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(trimmed));
         }
         let display_name = trimmed.to_string();
         let busy_message = crate::status_text![
@@ -5631,44 +5615,49 @@ mod tests {
     #[test]
     fn a_standalone_agent_without_a_typed_name_is_named_after_its_folder() {
         let name = crate::git::standalone_agent_title("", Path::new("/home/ada/My Notes! (2026)"));
-        assert!(!name.is_empty(), "a standalone agent always has a name");
-        assert!(
-            name.contains("Notes"),
-            "and it comes from the folder, got {name:?}"
-        );
+        assert_eq!(name, "My-Notes-2026", "it comes from the folder");
+        assert!(crate::git::is_valid_agent_name(&name), "{name:?}");
     }
 
-    /// A folder whose name sanitizes away to nothing still yields a name: the
-    /// invariant is non-empty, not "whatever the sanitizer produced".
+    /// A folder whose name converts away to nothing still yields a valid name:
+    /// the invariant is a valid, non-empty name, not "whatever the conversion
+    /// produced".
     #[test]
     fn a_folder_whose_name_sanitizes_to_nothing_still_gets_a_name() {
-        for path in ["/home/ada/!!!", "/", "/home/ada/   "] {
+        for path in ["/home/ada/!!!", "/", "/home/ada/   ", "/home/ada/日本"] {
             let name = crate::git::standalone_agent_title("", Path::new(path));
-            assert!(!name.is_empty(), "{path} produced an empty name");
+            assert!(
+                crate::git::is_valid_agent_name(&name),
+                "{path} produced {name:?}"
+            );
         }
     }
 
-    /// Folder names legally contain characters a branch name cannot, and a
-    /// standalone agent has no branch, so the branch validator must not be
-    /// applied to a typed name here.
+    /// A standalone agent creates no branch, but its name follows the same
+    /// rules as every other agent's, and the server holds it to them, so a
+    /// client that skips the input field's rules (the command line) cannot
+    /// create one with a name the field would never let through.
     #[test]
-    fn a_typed_name_is_not_held_to_the_branch_naming_rules() {
+    fn a_typed_name_is_held_to_the_agent_naming_rules() {
         let (mut engine, _tmp) = test_engine();
         let folder = tempfile::tempdir().unwrap();
-        let outcome = engine.apply_wire(WireCommand::CreateStandaloneAgent {
+        let create = |name: &str| WireCommand::CreateStandaloneAgent {
             folder: folder.path().to_string_lossy().to_string(),
-            name: "Sort the downloads!".to_string(),
+            name: name.to_string(),
             provider: None,
-        });
-        assert!(
-            outcome.is_ok(),
-            "no branch is created, so no branch rule applies: {:?}",
-            outcome.err().map(|e| e.to_string())
-        );
+        };
+        let message = match engine.apply_wire(create("Sort the downloads!")) {
+            Ok(_) => panic!("an invalid name must be refused"),
+            Err(err) => err.to_string(),
+        };
         assert_eq!(
-            crate::git::standalone_agent_title("Sort the downloads!", Path::new("/anywhere")),
-            "Sort the downloads!",
-            "a typed name is used verbatim once trimmed"
+            message,
+            crate::git::invalid_agent_name_refusal("Sort the downloads!"),
+            "with the sentence every other create refuses an invalid name with"
+        );
+        assert!(
+            engine.apply_wire(create("sort-downloads")).is_ok(),
+            "a valid name is accepted"
         );
     }
 
@@ -12706,42 +12695,32 @@ mod tests {
         assert_eq!(engine.sessions[0].branch_name(), Some("feat"));
     }
 
-    /// A STANDALONE agent's title is a label, not a refname, so the wire
-    /// rename is not held to the refname rules either.
-    ///
-    /// The asymmetry this pins was a one-way door: creation takes a standalone
-    /// title verbatim (folder names legally contain spaces and punctuation a
-    /// ref cannot), so a title dux itself minted from a folder called
-    /// `My Notes` could not be typed back over the wire.
+    /// A STANDALONE agent renames no branch, but its name follows the same
+    /// rules as every other agent's, so the wire refuses an invalid one with
+    /// the same sentence and leaves the name alone.
     #[test]
-    fn apply_wire_rename_session_takes_a_standalone_title_verbatim() {
+    fn apply_wire_rename_session_holds_a_standalone_title_to_the_agent_naming_rules() {
         let (mut engine, _tmp) = test_engine();
-        let session = sample_standalone_session("sa1", "/home/someone/My Notes");
+        let mut session = sample_standalone_session("sa1", "/home/someone/My Notes");
+        session.title = Some("My-Notes".to_string());
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        engine
+        let err = engine
             .apply_wire(WireCommand::RenameSession {
                 session_id: "sa1".to_string(),
                 title: "  My Notes (2026)  ".to_string(),
                 rename_branch: false,
             })
-            .expect("a standalone rename is not a refname");
+            .map(|_| ())
+            .unwrap_err();
         assert_eq!(
-            engine.sessions[0].title.as_deref(),
-            Some("My Notes (2026)"),
-            "trimmed, and otherwise taken verbatim"
+            err.to_string(),
+            crate::engine::branch_rename_refusal(
+                &crate::engine::BranchRenameRejection::MalformedName
+            ),
         );
-        let reloaded = engine.session_store.load_sessions().expect("reload");
-        assert_eq!(
-            reloaded
-                .iter()
-                .find(|s| s.id == "sa1")
-                .expect("row")
-                .title
-                .as_deref(),
-            Some("My Notes (2026)")
-        );
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("My-Notes"));
     }
 
     #[test]

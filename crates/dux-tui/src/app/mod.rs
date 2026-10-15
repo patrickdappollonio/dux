@@ -2974,11 +2974,10 @@ pub(crate) enum PromptState {
         focus: RenameSessionFocus,
         /// Whether this agent's name is also a git branch name.
         ///
-        /// False for a standalone agent, and it changes three things at once:
-        /// the branch checkbox is ABSENT (there is no branch to rename), the
-        /// modal is therefore single-control, and the field takes the name
-        /// verbatim instead of through the refname char map, because the label
-        /// dux itself derived from the folder may legally contain a space.
+        /// False for a standalone agent, and it changes two things at once:
+        /// the branch checkbox is ABSENT (there is no branch to rename), and
+        /// the modal is therefore single-control. The field's agent-name rules
+        /// are the same either way.
         branch_named: bool,
         /// The open pull request dux knows for the branch, which a branch
         /// rename leaves on the old name.
@@ -7106,16 +7105,11 @@ impl App {
                 bare.display_label()
             };
             let current = session.title.clone().unwrap_or_default();
-            // The refname char map is applied only where the name becomes a
-            // branch. For a standalone agent it would rewrite the space in the
-            // label dux itself derived from the folder, so the pre-filled name
-            // could not be re-submitted as typed.
-            let input = if branch_named {
-                TextInput::with_text(current).with_char_map(crate::git::agent_name_char_map)
-            } else {
-                TextInput::with_text(current)
-            }
-            .with_placeholder(fallback);
+            // Every agent's name follows the same rules, a standalone agent's
+            // included, even though no branch is renamed for one.
+            let input = TextInput::with_text(current)
+                .with_char_map(crate::git::agent_name_char_map)
+                .with_placeholder(fallback);
             self.prompt = PromptState::RenameSession {
                 open_pr: self.engine.rename_open_pull_request(&session.id),
                 session_id: session.id.clone(),

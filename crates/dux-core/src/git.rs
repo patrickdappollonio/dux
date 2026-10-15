@@ -5950,42 +5950,74 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
 }
 
 /// The display name a STANDALONE agent gets: the typed name when the user gave
-/// one, and otherwise a sanitized form of the folder's own name.
+/// one, and otherwise the folder's own name converted into a valid agent name.
 ///
 /// The invariant this exists to hold is that the result is NEVER EMPTY. Every
 /// row label in both surfaces falls back through the branch name when there is
 /// no title, and a standalone agent has no branch, so an empty title would
 /// render a nameless row.
 ///
-/// The typed name is used verbatim once trimmed: a standalone agent creates no
-/// branch, so [`is_valid_agent_name`] deliberately does NOT apply. Folder names
-/// legally contain spaces, dots and punctuation that a ref name cannot.
-///
-/// The sanitizer is gentle on purpose, because the result is a label and not a
-/// path or a ref: it only collapses whitespace and trims. When the folder's
-/// name has nothing usable left (the filesystem root, a name of only
-/// whitespace), it falls back to a fixed word rather than an empty string.
-///
-/// Char-based throughout: folder names are arbitrary UTF-8.
+/// A standalone agent creates no branch, but its name follows the same
+/// [`is_valid_agent_name`] rules as every other agent's. The typed name comes
+/// back trimmed and is NOT checked here: refusing it is the create's job, with
+/// the sentence every other create gives ([`invalid_agent_name_refusal`]).
 pub fn standalone_agent_title(typed: &str, folder: &Path) -> String {
     let typed = typed.trim();
     if !typed.is_empty() {
         return typed.to_string();
     }
-    let from_folder = folder
+    standalone_agent_name_from_folder(folder)
+}
+
+/// A folder's own name converted into a valid agent name, for a standalone
+/// agent nobody named or whose name was cleared.
+///
+/// Folder names legally contain spaces, dots, punctuation and non-ASCII text
+/// an agent name cannot, so every run of such characters becomes one `-`, and
+/// separators are trimmed off both ends so the result starts with a letter or
+/// digit. When nothing usable is left (the filesystem root, a name of only
+/// punctuation or non-ASCII text) it falls back to a fixed name rather than an
+/// empty one. The web's `standaloneAgentDefaultName` is its twin, pinned by
+/// shared vectors, because the create dialog promises this name.
+pub fn standalone_agent_name_from_folder(folder: &Path) -> String {
+    let raw = folder
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
-    // Collapse runs of whitespace so a name copied out of a file manager does
-    // not render with a ragged gap in the middle of a row.
-    let collapsed = from_folder.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        // The filesystem root, or a folder whose name is only whitespace. A
-        // fixed word beats an empty label, and the row's second line names the
-        // actual folder anyway.
-        return "Standalone agent".to_string();
+    let mut out = String::new();
+    // Inside a run of characters a name cannot hold, so a literal dash beside
+    // it joins that run's one separator instead of doubling it.
+    let mut in_separator = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+            in_separator = false;
+        } else if ch == '-' {
+            if !in_separator {
+                out.push('-');
+            }
+        } else {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+            in_separator = true;
+        }
     }
-    collapsed
+    let trimmed = out.trim_matches(|c: char| c == '-' || c == '_');
+    if trimmed.is_empty() {
+        return "standalone-agent".to_string();
+    }
+    trimmed.to_string()
+}
+
+/// The sentence a create refuses an invalid agent name with, the same for a
+/// managed agent and a standalone one.
+pub fn invalid_agent_name_refusal(name: &str) -> String {
+    format!(
+        "Invalid agent name \"{name}\". Use only letters, digits, dashes, \
+         underscores and slashes; it must start with a letter or digit, must \
+         not contain \"//\", and must not end with \"/\"."
+    )
 }
 
 pub fn docker_style_name() -> String {
@@ -13605,36 +13637,41 @@ mod tests {
         assert_eq!(folder_repo_status(&link), FolderRepoStatus::WorkingRepo);
     }
 
-    // ── SHARED VECTORS with paths.test.ts `standaloneAgentDefaultName` ────────
+    // ── SHARED VECTORS with agentWorkspace.test.ts `standaloneAgentDefaultName`
     //
     // The web's create dialog PROMISES this name in its placeholder ("defaults
     // to ..."), so the browser has to derive the same string the server will
-    // actually store. These are the cases a plain trailing-segment read gets
-    // wrong.
+    // actually store.
     #[test]
-    fn the_default_standalone_name_collapses_whitespace_and_never_ends_up_empty() {
+    fn the_default_standalone_name_is_a_valid_agent_name_converted_from_the_folder() {
         for (folder, expected) in [
             ("/home/ada/notes", "notes"),
             ("/home/ada/notes/", "notes"),
-            // Runs of whitespace collapse and the ends are trimmed, so a name
-            // copied out of a file manager does not render with a ragged gap.
-            ("/home/ada/My   Notes ", "My Notes"),
-            // Nothing usable left: the root, a name of only whitespace, nothing
-            // at all.
-            ("/", "Standalone agent"),
-            ("/home/ada/   ", "Standalone agent"),
-            ("", "Standalone agent"),
+            // Every run of characters a name cannot hold becomes one dash, and
+            // the ends are trimmed.
+            ("/home/ada/My Notes! (2026)", "My-Notes-2026"),
+            // A dash beside such a run joins it rather than doubling it; one
+            // the folder already had in a row stays.
+            ("/home/ada/my_project - copy", "my_project-copy"),
+            ("/home/ada/a--b", "a--b"),
+            // Non-ASCII text is a character a name cannot hold.
+            ("/home/ada/Café notes", "Caf-notes"),
+            // A name must start with a letter or digit.
+            ("/home/ada/_draft_", "draft"),
+            // Nothing usable left.
+            ("/", "standalone-agent"),
+            ("/home/ada/   ", "standalone-agent"),
+            ("/home/ada/!!!", "standalone-agent"),
+            ("", "standalone-agent"),
         ] {
-            assert_eq!(
-                standalone_agent_title("", Path::new(folder)),
-                expected,
-                "for {folder:?}"
-            );
+            let name = standalone_agent_title("", Path::new(folder));
+            assert_eq!(name, expected, "for {folder:?}");
+            assert!(is_valid_agent_name(&name), "{name:?} for {folder:?}");
         }
-        // A typed name wins, trimmed and otherwise verbatim.
+        // A typed name wins, trimmed.
         assert_eq!(
-            standalone_agent_title("  Sort the downloads!  ", Path::new("/home/ada/notes")),
-            "Sort the downloads!"
+            standalone_agent_title("  sort-downloads  ", Path::new("/home/ada/notes")),
+            "sort-downloads"
         );
     }
 

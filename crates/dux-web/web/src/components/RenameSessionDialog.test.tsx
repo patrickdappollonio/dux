@@ -50,7 +50,8 @@ installBrowserHistory()
 const { RenameSessionDialog } = await import("./RenameSessionDialog")
 const store = await import("@/lib/store")
 const api = await import("@/lib/sessionsApi")
-const { renameDraftValue, renamePayload } = await import("@/lib/renameAgent")
+const { renamePayload } = await import("@/lib/renameAgent")
+const { sanitizeAgentName } = await import("@/lib/agentName")
 const submitRename = vi.mocked(store.submitRename)
 const setRenameDraft = vi.mocked(store.setRenameDraft)
 const setRenameBranch = vi.mocked(store.setRenameBranch)
@@ -96,9 +97,7 @@ function renderDialog() {
   const view = render(<RenameSessionDialog />)
   const sync = () => view.rerender(<RenameSessionDialog />)
   setRenameDraft.mockImplementation((raw: string) => {
-    const session = (mockState.spine?.sessions ?? [])[0]
-    const branchNamed = session?.workspace.kind === "managed"
-    mockState = { ...mockState, renameDraft: renameDraftValue(raw, branchNamed) }
+    mockState = { ...mockState, renameDraft: sanitizeAgentName(raw) }
     sync()
   })
   setRenameBranch.mockImplementation((renameBranch: boolean) => {
@@ -186,21 +185,22 @@ describe("RenameSessionDialog", () => {
     expect(patch).toHaveBeenLastCalledWith("s1", { title: "", rename_branch: false })
   })
 
-  it("gives a standalone agent no box, its folder's name as the hint, and keeps spaces", () => {
-    seed("sa1", standaloneSession, "My Notes")
+  it("gives a standalone agent no box and holds its name to the agent-name rules", () => {
+    seed("sa1", standaloneSession, "My-Notes")
     renderDialog()
     expect(screen.queryByRole("checkbox")).toBeNull()
-    expect(screen.queryByText(/Letters, digits/)).toBeNull()
     expect(screen.getByText(/show its folder's name again/)).toBeTruthy()
     const field = screen.getByRole("textbox", { name: "Agent name" })
-    expect(field.getAttribute("placeholder")).toBe("My Notes")
+    expect(field.getAttribute("placeholder")).toBe("My-Notes")
     fireEvent.change(field, { target: { value: "My Notes (2026)" } })
-    expect((field as HTMLInputElement).value).toBe("My Notes (2026)")
-    expect(saveButton().disabled).toBe(false)
+    expect((field as HTMLInputElement).value).toBe("My-Notes-2026")
+    fireEvent.change(field, { target: { value: "notes/" } })
+    expect(saveButton().disabled).toBe(true)
+    fireEvent.change(field, { target: { value: "notes" } })
     fireEvent.click(saveButton())
     expect(submitRename).toHaveBeenCalledOnce()
-    expect(renamePayload("My Notes (2026)", true, false)).toEqual({
-      title: "My Notes (2026)",
+    expect(renamePayload("notes", true, false)).toEqual({
+      title: "notes",
       rename_branch: false,
     })
     expect(branchPushed).not.toHaveBeenCalled()

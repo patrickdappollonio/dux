@@ -4799,13 +4799,9 @@ impl Engine {
             if rename_branch && branch_named {
                 return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
             }
-        } else if branch_named && !crate::git::is_valid_agent_name(&name) {
-            // The refname rules apply only when the name really does become a
-            // git branch. A STANDALONE agent's name is a label: creation takes
-            // it verbatim precisely because folder names legally contain
-            // spaces, dots and punctuation a ref cannot, so applying the ref
-            // validator here made a title dux itself had minted impossible to
-            // type back.
+        } else if !crate::git::is_valid_agent_name(&name) {
+            // A STANDALONE agent has no branch, but its name follows the same
+            // rules as every other agent's, as it did when it was created.
             return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
         }
         // Block overlapping renames: a second concurrent `git branch -m` on the
@@ -5489,10 +5485,15 @@ impl Engine {
                 crate::home_path::shorten_home(&folder)
             );
         }
-        // The typed name is used verbatim: no branch is created here, so
-        // `is_valid_agent_name` deliberately does not apply. Folder names
-        // legally contain characters a ref name cannot.
-        let title = crate::git::standalone_agent_title(name, &folder);
+        // No branch is created here, but a standalone agent's name follows the
+        // same rules as every other agent's, and this is the check the command
+        // line cannot route around. An empty name is converted from the
+        // folder's, which is valid by construction.
+        let typed = name.trim();
+        if !typed.is_empty() && !crate::git::is_valid_agent_name(typed) {
+            anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(typed));
+        }
+        let title = crate::git::standalone_agent_title(typed, &folder);
         // The GLOBAL default provider, the same source the config's own default
         // uses, unless the caller overrode it.
         //
@@ -7254,42 +7255,42 @@ mod tests {
         );
     }
 
-    /// A standalone agent's name is not a refname, so renaming it is not held
-    /// to the refname rules.
-    ///
-    /// The asymmetry this fixes was a one-way door: creation deliberately takes
-    /// a standalone title verbatim (folder names legally contain spaces, dots
-    /// and punctuation a ref cannot), while rename ran the ref validator, so a
-    /// title dux itself had minted could not be typed back. Clearing it made it
-    /// worse, because the fallback label is the folder's name, which the
-    /// validator also refuses.
+    /// A standalone agent renames no branch, but its name follows the same
+    /// rules as every other agent's. Clearing it lands on the folder's name
+    /// converted into a valid agent name, the one creation would have given it,
+    /// so a cleared name never shows something the field could not accept.
     #[test]
-    fn renaming_a_standalone_agent_is_not_held_to_the_refname_rules() {
+    fn renaming_a_standalone_agent_is_held_to_the_agent_naming_rules() {
         let (mut engine, _tmp) = test_engine();
         engine
             .sessions
             .push(sample_standalone_session("sa1", "/home/someone/My Notes"));
 
-        // A name dux itself can mint from a folder called "My Notes".
-        let plan = engine.prepare_branch_rename("sa1", "My Notes (2026)", true);
-        assert!(
-            matches!(&plan, BranchRenamePlan::TitleWritten { name, sync_branches: false } if name == "My Notes (2026)"),
-            "a standalone rename writes the title and syncs no branch, got {plan:?}"
+        assert_eq!(
+            engine.prepare_branch_rename("sa1", "My Notes (2026)", false),
+            BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
         );
         assert_eq!(
             engine.sessions[0].title.as_deref(),
-            Some("My Notes (2026)"),
-            "and the title actually changed"
+            Some("sa1-title"),
+            "nothing was written"
         );
 
-        // Empty resets the label to the folder's name; with no branch to
-        // rename, the branch flag is no reason to refuse it.
+        let plan = engine.prepare_branch_rename("sa1", "My-Notes-2026", true);
+        assert!(
+            matches!(&plan, BranchRenamePlan::TitleWritten { name, sync_branches: false } if name == "My-Notes-2026"),
+            "a standalone rename writes the title and syncs no branch, got {plan:?}"
+        );
+        assert_eq!(engine.sessions[0].title.as_deref(), Some("My-Notes-2026"));
+
+        // With no branch to rename, the branch flag is no reason to refuse
+        // clearing it.
         assert_eq!(
             engine.prepare_branch_rename("sa1", "   ", true),
             BranchRenamePlan::TitleCleared
         );
         assert_eq!(engine.sessions[0].title, None);
-        assert_eq!(engine.sessions[0].display_label(), "My Notes");
+        assert_eq!(engine.sessions[0].display_label(), "My-Notes");
     }
 
     /// A MANAGED agent keeps the refname rules, because its name really does

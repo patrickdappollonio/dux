@@ -14,6 +14,7 @@ import {
   matchWorkspace,
   newTerminalLabel,
   sessionLabel,
+  standaloneAgentDefaultName,
   supportsBranchGit,
   workspaceBranchName,
   workspaceDirectory,
@@ -179,15 +180,16 @@ describe("agent workspace", () => {
     expect(sessionLabel(withFolder("/home/someone/notes/"))).toBe("notes")
     // A trailing "." is not a name of its own.
     expect(sessionLabel(withFolder("/home/someone/notes/."))).toBe("notes")
-    // A path whose last component is ".." has no name at all, so the label
-    // falls back to the whole path rather than the word "..".
+    // The folder's name is converted into a valid agent name.
+    expect(sessionLabel(withFolder("/home/someone/My Notes"))).toBe("My-Notes")
+    // A path whose last component is ".." has no name at all, so the label is
+    // the fixed fallback rather than the word "..".
     expect(sessionLabel(withFolder("/home/someone/notes/.."))).toBe(
-      "/home/someone/notes/..",
+      "standalone-agent",
     )
-    // Nor has the root, nor the empty string. Both fall back to the same field
-    // the Rust side falls back to, the path itself.
-    expect(sessionLabel(withFolder("/"))).toBe("/")
-    expect(sessionLabel(withFolder(""))).toBe("")
+    // Nor has the root, nor the empty string.
+    expect(sessionLabel(withFolder("/"))).toBe("standalone-agent")
+    expect(sessionLabel(withFolder(""))).toBe("standalone-agent")
 
     // A managed agent still takes its branch.
     expect(sessionLabel({ title: null, workspace: managed })).toBe("feature/x")
@@ -349,5 +351,27 @@ describe("an empty quiet sentence", () => {
     }
     expect(changesQuietReason(emptyManaged)).toBeNull()
     expect(changesGitBlockedReason(emptyManaged)).toBeNull()
+  })
+})
+
+// SHARED VECTORS with dux-core `git.rs`
+// `the_default_standalone_name_is_a_valid_agent_name_converted_from_the_folder`.
+// The dialog promises this name in its placeholder, so the browser has to
+// derive the same string the server will store.
+describe("standaloneAgentDefaultName", () => {
+  it.each([
+    ["/home/ada/notes", "notes"],
+    ["/home/ada/notes/", "notes"],
+    ["/home/ada/My Notes! (2026)", "My-Notes-2026"],
+    ["/home/ada/my_project - copy", "my_project-copy"],
+    ["/home/ada/a--b", "a--b"],
+    ["/home/ada/Café notes", "Caf-notes"],
+    ["/home/ada/_draft_", "draft"],
+    ["/", "standalone-agent"],
+    ["/home/ada/   ", "standalone-agent"],
+    ["/home/ada/!!!", "standalone-agent"],
+    ["", "standalone-agent"],
+  ])("names %j %j", (folder, expected) => {
+    expect(standaloneAgentDefaultName(folder)).toBe(expected)
   })
 })

@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(engine.sessions[1].title, None);
         assert_eq!(
             status.message,
-            "Cleared the custom name. Agent shows its folder's name \"My Notes\" again."
+            "Cleared the custom name. Agent shows its folder's name \"My-Notes\" again."
         );
     }
 
@@ -594,18 +594,6 @@ mod tests {
         }
         assert_eq!(engine.sessions[0].title, None);
         assert_eq!(engine.sessions[1].title.as_deref(), Some("custom"));
-    }
-
-    /// A standalone agent's name is taken verbatim, spaces and all.
-    #[test]
-    fn a_standalone_name_is_taken_verbatim() {
-        let (mut engine, _tmp) = test_engine();
-        engine
-            .sessions
-            .push(sample_standalone_session("sa1", "/home/someone/My Notes"));
-        let status = only_status(&engine.rename_agent("sa1", "My Notes (2026)", true).unwrap());
-        assert_eq!(status.message, "Renamed agent to \"My Notes (2026)\".");
-        assert_eq!(engine.sessions[0].title.as_deref(), Some("My Notes (2026)"));
     }
 
     /// Asking to rename the branch to the name it already has renames nothing

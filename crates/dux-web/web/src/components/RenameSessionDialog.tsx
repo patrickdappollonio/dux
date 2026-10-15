@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
-import { folderName, matchWorkspace } from "@/lib/agentWorkspace"
+import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
 import { renderProse } from "@/lib/prose"
 import {
   renameBlockedReason,
@@ -31,8 +31,9 @@ import {
 
 // Rename an agent: the same dialog the terminal UI shows. The field pre-fills the
 // current custom name (empty when none), with the branch name (a standalone
-// agent's folder name) as the placeholder, because an empty name goes back to
-// it. An agent with a branch also gets an unticked "Also rename the git branch"
+// agent's folder name, converted into a valid agent name) as the placeholder,
+// because an empty name goes back to it. Every agent's name follows the same
+// rules, a standalone agent's included. An agent with a branch also gets an unticked "Also rename the git branch"
 // box, with a line saying what stays on the old name when the branch has an
 // open pull request or a pushed copy.
 export function RenameSessionDialog() {
@@ -47,7 +48,7 @@ export function RenameSessionDialog() {
   const fallbackName = session
     ? matchWorkspace(session.workspace, {
         managed: (w) => w.branch_name,
-        folder: (w) => folderName(w.folder_path) ?? w.folder_label,
+        folder: (w) => standaloneAgentDefaultName(w.folder_path),
       })
     : ""
   const branchNamed = branch !== null
@@ -84,7 +85,6 @@ export function RenameSessionDialog() {
   }, [open, branchNamed, renameTarget])
 
   const invalidNonEmpty =
-    branchNamed &&
     renameDraft.trim() !== "" &&
     !isValidAgentName(renameDraft.trim())
   const blocked = renameBlockedReason(renameDraft, renameBranch, branchNamed)
@@ -121,7 +121,6 @@ export function RenameSessionDialog() {
             setRenameDraft(raw)
             // Keep the caret put when sanitization shrinks the string (same
             // approach as the new-agent input).
-            if (!branchNamed) return
             const sanitized = sanitizeAgentName(raw)
             if (sanitized !== raw) {
               const next = Math.max(0, caret - (raw.length - sanitized.length))
@@ -139,11 +138,9 @@ export function RenameSessionDialog() {
           aria-invalid={invalidNonEmpty}
           autoFocus
         />
-        {branchNamed && (
-          <p className="text-xs text-muted-foreground">
-            Letters, digits, dashes, underscores and slashes.
-          </p>
-        )}
+        <p className="text-xs text-muted-foreground">
+          Letters, digits, dashes, underscores and slashes.
+        </p>
         {branch !== null && (
           <div className="grid gap-1">
             <div className="flex items-center gap-2">

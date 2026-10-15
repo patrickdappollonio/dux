@@ -27576,20 +27576,17 @@ cyan = "#00ffff"
     }
 
     /// An empty field is the ordinary case: the agent is named after the
-    /// folder, exactly as the web dialog's placeholder promises.
+    /// folder, converted into a valid agent name, exactly as the web dialog's
+    /// placeholder promises.
     #[test]
     fn an_empty_standalone_name_creates_the_agent_named_after_the_folder() {
         let mut app = test_app(default_bindings());
-        let folder = tempfile::tempdir().expect("folder");
-        let folder_name = folder
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let parent = tempfile::tempdir().expect("folder");
+        let folder = parent.path().join("My Notes");
+        std::fs::create_dir(&folder).expect("named folder");
 
-        pick_standalone_folder(&mut app, folder.path());
-        assert_eq!(planned_standalone_title(&app), folder_name);
+        pick_standalone_folder(&mut app, &folder);
+        assert_eq!(planned_standalone_title(&app), "My-Notes");
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
@@ -27605,23 +27602,34 @@ cyan = "#00ffff"
         );
     }
 
-    /// A typed name keeps its interior spaces and punctuation: no branch is
-    /// created here, so the ref-name rules deliberately do not apply.
-    /// Surrounding whitespace is trimmed, and a blank name means the folder's
-    /// own name, which is what the web posts to the same helper.
+    /// No branch is created here, but the field is the New agent prompt's: a
+    /// space types a dash and a character a name cannot hold is refused. The
+    /// one invalid name it lets through mid-typing, a trailing slash, keeps
+    /// the prompt open with the refusal, as the New agent prompt does.
     #[test]
-    fn a_typed_standalone_agent_name_is_used_verbatim() {
+    fn a_typed_standalone_agent_name_follows_the_agent_name_rules() {
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
 
         pick_standalone_folder(&mut app, folder.path());
-        for ch in "notes for q3".chars() {
+        for ch in "notes for q3!/".chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .expect("the letter must type into the field");
         }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+        assert!(
+            matches!(app.prompt, PromptState::NameStandaloneAgent { .. }),
+            "an invalid name keeps the prompt open"
+        );
+        assert_eq!(
+            app.status.text(),
+            dux_core::git::invalid_agent_name_refusal("notes-for-q3/")
+        );
 
-        assert_eq!(planned_standalone_title(&app), "notes for q3");
-
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .expect("the backspace must be handled");
+        assert_eq!(planned_standalone_title(&app), "notes-for-q3");
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
         assert!(matches!(app.prompt, PromptState::None));

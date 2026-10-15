@@ -310,9 +310,8 @@ export function workspaceLocation(
 }
 
 /** The name to show for an agent: its title when it has one, the branch it
- * tracks otherwise, and for a standalone agent its folder's own name. Creation
- * guarantees a standalone agent has a title, so that last fallback is belt and
- * braces rather than a path users reach.
+ * tracks otherwise, and for a standalone agent whose name was cleared, its
+ * folder's name converted into a valid agent name.
  *
  * Twin of `AgentSession::display_label` in dux-core, pinned by shared vectors:
  * a twin that answers differently calls one agent two things. */
@@ -325,8 +324,36 @@ export function sessionLabel(session: {
   }
   return matchWorkspace(session.workspace, {
     managed: (w) => w.branch_name,
-    folder: (w) => folderName(w.folder_path) ?? w.folder_path,
+    folder: (w) => standaloneAgentDefaultName(w.folder_path),
   })
+}
+
+/**
+ * The name a standalone agent gets when nobody names it: its folder's name
+ * converted into a valid agent name. Every run of characters an agent name
+ * cannot hold becomes one `-`, separators are trimmed off both ends, and a
+ * name with nothing usable left falls back to `standalone-agent`. Twin of
+ * dux-core's `git::standalone_agent_name_from_folder`, pinned by shared
+ * vectors, because the create dialog promises this name in its placeholder.
+ */
+export function standaloneAgentDefaultName(folderPath: string): string {
+  let out = ""
+  // Inside a run of characters a name cannot hold, so a literal dash beside it
+  // joins that run's one separator instead of doubling it.
+  let inSeparator = false
+  for (const ch of folderName(folderPath) ?? "") {
+    if (/^[A-Za-z0-9_]$/.test(ch)) {
+      out += ch
+      inSeparator = false
+    } else if (ch === "-") {
+      if (!inSeparator) out += "-"
+    } else {
+      if (!out.endsWith("-")) out += "-"
+      inSeparator = true
+    }
+  }
+  const trimmed = out.replace(/^[-_]+|[-_]+$/g, "")
+  return trimmed === "" ? "standalone-agent" : trimmed
 }
 
 /** The last NAMED component of a path, or null when it has none. Twin of Rust's
