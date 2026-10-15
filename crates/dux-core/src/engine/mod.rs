@@ -9597,10 +9597,7 @@ mod tests {
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
-        let (mut engine, tmp) = test_engine();
-        // Applying the reloaded config turns the GitHub integration on, which
-        // launches the host probe; a missing program keeps the real `gh` out.
-        engine.gh_probe.program = tmp.path().join("no-such-gh").into();
+        let (mut engine, _tmp) = test_engine();
         // Baseline provider differs from the value the reload will deliver, so we
         // can prove the reloaded config actually landed (the reloaded config
         // must DIFFER from the initial one, not both be `Config::default()`).

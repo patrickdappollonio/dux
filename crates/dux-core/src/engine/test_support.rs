@@ -89,7 +89,13 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         gh_status: GhStatus::Unknown,
         force_worker_spawn_failure: false,
         force_loop_worker_spawn_failure: AtomicBool::new(false),
-        gh_probe: Default::default(),
+        // Reloading the default config turns the GitHub integration on and
+        // launches the host probe; a test that wants an answer from `gh`
+        // points this at a stand-in, and none ever runs the developer's own.
+        gh_probe: crate::engine::GhProbeState {
+            program: root.join("gh-is-not-installed").into_os_string(),
+            ..Default::default()
+        },
         pr_statuses: HashMap::new(),
         pr_overrides: HashMap::new(),
         pr_suppressions: HashSet::new(),

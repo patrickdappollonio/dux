@@ -10309,11 +10309,8 @@ mod tests {
     #[test]
     fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
         use crate::operations::{OperationKind, OperationState};
-        let (mut engine, tmp) = test_engine();
+        let (mut engine, _tmp) = test_engine();
         engine.surface = Box::new(FileReloadSurface);
-        // Applying a reload turns the GitHub integration on, which launches
-        // the host probe; a missing program keeps the real `gh` out of it.
-        engine.gh_probe.program = tmp.path().join("no-such-gh").into();
         std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 21\n").unwrap();
         let first = engine
             .apply_wire_operation(
