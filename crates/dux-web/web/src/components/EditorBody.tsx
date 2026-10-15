@@ -116,6 +116,7 @@ import { performTreeDrop } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { nextFileDropToastId } from "@/lib/fileDrop"
 import { uploadDroppedFile } from "@/lib/fileDropApi"
+import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useObjectUrl } from "@/hooks/use-object-url"
@@ -1895,8 +1896,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                             onClick={() => requestOpen(p)}
                             className={cn(
                               "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
-                              (p === openPath || p === searchPick.activeKey) &&
-                                "bg-muted",
+                              p === openPath && "bg-muted",
+                              p === searchPick.activeKey && ACTIVE_ROW_RING,
                             )}
                           >
                             {changedMap.get(p) && (

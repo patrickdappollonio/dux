@@ -22,7 +22,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { openAddProject } from "@/lib/store"
-import { FOCUS_RING } from "@/lib/focusRing"
+import { ACTIVE_ROW_RING, FOCUS_RING } from "@/lib/focusRing"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 
@@ -224,7 +224,7 @@ function ProjectRow({
   row: ProjectListRow
   onPick?: (id: string) => void
   pickId: string
-  // The row Enter in the search field would pick, lit like a hovered one.
+  // The row Enter in the search field would pick, ringed as if focused.
   active: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
@@ -248,7 +248,7 @@ function ProjectRow({
       className={cn(
         "group/project-row flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
         "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
-        active && "bg-accent/60",
+        active && ACTIVE_ROW_RING,
       )}
     >
       <button

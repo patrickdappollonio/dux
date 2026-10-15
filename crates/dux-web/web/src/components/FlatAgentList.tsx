@@ -40,6 +40,7 @@ import {
   useRevealSelectedRow,
 } from "@/hooks/use-reveal-selected-row"
 import { useSearchPick } from "@/hooks/use-search-pick"
+import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -290,7 +291,7 @@ function AgentFlatRow({
   // The live search query, for the match highlight ("" renders plain).
   query: string
   // The row's id for the search field's active descendant, and whether it is
-  // the row Enter there would pick, lit like a hovered one.
+  // the row Enter there would pick, ringed as if focused.
   pickId?: string
   picked?: boolean
 }) {
@@ -346,8 +347,8 @@ function AgentFlatRow({
           // ⋯; the button below is transparent and fills the row.
           "group/flat-row relative flex items-stretch rounded-md pr-1 transition-colors",
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-          (agentSelected || picked) &&
-            "bg-sidebar-accent text-sidebar-accent-foreground",
+          agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
+          picked && ACTIVE_ROW_RING,
         )}
       >
         <SimpleTooltip
@@ -549,7 +550,7 @@ function TerminalFlatRow({
   // The live search query, for the match highlight ("" renders plain).
   query: string
   // The row's id for the search field's active descendant, and whether it is
-  // the row Enter there would pick, lit like a hovered one.
+  // the row Enter there would pick, ringed as if focused.
   pickId?: string
   picked?: boolean
 }) {
@@ -597,7 +598,8 @@ function TerminalFlatRow({
       className={cn(
         "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-        (active || picked) && "bg-sidebar-accent text-sidebar-accent-foreground",
+        active && "bg-sidebar-accent text-sidebar-accent-foreground",
+        picked && ACTIVE_ROW_RING,
         // The same drag-lift cue as the agent row wrapper.
         isDragging && "z-10 shadow-lg",
       )}

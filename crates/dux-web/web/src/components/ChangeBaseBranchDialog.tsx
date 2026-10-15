@@ -23,6 +23,7 @@ import { useSearchPick } from "@/hooks/use-search-pick"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
 import { changeBaseBranchProse } from "@/lib/changeBaseBranch"
+import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { renderProse } from "@/lib/prose"
 import {
   changeBaseBranch,
@@ -251,7 +252,7 @@ function BranchRow({
   onPick,
 }: {
   id: string
-  // The row Enter in the search field would pick, lit like a hovered one.
+  // The row Enter in the search field would pick, ringed as if focused.
   active: boolean
   branch: BranchChoiceView
   isBase: boolean
@@ -275,7 +276,7 @@ function BranchRow({
       onClick={() => onPick(branch.name)}
       className={cn(
         "flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent max-md:min-h-10",
-        active && "bg-accent/60",
+        active && ACTIVE_ROW_RING,
       )}
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />

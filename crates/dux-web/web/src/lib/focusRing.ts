@@ -7,3 +7,14 @@
  */
 export const FOCUS_RING =
   "outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+
+/**
+ * The same ring, drawn whatever has focus, for the row a search field's Enter
+ * would pick while the field keeps keyboard focus. It is drawn INSIDE the row
+ * (an inset ring for the soft half, a pulled-in outline for the border half),
+ * because the lists it lights clip their overflow, and it is a ring rather than
+ * a background so it never reads as the selected or open row, which already
+ * wear the hover background.
+ */
+export const ACTIVE_ROW_RING =
+  "inset-ring-3 inset-ring-ring/50 outline-1 -outline-offset-1 outline-ring"
