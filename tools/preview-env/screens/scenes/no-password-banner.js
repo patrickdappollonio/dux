@@ -8,7 +8,7 @@ module.exports = {
   file: "no-password-banner.png",
   viewport: "desktop",
   async shoot(page) {
-    await goto(page, "")
+    await goto(page, "", { keepNoPasswordBanner: true })
     await clearToasts(page)
     await expectBanner(page, "No password: anyone who can reach this address can use dux.")
     return bannerClip(page, "no-auth-banner")

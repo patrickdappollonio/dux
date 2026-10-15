@@ -155,9 +155,25 @@ async function open({ mobile = false, width, height } = {}) {
   return { browser, page, cdp, reassert, width: w, height: h }
 }
 
-async function goto(page, hash) {
+// The preview serves with no password, so every page load opens under the red
+// no-password banner. A picture of anything else must not carry it, and the
+// banner's own Dismiss is the way a person gets rid of it (for this page load
+// only, nothing is written), so that is what every load does here. The one scene
+// that is a picture of the banner asks to keep it.
+async function goto(page, hash, { keepNoPasswordBanner = false } = {}) {
   await page.goto(BASE + "/" + (hash || ""), { waitUntil: "networkidle0", timeout: 45000 })
   await sleep(1500)
+  if (keepNoPasswordBanner) return
+  const dismissed = await page.evaluate(() => {
+    const banner = document.querySelector('[data-testid="no-auth-banner"]')
+    const button =
+      banner &&
+      [...banner.querySelectorAll("button")].find((b) => /^dismiss$/i.test((b.textContent || "").trim()))
+    if (!button) return false
+    button.click()
+    return true
+  })
+  if (dismissed) await sleep(500)
 }
 
 // A capture opens a real connection to the PTY, so it arrives as a watcher and
