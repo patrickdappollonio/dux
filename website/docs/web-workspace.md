@@ -510,6 +510,13 @@ success or a note uses your `ui.status_clear_seconds` window (six seconds by def
 warning stays three times that, and an error four times. Setting `ui.status_clear_seconds = 0`
 turns auto-clearing off. Dismiss one early by swiping it away or with its close button.
 
+A message that clears itself shows how long it has left as a thin bar along its bottom
+edge, in the message's own color, draining toward the left. Point at the stack or hold a
+finger on it and every countdown stops: the bars dim, a **Paused while you read** tag
+appears, and they pick up where they left off once you move away. The countdown also waits
+while the tab is in the background. If your system asks for reduced motion, the bar steps
+down once a second instead of gliding.
+
 A message about work still in flight is a spinner: no close button and no swipe, replaced
 in place by its own result the moment there is one. If the connection drops mid-operation
 and no result arrives, the spinner gives up after a minute.

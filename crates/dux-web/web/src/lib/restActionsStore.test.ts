@@ -11,6 +11,7 @@ vi.mock("sonner", () => {
     warning: vi.fn(),
     loading: vi.fn(),
     dismiss: vi.fn(),
+    getToasts: vi.fn(() => []),
   })
   return { toast }
 })
@@ -307,6 +308,7 @@ describe("store write actions surface REST errors as a toast", () => {
     await vi.waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("the server said no", {
         duration: ERROR_DURATION,
+        description: expect.anything(),
       }),
     )
   })
@@ -350,6 +352,7 @@ describe("store write actions surface REST errors as a toast", () => {
     await vi.waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("the server said no", {
         duration: ERROR_DURATION,
+        description: expect.anything(),
       }),
     )
   })
@@ -401,6 +404,7 @@ describe("store write actions surface REST errors as a toast", () => {
     await vi.waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("the server said no", {
         duration: ERROR_DURATION,
+        description: expect.anything(),
       }),
     )
   })

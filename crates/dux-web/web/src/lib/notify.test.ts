@@ -12,6 +12,7 @@ vi.mock("sonner", () => {
     warning: vi.fn(),
     loading: vi.fn(),
     dismiss: vi.fn(),
+    getToasts: vi.fn(() => []),
   })
   return { toast }
 })
@@ -118,25 +119,26 @@ describe("the configured window is read at RAISE time, not captured by the calle
   // to get wrong.
   it("uses the default until the bootstrap document lands", () => {
     notifyError("nope")
-    expect(toast.error).toHaveBeenCalledWith("nope", { duration: 24000 })
+    expect(toast.error).toHaveBeenCalledWith("nope", { duration: 24000, description: expect.anything() })
   })
 
   it("follows a later setStatusClearSeconds with no caller involvement", () => {
     setStatusClearSeconds(10)
     notifySuccess("fine")
-    expect(toast.success).toHaveBeenCalledWith("fine", { duration: 10000 })
+    expect(toast.success).toHaveBeenCalledWith("fine", { duration: 10000, description: expect.anything() })
 
     setStatusClearSeconds(0)
     notifySuccess("fine again")
     expect(toast.success).toHaveBeenLastCalledWith("fine again", {
       duration: Infinity,
+      description: expect.anything(),
     })
   })
 
   it("honours the documented 0 opt-out for every client-raised final", () => {
     setStatusClearSeconds(0)
     notifyWarning("careful")
-    expect(toast.warning).toHaveBeenCalledWith("careful", { duration: Infinity })
+    expect(toast.warning).toHaveBeenCalledWith("careful", { duration: Infinity, description: expect.anything() })
   })
 })
 
@@ -163,6 +165,7 @@ describe("an id means REPLACEMENT, so a repeat-prone notification carries none",
     expect(toast.error).toHaveBeenCalledWith("boom", {
       id: "drop-report",
       duration: 24000,
+      description: expect.anything(),
     })
   })
 })
@@ -175,6 +178,7 @@ describe("sticky", () => {
     notifyError("saved but not delivered", { sticky: true })
     expect(toast.error).toHaveBeenCalledWith("saved but not delivered", {
       duration: Infinity,
+      description: expect.anything(),
     })
   })
 
@@ -183,13 +187,14 @@ describe("sticky", () => {
     notifyWarning("half done", { sticky: true })
     expect(toast.warning).toHaveBeenCalledWith("half done", {
       duration: Infinity,
+      description: expect.anything(),
     })
   })
 
   it("is off by default", () => {
     setStatusClearSeconds(6)
     notifySuccess("all good")
-    expect(toast.success).toHaveBeenCalledWith("all good", { duration: 6000 })
+    expect(toast.success).toHaveBeenCalledWith("all good", { duration: 6000, description: expect.anything() })
   })
 
   it("rides an engine status too, and an absent flag means not sticky", () => {
@@ -198,12 +203,14 @@ describe("sticky", () => {
     expect(toast.error).toHaveBeenCalledWith("server says stop", {
       id: "k",
       duration: Infinity,
+      description: expect.anything(),
     })
 
     notifyStatus("error", "ordinary", { id: "k2" })
     expect(toast.error).toHaveBeenLastCalledWith("ordinary", {
       id: "k2",
       duration: 24000,
+      description: expect.anything(),
     })
   })
 
@@ -214,6 +221,7 @@ describe("sticky", () => {
     expect(toast.loading).toHaveBeenCalledWith("working", {
       id: "b",
       duration: BUSY_TOAST_MAX_MS,
+      description: expect.anything(),
     })
   })
 })
@@ -224,10 +232,10 @@ describe("tone routing", () => {
     notifySuccess("s")
     notifyWarning("w")
     notifyError("e")
-    expect(toast.info).toHaveBeenCalledWith("i", { duration: 6000 })
-    expect(toast.success).toHaveBeenCalledWith("s", { duration: 6000 })
-    expect(toast.warning).toHaveBeenCalledWith("w", { duration: 18000 })
-    expect(toast.error).toHaveBeenCalledWith("e", { duration: 24000 })
+    expect(toast.info).toHaveBeenCalledWith("i", { duration: 6000, description: expect.anything() })
+    expect(toast.success).toHaveBeenCalledWith("s", { duration: 6000, description: expect.anything() })
+    expect(toast.warning).toHaveBeenCalledWith("w", { duration: 18000, description: expect.anything() })
+    expect(toast.error).toHaveBeenCalledWith("e", { duration: 24000, description: expect.anything() })
   })
 
   it("shows an engine `info` with the success icon, because the engine has no success tone", () => {
@@ -240,6 +248,7 @@ describe("tone routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Pulled.", {
       id: "pull",
       duration: 6000,
+      description: expect.anything(),
     })
     expect(toast.info).not.toHaveBeenCalled()
   })
@@ -259,6 +268,7 @@ describe("tone routing", () => {
     expect(toast.success).toHaveBeenCalledWith("hello", {
       id: "n",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 })
@@ -279,7 +289,7 @@ describe("the busy leak guard", () => {
     vi.advanceTimersByTime(1)
     expect(toast.warning).toHaveBeenCalledWith(
       strandedBusyMessage("Saving shot.png"),
-      { id: "drop-1", duration: 18000 },
+      { id: "drop-1", duration: 18000, description: expect.anything() },
     )
   })
 
@@ -363,6 +373,7 @@ describe("the busy leak guard", () => {
     expect(toast.error).toHaveBeenCalledWith("Could not save shot.png", {
       id: "drop-1",
       duration: Infinity,
+      description: expect.anything(),
     })
 
     // Well past the guard's window. Nothing may replace or dismiss the final.
@@ -390,7 +401,7 @@ describe("the busy leak guard", () => {
     expect(toast.warning).toHaveBeenCalledTimes(1)
     expect(toast.warning).toHaveBeenCalledWith(
       strandedBusyMessage("Saving b.png"),
-      { id: "drop-b", duration: 18000 },
+      { id: "drop-b", duration: 18000, description: expect.anything() },
     )
   })
 
@@ -405,7 +416,7 @@ describe("the busy leak guard", () => {
     expect(toast.warning).toHaveBeenCalledTimes(1)
     expect(toast.warning).toHaveBeenCalledWith(
       strandedBusyMessage("step two"),
-      { id: "s", duration: 18000 },
+      { id: "s", duration: 18000, description: expect.anything() },
     )
   })
 

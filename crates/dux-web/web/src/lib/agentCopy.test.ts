@@ -12,6 +12,7 @@ vi.mock("sonner", () => {
     warning: vi.fn(),
     loading: vi.fn(),
     dismiss: vi.fn(),
+    getToasts: vi.fn(() => []),
   })
   return { toast }
 })

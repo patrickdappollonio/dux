@@ -234,3 +234,37 @@ describe("a notification with an action button", () => {
     expect(screen.queryByRole("button", { name: "Copy" })).toBeNull()
   })
 })
+
+describe("the countdown bar", () => {
+  // sonner MERGES a raise into the toast already on its id, so a bar left over
+  // from the toast being replaced would keep draining on one that never goes.
+  it("drains only while the toast on an id is going to dismiss itself", async () => {
+    render(<Toaster />)
+    const bar = () => toastEl().querySelector(".dux-toast-drain")
+    act(() => {
+      notifySuccess("counting down", { id: "k" })
+    })
+    await screen.findByText("counting down")
+    expect(bar()).not.toBeNull()
+
+    act(() => {
+      notifyWarning("waiting for you", { id: "k", sticky: true })
+    })
+    await screen.findByText("waiting for you")
+    expect(bar()).toBeNull()
+
+    act(() => {
+      notifyBusy("working on it", { id: "k" })
+    })
+    await screen.findByText("working on it")
+    expect(bar()).toBeNull()
+
+    // A base window of 0 turns auto-clear off for every final tone.
+    setStatusClearSeconds(0)
+    act(() => {
+      notifyError("no window at all", { id: "k" })
+    })
+    await screen.findByText("no window at all")
+    expect(bar()).toBeNull()
+  })
+})

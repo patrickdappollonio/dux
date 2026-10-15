@@ -16,6 +16,7 @@ import { createElement, Fragment, type ReactNode } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
+import { ToastCountdown } from "@/components/ui/sonner"
 
 import { authPaused, subscribeAuth } from "./authGate"
 import { type Prose, proseText, renderProse } from "./prose"
@@ -131,20 +132,46 @@ function cancelBusyGuard(id: string): void {
   busyGuards.delete(id)
 }
 
+// Every raise gets a fresh key on its countdown, so a toast replaced on its id
+// starts its bar over in the same commit that sonner restarts its timer.
+let countdownSeq = 0
+
+// The toast's foot (`ToastCountdown`): a bar over `ms`, or none for a toast that
+// will not dismiss itself. It rides sonner's description slot, which every raise
+// names, so a replacement can never inherit the bar of the toast it replaced.
+function countdown(tone: string, ms: number | null): ReactNode {
+  countdownSeq += 1
+  return createElement(ToastCountdown, { key: countdownSeq, tone, ms })
+}
+
+// sonner restarts a replaced toast's timer from its remaining time, which it only
+// resets when the duration changes: a toast that was once paused and is then
+// replaced with the same duration would finish early while its bar started
+// over. One millisecond less makes sonner start over too.
+function restartingDuration(id: string | undefined, duration: number): number {
+  if (id === undefined || !Number.isFinite(duration)) return duration
+  const current = toast.getToasts().find((t) => t.id === id)
+  return current && "duration" in current && current.duration === duration
+    ? duration - 1
+    : duration
+}
+
 // The one call into sonner for a final tone. Everything above resolves to this.
 function raiseFinal(
   tone: string,
   message: ReactNode,
-  duration: number,
+  windowMs: number,
   id?: string,
   action?: NotifyAction,
 ): void {
+  const duration = restartingDuration(id, windowMs)
+  const description = countdown(tone, Number.isFinite(duration) ? duration : null)
   // sonner MERGES a raise into the toast already on its id, so a replacement
   // names `action` even when it has none, or the old button would survive it.
   const options =
     id === undefined
-      ? { duration, ...(action ? { action: actionButton(action) } : {}) }
-      : { id, duration, action: action ? actionButton(action) : undefined }
+      ? { duration, description, ...(action ? { action: actionButton(action) } : {}) }
+      : { id, duration, description, action: action ? actionButton(action) : undefined }
   if (tone === "error") toast.error(message, options)
   else if (tone === "warning") toast.warning(message, options)
   else if (tone === "info") toast.info(message, options)
@@ -250,7 +277,11 @@ export function notifyBusy(
       notify("warning", strandedBusyMessage(noticeText(message), origin), { id: opts.id })
     }, duration),
   )
-  toast.loading(noticeBody(message), { id: opts.id, duration })
+  toast.loading(noticeBody(message), {
+    id: opts.id,
+    duration,
+    description: countdown("busy", null),
+  })
 }
 
 /// Raise a notification whose tone arrived over the wire as a string, correlated

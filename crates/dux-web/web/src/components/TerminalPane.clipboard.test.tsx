@@ -157,6 +157,7 @@ vi.mock("sonner", () => ({
     warning: vi.fn(),
     loading: vi.fn(),
     dismiss: vi.fn(),
+    getToasts: vi.fn(() => []),
   }),
 }))
 // Only the parser-handler installer is stubbed out (it needs a real xterm

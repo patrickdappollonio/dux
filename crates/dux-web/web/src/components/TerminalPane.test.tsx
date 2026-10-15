@@ -428,6 +428,7 @@ vi.mock("sonner", () => ({
     info: (...args: unknown[]) => void toastCalls.push(args[0]),
     warning: vi.fn(),
     error: (...args: unknown[]) => toastError(...args),
+    getToasts: () => [],
   }),
 }))
 // What reached the clipboard. The real helper needs `navigator.clipboard` or

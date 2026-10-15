@@ -828,3 +828,106 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 .dux-diff-all-delete .editor.modified .margin-view-overlays .line-numbers {
   display: none;
 }
+
+/* Toast countdown (`ToastCountdown` in components/ui/sonner.tsx). Both parts are
+   absolutely placed against the toast itself, which sonner positions. They sit
+   inside its description slot, below the toast's direct children, which keeps
+   them clear of sonner's reduced-motion rule (it removes every animation on the
+   toast and on its direct children).
+
+   The clip box covers the toast's padding box, so the 2px strip at its foot is
+   cut by the toast's own rounded corners. */
+.dux-toast-drain {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: calc(var(--border-radius) - 1px);
+  pointer-events: none;
+}
+.dux-toast-drain::before,
+.dux-toast-drain-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+}
+.dux-toast-drain::before {
+  content: "";
+  background: var(--border);
+}
+.dux-toast-drain-fill {
+  opacity: 0.75;
+  transform-origin: left center;
+  animation: dux-toast-drain var(--dux-drain-ms) linear forwards;
+  transition: opacity 150ms;
+}
+@keyframes dux-toast-drain {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+/* Held exactly when sonner holds its timers: the stack is expanded (sonner's
+   own attribute), a pointer is down on it, or the page is hidden (the last two
+   mirrored by the Toaster). A hidden page is not dimmed: nobody is looking. */
+[data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill,
+[data-dux-pressed] .dux-toast-drain-fill,
+[data-dux-hidden] .dux-toast-drain-fill {
+  animation-play-state: paused;
+}
+[data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill,
+[data-dux-pressed] .dux-toast-drain-fill {
+  opacity: 0.4;
+}
+
+/* Less motion: the bar steps down once a second instead of gliding. */
+@media (prefers-reduced-motion: reduce) {
+  .dux-toast-drain-fill {
+    animation-timing-function: steps(var(--dux-drain-steps));
+    transition: none;
+  }
+}
+
+/* "Paused while you read": one tag beyond the far end of the stack, so it sits
+   over the page rather than over a toast or its close button, and it takes no
+   pointer events, so it can never catch a click meant for what is under it. */
+.dux-toast-held-tag {
+  position: absolute;
+  left: 50%;
+  translate: -50% 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--popover);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms;
+}
+[data-sonner-toast][data-y-position="bottom"] .dux-toast-held-tag {
+  bottom: calc(100% + 8px);
+}
+[data-sonner-toast][data-y-position="top"] .dux-toast-held-tag {
+  top: calc(100% + 8px);
+}
+/* Shown only while some visible toast is counting down. Expanded, the far end
+   is the last visible toast; a press on a collapsed stack leaves only the front
+   toast legible, so the tag rides that one. */
+[data-sonner-toaster]:has(> [data-sonner-toast][data-visible="true"][data-removed="false"] .dux-toast-drain)
+  > [data-sonner-toast][data-expanded="true"][data-visible="true"][data-removed="false"]:not(:has(~ [data-sonner-toast][data-visible="true"][data-removed="false"]))
+  .dux-toast-held-tag,
+[data-dux-pressed]
+  [data-sonner-toaster]:has(> [data-sonner-toast][data-visible="true"][data-removed="false"] .dux-toast-drain)
+  > [data-sonner-toast][data-front="true"][data-expanded="false"]
+  .dux-toast-held-tag {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dux-toast-held-tag {
+    transition: none;
+  }
+}

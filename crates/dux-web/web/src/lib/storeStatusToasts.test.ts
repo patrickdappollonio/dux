@@ -13,6 +13,7 @@ vi.mock("sonner", () => {
     warning: vi.fn(),
     loading: vi.fn(),
     dismiss: vi.fn(),
+    getToasts: vi.fn(() => []),
   })
   return { toast }
 })
@@ -150,6 +151,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).toHaveBeenCalledWith("Pulling…", {
       id: "pull",
       duration: BUSY_TOAST_MAX_MS,
+      description: expect.anything(),
     })
 
     // Success replaces it on the same id, should fire toast.success with 6s.
@@ -157,6 +159,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Pulled.", {
       id: "pull",
       duration: 6000,
+      description: expect.anything(),
     })
 
     // Clear dismisses the toast by key.
@@ -172,6 +175,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.error).toHaveBeenCalledWith("Push failed.", {
       id: "push",
       duration: 24000,
+      description: expect.anything(),
     })
   })
 
@@ -183,6 +187,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.warning).toHaveBeenCalledWith("Careful!", {
       id: "warn-key",
       duration: 18000,
+      description: expect.anything(),
     })
   })
 
@@ -194,6 +199,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("All good.", {
       id: "dux-anon-status",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 
@@ -206,6 +212,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).toHaveBeenCalledWith("Uploading…", {
       id: "dux-anon-status",
       duration: BUSY_TOAST_MAX_MS,
+      description: expect.anything(),
     })
 
     // Clear dismisses the anonymous slot.
@@ -242,6 +249,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Changes committed successfully.", {
       id: "dux-anon-status",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 
@@ -254,6 +262,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Done.", {
       id: "k",
       duration: 10000,
+      description: expect.anything(),
     })
   })
 
@@ -266,11 +275,13 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Sticky info.", {
       id: "k",
       duration: Infinity,
+      description: expect.anything(),
     })
     status(mod, "k2", "error", "Sticky error.")
     expect(toast.error).toHaveBeenCalledWith("Sticky error.", {
       id: "k2",
       duration: Infinity,
+      description: expect.anything(),
     })
   })
 
@@ -285,6 +296,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).toHaveBeenCalledWith("Working…", {
       id: "k",
       duration: BUSY_TOAST_MAX_MS,
+      description: expect.anything(),
     })
   })
 
@@ -297,11 +309,13 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.warning).toHaveBeenCalledWith("Careful.", {
       id: "w",
       duration: 30000,
+      description: expect.anything(),
     })
     status(mod, "e", "error", "Broken.")
     expect(toast.error).toHaveBeenCalledWith("Broken.", {
       id: "e",
       duration: 40000,
+      description: expect.anything(),
     })
   })
 
@@ -430,6 +444,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Default window.", {
       id: "k",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 
@@ -445,6 +460,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).toHaveBeenCalledWith('Removing worktree for agent "x"…', {
       id: "delete:s1",
       duration: BUSY_TOAST_MAX_MS,
+      description: expect.anything(),
     })
 
     // The async success final reuses the same id, swapping spinner → check.
@@ -452,6 +468,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Agent and worktree removed.", {
       id: "delete:s1",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 })
@@ -503,6 +520,7 @@ describe("the standalone editor tab", () => {
     expect(toast.success).toHaveBeenCalledWith("Saved.", {
       id: "save",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 
@@ -525,6 +543,7 @@ describe("the standalone editor tab", () => {
     expect(toast.warning).toHaveBeenCalledWith("Agent exited.", {
       id: "pull",
       duration: 18000,
+      description: expect.anything(),
     })
   })
 })
@@ -538,6 +557,7 @@ describe("an engine status that says it waits for the user", () => {
     expect(toast.warning).toHaveBeenCalledWith("Half of it landed.", {
       id: "half-done",
       duration: Infinity,
+      description: expect.anything(),
     })
   })
 
@@ -549,6 +569,7 @@ describe("an engine status that says it waits for the user", () => {
     expect(toast.warning).toHaveBeenCalledWith("Careful.", {
       id: "ordinary",
       duration: 18000,
+      description: expect.anything(),
     })
   })
 
@@ -563,6 +584,7 @@ describe("an engine status that says it waits for the user", () => {
     expect(toast.error).toHaveBeenCalledWith("Broken.", {
       id: "ordinary",
       duration: 24000,
+      description: expect.anything(),
     })
   })
 })
@@ -592,7 +614,7 @@ describe("an engine status that names things", () => {
     mod.eventsSocket.onEvent(frame)
     expect(toast.success).toHaveBeenCalledTimes(1)
     const [body, options] = vi.mocked(toast.success).mock.calls[0]
-    expect(options).toEqual({ id: "op-9", duration: 6000 })
+    expect(options).toEqual({ id: "op-9", duration: 6000, description: expect.anything() })
     expect(typeof body).not.toBe("string")
     const html = renderToStaticMarkup(body as ReactElement)
     expect(html).toContain('<code data-slot="inline-code"')
@@ -609,6 +631,7 @@ describe("an engine status that names things", () => {
     expect(toast.success).toHaveBeenCalledWith(frame.message, {
       id: "op-9",
       duration: 6000,
+      description: expect.anything(),
     })
   })
 })

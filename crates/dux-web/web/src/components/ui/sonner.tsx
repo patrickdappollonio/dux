@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useRef } from "react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -54,16 +55,76 @@ export function toastPlacement(isMobile: boolean): {
   }
 }
 
-// Per-tone icon color, added to a shape that already differs per tone, so color is
-// never the only carrier. The loading spinner stays muted: in progress is not a
-// severity.
+// Per-tone color, worn by the icon and by the countdown bar so a toast's two
+// marks always agree. The icon adds it to a shape that already differs per tone,
+// so color is never the only carrier.
+const TONE_COLOR = {
+  success: "text-dux-success",
+  info: "text-sky-400",
+  warning: "text-dux-warning",
+  error: "text-destructive",
+} as const
+
+// The loading spinner stays muted: in progress is not a severity.
 const TONE_ICON = {
-  success: "size-4 text-dux-success",
-  info: "size-4 text-sky-400",
-  warning: "size-4 text-dux-warning",
-  error: "size-4 text-destructive",
+  success: `size-4 ${TONE_COLOR.success}`,
+  info: `size-4 ${TONE_COLOR.info}`,
+  warning: `size-4 ${TONE_COLOR.warning}`,
+  error: `size-4 ${TONE_COLOR.error}`,
   loading: "size-4 animate-spin text-muted-foreground",
 } as const
+
+/// The foot of every toast `lib/notify.ts` raises: a bar draining over `ms`, the
+/// toast's exact sonner duration, or no bar when the toast will not dismiss
+/// itself (`ms` null), plus the tag the stack shows while sonner holds its
+/// timers. Both are absolutely placed against the toast, so they take no room in
+/// it, and both are hidden from the toaster's live region.
+///
+/// The bar keeps no clock of its own. It is a CSS animation that `index.css`
+/// pauses on exactly the conditions sonner pauses on (see `Toaster` below), and
+/// a raise that replaces a toast hands a fresh element key, so the bar starts
+/// over with sonner's timer.
+///
+/// sonner arms its timer in an effect of the commit that mounts the toast, while
+/// a CSS animation's own start waits for the frame that first paints it
+/// (measured at 130 to 300ms late on a busy page). So a running bar is anchored
+/// to the mounting commit instead, which also holds when sonner remounts a toast
+/// and restarts its timer. A bar that mounts held is left alone: sonner has not
+/// started counting either, and both start on the same release.
+export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }) {
+  // An unknown tone is raised as a success, so it drains in the success color.
+  const color = TONE_COLOR[tone as keyof typeof TONE_COLOR] ?? TONE_COLOR.success
+  const fillRef = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const fill = fillRef.current
+    if (!fill || typeof fill.getAnimations !== "function") return
+    const mountedAt = performance.now()
+    for (const animation of fill.getAnimations()) {
+      if (animation.playState === "running") animation.startTime = mountedAt
+    }
+  }, [])
+  return (
+    <>
+      {ms !== null && (
+        <span aria-hidden className="dux-toast-drain">
+          <span
+            ref={fillRef}
+            className={`dux-toast-drain-fill bg-current ${color}`}
+            style={
+              {
+                "--dux-drain-ms": `${ms}ms`,
+                "--dux-drain-steps": Math.max(1, Math.round(ms / 1000)),
+              } as React.CSSProperties
+            }
+          />
+        </span>
+      )}
+      <span aria-hidden className="dux-toast-held-tag">
+        Paused while you read
+      </span>
+    </>
+  )
+}
 
 /// How many toasts stack before the rest queue behind them. Above sonner's default
 /// of 3, which a multi-step operation's keyed statuses fill on their own.
@@ -89,8 +150,36 @@ const Toaster = ({ ...props }: ToasterProps) => {
   // shell. Crossing it re-keys sonner's per-position list, so open toasts remount
   // and their dismissal timers restart, which is the accepted cost.
   const placement = toastPlacement(isMobile)
+  // sonner pauses every toast's timer while the stack is expanded (published as
+  // `data-expanded` on each toast), while a pointer is down on the stack, and
+  // while the page is hidden. The last two are React state it does not publish,
+  // so they are mirrored here off the same events it reads, and the countdown
+  // bar pauses on exactly what sonner pauses on.
+  const sectionRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const section = sectionRef.current
+    if (!section) return
+    // sonner's own list handler: any press counts, except one landing on a toast
+    // raised as not dismissible.
+    const press = (e: PointerEvent) => {
+      if (e.target instanceof HTMLElement && e.target.dataset.dismissible === "false") return
+      section.setAttribute("data-dux-pressed", "")
+    }
+    const release = () => section.removeAttribute("data-dux-pressed")
+    const visibility = () => section.toggleAttribute("data-dux-hidden", document.hidden)
+    visibility()
+    section.addEventListener("pointerdown", press)
+    section.addEventListener("pointerup", release)
+    document.addEventListener("visibilitychange", visibility)
+    return () => {
+      section.removeEventListener("pointerdown", press)
+      section.removeEventListener("pointerup", release)
+      document.removeEventListener("visibilitychange", visibility)
+    }
+  }, [])
   return (
     <Sonner
+      ref={sectionRef}
       theme="dark"
       visibleToasts={isMobile ? VISIBLE_TOASTS_MOBILE : VISIBLE_TOASTS_DESKTOP}
       className="toaster group"
@@ -138,6 +227,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
           // cost is that a finger cannot scroll an overflowing text, so the
           // phone's cap is tall enough that a long toast rarely needs to.
           title: `${toastTextCap(isMobile)} overflow-y-auto overscroll-contain touch-none`,
+          // The description slot carries only `ToastCountdown`, whose parts are
+          // absolutely placed against the toast: `contents` keeps the slot from
+          // adding a box, and the content column's gap with it, under the text.
+          description: "contents",
         },
       }}
       {...props}

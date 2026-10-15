@@ -13,6 +13,7 @@ const toastMock = Object.assign(vi.fn(), {
   warning: vi.fn(),
   loading: vi.fn(),
   dismiss: vi.fn(),
+  getToasts: vi.fn(() => []),
   custom: vi.fn(),
 })
 vi.mock("sonner", () => ({ toast: toastMock }))
@@ -243,6 +244,7 @@ describe("terminal-keys bar visibility", () => {
     // sonner's own bare 4000ms.
     expect(toastMock.error).toHaveBeenCalledWith("disk full", {
       duration: 24000,
+      description: expect.anything(),
     })
   })
 
