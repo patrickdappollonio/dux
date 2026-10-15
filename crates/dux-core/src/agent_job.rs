@@ -732,12 +732,9 @@ impl CreatePlanContext<'_> {
                 containment,
                 HeadContainment::Lacks | HeadContainment::Unknown(_)
             );
-        let not_local = matches!(containment, HeadContainment::NotLocal);
-        if !needs_copy && !not_local {
-            return BusyBranchCheck::Free;
-        }
-        // Before another copy: an agent of the project whose branch already
-        // contains the head commit has the code, whatever its branch is called.
+        // Before another copy, or before reusing a branch: an agent of the
+        // project whose branch already contains the head commit has the code,
+        // whatever its branch is called.
         if let Some(commit) = head_commit
             && let Some((agent, branch, folder)) =
                 self.agent_with_head_commit(repo_path, agents, commit)
@@ -3005,6 +3002,31 @@ mod tests {
             git_stdout(repo.path(), &["for-each-ref", "refs/dux"]),
             "",
             "the ref the check used is gone"
+        );
+
+        // A free local branch that holds the code is not reused while an agent
+        // already has that code under another name: the agent is pointed to.
+        let agent_folder = PathBuf::from(session.directory());
+        git_in(
+            &agent_folder,
+            &["branch", "-m", "pr-head", "pr-head-renamed"],
+        );
+        git_in(repo.path(), &["branch", "--", "pr-head", "origin/pr-head"]);
+        let mut again = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { agents, .. } = &mut again {
+            agents.push(crate::worker::AgentAtWorktree {
+                name: "earlier".to_string(),
+                worktree_path: agent_folder.clone(),
+            });
+        }
+        let refused = drive_create_job_run(repo.path(), again);
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .is_some_and(|f| f.starts_with("Agent \"earlier\" already has the code of PR #42: its branch \"pr-head-renamed\" at ")),
+            "{:?}",
+            refused.failure
         );
 
         // A local branch of the same name on an unrelated commit is not the
