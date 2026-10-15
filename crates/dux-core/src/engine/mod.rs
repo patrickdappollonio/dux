@@ -9546,6 +9546,22 @@ mod tests {
         }
     }
 
+    /// The next reload completion off the worker lane, unprocessed. Other
+    /// workers answer on the same channel in no fixed order, so whatever
+    /// arrives ahead of it is applied first.
+    fn next_reload_event(engine: &mut Engine) -> crate::worker::WorkerEvent {
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a reload completes");
+            if matches!(event, crate::worker::WorkerEvent::ConfigReloadReady(_)) {
+                return event;
+            }
+            let _ = engine.process_worker_event(event);
+        }
+    }
+
     #[test]
     fn config_mutating_commands_defer_while_reloading() {
         let (mut engine, _tmp) = test_engine();
@@ -9581,7 +9597,10 @@ mod tests {
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
-        let (mut engine, _tmp) = test_engine();
+        let (mut engine, tmp) = test_engine();
+        // Applying the reloaded config turns the GitHub integration on, which
+        // launches the host probe; a missing program keeps the real `gh` out.
+        engine.gh_probe.program = tmp.path().join("no-such-gh").into();
         // Baseline provider differs from the value the reload will deliver, so we
         // can prove the reloaded config actually landed (the reloaded config
         // must DIFFER from the initial one, not both be `Config::default()`).
@@ -9678,7 +9697,7 @@ mod tests {
 
         // The surface already posted the completion; drain it through the real
         // worker-event path so the barrier closes and the deferred command drains.
-        let event = engine.worker_rx.recv().expect("reload completion");
+        let event = next_reload_event(&mut engine);
         let reaction = engine.process_worker_event(event);
 
         // Deferral folds the reload + the deferred save into one Multi.
@@ -9772,7 +9791,7 @@ mod tests {
             crate::operations::OperationState::Running,
             "a deferred change has not happened yet"
         );
-        let event = engine.worker_rx.recv().expect("reload completion");
+        let event = next_reload_event(&mut engine);
         let _ = engine.process_worker_event(event);
         let record = engine.operations.view(&id, now()).unwrap();
         assert_eq!(record.state, crate::operations::OperationState::Succeeded);
@@ -9810,18 +9829,9 @@ mod tests {
             .expect("the removal is accepted and deferred")
             .operation_id
             .expect("an operation id");
-        // Other workers (the project's save among them) answer on the same
-        // channel in no fixed order, so step to each reload's own completion.
-        let through_next_reload = |engine: &mut Engine| loop {
-            let event = engine
-                .worker_rx
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .expect("a reload completes");
-            let reload = matches!(event, crate::worker::WorkerEvent::ConfigReloadReady(_));
+        let through_next_reload = |engine: &mut Engine| {
+            let event = next_reload_event(engine);
             let _ = engine.process_worker_event(event);
-            if reload {
-                break;
-            }
         };
         through_next_reload(&mut engine);
         assert!(engine.reloading, "the follow-up reload is running");
@@ -9879,7 +9889,7 @@ mod tests {
             .expect("apply");
         assert_eq!(engine.deferred_commands.len(), 1);
 
-        let event = engine.worker_rx.recv().expect("reload completion");
+        let event = next_reload_event(&mut engine);
         let reaction = engine.process_worker_event(event);
 
         // Barrier closed, deferred drained.
@@ -10029,15 +10039,12 @@ mod tests {
         // Drain the NoopConfigSurface's completion that ReloadConfig already
         // posted so the channel is clean, then simulate a DIFFERENT worker that
         // dies: a guard that drops without completing.
-        let _ = engine.worker_rx.recv().expect("noop completion");
+        let _ = next_reload_event(&mut engine);
 
         drop(crate::engine::ReloadCompletionGuard::new(
             engine.worker_tx.clone(),
         ));
-        let event = engine
-            .worker_rx
-            .recv()
-            .expect("drop-guard must post a completion");
+        let event = next_reload_event(&mut engine);
         let reaction = engine.process_worker_event(event);
         // The Err completion opens the reload-failed modal and closes the barrier.
         assert!(matches!(
