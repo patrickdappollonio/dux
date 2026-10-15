@@ -2153,7 +2153,7 @@ pub fn add_worktree_existing_branch_at(
     if let Some(parent) = worktree_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch_name)?;
+    add_readable_worktree(repo_path, worktree_path, branch_name)?;
     // Attach the branch the add left detached. Gated on the local ref so a
     // commit-ish naming a tag keeps checking out detached, as it does today.
     let attached = current_branch_opt(worktree_path).unwrap_or(None);
@@ -2420,9 +2420,7 @@ pub fn add_worktree_new_branch_at(
         ],
     )
     .with_context(|| format!("failed to create branch '{branch_name}'"))?;
-    if let Err(err) =
-        add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch_name)
-    {
+    if let Err(err) = add_readable_worktree(repo_path, worktree_path, branch_name) {
         remove_branch_minted_for_failed_add(repo_path, &refname, &start);
         return Err(err);
     }
@@ -2596,6 +2594,110 @@ fn add_worktree_retrying_a_pruned_admin_folder(
         ));
     }
     Ok(())
+}
+
+/// [`add_worktree_retrying_a_pruned_admin_folder`], then proof that git can
+/// read the copy it reported as created, with ONE more add when it cannot.
+///
+/// A worktree prune run by another program (the user's own git, an editor's
+/// `git maintenance`) can delete `.git/worktrees/<name>` after git's checkout
+/// step. `worktree add` then exits 0 and leaves a folder whose `.git` file
+/// points at nothing, which every git command inside it answers with "not a
+/// git repository". The folder is removed before the second add only when this
+/// add made it (nothing was at the path beforehand) and git has no
+/// registration for it; a folder that was already there is never touched. A
+/// branch minted for the add stays for the second attempt, which only attaches
+/// it, and the caller rolls it back if that attempt fails too.
+fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
+    let path_was_free = matches!(
+        fs::symlink_metadata(worktree_path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound
+    );
+    add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch)?;
+    if worktree_is_readable(worktree_path) {
+        return Ok(());
+    }
+    let unreadable = |what_dux_did: &str| {
+        anyhow!(
+            "git reported the working copy at {} as created, but git cannot read it: the \
+             repository's record of it was removed while it was being made, most likely by \
+             another program cleaning up this repository's worktrees (a git maintenance or \
+             worktree prune run) at the same time. {what_dux_did} Wait for that program to \
+             finish, then try again.",
+            worktree_path.display()
+        )
+    };
+    if !path_was_free {
+        return Err(unreadable(
+            "The folder was there before dux added the working copy, so dux left it as it is.",
+        ));
+    }
+    remove_unreadable_worktree(repo_path, worktree_path).map_err(|why| {
+        unreadable(&format!(
+            "dux did not remove the folder because {why}, so check it before you try again."
+        ))
+    })?;
+    logger::warn(&format!(
+        "git reported the working copy at {} as created but cannot read it (its admin folder \
+         was removed during the add), so dux removed the folder and is adding it once more",
+        worktree_path.display()
+    ));
+    add_worktree_retrying_a_pruned_admin_folder(repo_path, worktree_path, branch)?;
+    if worktree_is_readable(worktree_path) {
+        return Ok(());
+    }
+    Err(match remove_unreadable_worktree(repo_path, worktree_path) {
+        Ok(()) => unreadable("dux tried twice and removed the folder it made both times."),
+        Err(why) => unreadable(&format!(
+            "dux tried twice and left the second folder in place because {why}, so check it \
+             before you try again."
+        )),
+    })
+}
+
+/// Whether git, run inside `worktree_path`, finds a working copy whose top
+/// level is that very folder. Comparing the top level, not only asking for
+/// success, keeps an enclosing repository that git would walk up to from
+/// passing for the copy.
+fn worktree_is_readable(worktree_path: &Path) -> bool {
+    let Ok(toplevel) = run_git_capture(
+        worktree_path,
+        &["rev-parse", "--show-toplevel"],
+        "find the working copy's top level",
+    ) else {
+        return false;
+    };
+    match (
+        Path::new(&toplevel).canonicalize(),
+        worktree_path.canonicalize(),
+    ) {
+        (Ok(found), Ok(expected)) => found == expected,
+        _ => false,
+    }
+}
+
+/// Remove the folder an add just made and git cannot read, or say why it was
+/// left. Only a real directory is removed (never a symlink standing at the
+/// path), and only while git has no registration for it, so a copy something
+/// else registered in the meantime stays. `remove_dir_all` does not follow
+/// symlinks inside the folder.
+fn remove_unreadable_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(worktree_path) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => return Err("something other than a folder is at that path".to_string()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("it could not be read ({err})")),
+    }
+    match registration_at(repo_path, worktree_path) {
+        Ok(false) => {}
+        Ok(true) => return Err("git still has a working copy registered there".to_string()),
+        Err(err) => {
+            return Err(format!(
+                "git's list of working copies could not be read ({err:#})"
+            ));
+        }
+    }
+    fs::remove_dir_all(worktree_path).map_err(|err| format!("removing it failed ({err})"))
 }
 
 /// The repository's `<common dir>/worktrees/` in every form git may print it:
@@ -9101,6 +9203,124 @@ mod tests {
             Some("sibling"),
             "the sibling worktree must still work"
         );
+    }
+
+    /// A `post-checkout` hook in the fixture repository that deletes the new
+    /// worktree's admin folder, which is what another program's prune landing
+    /// after git's checkout step does: `worktree add` still exits 0, and the
+    /// copy's `.git` file points at nothing. With `once`, only the first add
+    /// is struck.
+    fn strike_admin_folder_after_checkout(repo: &Path, once: bool) -> tempfile::TempDir {
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = hooks.path().join("struck");
+        let guard = if once {
+            format!("[ -e '{0}' ] && exit 0; : > '{0}'\n", marker.display())
+        } else {
+            String::new()
+        };
+        let hook = hooks.path().join("post-checkout");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n{guard}admin=$(git rev-parse --absolute-git-dir)\n\
+                 case \"$admin\" in */worktrees/*) rm -rf \"$admin\" ;; esac\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        run_git(
+            repo,
+            &["config", "core.hooksPath", hooks.path().to_str().unwrap()],
+        );
+        hooks
+    }
+
+    /// git reports the add as done, but something removed the copy's admin
+    /// folder after the checkout: dux sees git cannot read the copy, removes
+    /// the folder that add made, and adds it once more.
+    #[test]
+    fn a_worktree_git_cannot_read_after_a_successful_add_is_recreated_once() {
+        let repo = init_test_repo();
+        let head = head_commit(repo.path()).unwrap();
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), true);
+        let worktrees_root = tempfile::tempdir().unwrap();
+
+        let (_, worktree) = create_worktree_from_start_point(
+            repo.path(),
+            worktrees_root.path(),
+            "proj",
+            None,
+            Some("fresh"),
+        )
+        .expect("the second add should land a working copy git can read");
+
+        assert_eq!(
+            current_branch_opt(&worktree).unwrap().as_deref(),
+            Some("fresh")
+        );
+        assert_eq!(head_commit(&worktree).unwrap(), head);
+        assert!(matches!(registration_at(repo.path(), &worktree), Ok(true)));
+
+        run_git(repo.path(), &["branch", "existing"]);
+        let existing = worktrees_root.path().join("proj").join("existing");
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), true);
+        add_worktree_existing_branch_at(repo.path(), &existing, "existing")
+            .expect("the existing-branch path recreates it too");
+        assert_eq!(
+            current_branch_opt(&existing).unwrap().as_deref(),
+            Some("existing")
+        );
+    }
+
+    /// When every add comes out unreadable, dux stops after the second one and
+    /// says so, removing only the folder and the branch it made itself. A
+    /// folder that was there before the add is never removed.
+    #[test]
+    fn a_worktree_that_stays_unreadable_fails_loudly_and_removes_only_what_dux_made() {
+        let repo = init_test_repo();
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), false);
+        let worktrees_root = tempfile::tempdir().unwrap();
+        let project = worktrees_root.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("keep"), "user data").unwrap();
+        let branch_exists = |name: &str| {
+            test_support::git_command()
+                .args(["rev-parse", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{name}"))
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        };
+
+        let worktree = project.join("fresh");
+        let err = add_worktree_new_branch_at(repo.path(), &worktree, "fresh", None)
+            .expect_err("a copy that stays unreadable must fail the add");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&worktree.display().to_string()) && message.contains("try again"),
+            "the failure must name the folder and say what to do: {message}"
+        );
+        assert!(
+            fs::symlink_metadata(&worktree).is_err(),
+            "the folder dux made is removed"
+        );
+        assert!(!branch_exists("fresh"), "the minted branch is removed");
+        assert_eq!(
+            fs::read_to_string(project.join("keep")).unwrap(),
+            "user data"
+        );
+
+        run_git(repo.path(), &["branch", "theirs"]);
+        let preexisting = project.join("theirs");
+        fs::create_dir(&preexisting).unwrap();
+        add_worktree_existing_branch_at(repo.path(), &preexisting, "theirs")
+            .expect_err("an unreadable copy in a folder that was already there fails");
+        assert!(
+            preexisting.is_dir(),
+            "a folder that pre-existed is left alone"
+        );
+        assert!(branch_exists("theirs"), "a branch dux did not make is kept");
     }
 
     /// A failed attach removes the branch dux minted for it, unless something
