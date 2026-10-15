@@ -10297,8 +10297,11 @@ mod tests {
     #[test]
     fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
         use crate::operations::{OperationKind, OperationState};
-        let (mut engine, _tmp) = test_engine();
+        let (mut engine, tmp) = test_engine();
         engine.surface = Box::new(FileReloadSurface);
+        // Applying a reload turns the GitHub integration on, which launches
+        // the host probe; a missing program keeps the real `gh` out of it.
+        engine.gh_probe.program = tmp.path().join("no-such-gh").into();
         std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 21\n").unwrap();
         let first = engine
             .apply_wire_operation(
@@ -10423,8 +10426,13 @@ mod tests {
             .expect("a later reload")
             .operation_id
             .expect("record");
-        let event = try_recv_worker_event(&engine).expect("the later reload read the file");
-        engine.process_worker_event(event);
+        loop {
+            let event = try_recv_worker_event(&engine).expect("the later reload read the file");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                engine.process_worker_event(event);
+                break;
+            }
+        }
         engine.finish_config_reload_operations(
             &crate::config_reload_status::ConfigReloadOutcome::Refused("no".to_string()),
         );
