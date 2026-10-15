@@ -787,12 +787,8 @@ impl App {
                     Some(Action::SearchToggle) if !searching => prompt.list.begin_search(),
                     Some(Action::MoveDown) => prompt.list.move_down(visible_len),
                     Some(Action::MoveUp) => prompt.list.move_up(),
-                    _ if searching && prompt.list.filter.handle_key(key) => {
-                        let new_len = prompt
-                            .list
-                            .visible_indices(&prompt.branches, branch_choice_matches)
-                            .len();
-                        prompt.list.clamp_selected(new_len);
+                    _ if searching => {
+                        prompt.list.edit_filter(|filter| filter.handle_key(key));
                     }
                     _ => {}
                 }

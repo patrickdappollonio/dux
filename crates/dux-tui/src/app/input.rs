@@ -1863,14 +1863,18 @@ impl App {
             // typing).
             PromptState::PickProject { list, .. } => {
                 if list.searching {
-                    list.filter.insert_str(text);
-                    list.selected = 0;
+                    list.edit_filter(|filter| {
+                        filter.insert_str(text);
+                        true
+                    });
                 }
             }
             PromptState::KillRunning(prompt) => {
                 if prompt.list.searching {
-                    prompt.list.filter.insert_str(text);
-                    prompt.list.selected = 0;
+                    prompt.list.edit_filter(|filter| {
+                        filter.insert_str(text);
+                        true
+                    });
                     Self::clamp_kill_running_prompt(prompt);
                 }
             }
@@ -1991,8 +1995,10 @@ impl App {
 
             PromptState::ChangeBaseBranch(prompt) => {
                 if prompt.list.searching {
-                    prompt.list.filter.insert_str(text);
-                    prompt.list.selected = 0;
+                    prompt.list.edit_filter(|filter| {
+                        filter.insert_str(text);
+                        true
+                    });
                 }
             }
         }
@@ -4051,9 +4057,7 @@ impl App {
 
     fn handle_kill_running_search_key(&mut self, key: KeyEvent) {
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
-            if prompt.list.filter.handle_key(key) {
-                prompt.list.selected = 0;
-            }
+            prompt.list.edit_filter(|filter| filter.handle_key(key));
             Self::clamp_kill_running_prompt(prompt);
         }
     }
@@ -4735,9 +4739,8 @@ impl App {
                 }
                 Some(Action::MoveDown) => list.move_down(visible_len),
                 Some(Action::MoveUp) => list.move_up(),
-                _ if searching && list.filter.handle_key(key) => {
-                    let new_len = list.visible_indices(entries, pick_project_matches).len();
-                    list.clamp_selected(new_len);
+                _ if searching => {
+                    list.edit_filter(|filter| filter.handle_key(key));
                 }
                 _ => {}
             }

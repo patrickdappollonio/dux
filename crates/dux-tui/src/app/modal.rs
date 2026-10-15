@@ -189,8 +189,11 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
 
         // ── Picker ──────────────────────────────────────────────────────
-        // A selection cursor over rows; Enter picks. Their filter rows are
-        // type-immediately and single-line, so no dual-mode question arises.
+        // A selection cursor over rows; Enter picks. The palette types into
+        // its query at once; the other filter rows open on the search binding
+        // and then take typing at once, with the movement keys still moving
+        // the cursor and the query's first match highlighted. Every filter is
+        // single-line, so no multiline engage question arises.
         // A picker gets no Cancel and no Apply: its footer names the keys
         // through the bindings, and a button label cannot stay truthful once a
         // user rebinds.

@@ -2284,7 +2284,22 @@ impl SearchableList {
         }
     }
 
-    /// Keep `selected` within `[0, visible_len)`. Call after the query changes.
+    /// Apply `edit` to the query (a key, a paste) and return what it returned.
+    /// When the query's text changed, the highlight goes back to the first
+    /// match, so Enter right after typing picks the top row rather than
+    /// whichever row the old index now happens to land on. A caret move leaves
+    /// the highlight where it is.
+    pub(crate) fn edit_filter(&mut self, edit: impl FnOnce(&mut TextInput) -> bool) -> bool {
+        let before = self.filter.text.clone();
+        let handled = edit(&mut self.filter);
+        if self.filter.text != before {
+            self.selected = 0;
+        }
+        handled
+    }
+
+    /// Keep `selected` within `[0, visible_len)`, for a list whose rows
+    /// changed under an unchanged query.
     pub(crate) fn clamp_selected(&mut self, visible_len: usize) {
         if self.selected >= visible_len {
             self.selected = visible_len.saturating_sub(1);

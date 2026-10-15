@@ -7173,6 +7173,48 @@ mod tests {
         }
     }
 
+    /// Typing a query highlights its first match, wherever the cursor was
+    /// before, so Enter right after typing picks the top row.
+    #[test]
+    fn project_chooser_query_highlights_the_first_match() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |app: &mut App, code: KeyCode| {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+        };
+
+        let projects = ["alpha", "beta-one", "beta-two"].map(|name| {
+            let mut project = make_project(name, "codex");
+            project.name = name.to_string();
+            project
+        });
+        let mut app = test_app_with_sessions(vec![], projects.to_vec());
+        app.open_project_chooser(ProjectChooserIntent::Manage)
+            .unwrap();
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "beta".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let PromptState::PickProject { entries, list, .. } = &app.prompt else {
+            panic!("expected the project chooser, got {:?}", app.prompt);
+        };
+        let first_match = entries[list.visible_indices(entries, pick_project_matches)[0]]
+            .id
+            .clone();
+        press(&mut app, KeyCode::Enter);
+
+        match &app.prompt {
+            PromptState::ProjectActions(prompt) => assert_eq!(
+                prompt.target,
+                ProjectActionsTarget::Project { id: first_match }
+            ),
+            other => panic!("expected the first match's action list, got {other:?}"),
+        }
+    }
+
     /// The chooser lists projects by what was touched most recently: the project
     /// holding the newest agent first, then the rest by the date they were added.
     #[test]
