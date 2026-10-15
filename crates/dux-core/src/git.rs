@@ -2660,20 +2660,33 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
 /// success, keeps an enclosing repository that git would walk up to from
 /// passing for the copy.
 fn worktree_is_readable(worktree_path: &Path) -> bool {
-    let Ok(toplevel) = run_git_capture(
-        worktree_path,
-        &["rev-parse", "--show-toplevel"],
-        "find the working copy's top level",
-    ) else {
+    let Some(toplevel) = git_printed_path(worktree_path, &["rev-parse", "--show-toplevel"]) else {
         return false;
     };
-    match (
-        Path::new(&toplevel).canonicalize(),
-        worktree_path.canonicalize(),
-    ) {
+    match (toplevel.canonicalize(), worktree_path.canonicalize()) {
         (Ok(found), Ok(expected)) => found == expected,
         _ => false,
     }
+}
+
+/// The one path a git command run in `dir` prints, byte for byte: a folder
+/// name may end in a space or hold bytes that are not UTF-8, so only the
+/// newline git ends the line with is taken off. `None` when git fails or
+/// prints nothing.
+fn git_printed_path(dir: &Path, args: &[&str]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let printed = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+    (!printed.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(printed)))
 }
 
 /// Remove the folder an add just made and git cannot read, or say why it was
@@ -9321,6 +9334,27 @@ mod tests {
             "a folder that pre-existed is left alone"
         );
         assert!(branch_exists("theirs"), "a branch dux did not make is kept");
+    }
+
+    /// A folder name git prints exactly but that is not plain text (a trailing
+    /// space, or bytes that are not UTF-8) is still the copy git can read, so
+    /// the add succeeds on its first attempt.
+    #[test]
+    fn a_worktree_whose_path_is_not_plain_text_is_read_as_readable() {
+        let repo = init_test_repo();
+        let root = tempfile::tempdir().unwrap();
+        let spaced = root.path().join("ends in a space ");
+        add_worktree_new_branch_at(repo.path(), &spaced, "spaced", None)
+            .expect("a trailing space is part of the folder's name");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = root
+                .path()
+                .join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff"));
+            add_worktree_new_branch_at(repo.path(), &raw, "raw", None)
+                .expect("a name that is not UTF-8 is still a folder git can read");
+        }
     }
 
     /// A failed attach removes the branch dux minted for it, unless something
