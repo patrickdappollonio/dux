@@ -13,6 +13,7 @@ import type { DuxState } from "@/lib/store"
 import {
   fireAnimationIteration,
   fireAnimationStart,
+  expectLookEasesIn,
   stubGlyphEase,
 } from "@/test/animationEvents"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
@@ -2386,7 +2387,7 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
       expect(frame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
       expect(withLook(), LOCKED).toBeNull()
       await ease.eased()
-      expect(withLook()?.getAttribute("class"), LOCKED).toContain("transition-colors")
+      expectLookEasesIn(withLook()?.getAttribute("class") ?? "", LOCKED)
     })
   }
 })

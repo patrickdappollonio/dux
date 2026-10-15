@@ -1,5 +1,7 @@
 import * as React from "react"
 
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
+
 import {
   type SettlingAnimationHandlers,
   useSettlingAnimation,
@@ -68,8 +70,8 @@ export function useWorkingPulseAnchor(
 /**
  * Drives one working glyph: `bouncing` keys the bounce class on the frame that
  * `attachBounce` and `handlers` go on, and `pulsing` keys the pulse class on the
- * glyph that `attachPulse` goes on. `fading` is true while the glyph is still
- * easing back to full opacity after a stop.
+ * glyph that `attachPulse` goes on. `landing` is true from a stop until the
+ * bounce has finished and the glyph has eased back to full opacity.
  *
  * `working` is the cue's one flag, already resolved through the state word's
  * ladder by the caller, so a higher state taking over is just `working` turning
@@ -82,15 +84,17 @@ export function useWorkingPulseAnchor(
  * hand-over included, the pulse is held for one layout pass, long enough to
  * read the opacity it had reached and ease the glyph from there back to full
  * with a script animation, and then dropped before anything is painted. A
- * higher state's own look waits for `bouncing` and `fading` to clear (see
- * `WorkingGlyph`), so the ease never runs under an attention blink.
+ * higher state's own look waits for `landing` to clear (see `WorkingGlyph`), so
+ * the ease never runs under an attention blink. Reduced motion has no landing:
+ * it never starts the ease, cancels one already running, and releases the look
+ * at once.
  */
 export function useWorkingCue<B extends Element, G extends Element>(
   working: boolean,
 ): {
   bouncing: boolean
   pulsing: boolean
-  fading: boolean
+  landing: boolean
   attachBounce: (el: B | null) => void
   attachPulse: (el: G | null) => void
   handlers: SettlingAnimationHandlers
@@ -100,6 +104,7 @@ export function useWorkingCue<B extends Element, G extends Element>(
   const [glyph, setGlyph] = React.useState<G | null>(null)
   const fade = React.useRef<Animation | null>(null)
   const [fading, setFading] = React.useState(false)
+  const reduced = usePrefersReducedMotion()
 
   const [prevWorking, setPrevWorking] = React.useState(working)
   const [leaving, setLeaving] = React.useState(false)
@@ -119,7 +124,13 @@ export function useWorkingCue<B extends Element, G extends Element>(
   React.useLayoutEffect(() => {
     if (!leaving) return
     const pulse = findAnimation(glyph, WORKING_PULSE_NAME)
-    if (glyph && pulse && !pageHidden() && typeof glyph.animate === "function") {
+    if (
+      glyph &&
+      pulse &&
+      !reduced &&
+      !pageHidden() &&
+      typeof glyph.animate === "function"
+    ) {
       const from = window.getComputedStyle(glyph).opacity
       const animation = glyph.animate([{ opacity: from }, { opacity: "1" }], {
         duration: WORKING_PULSE_FADE_MS,
@@ -139,17 +150,17 @@ export function useWorkingCue<B extends Element, G extends Element>(
     // belong in this layout effect rather than after it.
     setFading(fade.current !== null)
     setLeaving(false)
-  }, [leaving, glyph])
+  }, [leaving, glyph, reduced])
 
-  // Resuming ends an ease still running, and so does the tab going hidden,
-  // where nothing is painted to ease.
+  // Resuming ends an ease still running, and so do reduced motion and the tab
+  // going hidden, where there is no motion to finish.
   React.useLayoutEffect(() => {
-    if (!working) return
+    if (!working && !reduced) return
     fade.current?.cancel()
     fade.current = null
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFading(false)
-  }, [working])
+  }, [working, reduced])
   React.useEffect(() => {
     if (!fading) return
     const onVisibility = () => {
@@ -175,7 +186,9 @@ export function useWorkingCue<B extends Element, G extends Element>(
   return {
     bouncing: bounce.running,
     pulsing: working || leavingNow,
-    fading,
+    // True from the stop's own render, before any effect or animation event
+    // has run, so a look waiting on it can never slip in ahead of the ease.
+    landing: !working && !reduced && (bounce.running || fading || leavingNow),
     attachBounce,
     attachPulse: setGlyph,
     handlers: bounce.handlers,

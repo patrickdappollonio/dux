@@ -50,7 +50,7 @@ export function WorkingGlyph({
   frameClassName?: string
   frameRef?: RefObject<HTMLSpanElement | null>
 }) {
-  const { bouncing, pulsing, fading, attachBounce, attachPulse, handlers } =
+  const { bouncing, pulsing, landing, attachBounce, attachPulse, handlers } =
     useWorkingCue<HTMLSpanElement, SVGSVGElement>(working)
   const attachFrame = useCallback(
     (el: HTMLSpanElement | null) => {
@@ -60,7 +60,6 @@ export function WorkingGlyph({
     [attachBounce, frameRef],
   )
 
-  const landing = !working && (bouncing || fading)
   const [shown, setShown] = useState(look)
   const [held, setHeld] = useState(false)
   const [eased, setEased] = useState(false)

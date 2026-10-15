@@ -6,6 +6,7 @@ import type { DragEndEvent } from "@dnd-kit/core"
 import {
   fireAnimationIteration,
   fireAnimationStart,
+  expectLookEasesIn,
   stubGlyphEase,
 } from "@/test/animationEvents"
 import type { DuxState } from "@/lib/store"
@@ -2345,6 +2346,6 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     for (const ease of eases) await ease.eased()
     const look = bot().closest(ATTENTION)?.getAttribute("class") ?? ""
     expect(look, LOCKED).toContain("text-cyan-100")
-    expect(look, LOCKED).toContain("transition-colors")
+    expectLookEasesIn(look, LOCKED)
   })
 })

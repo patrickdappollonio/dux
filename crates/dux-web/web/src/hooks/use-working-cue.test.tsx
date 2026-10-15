@@ -2,9 +2,11 @@
 import { act, cleanup, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { fireAnimationStart } from "@/test/animationEvents"
-
+import { Bot } from "lucide-react"
 import { useRef } from "react"
+
+import { WorkingGlyph } from "@/components/WorkingGlyph"
+import { fireAnimationStart, stubGlyphEase } from "@/test/animationEvents"
 
 import {
   useWorkingCue,
@@ -268,5 +270,30 @@ describe("useWorkingPulseAnchor", () => {
     withAnimations(screen.getByTestId("word"), () => [word.animation])
     rerender(<AnchorProbe working />)
     expect(word.clockWrites).toEqual([])
+  })
+})
+
+// A look held for the landing must never be held forever: a stop that comes
+// before the bounce ever reported starting still holds it for the ease, and a
+// hidden tab cancelling that ease releases it.
+describe("WorkingGlyph's held look", () => {
+  afterEach(() => {
+    cleanup()
+    setHidden(false)
+  })
+
+  it("holds the look through the ease and releases it when a hidden tab cancels it", async () => {
+    const { container, rerender } = render(<WorkingGlyph icon={Bot} working look="at-rest" />)
+    const frame = () => container.querySelector("[data-slot='working-glyph']")!
+    stubGlyphEase(container.querySelector("svg")!)
+
+    rerender(<WorkingGlyph icon={Bot} working={false} look="needs-you" />)
+    expect(frame().className).not.toContain("needs-you")
+
+    setHidden(true)
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    expect(frame().className).toContain("needs-you")
   })
 })
