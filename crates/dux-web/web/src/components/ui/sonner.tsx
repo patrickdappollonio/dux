@@ -60,7 +60,7 @@ export function toastPlacement(isMobile: boolean): {
 // so color is never the only carrier.
 const TONE_COLOR = {
   success: "text-dux-success",
-  info: "text-sky-400",
+  info: "text-dux-info",
   warning: "text-dux-warning",
   error: "text-destructive",
 } as const
@@ -75,22 +75,22 @@ const TONE_ICON = {
 } as const
 
 /// The foot of every toast `lib/notify.ts` raises: a bar draining over `ms`, the
-/// toast's exact sonner duration, or no bar when the toast will not dismiss
-/// itself (`ms` null), plus the tag the stack shows while sonner holds its
-/// timers. Both are absolutely placed against the toast, so they take no room in
-/// it, and both are hidden from the toaster's live region.
+/// toast's exact sonner duration, plus the tag that says it is paused; nothing at
+/// all when the toast will not dismiss itself (`ms` null). Both sit in the
+/// toast's own bottom padding, absolutely placed, so they take no room in it and
+/// cover nothing outside it, and both are hidden from the toaster's live region.
 ///
 /// The bar keeps no clock of its own. It is a CSS animation that `index.css`
 /// pauses on exactly the conditions sonner pauses on (see `Toaster` below), and
 /// a raise that replaces a toast hands a fresh element key, so the bar starts
 /// over with sonner's timer.
 ///
-/// sonner arms its timer in an effect of the commit that mounts the toast, while
-/// a CSS animation's own start waits for the frame that first paints it
-/// (measured at 130 to 300ms late on a busy page). So a running bar is anchored
-/// to the mounting commit instead, which also holds when sonner remounts a toast
-/// and restarts its timer. A bar that mounts held is left alone: sonner has not
-/// started counting either, and both start on the same release.
+/// sonner (re)arms its timer in an effect of the very commit that mounts the
+/// toast or releases the stack, while a CSS animation that starts or resumes
+/// waits for the frame that paints it (measured 130 to 300ms late on a busy
+/// page). So whenever the bar goes from waiting to running, at mount or on a
+/// release, its start is anchored to that moment instead, keeping what it had
+/// already drained.
 export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }) {
   // An unknown tone is raised as a success, so it drains in the success color.
   const color = TONE_COLOR[tone as keyof typeof TONE_COLOR] ?? TONE_COLOR.success
@@ -98,31 +98,42 @@ export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }
   useLayoutEffect(() => {
     const fill = fillRef.current
     if (!fill || typeof fill.getAnimations !== "function") return
-    const mountedAt = performance.now()
-    for (const animation of fill.getAnimations()) {
-      if (animation.playState === "running") animation.startTime = mountedAt
+    const anchor = () => {
+      // Reading the animations flushes style, so a release has already turned
+      // a held bar into one pending to run.
+      for (const animation of fill.getAnimations()) {
+        if (animation.playState !== "running" || !animation.pending) continue
+        const drained = Number(animation.currentTime ?? 0)
+        animation.startTime = performance.now() - drained
+      }
     }
+    anchor()
+    // The hold conditions live on the toast (sonner's `data-expanded`) and on
+    // the toaster's section (the mirrored press and hidden flags).
+    const observer = new MutationObserver(anchor)
+    const toast = fill.closest("[data-sonner-toast]")
+    const section = fill.closest("section")
+    if (toast) observer.observe(toast, { attributeFilter: ["data-expanded"] })
+    if (section) {
+      observer.observe(section, { attributeFilter: ["data-dux-pressed", "data-dux-hidden"] })
+    }
+    return () => observer.disconnect()
   }, [])
+  if (ms === null) return null
   return (
-    <>
-      {ms !== null && (
-        <span aria-hidden className="dux-toast-drain">
-          <span
-            ref={fillRef}
-            className={`dux-toast-drain-fill bg-current ${color}`}
-            style={
-              {
-                "--dux-drain-ms": `${ms}ms`,
-                "--dux-drain-steps": Math.max(1, Math.round(ms / 1000)),
-              } as React.CSSProperties
-            }
-          />
-        </span>
-      )}
-      <span aria-hidden className="dux-toast-held-tag">
-        Paused while you read
-      </span>
-    </>
+    <span aria-hidden className="dux-toast-drain">
+      <span className="dux-toast-held-tag">Paused while you read</span>
+      <span
+        ref={fillRef}
+        className={`dux-toast-drain-fill bg-current ${color}`}
+        style={
+          {
+            "--dux-drain-ms": `${ms}ms`,
+            "--dux-drain-steps": Math.max(1, Math.round(ms / 1000)),
+          } as React.CSSProperties
+        }
+      />
+    </span>
   )
 }
 

@@ -88,6 +88,7 @@ const STATE_TOKENS: { token: string; uses: Record<string, string> }[] = [
       "components/ui/sonner.tsx": "text-dux-success",
     },
   },
+  { token: "dux-info", uses: { "components/ui/sonner.tsx": "text-dux-info" } },
   {
     token: "dux-error",
     uses: { "components/ConnDot.tsx": "bg-dux-error" },

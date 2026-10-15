@@ -184,6 +184,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --color-dux-added: var(--dux-added);
     --color-dux-deleted: var(--dux-deleted);
     --color-dux-success: var(--dux-success);
+    --color-dux-info: var(--dux-info);
     --color-dux-error: var(--dux-error);
     --color-dux-pr-open: var(--dux-pr-open);
     --color-dux-pr-open-hover: var(--dux-pr-open-hover);
@@ -456,6 +457,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-added: oklch(72.3% 0.219 149.579);
     --dux-deleted: oklch(63.7% 0.237 25.331);
     --dux-success: oklch(72.3% 0.219 149.579);
+    /* Tailwind's sky-400, the info tone (a toast's icon and its countdown bar). */
+    --dux-info: oklch(74.6% 0.16 232.661);
     --dux-error: oklch(63.7% 0.237 25.331);
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
@@ -524,6 +527,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-added: oklch(72.3% 0.219 149.579);
     --dux-deleted: oklch(63.7% 0.237 25.331);
     --dux-success: oklch(72.3% 0.219 149.579);
+    --dux-info: oklch(74.6% 0.16 232.661);
     --dux-error: oklch(63.7% 0.237 25.331);
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
@@ -869,14 +873,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 
 /* Held exactly when sonner holds its timers: the stack is expanded (sonner's
    own attribute), a pointer is down on it, or the page is hidden (the last two
-   mirrored by the Toaster). A hidden page is not dimmed: nobody is looking. */
+   mirrored by the Toaster). Only the expanded stack, the one a reader is
+   looking at, also SAYS it is paused: a press is a close, an action or a swipe
+   on its way somewhere, and a hidden page has nobody looking. */
 [data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill,
 [data-dux-pressed] .dux-toast-drain-fill,
 [data-dux-hidden] .dux-toast-drain-fill {
   animation-play-state: paused;
 }
-[data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill,
-[data-dux-pressed] .dux-toast-drain-fill {
+[data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill {
   opacity: 0.4;
 }
 
@@ -888,42 +893,23 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   }
 }
 
-/* "Paused while you read": one tag beyond the far end of the stack, so it sits
-   over the page rather than over a toast or its close button, and it takes no
-   pointer events, so it can never catch a click meant for what is under it. */
+/* "Paused while you read": a small label right-aligned just above the bar, on
+   each counting toast, in the 16px bottom padding sonner gives every toast.
+   Text, icon, action button and close button all live inside that padding, so
+   the label covers none of them, and it is inside the clip box, so it can
+   never reach past its own toast. */
 .dux-toast-held-tag {
   position: absolute;
-  left: 50%;
-  translate: -50% 0;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: var(--popover);
+  right: 12px;
+  bottom: 4px;
   color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 10px;
   line-height: 1;
   white-space: nowrap;
-  pointer-events: none;
   opacity: 0;
   transition: opacity 150ms;
 }
-[data-sonner-toast][data-y-position="bottom"] .dux-toast-held-tag {
-  bottom: calc(100% + 8px);
-}
-[data-sonner-toast][data-y-position="top"] .dux-toast-held-tag {
-  top: calc(100% + 8px);
-}
-/* Shown only while some visible toast is counting down. Expanded, the far end
-   is the last visible toast; a press on a collapsed stack leaves only the front
-   toast legible, so the tag rides that one. */
-[data-sonner-toaster]:has(> [data-sonner-toast][data-visible="true"][data-removed="false"] .dux-toast-drain)
-  > [data-sonner-toast][data-expanded="true"][data-visible="true"][data-removed="false"]:not(:has(~ [data-sonner-toast][data-visible="true"][data-removed="false"]))
-  .dux-toast-held-tag,
-[data-dux-pressed]
-  [data-sonner-toaster]:has(> [data-sonner-toast][data-visible="true"][data-removed="false"] .dux-toast-drain)
-  > [data-sonner-toast][data-front="true"][data-expanded="false"]
-  .dux-toast-held-tag {
+[data-sonner-toast][data-expanded="true"] .dux-toast-held-tag {
   opacity: 1;
 }
 @media (prefers-reduced-motion: reduce) {

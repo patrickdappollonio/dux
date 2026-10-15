@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import { Toaster } from "@/components/ui/sonner"
@@ -266,5 +266,39 @@ describe("the countdown bar", () => {
     })
     await screen.findByText("no window at all")
     expect(bar()).toBeNull()
+  })
+
+  // The bar starts over on every replacement, so sonner's timer has to as well.
+  // sonner only resets a toast's remaining time when its duration changes, so a
+  // toast that was paused once and then replaced with the same duration would
+  // resume from the remainder left at that pause and vanish early.
+  it("restarts the full window when a once-paused toast is replaced on its id", async () => {
+    setStatusClearSeconds(0.6)
+    render(<Toaster />)
+    act(() => {
+      notifySuccess("first copy", { id: "same" })
+    })
+    await screen.findByText("first copy")
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const stack = document.querySelector("[data-sonner-toaster]") as HTMLElement
+    // Hovering expands the stack, which is what pauses sonner's timers; about
+    // 300ms of the 600ms window is left at this pause.
+    act(() => {
+      fireEvent.mouseEnter(stack)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    act(() => {
+      fireEvent.mouseLeave(stack)
+    })
+    act(() => {
+      notifySuccess("second copy", { id: "same" })
+    })
+    await screen.findByText("second copy")
+    // Past the old remainder, well short of a fresh window.
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+    await waitFor(() => expect(toastEl().getAttribute("data-removed")).toBe("true"), {
+      timeout: 1000,
+    })
   })
 })
