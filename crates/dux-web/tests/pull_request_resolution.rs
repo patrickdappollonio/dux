@@ -14,7 +14,7 @@ use std::path::Path;
 use axum::Router;
 use dux_core::config::{DuxPaths, ProjectConfig};
 use dux_core::gh::GithubHostPolicy;
-use dux_core::gh::probe_test_support::stand_in_gh_serving;
+use dux_core::gh::probe_test_support::stand_in_gh_with_pull_request;
 use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
@@ -47,6 +47,16 @@ fn git_isolated(dir: &Path, args: &[&str]) {
 async fn boot(
     projects: &[(&str, &str, &str)],
     hosts: &[&str],
+) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
+    boot_with_lookup(projects, hosts, Err("no pull request answers here")).await
+}
+
+/// [`boot`] with `gh pr view` answering `pull_request`: its JSON, or a message
+/// on stderr with a failing exit.
+async fn boot_with_lookup(
+    projects: &[(&str, &str, &str)],
+    hosts: &[&str],
+    pull_request: Result<&str, &str>,
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
@@ -91,10 +101,17 @@ async fn boot(
     // probe overwrites the placed answer mid-test and every resolve is refused.
     // With the stand-in, the production probe code path runs unchanged and the
     // answer it gets is the one this test wrote.
-    engine.gh_probe.program = stand_in_gh_serving(&root, hosts).into();
+    let signed_in: Vec<(&str, &str)> = hosts.iter().map(|h| (*h, "ssh")).collect();
+    engine.gh_probe.program = stand_in_gh_with_pull_request(&root, &signed_in, pull_request).into();
     // The placed pair covers the window BEFORE the probe reports, so the answer
     // is the same at every instant of the test rather than only after it lands.
     engine.gh_status = GhStatus::Available;
+    engine.set_github_git_protocols(
+        hosts
+            .iter()
+            .map(|h| ((*h).to_string(), dux_core::gh::GitProtocol::Ssh))
+            .collect(),
+    );
     engine.set_github_host_policy(GithubHostPolicy::Hosts(
         hosts.iter().map(|h| (*h).to_string()).collect(),
     ));
@@ -192,6 +209,45 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
         value["repository"], "github.com/acme/unknown",
         "the client has to be able to say WHICH repository dux has no project for"
     );
+    // The pull request cannot be found: still a 200 with the projects, no
+    // offer, and the lookup's own sentence as data.
+    assert!(value.get("clone").is_none(), "{body}");
+    assert_eq!(
+        value["clone_unavailable"],
+        "Failed to resolve PR #3 from acme/unknown: no pull request answers here"
+    );
+
+    // A reference with no number has nothing to look up, so neither key exists.
+    let (status, body) = resolve(addr, "https://github.com/acme/unknown").await;
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(value.get("clone").is_none(), "{body}");
+    assert!(value.get("clone_unavailable").is_none(), "{body}");
+
+    // With a pull request gh can find, the reply carries the offer: the
+    // address follows the host's ssh setting.
+    let (addr, _tmp) = boot_with_lookup(
+        &[("p1", "widget", "git@github.com:acme/widget.git")],
+        &["github.com"],
+        Ok(r#"{"number":3,"title":"Add a thing","state":"OPEN","headRefName":"add-thing"}"#),
+    )
+    .await;
+    let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["clone"],
+        serde_json::json!({
+            "address": "git@github.com:acme/unknown.git",
+            "host": "github.com",
+            "owner_repo": "acme/unknown",
+            "number": 3,
+            "title": "Add a thing",
+            "state": "OPEN",
+            "head_branch": "add-thing",
+        })
+    );
+    assert!(value.get("clone_unavailable").is_none(), "{body}");
 }
 
 #[tokio::test]

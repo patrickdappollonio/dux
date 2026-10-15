@@ -131,6 +131,17 @@ impl From<String> for WireError {
 pub const MISSING_OPERATION_RECORD: &str =
     "the change was made, but its operation record did not come back with the reply";
 
+/// Everything the pull-request reference resolver reads from the engine.
+pub struct PullRequestResolutionInputs {
+    pub projects: Vec<dux_core::model::Project>,
+    pub policy: dux_core::gh::GithubHostPolicy,
+    /// Each signed-in host's git protocol, for the clone address.
+    pub protocols: std::collections::BTreeMap<String, dux_core::gh::GitProtocol>,
+    /// The program the pull request lookup runs: `gh`, or a test's stand-in.
+    pub gh_program: std::ffi::OsString,
+    pub gh_available: bool,
+}
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
@@ -428,13 +439,7 @@ pub enum EngineRequest {
     /// async reactor. Fetched per request, never cached: the answer changes when an
     /// address is edited, when git's rewrite configuration changes, and when a
     /// project's path moves under the same id.
-    PullRequestResolutionInputs(
-        oneshot::Sender<(
-            Vec<dux_core::model::Project>,
-            dux_core::gh::GithubHostPolicy,
-            bool,
-        )>,
-    ),
+    PullRequestResolutionInputs(oneshot::Sender<PullRequestResolutionInputs>),
     /// Resolve a session's startup-command-log context: `(dux paths, project_id)`
     /// for the session, so a GET handler can list/read its startup-command logs
     /// off-thread. `None` when the session id is unknown. Instant clone off engine
@@ -2089,13 +2094,7 @@ impl EngineHandle {
     /// The project list, host policy and gh-availability flag the pull-request
     /// reference resolver needs. See
     /// [`EngineRequest::PullRequestResolutionInputs`].
-    pub async fn pull_request_resolution_inputs(
-        &self,
-    ) -> Option<(
-        Vec<dux_core::model::Project>,
-        dux_core::gh::GithubHostPolicy,
-        bool,
-    )> {
+    pub async fn pull_request_resolution_inputs(&self) -> Option<PullRequestResolutionInputs> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -4787,11 +4786,13 @@ fn handle_request(
             engine.spawn_changed_files_refresh(std::path::PathBuf::from(worktree));
         }
         EngineRequest::PullRequestResolutionInputs(reply) => {
-            let _ = reply.send((
-                engine.projects.clone(),
-                engine.github_host_policy(),
-                engine.pr_agent_command_available(),
-            ));
+            let _ = reply.send(PullRequestResolutionInputs {
+                projects: engine.projects.clone(),
+                policy: engine.github_host_policy(),
+                protocols: engine.github_git_protocols(),
+                gh_program: engine.gh_probe.program.clone(),
+                gh_available: engine.pr_agent_command_available(),
+            });
         }
         EngineRequest::DestructiveCheck(path, reply) => {
             let _ = reply.send(engine.destructive_check(&path));

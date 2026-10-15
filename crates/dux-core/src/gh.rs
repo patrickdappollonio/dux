@@ -2,7 +2,7 @@
 //! (`spawn_pr_sync_worker`, `spawn_initial_pr_refresh`, `spawn_pr_check_for_session`).
 //! All helpers shell out to `gh` and parse JSON; no UI deps.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
@@ -755,6 +755,25 @@ impl GithubHostPolicy {
     }
 }
 
+/// How `gh` clones from a host, as its `gitProtocol` setting says. A missing or
+/// unrecognised value is https, which is also what `gh repo clone` falls back to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GitProtocol {
+    #[default]
+    Https,
+    Ssh,
+}
+
+impl GitProtocol {
+    fn from_gh(value: &serde_json::Value) -> Self {
+        if value.as_str() == Some("ssh") {
+            Self::Ssh
+        } else {
+            Self::Https
+        }
+    }
+}
+
 /// What one run of the `gh` host probe concluded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GhProbe {
@@ -768,15 +787,18 @@ pub enum GhProbe {
     Decided {
         available: bool,
         policy: GithubHostPolicy,
+        /// Each qualifying host's git protocol (lowercased host keys). Empty
+        /// under the legacy policy, which reports none: https for every host.
+        protocols: BTreeMap<String, GitProtocol>,
     },
 }
 
 /// The shape of `gh auth status --active --json hosts`, typed so that anything
 /// that is not that shape fails to deserialize instead of being read loosely.
 ///
-/// Only the three fields the decision needs are named; `gh` sends more (login,
-/// scopes, gitProtocol, tokenSource) and serde ignores them, so a future field
-/// cannot break this.
+/// Only the fields the decision needs are named (`gitProtocol` is read loosely);
+/// `gh` sends more (login, scopes, tokenSource) and serde ignores them, so a
+/// future field cannot break this.
 #[derive(serde::Deserialize)]
 struct AuthStatusOutput {
     hosts: std::collections::BTreeMap<String, Vec<AuthStatusAccount>>,
@@ -804,6 +826,9 @@ struct AuthStatusAccount {
     host: String,
     #[serde(default)]
     error: String,
+    /// Read loosely: any shape other than the string `ssh` means https.
+    #[serde(default, rename = "gitProtocol")]
+    git_protocol: serde_json::Value,
 }
 
 impl AuthStatusAccount {
@@ -857,6 +882,8 @@ pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> 
 pub(crate) struct AuthStatusReading {
     /// Hosts whose ACTIVE account reports success.
     eligible: BTreeSet<String>,
+    /// The git protocol of each eligible host's qualifying account.
+    protocols: BTreeMap<String, GitProtocol>,
     /// `gh`'s own `error` text for every ACTIVE account that did not qualify,
     /// in host order. Inactive accounts are skipped: dux never names an account
     /// when it calls `gh`, so a sibling's failure is not this call's problem.
@@ -870,6 +897,7 @@ pub(crate) fn parse_auth_status(stdout: &str) -> Option<AuthStatusReading> {
     let parsed: AuthStatusOutput = serde_json::from_str(stdout.trim()).ok()?;
     let mut reading = AuthStatusReading {
         eligible: BTreeSet::new(),
+        protocols: BTreeMap::new(),
         active_errors: Vec::new(),
     };
     for (key, accounts) in &parsed.hosts {
@@ -877,7 +905,10 @@ pub(crate) fn parse_auth_status(stdout: &str) -> Option<AuthStatusReading> {
         if key.is_empty() {
             continue;
         }
-        if accounts.iter().any(|account| account.qualifies(&key)) {
+        if let Some(account) = accounts.iter().find(|account| account.qualifies(&key)) {
+            reading
+                .protocols
+                .insert(key.clone(), GitProtocol::from_gh(&account.git_protocol));
             reading.eligible.insert(key);
             continue;
         }
@@ -1092,6 +1123,7 @@ pub(crate) fn decide_gh_probe(
             return GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::Hosts(reading.eligible),
+                protocols: reading.protocols,
             };
         }
         // Nothing qualified, which is where the three different answers `gh`
@@ -1109,6 +1141,7 @@ pub(crate) fn decide_gh_probe(
         return GhProbe::Decided {
             available: false,
             policy: GithubHostPolicy::Hosts(reading.eligible),
+            protocols: reading.protocols,
         };
     }
 
@@ -1152,6 +1185,7 @@ pub(crate) fn decide_gh_probe(
             GhProbe::Decided {
                 available: output.status.success(),
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: BTreeMap::new(),
             }
         }
     }
@@ -2039,34 +2073,8 @@ pub fn run_pull_request_lookup_job(
         }
     };
 
-    let args = pr_view_args(&lookup.host, &lookup.owner_repo, lookup.number);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // Bounded so a hung `gh pr view` (stalled network, credential prompt) can't
-    // strand the web CreateAgentFromPr Busy status forever.
-    let result = match run_gh_with_timeout(&arg_refs, GH_CALL_TIMEOUT) {
-        GhCallOutcome::Completed(output) if output.status.success() => {
-            parse_resolved_pull_request_json(
-                &String::from_utf8_lossy(&output.stdout),
-                project,
-                &lookup.host,
-                &lookup.owner_repo,
-                custom_name,
-            )
-        }
-        GhCallOutcome::Completed(output) => Err(format!(
-            "Failed to resolve PR #{} from {}: {}",
-            lookup.number,
-            lookup.owner_repo,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-        GhCallOutcome::TimedOut => Err(format!(
-            "gh pr view timed out after {}s resolving PR #{} from {}.",
-            GH_CALL_TIMEOUT.as_secs(),
-            lookup.number,
-            lookup.owner_repo,
-        )),
-        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
-    };
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
+        .map(|metadata| resolved_pull_request(metadata, project, &lookup, custom_name));
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
         purpose: PrLookupPurpose::CreateAgent,
@@ -2194,18 +2202,38 @@ pub fn run_attach_pull_request_lookup_job(
             }
         };
 
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
+        .map(|metadata| resolved_pull_request(metadata, project, &lookup, None));
+    let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+        result,
+        purpose,
+        status_op_id,
+    });
+}
+
+/// A pull request as `gh pr view` reports it, before any project is attached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestMetadata {
+    pub number: u64,
+    /// With the bidirectional-text controls stripped.
+    pub title: String,
+    pub state: String,
+    pub head_ref_name: String,
+}
+
+/// Run `gh pr view` through `program` for `lookup` and read its answer. Needs no
+/// project: callers that already hold one attach it with
+/// [`resolved_pull_request`]. Bounded by [`GH_CALL_TIMEOUT`] so a hung call
+/// (stalled network, credential prompt) cannot strand a busy status forever.
+pub fn look_up_pull_request(
+    program: &OsStr,
+    lookup: &PullRequestLookup,
+) -> Result<PullRequestMetadata, String> {
     let args = pr_view_args(&lookup.host, &lookup.owner_repo, lookup.number);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // Bounded so a hung `gh pr view` cannot strand the attach busy forever.
-    let result = match run_gh_with_timeout(&arg_refs, GH_CALL_TIMEOUT) {
+    match run_program_with_timeout(program, &arg_refs, GH_CALL_TIMEOUT) {
         GhCallOutcome::Completed(output) if output.status.success() => {
-            parse_resolved_pull_request_json(
-                &String::from_utf8_lossy(&output.stdout),
-                project,
-                &lookup.host,
-                &lookup.owner_repo,
-                None,
-            )
+            parse_pull_request_metadata_json(&String::from_utf8_lossy(&output.stdout))
         }
         GhCallOutcome::Completed(output) => Err(format!(
             "Failed to resolve PR #{} from {}: {}",
@@ -2220,21 +2248,28 @@ pub fn run_attach_pull_request_lookup_job(
             lookup.owner_repo,
         )),
         GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
-    };
-    let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
-        result,
-        purpose,
-        status_op_id,
-    });
+    }
 }
 
-fn parse_resolved_pull_request_json(
-    json: &str,
+fn resolved_pull_request(
+    metadata: PullRequestMetadata,
     project: Project,
-    host: &str,
-    owner_repo: &str,
+    lookup: &PullRequestLookup,
     custom_name: Option<String>,
-) -> Result<ResolvedPullRequest, String> {
+) -> ResolvedPullRequest {
+    ResolvedPullRequest {
+        project,
+        host: lookup.host.clone(),
+        owner_repo: lookup.owner_repo.clone(),
+        number: metadata.number,
+        title: metadata.title,
+        state: metadata.state,
+        head_ref_name: metadata.head_ref_name,
+        custom_name,
+    }
+}
+
+fn parse_pull_request_metadata_json(json: &str) -> Result<PullRequestMetadata, String> {
     let obj: serde_json::Value = serde_json::from_str(json.trim())
         .map_err(|err| format!("gh returned invalid PR JSON: {err}"))?;
     let number = obj
@@ -2254,15 +2289,11 @@ fn parse_resolved_pull_request_json(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "gh PR response did not include a head branch.".to_string())?
         .to_string();
-    Ok(ResolvedPullRequest {
-        project,
-        host: host.to_string(),
-        owner_repo: owner_repo.to_string(),
+    Ok(PullRequestMetadata {
         number,
         title,
         state,
         head_ref_name,
-        custom_name,
     })
 }
 
@@ -2333,6 +2364,37 @@ pub mod probe_test_support {
             &format!("case \"$*\" in\n  *--json*) printf '%s' '{json}' ;;\n  *) exit 1 ;;\nesac\n"),
         )
     }
+
+    /// A stand-in that tells the two calls dux makes apart by their first
+    /// word, which `stand_in_gh_serving` cannot: both carry `--json`.
+    /// `auth status ...` answers each of `hosts` (host, `gitProtocol`) with a
+    /// successful active account; `pr view ...` prints `pull_request` when it
+    /// is `Ok`, and exits 1 with the message on stderr when it is `Err`.
+    pub fn stand_in_gh_with_pull_request(
+        dir: &Path,
+        hosts: &[(&str, &str)],
+        pull_request: Result<&str, &str>,
+    ) -> PathBuf {
+        let entries: Vec<String> = hosts
+            .iter()
+            .map(|(h, protocol)| {
+                format!(
+                    r#""{h}":[{{"state":"success","active":true,"host":"{h}","gitProtocol":"{protocol}"}}]"#
+                )
+            })
+            .collect();
+        let auth = format!(r#"{{"hosts":{{{}}}}}"#, entries.join(","));
+        let pr = match pull_request {
+            Ok(json) => format!("printf '%s' '{json}'"),
+            Err(message) => format!("echo '{message}' >&2; exit 1"),
+        };
+        stand_in_gh(
+            dir,
+            &format!(
+                "case \"$1\" in\n  auth) printf '%s' '{auth}' ;;\n  pr) {pr} ;;\n  *) exit 1 ;;\nesac\n"
+            ),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2370,6 +2432,27 @@ mod host_policy_tests {
                 .expect("expected shape")
                 .is_empty(),
             "a host whose active account errors must not qualify",
+        );
+
+        let protocols = parse_auth_status(MEASURED_GH_2_95_OUTPUT)
+            .expect("expected shape")
+            .protocols;
+        assert_eq!(
+            protocols,
+            BTreeMap::from([("github.com".to_string(), GitProtocol::Ssh)]),
+        );
+        let no_field =
+            r#"{"hosts":{"GHE.example":[{"state":"success","active":true,"host":"ghe.example"}]}}"#;
+        assert_eq!(
+            parse_auth_status(no_field)
+                .expect("expected shape")
+                .protocols,
+            BTreeMap::from([("ghe.example".to_string(), GitProtocol::Https)]),
+        );
+        let other = r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","gitProtocol":"https"}]}}"#;
+        assert_eq!(
+            parse_auth_status(other).expect("expected shape").protocols,
+            BTreeMap::from([("github.com".to_string(), GitProtocol::Https)]),
         );
     }
 
@@ -2479,6 +2562,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                    protocols: Default::default(),
                 },
                 "{decisive}",
             );
@@ -2581,6 +2665,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
 
@@ -2659,7 +2744,10 @@ mod host_policy_tests {
         let probe = decide_gh_probe(GhCallOutcome::Completed(completed(0, answer)), || {
             panic!("a parseable answer needs no fallback")
         });
-        let GhProbe::Decided { available, policy } = probe else {
+        let GhProbe::Decided {
+            available, policy, ..
+        } = probe
+        else {
             panic!("expected a decided probe, got {probe:?}");
         };
         assert!(available, "one working host means GitHub is available");
@@ -2848,6 +2936,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                protocols: Default::default(),
             },
         );
     }
@@ -2870,6 +2959,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
         let calls: Vec<String> = std::fs::read_to_string(&log)
@@ -3009,6 +3099,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
     }
@@ -3057,6 +3148,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
     }
@@ -3099,6 +3191,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                protocols: Default::default(),
             },
         );
     }
@@ -3137,6 +3230,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                    protocols: Default::default(),
                 },
                 "a rejected credential decides",
             );
@@ -3169,6 +3263,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                protocols: Default::default(),
             },
         );
     }
@@ -4495,14 +4590,7 @@ mod tests {
         let polled = parse_pr_json_object(&json, "github.com", "owner/repo").expect("pr");
         assert_eq!(polled.title, "Fix login exe.txt");
 
-        let resolved = parse_resolved_pull_request_json(
-            &json,
-            lookup_test_project(),
-            "github.com",
-            "owner/repo",
-            None,
-        )
-        .expect("resolved");
+        let resolved = parse_pull_request_metadata_json(&json).expect("resolved");
         assert_eq!(resolved.title, "Fix login exe.txt");
 
         // A row stored before the stripping existed is cleaned on the way out.
@@ -4713,53 +4801,55 @@ mod tests {
         );
     }
 
-    fn lookup_test_project() -> Project {
-        Project {
-            id: "p1".to_string(),
-            name: "demo".to_string(),
-            path: "/tmp/demo".to_string(),
-            explicit_default_provider: None,
-            default_provider: crate::model::ProviderKind::new("claude"),
-            leading_branch: Some("main".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: std::collections::BTreeMap::new(),
-            current_branch: "main".to_string(),
-            branch_status: crate::model::ProjectBranchStatus::Leading,
-            path_missing: false,
-            created_at: None,
-        }
+    #[test]
+    fn a_pull_request_is_looked_up_without_a_project_and_failures_keep_their_sentences() {
+        let dir = tempfile::tempdir().unwrap();
+        let lookup = PullRequestLookup {
+            host: "github.com".to_string(),
+            owner_repo: "acme/widget".to_string(),
+            number: 7,
+        };
+
+        let found = probe_test_support::stand_in_gh_with_pull_request(
+            dir.path(),
+            &[],
+            Ok(r#"{"number":7,"title":"Add a thing","state":"OPEN","headRefName":"add-thing"}"#),
+        );
+        assert_eq!(
+            look_up_pull_request(found.as_os_str(), &lookup).unwrap(),
+            PullRequestMetadata {
+                number: 7,
+                title: "Add a thing".to_string(),
+                state: "OPEN".to_string(),
+                head_ref_name: "add-thing".to_string(),
+            }
+        );
+
+        let missing =
+            probe_test_support::stand_in_gh_with_pull_request(dir.path(), &[], Err("not found"));
+        assert_eq!(
+            look_up_pull_request(missing.as_os_str(), &lookup).unwrap_err(),
+            "Failed to resolve PR #7 from acme/widget: not found"
+        );
     }
 
     #[test]
-    fn parse_resolved_pull_request_json_extracts_fields() {
-        let resolved = parse_resolved_pull_request_json(
+    fn parse_pull_request_metadata_json_extracts_fields() {
+        let resolved = parse_pull_request_metadata_json(
             r#"{"number":42,"title":"Fix bug","state":"OPEN","headRefName":"feature/fix"}"#,
-            lookup_test_project(),
-            "github.com",
-            "octocat/Hello-World",
-            Some("my-name".to_string()),
         )
         .expect("resolved");
         assert_eq!(resolved.number, 42);
         assert_eq!(resolved.title, "Fix bug");
         assert_eq!(resolved.state, "OPEN");
         assert_eq!(resolved.head_ref_name, "feature/fix");
-        assert_eq!(resolved.host, "github.com");
-        assert_eq!(resolved.owner_repo, "octocat/Hello-World");
-        assert_eq!(resolved.custom_name.as_deref(), Some("my-name"));
     }
 
     #[test]
-    fn parse_resolved_pull_request_json_rejects_missing_head_branch() {
-        let err = parse_resolved_pull_request_json(
-            r#"{"number":42,"title":"Fix bug","state":"OPEN"}"#,
-            lookup_test_project(),
-            "github.com",
-            "octocat/Hello-World",
-            None,
-        )
-        .expect_err("missing head");
+    fn parse_pull_request_metadata_json_rejects_missing_head_branch() {
+        let err =
+            parse_pull_request_metadata_json(r#"{"number":42,"title":"Fix bug","state":"OPEN"}"#)
+                .expect_err("missing head");
         assert!(err.contains("head branch"));
     }
 

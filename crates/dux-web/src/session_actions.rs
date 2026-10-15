@@ -2246,6 +2246,53 @@ struct ResolvePullRequestReply {
     /// the two surfaces word it identically. `null` when every project was
     /// inspected and "none of them" really means none of them.
     uninspected_summary: Option<String>,
+    /// Present on a zero-match answer for a reference dux could offer to clone:
+    /// the address, the pull request's own facts, as `gh` just reported them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clone: Option<PullRequestCloneReply>,
+    /// Present when an offer was possible but `gh` could not look the pull
+    /// request up: the lookup's own sentence. The answer is still a 200 with
+    /// its projects, so choosing an existing project stays open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clone_unavailable: Option<String>,
+}
+
+/// The clone offer for a pull request, with the facts a confirmation shows.
+#[derive(Serialize)]
+struct PullRequestCloneReply {
+    address: String,
+    host: String,
+    owner_repo: String,
+    number: u64,
+    title: String,
+    state: String,
+    head_branch: String,
+}
+
+/// Look the pull request up through `gh_program` and pair it with the offer.
+/// The error is the lookup's own sentence, unchanged.
+fn look_up_clone_offer(
+    gh_program: &std::ffi::OsStr,
+    offer: dux_core::pr_reference::PullRequestCloneOffer,
+) -> Result<PullRequestCloneReply, String> {
+    let target = offer.target();
+    let metadata = dux_core::gh::look_up_pull_request(
+        gh_program,
+        &dux_core::worker::PullRequestLookup {
+            host: target.host,
+            owner_repo: target.owner_repo,
+            number: target.number,
+        },
+    )?;
+    Ok(PullRequestCloneReply {
+        address: offer.address,
+        host: offer.host,
+        owner_repo: offer.owner_repo,
+        number: metadata.number,
+        title: metadata.title,
+        state: metadata.state,
+        head_branch: metadata.head_ref_name,
+    })
 }
 
 /// Read a typed pull-request reference and match it against every project's
@@ -2274,11 +2321,16 @@ async fn resolve_pull_request_reference(
             .into_response();
     }
 
-    let Some((projects, policy, gh_available)) =
-        state.engine.pull_request_resolution_inputs().await
-    else {
+    let Some(inputs) = state.engine.pull_request_resolution_inputs().await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "engine unavailable").into_response();
     };
+    let crate::engine_actor::PullRequestResolutionInputs {
+        projects,
+        policy,
+        protocols,
+        gh_program,
+        gh_available,
+    } = inputs;
     // The same gate the create carries: a raw or stale client must not reach a
     // resolution the create would then refuse.
     if !gh_available {
@@ -2304,26 +2356,46 @@ async fn resolve_pull_request_reference(
 
     let repository = reference.repository_label();
     let number = reference.number;
+    let offer = dux_core::pr_reference::pull_request_clone_offer(&reference, &policy, &protocols);
     match tokio::task::spawn_blocking(move || {
-        dux_core::pr_reference::resolve_reference_projects(&reference, &projects, &policy)
+        let resolution =
+            dux_core::pr_reference::resolve_reference_projects(&reference, &projects, &policy);
+        // The lookup shells out to `gh`, so it runs here and only when it can
+        // matter: no project has the repository and an offer is possible.
+        let lookup = match offer {
+            Some(offer) if resolution.matches.is_empty() => {
+                Some(look_up_clone_offer(&gh_program, offer))
+            }
+            _ => None,
+        };
+        (resolution, lookup)
     })
     .await
     {
-        Ok(resolution) => Json(ResolvePullRequestReply {
-            repository,
-            number,
-            uninspected_count: resolution.uninspected.len(),
-            uninspected_summary: resolution.uninspected_summary(),
-            projects: resolution
-                .matches
-                .into_iter()
-                .map(|project| PullRequestProjectMatch {
-                    id: project.id,
-                    name: project.name,
-                })
-                .collect(),
-        })
-        .into_response(),
+        Ok((resolution, lookup)) => {
+            let (clone, clone_unavailable) = match lookup {
+                Some(Ok(clone)) => (Some(clone), None),
+                Some(Err(sentence)) => (None, Some(sentence)),
+                None => (None, None),
+            };
+            Json(ResolvePullRequestReply {
+                repository,
+                number,
+                uninspected_count: resolution.uninspected.len(),
+                uninspected_summary: resolution.uninspected_summary(),
+                clone,
+                clone_unavailable,
+                projects: resolution
+                    .matches
+                    .into_iter()
+                    .map(|project| PullRequestProjectMatch {
+                        id: project.id,
+                        name: project.name,
+                    })
+                    .collect(),
+            })
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("resolving the pull request reference failed: {e}"),

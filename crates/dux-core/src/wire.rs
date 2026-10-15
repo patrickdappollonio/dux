@@ -7297,6 +7297,7 @@ mod tests {
             crate::gh::GhProbe::Decided {
                 available: false,
                 policy: crate::gh::GithubHostPolicy::Hosts(Default::default()),
+                protocols: Default::default(),
             },
             crate::gh::GhProbe::NotInstalled,
         ] {
@@ -7309,6 +7310,7 @@ mod tests {
                     policy: crate::gh::GithubHostPolicy::Hosts(
                         ["github.com".to_string()].into_iter().collect(),
                     ),
+                    protocols: Default::default(),
                 },
             });
             assert!(engine.pr_sync.is_armed(), "a success arms the work");
@@ -7344,6 +7346,7 @@ mod tests {
                 policy: crate::gh::GithubHostPolicy::Hosts(
                     ["github.com".to_string()].into_iter().collect(),
                 ),
+                protocols: Default::default(),
             },
         });
         assert!(engine.pr_sync.is_armed());

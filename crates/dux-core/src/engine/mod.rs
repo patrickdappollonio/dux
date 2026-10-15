@@ -170,6 +170,9 @@ pub struct GhProbeState {
     /// [`Engine::github_host_policy`]; the lock is never held across a `gh`
     /// call.
     pub policy: Arc<Mutex<crate::gh::GithubHostPolicy>>,
+    /// Each qualifying host's git protocol, kept beside the policy and adopted
+    /// and cleared with it. Read through [`Engine::github_git_protocols`].
+    pub protocols: Arc<Mutex<std::collections::BTreeMap<String, crate::gh::GitProtocol>>>,
     /// Monotonic stamp for ordering overlapping probes. Bumped before each
     /// spawn; a result carrying an older stamp is discarded.
     pub generation: u64,
@@ -193,6 +196,7 @@ impl Default for GhProbeState {
     fn default() -> Self {
         Self {
             policy: Arc::new(Mutex::new(crate::gh::GithubHostPolicy::DenyAll)),
+            protocols: Arc::new(Mutex::new(Default::default())),
             generation: 0,
             program: std::ffi::OsString::from("gh"),
             last_probe_at: None,
@@ -4215,6 +4219,30 @@ impl Engine {
             .policy
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = policy;
+    }
+
+    /// A snapshot of each signed-in host's git protocol, as `gh` reports it.
+    /// A host with no entry clones over https.
+    pub fn github_git_protocols(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::gh::GitProtocol> {
+        self.gh_probe
+            .protocols
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the protocol map. Only the probe's completion handler does this.
+    pub fn set_github_git_protocols(
+        &self,
+        protocols: std::collections::BTreeMap<String, crate::gh::GitProtocol>,
+    ) {
+        *self
+            .gh_probe
+            .protocols
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = protocols;
     }
 
     /// Stop pull-request background work: clear the arm flag so the live poller
@@ -8830,7 +8858,7 @@ mod tests {
 
     use super::test_support::settle_gh_probe;
     use crate::gh::probe_test_support::{stand_in_gh, stand_in_gh_serving};
-    use crate::gh::{GhProbe, GithubHostPolicy};
+    use crate::gh::{GhProbe, GitProtocol, GithubHostPolicy};
 
     fn eligible(engine: &Engine) -> GithubHostPolicy {
         engine.github_host_policy()
@@ -8838,6 +8866,12 @@ mod tests {
 
     fn hosts(names: &[&str]) -> GithubHostPolicy {
         GithubHostPolicy::Hosts(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    fn protocols(
+        pairs: &[(&str, crate::gh::GitProtocol)],
+    ) -> std::collections::BTreeMap<String, crate::gh::GitProtocol> {
+        pairs.iter().map(|(h, p)| (h.to_string(), *p)).collect()
     }
 
     /// The off→on re-arm restores a pinned PR's badge immediately: the probe
@@ -8871,6 +8905,7 @@ mod tests {
             outcome: GhProbe::Decided {
                 available: true,
                 policy: hosts(&["github.com"]),
+                protocols: Default::default(),
             },
         });
 
@@ -8884,6 +8919,7 @@ mod tests {
         engine.github_integration_enabled = true;
         engine.gh_probe.generation = 2;
         engine.set_github_host_policy(hosts(&["git.company.example"]));
+        engine.set_github_git_protocols(protocols(&[("git.company.example", GitProtocol::Ssh)]));
         engine.gh_status = GhStatus::Available;
 
         // An older probe finishing late, with a decisive but out-of-date answer.
@@ -8892,8 +8928,14 @@ mod tests {
             outcome: GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(Default::default()),
+                protocols: Default::default(),
             },
         });
+        assert_eq!(
+            engine.github_git_protocols(),
+            protocols(&[("git.company.example", GitProtocol::Ssh)]),
+            "a late older answer must not change the protocols either",
+        );
 
         assert_eq!(
             eligible(&engine),
@@ -8911,6 +8953,20 @@ mod tests {
         });
         assert_eq!(eligible(&engine), hosts(&["git.company.example"]));
         assert_eq!(engine.gh_status, GhStatus::Available);
+
+        // The current probe's decisive answer replaces the whole map.
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: GhProbe::Decided {
+                available: true,
+                policy: hosts(&["github.com"]),
+                protocols: protocols(&[("github.com", GitProtocol::Https)]),
+            },
+        });
+        assert_eq!(
+            engine.github_git_protocols(),
+            protocols(&[("github.com", GitProtocol::Https)]),
+        );
     }
 
     #[test]
@@ -8944,6 +9000,7 @@ mod tests {
         engine.github_integration_enabled = true;
         engine.gh_status = GhStatus::Available;
         engine.set_github_host_policy(hosts(&["git.company.example"]));
+        engine.set_github_git_protocols(protocols(&[("git.company.example", GitProtocol::Ssh)]));
 
         engine.process_worker_event(WorkerEvent::GhStatusChecked {
             generation: engine.gh_probe.generation,
@@ -8951,6 +9008,10 @@ mod tests {
         });
 
         assert_eq!(eligible(&engine), hosts(&["git.company.example"]));
+        assert_eq!(
+            engine.github_git_protocols(),
+            protocols(&[("git.company.example", GitProtocol::Ssh)]),
+        );
         assert_eq!(engine.gh_status, GhStatus::Available);
     }
 
@@ -8960,11 +9021,13 @@ mod tests {
         engine.github_integration_enabled = true;
         engine.gh_status = GhStatus::Available;
         engine.set_github_host_policy(hosts(&["git.company.example"]));
+        engine.set_github_git_protocols(protocols(&[("git.company.example", GitProtocol::Ssh)]));
 
         engine.process_worker_event(WorkerEvent::GhStatusChecked {
             generation: engine.gh_probe.generation,
             outcome: GhProbe::NotInstalled,
         });
+        assert!(engine.github_git_protocols().is_empty());
 
         assert_eq!(
             eligible(&engine),
@@ -9102,6 +9165,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
         assert!(
@@ -9125,6 +9189,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         );
         assert!(repeat.is_empty(), "a repeat answer says nothing");
@@ -9234,6 +9299,7 @@ mod tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::DenyAll,
+                protocols: Default::default(),
             },
         );
         let status = reactions

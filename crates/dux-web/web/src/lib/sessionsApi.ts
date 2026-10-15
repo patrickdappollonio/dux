@@ -125,6 +125,22 @@ export interface ResolvedPullRequestReference {
   // reported as "no project is a checkout of that repository" while any remain.
   uninspected_count: number
   uninspected_summary: string | null
+  // Present on a zero-match answer when the repository could be cloned: the address
+  // dux would clone from and the pull request's facts as `gh` just reported them.
+  clone?: PullRequestCloneOffer
+  // Present instead when an offer was possible but `gh` could not look the pull
+  // request up: the lookup's own sentence.
+  clone_unavailable?: string
+}
+
+export interface PullRequestCloneOffer {
+  address: string
+  host: string
+  owner_repo: string
+  number: number
+  title: string
+  state: string
+  head_branch: string
 }
 
 // The answer to `GET /api/v1/sessions/:id/branch-unpushed`. `branches` is every

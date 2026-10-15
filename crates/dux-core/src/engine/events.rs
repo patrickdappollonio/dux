@@ -3683,6 +3683,7 @@ impl Engine {
         match outcome {
             crate::gh::GhProbe::NotInstalled => {
                 self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
+                self.set_github_git_protocols(Default::default());
                 (GhStatus::NotInstalled, None)
             }
             crate::gh::GhProbe::Transient(reason) => {
@@ -3701,8 +3702,13 @@ impl Engine {
                 };
                 (status, Some(reason))
             }
-            crate::gh::GhProbe::Decided { available, policy } => {
+            crate::gh::GhProbe::Decided {
+                available,
+                policy,
+                protocols,
+            } => {
                 self.set_github_host_policy(policy);
+                self.set_github_git_protocols(protocols);
                 let status = if available {
                     GhStatus::Available
                 } else {
@@ -6879,6 +6885,7 @@ mod tests {
         let (status, reason) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: true,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+            protocols: Default::default(),
         });
         assert_eq!(status, GhStatus::Available);
         assert_eq!(reason, None);
@@ -6890,6 +6897,7 @@ mod tests {
         let (status, _) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: false,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+            protocols: Default::default(),
         });
         assert_eq!(status, GhStatus::NotAuthenticated);
     }
@@ -6931,6 +6939,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         });
 
@@ -6952,6 +6961,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         });
 
@@ -6972,6 +6982,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: false,
                 policy: crate::gh::GithubHostPolicy::DenyAll,
+                protocols: Default::default(),
             },
         });
 
@@ -7004,6 +7015,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+                protocols: Default::default(),
             },
         });
 

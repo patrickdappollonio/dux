@@ -22,9 +22,10 @@
 //! all naming `example/application`, plus the pull-request spellings: a full
 //! PR URL, `owner/repo#123`, `#123` and a bare `123`.
 //!
-//! Nothing here consults [`crate::gh::GithubHostPolicy`]. Parsing is about what
-//! the text SAYS; whether dux may ask `gh` about that host is a separate
-//! question, asked by the callers that have a host to ask about.
+//! Parsing never consults [`crate::gh::GithubHostPolicy`]. It is about what the
+//! text SAYS; whether dux may ask `gh` about that host is a separate question,
+//! asked by the callers that have a host to ask about, and by
+//! [`pull_request_clone_offer`] when it turns a parsed reference into an offer.
 //!
 //! # What is refused as ambiguous
 //!
@@ -41,6 +42,10 @@
 //! * A missing scheme separator that is also scp shorthand:
 //!   `https:acme/widget/pull/7`, a browser address that lost its slashes and an
 //!   scp address on a host named `https`. See [`classify`].
+
+use std::collections::BTreeMap;
+
+use crate::gh::{GitProtocol, GithubHostPolicy};
 
 /// A repository, a pull request number, or both, as named by typed text.
 ///
@@ -92,6 +97,74 @@ impl TypedReference {
             None => true,
         }
     }
+}
+
+/// A pull request in a repository dux may clone, as requests carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestCloneTarget {
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+}
+
+/// What a clone confirmation shows: the target plus the address dux would
+/// clone from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestCloneOffer {
+    pub address: String,
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+}
+
+impl PullRequestCloneOffer {
+    pub fn target(&self) -> PullRequestCloneTarget {
+        PullRequestCloneTarget {
+            host: self.host.clone(),
+            owner_repo: self.owner_repo.clone(),
+            number: self.number,
+        }
+    }
+}
+
+/// The one place that infers a host for a reference that names none, and the one
+/// place that builds a clone address from a reference.
+///
+/// There is an offer only for a reference that names a repository and a pull
+/// request number on a host the policy allows. A missing host is `github.com`
+/// when the policy allows it, else the only allowed host, else no offer:
+/// guessing among several could clone the wrong repository. The address follows
+/// `gh repo clone`: `git@host:owner/repo.git` when `gh`'s git protocol for the
+/// host is ssh, `https://host/owner/repo.git` in every other case, including a
+/// host with no recorded protocol (the legacy policy records none).
+pub fn pull_request_clone_offer(
+    reference: &TypedReference,
+    policy: &GithubHostPolicy,
+    protocols: &BTreeMap<String, GitProtocol>,
+) -> Option<PullRequestCloneOffer> {
+    let owner_repo = strip_dot_git(reference.owner_repo.as_deref()?).to_string();
+    let number = reference.number?;
+    let host = match reference.host.as_deref() {
+        Some(host) => host.to_ascii_lowercase(),
+        None if policy.allows("github.com") => "github.com".to_string(),
+        None => match policy {
+            GithubHostPolicy::Hosts(hosts) if hosts.len() == 1 => hosts.iter().next()?.clone(),
+            _ => return None,
+        },
+    };
+    if !policy.allows(&host) {
+        return None;
+    }
+    let address = match protocols.get(&host) {
+        Some(GitProtocol::Ssh) => format!("git@{host}:{owner_repo}.git"),
+        _ => format!("https://{host}/{owner_repo}.git"),
+    };
+    Some(PullRequestCloneOffer {
+        address,
+        host,
+        owner_repo,
+        number,
+    })
 }
 
 /// The one message every unparseable spelling gets. It names the shapes rather
@@ -1541,6 +1614,100 @@ mod resolution_tests {
             Some("github.com/acme/unknown"),
             "the message has to be able to say WHICH repository dux has no project for"
         );
+    }
+
+    fn offer(
+        text: &str,
+        policy: &GithubHostPolicy,
+        protocols: &[(&str, crate::gh::GitProtocol)],
+    ) -> Option<PullRequestCloneOffer> {
+        let protocols = protocols.iter().map(|(h, p)| (h.to_string(), *p)).collect();
+        pull_request_clone_offer(&parse_typed_reference(text).unwrap(), policy, &protocols)
+    }
+
+    fn allowed(hosts: &[&str]) -> GithubHostPolicy {
+        GithubHostPolicy::Hosts(hosts.iter().map(|h| h.to_string()).collect())
+    }
+
+    #[test]
+    fn a_clone_offer_builds_the_address_gh_would_clone_from() {
+        use crate::gh::GitProtocol::{Https, Ssh};
+        let github = allowed(&["github.com"]);
+
+        let ssh = offer("acme/widget#3", &github, &[("github.com", Ssh)]).unwrap();
+        assert_eq!(ssh.address, "git@github.com:acme/widget.git");
+        assert_eq!(
+            (ssh.host.as_str(), ssh.owner_repo.as_str(), ssh.number),
+            ("github.com", "acme/widget", 3)
+        );
+        assert_eq!(
+            offer("acme/widget#3", &github, &[("github.com", Https)])
+                .unwrap()
+                .address,
+            "https://github.com/acme/widget.git"
+        );
+        assert_eq!(
+            offer("acme/widget#3", &github, &[]).unwrap().address,
+            "https://github.com/acme/widget.git",
+            "a host with no recorded protocol is https"
+        );
+        assert_eq!(
+            offer(
+                "https://GHE.example/acme/widget/pull/4",
+                &allowed(&["ghe.example"]),
+                &[("ghe.example", Ssh)]
+            )
+            .unwrap()
+            .address,
+            "git@ghe.example:acme/widget.git"
+        );
+    }
+
+    #[test]
+    fn a_clone_offer_settles_a_missing_host_or_gives_none() {
+        // github.com wins when gh is signed in there, even with another host.
+        assert_eq!(
+            offer(
+                "acme/widget#3",
+                &allowed(&["ghe.example", "github.com"]),
+                &[]
+            )
+            .unwrap()
+            .host,
+            "github.com"
+        );
+        // A lone enterprise host is used.
+        assert_eq!(
+            offer("acme/widget#3", &allowed(&["ghe.example"]), &[])
+                .unwrap()
+                .host,
+            "ghe.example"
+        );
+        // Two hosts and no github.com: guessing could clone the wrong repository.
+        assert!(offer("acme/widget#3", &allowed(&["a.example", "b.example"]), &[]).is_none());
+        assert!(offer("acme/widget#3", &GithubHostPolicy::DenyAll, &[]).is_none());
+    }
+
+    #[test]
+    fn a_clone_offer_needs_a_repository_a_number_and_an_allowed_host() {
+        let github = allowed(&["github.com"]);
+        assert!(offer("acme/widget", &github, &[]).is_none());
+        assert!(offer("#3", &github, &[]).is_none());
+        assert!(offer("https://gitlab.com/acme/widget/pull/3", &github, &[]).is_none());
+    }
+
+    #[test]
+    fn the_legacy_policy_offers_https_on_github_hosts_only() {
+        let legacy = GithubHostPolicy::LegacyNameRule;
+        let github = offer("acme/widget#3", &legacy, &[]).unwrap();
+        assert_eq!(github.address, "https://github.com/acme/widget.git");
+        assert_eq!(
+            offer("github.example.com/acme/widget#3", &legacy, &[])
+                .unwrap()
+                .address,
+            "https://github.example.com/acme/widget.git"
+        );
+        assert!(offer("gitlab.com/acme/widget#3", &legacy, &[]).is_none());
     }
 
     #[test]
