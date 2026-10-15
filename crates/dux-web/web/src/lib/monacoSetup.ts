@@ -145,6 +145,36 @@ export const DIFF_THEME_PROPS = {
   beforeMount: defineDiffTheme,
 } as const
 
+// The theme the editor's diff mode renders under: vs-dark with the inserted
+// and removed shading taken from the same `--dux-added` and `--dux-deleted`
+// tokens, so a change is the same green and red here as in the changed-files
+// pane. Monaco requires these colours to be translucent so the code's own
+// highlighting shows through; 0x33 is the alpha Monaco's own defaults use. The
+// gutter and the overview ruler derive their colours from these four keys.
+// Defined before mount and exported only as a props pair, for the same reasons
+// as the patch viewer's theme above.
+const DIFF_EDITOR_THEME = "dux-diff-editor"
+const DIFF_EDITOR_ALPHA = "33"
+function defineDiffEditorTheme(): void {
+  const added = tokenHex("--dux-added", "00C950") + DIFF_EDITOR_ALPHA
+  const deleted = tokenHex("--dux-deleted", "FB2C36") + DIFF_EDITOR_ALPHA
+  monaco.editor.defineTheme(DIFF_EDITOR_THEME, {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "diffEditor.insertedLineBackground": `#${added}`,
+      "diffEditor.insertedTextBackground": `#${added}`,
+      "diffEditor.removedLineBackground": `#${deleted}`,
+      "diffEditor.removedTextBackground": `#${deleted}`,
+    },
+  })
+}
+export const DIFF_EDITOR_THEME_PROPS = {
+  theme: DIFF_EDITOR_THEME,
+  beforeMount: defineDiffEditorTheme,
+} as const
+
 export { monaco }
 
 // The Monaco language id for a file path, from the grammars registered above.

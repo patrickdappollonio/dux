@@ -3,7 +3,7 @@ import { DiffEditor, type DiffOnMount } from "@monaco-editor/react"
 import type { editor as MonacoEditor, IDisposable } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before DiffEditor mounts, and gives us the path→language helper.
-import { monacoLanguageForPath } from "@/lib/monacoSetup"
+import { DIFF_EDITOR_THEME_PROPS, monacoLanguageForPath } from "@/lib/monacoSetup"
 import { allDeleteDiffOptions } from "@/lib/diffPresentation"
 import { diffQuitEarly } from "@/lib/diffComputation"
 
@@ -103,8 +103,10 @@ export default function DiffViewer({
       )}
       <div className="min-h-0 flex-1">
         <DiffEditor
-          // The web UI is dark-only (main.tsx force-adds `.dark`), matching vs-dark.
-          theme="vs-dark"
+          // vs-dark with the added and removed shading from the dux tokens; see
+          // defineDiffEditorTheme. The web UI is dark-only (main.tsx
+          // force-adds `.dark`), matching vs-dark.
+          {...DIFF_EDITOR_THEME_PROPS}
           original={original}
           modified={modified}
           language={language}

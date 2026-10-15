@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 // `onMount` a fake shaped like the one narrow read this component makes.
 vi.mock("@/lib/monacoSetup", () => ({
   monacoLanguageForPath: () => "plaintext",
+  DIFF_EDITOR_THEME_PROPS: {},
   monaco: {},
 }))
 
