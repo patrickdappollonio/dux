@@ -1271,10 +1271,11 @@ function handleStatusEvent(event: EventsServerMessage): void {
   if (event.tone === "error") setState({ ...clearPendingClientIntent() })
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
   if (event.tone === "error") {
-    if (askReviewCopy(event)) return
     // The same refusal again, replayed after the question was already put to
-    // the user, would stack a long toast over the dialog that asks it.
+    // the user, would stack a long toast over the dialog that asks it, and
+    // must not take a newer submission's place either.
     if (event.key && askedKeys.has(event.key)) return
+    if (askReviewCopy(event)) return
   }
   showStatusToast(
     event.key,
@@ -6778,12 +6779,20 @@ export function createAgentFromPr(
   // Remembered so a refusal that asks about a review copy can reopen the
   // dialog on what was typed. Without this tab having asked for a create, the
   // same refusal is an ordinary error toast.
-  const submission = { projectId, pr, name, at: Date.now() }
-  pendingPrSubmission = submission
+  //
+  // Each submission has an id of its own, which the server echoes on the
+  // question it asks, so a question is put back to the submission it answers
+  // even when a later one has been sent since.
+  const now = Date.now()
+  for (const [id, old] of pendingPrSubmissions) {
+    if (now - old.at > PENDING_PR_SUBMISSION_MS) pendingPrSubmissions.delete(id)
+  }
+  const askId = `pr-${now.toString(36)}-${(prSubmissionSeq++).toString(36)}`
+  pendingPrSubmissions.set(askId, { projectId, pr, name, at: now })
   // The request ends the wait when it fails or the agent exists. A reply of
   // "under way" does not: the answer comes later on the events socket.
   const settle = () => {
-    if (pendingPrSubmission === submission) pendingPrSubmission = null
+    pendingPrSubmissions.delete(askId)
   }
   sessionsApi
     .create({
@@ -6791,6 +6800,7 @@ export function createAgentFromPr(
       project_id: projectId,
       pr,
       name,
+      ask_id: askId,
       ...(reviewCopyWarned === null
         ? {}
         : { review_copy: true, review_copy_warned: reviewCopyWarned }),
@@ -6807,16 +6817,21 @@ export function createAgentFromPr(
 // The from-PR create this tab last sent, kept for as long as an answer to it
 // can still arrive. The refusal comes later over the events socket, not in the
 // reply to the request, which only says the create is under way.
-let pendingPrSubmission:
-  | { projectId: string; pr: string; name: string; at: number }
-  | null = null
+const pendingPrSubmissions = new Map<
+  string,
+  { projectId: string; pr: string; name: string; at: number }
+>()
+let prSubmissionSeq = 0
 const PENDING_PR_SUBMISSION_MS = 120_000
 // Keys of the refusals already put to the user as a question.
 const askedKeys = new Set<string>()
 
-function readReviewCopyAsk(ask: unknown): Omit<ReviewCopyAsk, "agreed"> | null {
+function readReviewCopyAsk(
+  ask: unknown,
+): (Omit<ReviewCopyAsk, "agreed"> & { request: string }) | null {
   if (typeof ask !== "object" || ask === null) return null
-  const { kind, warned, warning } = ask as Record<string, unknown>
+  const { kind, warned, warning, request } = ask as Record<string, unknown>
+  if (typeof request !== "string") return null
   if (kind !== "review_copy" || typeof warned !== "string") return null
   // The warning has no plain spelling beside it to check the parts against,
   // so they are checked for shape alone and a malformed one is no question.
@@ -6832,7 +6847,7 @@ function readReviewCopyAsk(ask: unknown): Omit<ReviewCopyAsk, "agreed"> | null {
           typeof (part as ProseName).quoted === "boolean"),
     )
   if (!wellFormed) return null
-  return { warned, warning: warning as Prose }
+  return { warned, warning: warning as Prose, request }
 }
 
 // Reopen the dialog on the refused create, showing why. Returns whether this
@@ -6840,17 +6855,13 @@ function readReviewCopyAsk(ask: unknown): Omit<ReviewCopyAsk, "agreed"> | null {
 // values to put back.
 function askReviewCopy(event: EventsServerMessage): boolean {
   const asked = readReviewCopyAsk(event.ask)
-  const pending = pendingPrSubmission
-  if (!asked || !pending) return false
-  // A status for everyone (the command line's, the terminal UI's) is not an
-  // answer to what this tab sent: the server scopes a create's answer to the
-  // connection that asked for it.
-  if (event.scope === undefined || event.scope === "all") return false
-  if (Date.now() - pending.at > PENDING_PR_SUBMISSION_MS) {
-    pendingPrSubmission = null
-    return false
-  }
-  pendingPrSubmission = null
+  if (!asked) return false
+  // Only the create this tab sent under that id: another surface's question,
+  // or one for a create this tab no longer waits for, is an ordinary refusal.
+  const pending = pendingPrSubmissions.get(asked.request)
+  if (!pending) return false
+  pendingPrSubmissions.delete(asked.request)
+  if (Date.now() - pending.at > PENDING_PR_SUBMISSION_MS) return false
   if (event.key) {
     if (askedKeys.size >= 20) askedKeys.clear()
     askedKeys.add(event.key)
@@ -6867,7 +6878,11 @@ function askReviewCopy(event: EventsServerMessage): boolean {
     createAgentPrResolving: false,
     createAgentPrError: null,
     createAgentPrRequestId: null,
-    createAgentReviewCopy: { ...asked, agreed: false },
+    createAgentReviewCopy: {
+      warned: asked.warned,
+      warning: asked.warning,
+      agreed: false,
+    },
   })
   return true
 }

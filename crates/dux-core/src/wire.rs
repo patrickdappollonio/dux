@@ -611,6 +611,10 @@ pub enum WireCommand {
         /// so a refusal names the flag.
         #[serde(default)]
         review_copy_by_flag: bool,
+        /// An id the client gives this create, echoed on the question a
+        /// refusal puts so the client can tell which create it answers.
+        #[serde(default)]
+        ask_id: Option<String>,
     },
     /// Run a configured text macro against a live PTY target, mirroring the TUI's
     /// macro bar. `target_id` names EITHER an agent session (surface `Agent`) OR
@@ -1989,13 +1993,14 @@ impl Engine {
                 review_copy,
                 review_copy_warned,
                 review_copy_by_flag,
+                ask_id,
             } => {
                 let consent = crate::worker::ReviewCopyConsent::from_request(
                     review_copy,
                     review_copy_warned,
                     review_copy_by_flag,
                 );
-                let status = self.create_agent_from_pr(&project_id, &pr, name, consent)?;
+                let status = self.create_agent_from_pr(&project_id, &pr, name, consent, ask_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -3689,6 +3694,7 @@ impl Engine {
         pr: &str,
         name: String,
         review_copy: crate::worker::ReviewCopyConsent,
+        ask_id: Option<String>,
     ) -> anyhow::Result<WireStatus> {
         // Mirror the TUI's `open_new_agent_from_pr_prompt` gating: the PR flow is
         // unavailable unless GitHub integration is on AND `gh` is installed and
@@ -3774,6 +3780,7 @@ impl Engine {
                     raw_input,
                     custom_name,
                     review_copy,
+                    ask_id,
                     worker_tx,
                     Some(op_id),
                     policy,
@@ -3875,6 +3882,7 @@ impl Engine {
                     custom_name,
                     use_existing_branch: false,
                     review_copy: pr.review_copy.clone(),
+                    ask_id: pr.ask_id.clone(),
                     agents: Vec::new(),
                 };
                 // The nested create dispatch mints its own busy from
@@ -9558,6 +9566,7 @@ mod tests {
                 head_ref_name: "feat".to_string(),
                 custom_name: None,
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "s1".to_string(),
@@ -9651,6 +9660,7 @@ mod tests {
             head_ref_name: "feat".to_string(),
             custom_name: None,
             review_copy: Default::default(),
+            ask_id: None,
         };
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
@@ -9724,6 +9734,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -9762,6 +9773,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect("dispatch")
             .status
@@ -13407,6 +13419,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             }
         );
     }
@@ -13426,6 +13439,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect_err("gh unavailable");
         assert!(
@@ -13446,6 +13460,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect_err("unknown project");
         assert!(err.to_string().contains("unknown project"), "msg: {err}");
@@ -13464,6 +13479,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect_err("empty pr");
         assert!(
@@ -13486,6 +13502,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect_err("invalid name");
         assert!(err.to_string().contains("Invalid agent name"), "msg: {err}");
@@ -13525,6 +13542,7 @@ mod tests {
                 review_copy: false,
                 review_copy_warned: None,
                 review_copy_by_flag: false,
+                ask_id: None,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -13611,6 +13629,7 @@ mod tests {
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             // An id with no registered lookup op, so the followup returns no
             // clear key and resolves nothing: the create busy flows through the
@@ -13755,6 +13774,7 @@ mod tests {
                 head_ref_name: own_branch.to_string(),
                 custom_name: Some(own_branch.to_string()),
                 review_copy: Default::default(),
+                ask_id: Some("req-7".to_string()),
             }),
             status_op_id: None,
         };
@@ -13784,6 +13804,7 @@ mod tests {
             panic!("the refusal carries the question: {asked:?}");
         };
         assert_eq!(ask.warned, "diverged:#42:feature/pr-42-review:");
+        assert_eq!(ask.request.as_deref(), Some("req-7"));
         assert!(
             asked
                 .message
@@ -13825,6 +13846,7 @@ mod tests {
                 head_ref_name: "feature/head".to_string(),
                 custom_name: None,
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             status_op_id: None,
         };
@@ -13863,6 +13885,7 @@ mod tests {
                 head_ref_name: "feature/add colons: & spaces".to_string(),
                 custom_name: None,
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             status_op_id: Some("op-lookup".to_string()),
         };
@@ -13925,6 +13948,7 @@ mod tests {
                 head_ref_name: "feat\u{202E}txt.exe".to_string(),
                 custom_name: None,
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             status_op_id: None,
         };

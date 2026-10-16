@@ -478,6 +478,10 @@ for a different reason or under a different name, dux asks again instead of goin
 > share a name with yours, such as `main`), there is no count and no warning, because the
 > copy is not an older version of the busy branch and nothing in it is simply missing.
 
+A name you type yourself in the form of a review copy of the pull request's branch, such
+as `feat-x-review`, makes a review copy all the same, so dux asks about it the same way. Any
+other new name needs no question.
+
 A name you typed yourself that is checked out elsewhere, and is not the pull request's
 branch, is refused with the place it is checked out, so you can pick another. So is a
 name you typed that is already a local branch without the pull request's code.

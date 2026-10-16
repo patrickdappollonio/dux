@@ -654,8 +654,9 @@ describe("a refusal the browser raises itself", () => {
 })
 
 describe("a create that asks for a review copy", () => {
-  const ask = {
+  const askFor = (request: string) => ({
     kind: "review_copy",
+    request,
     warned: "diverged:pr-head-review",
     warning: [
       "Branch ",
@@ -664,16 +665,16 @@ describe("a create that asks for a review copy", () => {
       { name: "pr-head-review", quoted: true },
       ".",
     ],
-  }
-  const refusal = {
+  })
+  const ask = askFor("")
+  const refusal = (request: string, key = "op-3") => ({
     event: "status",
-    key: "op-3",
+    key,
     tone: "error",
     message: 'Branch "pr-head" has diverged. Pushes would land on "pr-head-review".',
-    ask,
-    // The server scopes a create's answer to the connection that asked.
+    ask: askFor(request),
     scope: { connection: "c1" },
-  }
+  })
 
   function createBodies() {
     return fetchMock.mock.calls
@@ -691,10 +692,11 @@ describe("a create that asks for a review copy", () => {
     mod.submitNameDialog("my-review")
     expect(mod.getSnapshot().createAgentTarget).toBeNull()
 
-    mod.eventsSocket.onEvent(refusal)
+    const [first] = createBodies()
+    mod.eventsSocket.onEvent(refusal(first.ask_id))
     // The same refusal replayed (a reconnect) does not stack a toast over the
     // dialog that is asking.
-    mod.eventsSocket.onEvent({ ...refusal, ask: undefined })
+    mod.eventsSocket.onEvent({ ...refusal(first.ask_id), ask: undefined })
     const reopened = mod.getSnapshot()
     expect(toast.error).not.toHaveBeenCalled()
     expect(reopened.createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
@@ -726,9 +728,33 @@ describe("a create that asks for a review copy", () => {
     const mod = await loadStoreWithBootstrap()
     const { toast } = await import("sonner")
 
-    mod.eventsSocket.onEvent(refusal)
+    mod.eventsSocket.onEvent(refusal("pr-never-sent"))
     expect(toast.error).toHaveBeenCalledTimes(1)
     expect(mod.getSnapshot().createAgentTarget).toBeNull()
+  })
+
+  it("puts a question back to the submission it answers, not the latest one", async () => {
+    const mod = await loadStoreWithBootstrap()
+
+    mod.openCreateAgentFromPr("p1")
+    mod.setCreateAgentPrInput("#41")
+    mod.setCreateAgentDraft("first")
+    mod.submitNameDialog("first")
+    mod.openCreateAgentFromPr("p1")
+    mod.setCreateAgentPrInput("#42")
+    mod.setCreateAgentDraft("second")
+    mod.submitNameDialog("second")
+    const [a, b] = createBodies()
+
+    mod.eventsSocket.onEvent(refusal(a.ask_id))
+    const reopened = mod.getSnapshot()
+    expect(reopened.createAgentPrInput).toBe("#41")
+    expect(reopened.createAgentDraft).toBe("first")
+
+    // The other one is still waiting for its own.
+    mod.setCreateAgentReviewCopyAgreed(true)
+    mod.eventsSocket.onEvent(refusal(b.ask_id, "op-4"))
+    expect(mod.getSnapshot().createAgentPrInput).toBe("#42")
   })
 
   it("leaves another surface's refusal as a toast and keeps waiting for its own", async () => {
@@ -741,7 +767,7 @@ describe("a create that asks for a review copy", () => {
     mod.submitNameDialog("my-review")
 
     // The command line's create, or the terminal UI's, reaches every page.
-    mod.eventsSocket.onEvent({ ...refusal, key: "op-9", scope: "all" })
+    mod.eventsSocket.onEvent({ ...refusal("elsewhere", "op-9"), scope: "all" })
     expect(toast.error).toHaveBeenCalledTimes(1)
     expect(mod.getSnapshot().createAgentTarget).toBeNull()
 
@@ -753,7 +779,7 @@ describe("a create that asks for a review copy", () => {
       message: "Could not rename.",
       scope: { connection: "c1" },
     })
-    mod.eventsSocket.onEvent(refusal)
+    mod.eventsSocket.onEvent(refusal(createBodies()[0].ask_id))
     expect(mod.getSnapshot().createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
   })
 })

@@ -17084,6 +17084,7 @@ not_a_real_action = ["x"]
                 use_existing_branch: false,
                 agents: Vec::new(),
                 review_copy: Default::default(),
+                ask_id: None,
             },
             input: TextInput::with_text("feature/pr-42".to_string()),
             randomize_name: false,
@@ -24219,6 +24220,7 @@ not_a_real_action = ["x"]
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
                     review_copy: Default::default(),
+                    ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: None,
@@ -24270,6 +24272,7 @@ not_a_real_action = ["x"]
                     head_ref_name: crafted.to_string(),
                     custom_name: None,
                     review_copy: Default::default(),
+                    ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: None,
@@ -24337,6 +24340,7 @@ not_a_real_action = ["x"]
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
                     review_copy: Default::default(),
+                    ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(op_id.clone()),
@@ -36666,6 +36670,7 @@ cyan = "#00ffff"
                 custom_name: Some("pr-head".to_string()),
                 use_existing_branch: false,
                 review_copy: Default::default(),
+                ask_id: None,
                 agents: Vec::new(),
             },
         ));
@@ -36675,6 +36680,7 @@ cyan = "#00ffff"
                 warning: vec![dux_core::prose::ProseSegment::Text(
                     "Pushes would land on the copy.".to_string(),
                 )],
+                request: None,
             },
         ));
         let refusal = |key: &str| {
@@ -36740,6 +36746,43 @@ cyan = "#00ffff"
             *review_copy,
             dux_core::worker::ReviewCopyConsent::Warned("diverged:pr-head-review".to_string())
         );
+    }
+
+    #[test]
+    fn a_create_the_engine_refuses_as_already_running_keeps_the_question_of_the_one_running() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        let request = |name: &str| CreateAgentRequest::PullRequest {
+            project: project.clone(),
+            host: "github.com".to_string(),
+            owner_repo: "octo/hello".to_string(),
+            number: 42,
+            title: "Fix".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: "pr-head".to_string(),
+            custom_name: Some(name.to_string()),
+            use_existing_branch: false,
+            review_copy: Default::default(),
+            ask_id: None,
+            agents: Vec::new(),
+        };
+        app.dispatch_create_agent_request(request("first"), "Creating first".to_string())
+            .unwrap();
+        let (key, _) = app.pull_request_create.clone().expect("the first is armed");
+
+        // The engine allows one create at a time and refuses this one.
+        app.dispatch_create_agent_request(request("second"), "Creating second".to_string())
+            .unwrap();
+        let Some((still, CreateAgentRequest::PullRequest { custom_name, .. })) =
+            &app.pull_request_create
+        else {
+            panic!(
+                "the first create's question was lost: {:?}",
+                app.pull_request_create
+            );
+        };
+        assert_eq!(*still, key);
+        assert_eq!(custom_name.as_deref(), Some("first"));
     }
 
     #[test]

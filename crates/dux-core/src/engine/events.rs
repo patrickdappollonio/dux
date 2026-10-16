@@ -7458,6 +7458,7 @@ mod tests {
                 head_ref_name: "feat".into(),
                 custom_name: None,
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "deleted".into(),

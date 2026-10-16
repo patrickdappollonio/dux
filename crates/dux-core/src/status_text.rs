@@ -56,6 +56,10 @@ pub enum StatusAsk {
 pub struct ReviewCopyAsk {
     pub warned: String,
     pub warning: Vec<ProseSegment>,
+    /// The id the asking client gave the create, so it can tell this is the
+    /// answer to that create and not to a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 impl StatusText {

@@ -281,6 +281,7 @@ mod tests {
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
                 review_copy: Default::default(),
+                ask_id: None,
             }),
             status_op_id,
         }

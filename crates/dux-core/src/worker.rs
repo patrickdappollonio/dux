@@ -58,6 +58,9 @@ pub struct ResolvedPullRequest {
     /// lookup hands off to. The TUI asks after resolving, so it passes the
     /// default; the web and the command line decide before the lookup.
     pub review_copy: ReviewCopyConsent,
+    /// The id the asking client gave this create, echoed on the question a
+    /// refusal puts so the client can tell it is the answer to that create.
+    pub ask_id: Option<String>,
 }
 
 /// Whether the user agreed that an agent from a pull request may be made on a
@@ -432,6 +435,9 @@ pub enum CreateAgentRequest {
         /// Whether the user agreed to a review copy. Without it a create that
         /// needs one creates nothing and asks.
         review_copy: ReviewCopyConsent,
+        /// The asking client's id for this create; see
+        /// [`ResolvedPullRequest::ask_id`].
+        ask_id: Option<String>,
         /// Every managed agent of the project, as the engine knows them when
         /// the create is dispatched, so the job can tell a branch held by an
         /// agent from one held by anything else. Empty from every constructor;

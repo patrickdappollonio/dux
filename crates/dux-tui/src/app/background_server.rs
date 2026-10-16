@@ -1384,6 +1384,7 @@ pub(crate) mod tests {
             head_ref_name: "feature/pr-42".to_string(),
             custom_name: None,
             review_copy: Default::default(),
+            ask_id: None,
         }
     }
 

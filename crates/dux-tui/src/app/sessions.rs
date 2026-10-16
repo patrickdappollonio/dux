@@ -901,6 +901,7 @@ impl App {
                     raw_input,
                     None,
                     Default::default(),
+                    None,
                     worker_tx,
                     Some(op_id),
                     policy,
@@ -1476,7 +1477,6 @@ impl App {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         let pull_request =
             matches!(request, CreateAgentRequest::PullRequest { .. }).then(|| request.clone());
-        self.pull_request_create = None;
         // Armed only once the dispatch is known accepted, and taking the
         // in-flight key is what says so. The engine allows one create at a time
         // and refuses a second with an ordinary status rather than an error, so

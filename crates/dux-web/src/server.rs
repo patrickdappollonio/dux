@@ -5912,6 +5912,7 @@ mod tests {
                     warning: vec![dux_core::prose::ProseSegment::Text(
                         "Pushes would land on the copy.".into(),
                     )],
+                    request: Some("req-1".into()),
                 },
             ))),
             scope: StatusScope::All,
@@ -5919,7 +5920,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"event":"status","key":"op-1","tone":"error","message":"Pushes would land on the copy.","ask":{"kind":"review_copy","warned":"diverged:pr-head-review","warning":["Pushes would land on the copy."]},"scope":"all","sticky":false}"#
+            r#"{"event":"status","key":"op-1","tone":"error","message":"Pushes would land on the copy.","ask":{"kind":"review_copy","warned":"diverged:pr-head-review","warning":["Pushes would land on the copy."],"request":"req-1"},"scope":"all","sticky":false}"#
         );
     }
 

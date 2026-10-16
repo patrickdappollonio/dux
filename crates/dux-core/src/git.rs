@@ -1977,6 +1977,91 @@ pub fn branch_behind_commit(
     }
 }
 
+/// `git <args>` inside the worktree `worktree`, with nothing from the user's
+/// configuration able to change what it does: no hooks run, submodules are not
+/// entered, and no automatic maintenance starts.
+fn worktree_git(worktree: &Path, args: &[&str]) -> Command {
+    let mut command = git_without_auto_maintenance();
+    command
+        .args([
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+        ])
+        .arg(worktree)
+        .args(args);
+    command
+}
+
+/// Whether the commit `commit` is in the history of what `worktree` has checked
+/// out now. Answers through the exit status of `merge-base --is-ancestor`, so a
+/// commit this clone lacks is an error and not a no.
+pub fn worktree_head_contains(worktree: &Path, commit: &str) -> Result<bool> {
+    if !is_object_id(commit) {
+        return Err(anyhow!("\"{commit}\" is not a full commit id"));
+    }
+    let out = worktree_git(
+        worktree,
+        &["merge-base", "--is-ancestor", commit, "HEAD", "--"],
+    )
+    .stdin(Stdio::null())
+    .output()
+    .with_context(|| format!("failed to inspect {}", worktree.display()))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "git could not tell whether {} holds {commit}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Fast-forward what `worktree` has checked out to `commit`, files and index
+/// with it. `--ff-only` refuses anything that is not a pure fast-forward and
+/// leaves the branch where it was. The worktree holds the branch, so git keeps
+/// every other worktree from checking it out while this runs.
+pub fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()> {
+    if !is_object_id(commit) {
+        return Err(anyhow!("a branch moves to a full commit id only"));
+    }
+    let out = worktree_git(worktree, &["merge", "--ff-only", "--no-edit", commit])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to fast-forward {}", worktree.display()))?;
+    if !out.status.success() {
+        return Err(git_failure("git merge --ff-only", worktree, &out));
+    }
+    Ok(())
+}
+
+/// Put what `worktree` has checked out back from `from` to `to`, the undo of
+/// [`fast_forward_worktree`]. Refused unless the worktree is still at `from`,
+/// so a branch that has moved on since is not rewound over somebody's work.
+pub fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<()> {
+    if !is_object_id(to) {
+        return Err(anyhow!("a branch moves to a full commit id only"));
+    }
+    let head = head_commit(worktree)?;
+    if head != from {
+        return Err(anyhow!(
+            "{} is at {head}, not at {from}, so it was left alone",
+            worktree.display()
+        ));
+    }
+    let out = worktree_git(worktree, &["reset", "--hard", "--quiet", to])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to rewind {}", worktree.display()))?;
+    if !out.status.success() {
+        return Err(git_failure("git reset --hard", worktree, &out));
+    }
+    Ok(())
+}
+
 /// Move local branch `branch` from `old_tip` to `commit` without touching any
 /// checkout. `update-ref` is given the old value, so a branch that moved since
 /// `old_tip` was read is refused and keeps wherever it went, instead of being
@@ -10933,6 +11018,32 @@ mod tests {
         );
         fast_forward_branch(repo.path(), "--all", &base, &ahead).unwrap();
         assert_eq!(rev_parse(repo.path(), "refs/heads/--all"), ahead);
+    }
+
+    #[test]
+    fn a_worktree_holding_a_branch_fast_forwards_and_rewinds_with_its_files() {
+        let repo = init_test_repo();
+        let (base, ahead, elsewhere) = behind_ahead_and_elsewhere(repo.path());
+        let root = tempfile::tempdir().unwrap();
+        let wt = root.path().canonicalize().unwrap().join("wt");
+        run_git(
+            repo.path(),
+            &["worktree", "add", wt.to_str().unwrap(), "behind"],
+        );
+        assert_eq!(head_commit(&wt).unwrap(), base);
+        assert!(!worktree_head_contains(&wt, &ahead).unwrap());
+        fast_forward_worktree(&wt, &ahead).unwrap();
+        assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), ahead);
+        assert!(worktree_head_contains(&wt, &ahead).unwrap());
+
+        // Not a fast-forward: refused, and the branch stays.
+        assert!(fast_forward_worktree(&wt, &elsewhere).is_err());
+        assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), ahead);
+
+        // Rewinding is refused once the worktree is not where it was put.
+        assert!(rewind_worktree(&wt, &base, &base).is_err());
+        rewind_worktree(&wt, &ahead, &base).unwrap();
+        assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), base);
     }
 
     // ── commit_is_in_branch_history ──────────────────────────

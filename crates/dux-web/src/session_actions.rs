@@ -154,6 +154,10 @@ enum CreateSessionBody {
         /// The client agrees with a flag rather than a box (the command line).
         #[serde(default)]
         review_copy_by_flag: bool,
+        /// An id the client gives this create, echoed on the question a
+        /// refusal puts so the client can tell which create it answers.
+        #[serde(default)]
+        ask_id: Option<String>,
     },
     /// A STANDALONE agent: run a provider in a folder the user already has. It
     /// carries no `project_id`, belonging to no project, and it is the only kind
@@ -203,6 +207,7 @@ impl CreateSessionBody {
                 review_copy,
                 review_copy_warned,
                 review_copy_by_flag,
+                ask_id,
             } => WireCommand::CreateAgentFromPr {
                 project_id,
                 pr,
@@ -210,6 +215,7 @@ impl CreateSessionBody {
                 review_copy,
                 review_copy_warned,
                 review_copy_by_flag,
+                ask_id,
             },
             CreateSessionBody::Standalone {
                 folder,

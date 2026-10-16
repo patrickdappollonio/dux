@@ -2044,11 +2044,13 @@ pub fn parse_pull_request_lookup(
 /// `custom_name` carries a caller-supplied display name through to the resolved
 /// PR (`None` for the TUI, which prompts for a name after resolution; `Some` for
 /// the web, which sends the name upfront).
+#[allow(clippy::too_many_arguments)]
 pub fn run_pull_request_lookup_job(
     project: Project,
     raw_input: String,
     custom_name: Option<String>,
     review_copy: crate::worker::ReviewCopyConsent,
+    ask_id: Option<String>,
     worker_tx: Sender<WorkerEvent>,
     status_op_id: Option<String>,
     policy: GithubHostPolicy,
@@ -2075,7 +2077,7 @@ pub fn run_pull_request_lookup_job(
     };
 
     let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, custom_name, review_copy)
+        resolved_pull_request(metadata, project, &lookup, custom_name, review_copy, ask_id)
     });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
@@ -2205,7 +2207,7 @@ pub fn run_attach_pull_request_lookup_job(
         };
 
     let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, None, Default::default())
+        resolved_pull_request(metadata, project, &lookup, None, Default::default(), None)
     });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
@@ -2260,6 +2262,7 @@ fn resolved_pull_request(
     lookup: &PullRequestLookup,
     custom_name: Option<String>,
     review_copy: crate::worker::ReviewCopyConsent,
+    ask_id: Option<String>,
 ) -> ResolvedPullRequest {
     ResolvedPullRequest {
         project,
@@ -2271,6 +2274,7 @@ fn resolved_pull_request(
         head_ref_name: metadata.head_ref_name,
         custom_name,
         review_copy,
+        ask_id,
     }
 }
 

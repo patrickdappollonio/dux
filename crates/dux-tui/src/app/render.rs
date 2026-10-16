@@ -23965,6 +23965,7 @@ mod tests {
                 custom_name: Some("pr-head".to_string()),
                 use_existing_branch: false,
                 review_copy: Default::default(),
+                ask_id: None,
                 agents: Vec::new(),
             },
             input,

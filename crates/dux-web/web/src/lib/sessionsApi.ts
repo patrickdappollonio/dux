@@ -48,6 +48,7 @@ export type CreateSessionBody =
       // identifier of the warning it answers (from the server's refusal).
       review_copy?: boolean
       review_copy_warned?: string
+      ask_id?: string
     }
   // A STANDALONE agent: it carries no project (it belongs to none), and it is
   // the only kind that carries a provider, because the others take their
