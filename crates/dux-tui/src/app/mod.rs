@@ -416,7 +416,11 @@ pub struct App {
     /// fails for a reason other than a question. A refusal that asks for the
     /// user's agreement to a review copy reopens the name prompt on this
     /// request, so the typed name and the pull request stay filled in.
-    pub(crate) pull_request_create: Option<CreateAgentRequest>,
+    ///
+    /// Held with the key of the busy status the engine gave the create, which
+    /// is what its refusal comes back under, so a question that belongs to
+    /// another create (a browser's, the command line's) is not taken for it.
+    pub(crate) pull_request_create: Option<(String, CreateAgentRequest)>,
     /// What the clone form held when it last started a clone, until that
     /// clone succeeds or another submit replaces it.
     pub(crate) clone_draft: Option<CloneDraft>,

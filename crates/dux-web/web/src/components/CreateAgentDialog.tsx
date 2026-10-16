@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"
 import { TriangleAlert } from "lucide-react"
@@ -197,16 +197,13 @@ function ReviewCopyQuestion({ ask }: { ask: ReviewCopyAsk }) {
         <TriangleAlert className="mt-0.5 size-4 shrink-0 text-dux-warning" />
         <span>{renderProse(ask.warning)}</span>
       </p>
-      <div className="flex items-center gap-2 max-md:min-h-10">
-        <Checkbox
-          id="create-review-copy"
-          checked={ask.agreed}
-          onCheckedChange={setCreateAgentReviewCopyAgreed}
-        />
-        <label htmlFor="create-review-copy" className="text-sm">
-          Create a review copy
-        </label>
-      </div>
+      <CheckboxRow
+        id="create-review-copy"
+        checked={ask.agreed}
+        onCheckedChange={setCreateAgentReviewCopyAgreed}
+      >
+        Create a review copy
+      </CheckboxRow>
     </>
   )
 }
@@ -229,16 +226,13 @@ function AgentOptions({
         onToggle={toggleCreateAgentRandomize}
       />
       {showCopyChanges && (
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="copy-uncommitted-changes"
-            checked={copyChanges}
-            onCheckedChange={toggleCreateAgentCopyChanges}
-          />
-          <label htmlFor="copy-uncommitted-changes" className="text-sm">
-            Copy uncommitted changes from the project checkout
-          </label>
-        </div>
+        <CheckboxRow
+          id="copy-uncommitted-changes"
+          checked={copyChanges}
+          onCheckedChange={toggleCreateAgentCopyChanges}
+        >
+          Copy uncommitted changes from the project checkout
+        </CheckboxRow>
       )}
     </>
   )

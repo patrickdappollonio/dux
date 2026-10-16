@@ -607,6 +607,10 @@ pub enum WireCommand {
         /// agreement then covers any copy.
         #[serde(default)]
         review_copy_warned: Option<String>,
+        /// The caller agrees with a flag rather than a box (the command line),
+        /// so a refusal names the flag.
+        #[serde(default)]
+        review_copy_by_flag: bool,
     },
     /// Run a configured text macro against a live PTY target, mirroring the TUI's
     /// macro bar. `target_id` names EITHER an agent session (surface `Agent`) OR
@@ -1984,9 +1988,13 @@ impl Engine {
                 name,
                 review_copy,
                 review_copy_warned,
+                review_copy_by_flag,
             } => {
-                let consent =
-                    crate::worker::ReviewCopyConsent::from_request(review_copy, review_copy_warned);
+                let consent = crate::worker::ReviewCopyConsent::from_request(
+                    review_copy,
+                    review_copy_warned,
+                    review_copy_by_flag,
+                );
                 let status = self.create_agent_from_pr(&project_id, &pr, name, consent)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
@@ -9715,6 +9723,7 @@ mod tests {
                 name: "my-agent".to_string(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -9752,6 +9761,7 @@ mod tests {
                 name: "my-agent".to_string(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect("dispatch")
             .status
@@ -13396,6 +13406,7 @@ mod tests {
                 name: "fix".to_string(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             }
         );
     }
@@ -13414,6 +13425,7 @@ mod tests {
                 name: String::new(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect_err("gh unavailable");
         assert!(
@@ -13433,6 +13445,7 @@ mod tests {
                 name: String::new(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect_err("unknown project");
         assert!(err.to_string().contains("unknown project"), "msg: {err}");
@@ -13450,6 +13463,7 @@ mod tests {
                 name: String::new(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect_err("empty pr");
         assert!(
@@ -13471,6 +13485,7 @@ mod tests {
                 name: "/bad//name".to_string(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect_err("invalid name");
         assert!(err.to_string().contains("Invalid agent name"), "msg: {err}");
@@ -13509,6 +13524,7 @@ mod tests {
                 name: "my-agent".to_string(),
                 review_copy: false,
                 review_copy_warned: None,
+                review_copy_by_flag: false,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -13767,7 +13783,7 @@ mod tests {
         let Some(crate::status_text::StatusAsk::ReviewCopy(ask)) = &asked.ask else {
             panic!("the refusal carries the question: {asked:?}");
         };
-        assert_eq!(ask.warned, "diverged:feature/pr-42-review");
+        assert_eq!(ask.warned, "diverged:#42:feature/pr-42-review:");
         assert!(
             asked
                 .message

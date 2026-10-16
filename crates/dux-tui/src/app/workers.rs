@@ -594,26 +594,33 @@ impl App {
                 ask,
                 ..
             }) => {
-                // A refused create that asks for agreement to a review copy
-                // is answered in the name prompt, not on the status line. One
-                // this surface did not dispatch has no request to reopen, and
-                // shows its sentence like any other refusal.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
-                    && let Some(request) = self.pull_request_create.take()
-                {
-                    self.reopen_name_prompt_for_review_copy(
-                        request,
-                        question.warned,
-                        question.warning,
-                    );
-                    return;
-                }
                 // A final ends whatever a change of this surface's still holds
                 // under its key, shown or not.
                 if tone != StatusTone::Busy
                     && let Some(key) = &key
                 {
                     self.engine.attachments.finish_key(key);
+                }
+                // A refused create that asks for agreement to a review copy is
+                // answered in the name prompt, not on the status line, and the
+                // create's spinner is retired by it. One this surface did not
+                // dispatch has no request to reopen, and shows its sentence
+                // like any other refusal.
+                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
+                    && let Some(key) = &key
+                    && self
+                        .pull_request_create
+                        .as_ref()
+                        .is_some_and(|(pending, _)| pending == key)
+                    && let Some((_, request)) = self.pull_request_create.take()
+                {
+                    self.status.clear(key, None);
+                    self.reopen_name_prompt_for_review_copy(
+                        request,
+                        question.warned,
+                        question.warning,
+                    );
+                    return;
                 }
                 // Only an INFO may be withheld: a warning, an error and a
                 // spinner all report something the screen cannot be standing in

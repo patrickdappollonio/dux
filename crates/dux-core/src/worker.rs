@@ -68,6 +68,9 @@ pub enum ReviewCopyConsent {
     /// Nobody agreed: a create that needs a copy is refused and asks.
     #[default]
     Withheld,
+    /// Nobody agreed, and the request came from the command line, which agrees
+    /// with a flag instead of a box: the refusal names the flag.
+    WithheldByFlag,
     /// Agreed without having been shown a warning, as the command line's flag
     /// does. Covers whatever copy turns out to be needed.
     Blanket,
@@ -79,8 +82,9 @@ pub enum ReviewCopyConsent {
 impl ReviewCopyConsent {
     /// Read the two fields every surface sends: whether the box was ticked or
     /// the flag given, and the identifier of the warning the user was shown.
-    pub fn from_request(agreed: bool, warned: Option<String>) -> Self {
+    pub fn from_request(agreed: bool, warned: Option<String>, by_flag: bool) -> Self {
         match (agreed, warned) {
+            (false, _) if by_flag => Self::WithheldByFlag,
             (false, _) => Self::Withheld,
             (true, None) => Self::Blanket,
             (true, Some(warned)) => Self::Warned(warned),
@@ -90,7 +94,7 @@ impl ReviewCopyConsent {
     /// Whether this agreement covers the copy described by `warned`.
     pub fn covers(&self, warned: &str) -> bool {
         match self {
-            Self::Withheld => false,
+            Self::Withheld | Self::WithheldByFlag => false,
             Self::Blanket => true,
             Self::Warned(seen) => seen == warned,
         }

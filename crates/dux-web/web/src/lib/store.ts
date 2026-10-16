@@ -1272,8 +1272,9 @@ function handleStatusEvent(event: EventsServerMessage): void {
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
   if (event.tone === "error") {
     if (askReviewCopy(event)) return
-    // Any other failure ends the create this tab was waiting on.
-    pendingPrSubmission = null
+    // The same refusal again, replayed after the question was already put to
+    // the user, would stack a long toast over the dialog that asks it.
+    if (event.key && askedKeys.has(event.key)) return
   }
   showStatusToast(
     event.key,
@@ -6777,7 +6778,13 @@ export function createAgentFromPr(
   // Remembered so a refusal that asks about a review copy can reopen the
   // dialog on what was typed. Without this tab having asked for a create, the
   // same refusal is an ordinary error toast.
-  pendingPrSubmission = { projectId, pr, name, at: Date.now() }
+  const submission = { projectId, pr, name, at: Date.now() }
+  pendingPrSubmission = submission
+  // The request ends the wait when it fails or the agent exists. A reply of
+  // "under way" does not: the answer comes later on the events socket.
+  const settle = () => {
+    if (pendingPrSubmission === submission) pendingPrSubmission = null
+  }
   sessionsApi
     .create({
       kind: "from_pr",
@@ -6788,7 +6795,13 @@ export function createAgentFromPr(
         ? {}
         : { review_copy: true, review_copy_warned: reviewCopyWarned }),
     })
-    .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
+    .then((created) => {
+      if (!("op_id" in created)) settle()
+    })
+    .catch((e) => {
+      settle()
+      toastCreateError(e, "Could not create the agent from the PR.")
+    })
 }
 
 // The from-PR create this tab last sent, kept for as long as an answer to it
@@ -6798,6 +6811,8 @@ let pendingPrSubmission:
   | { projectId: string; pr: string; name: string; at: number }
   | null = null
 const PENDING_PR_SUBMISSION_MS = 120_000
+// Keys of the refusals already put to the user as a question.
+const askedKeys = new Set<string>()
 
 function readReviewCopyAsk(ask: unknown): Omit<ReviewCopyAsk, "agreed"> | null {
   if (typeof ask !== "object" || ask === null) return null
@@ -6827,11 +6842,19 @@ function askReviewCopy(event: EventsServerMessage): boolean {
   const asked = readReviewCopyAsk(event.ask)
   const pending = pendingPrSubmission
   if (!asked || !pending) return false
+  // A status for everyone (the command line's, the terminal UI's) is not an
+  // answer to what this tab sent: the server scopes a create's answer to the
+  // connection that asked for it.
+  if (event.scope === undefined || event.scope === "all") return false
   if (Date.now() - pending.at > PENDING_PR_SUBMISSION_MS) {
     pendingPrSubmission = null
     return false
   }
   pendingPrSubmission = null
+  if (event.key) {
+    if (askedKeys.size >= 20) askedKeys.clear()
+    askedKeys.add(event.key)
+  }
   // The create's spinner would otherwise outlive the answer that replaces it.
   dismissNotification(event.key ?? ANON_TOAST_ID)
   setState({

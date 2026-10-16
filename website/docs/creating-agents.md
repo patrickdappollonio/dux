@@ -433,8 +433,11 @@ default. Nothing dux does to it reaches the remote: the branch on GitHub, and th
 request itself, are untouched either way. If dux cannot fetch the pull request, nothing
 is created and the message says why.
 
-If another agent already has the pull request's branch checked out and that branch
-contains the pull request's code, dux creates nothing. It tells you which agent has it and
+If another agent already has the pull request's code, dux creates nothing, whatever name
+you typed. An agent has it when its branch is the pull request's own branch (or a review
+copy of it) and contains the pull request's latest commit, or when its branch sits exactly
+on that commit. An agent working on a pull request stacked on top of this one does not
+count. dux tells you which agent has it and
 where, and suggests opening a new tab in that agent, which works in the same folder on the
 same code. An agent on that branch that does not have the pull request's code yet gets the
 fresh copy below.

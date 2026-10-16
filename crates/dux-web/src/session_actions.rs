@@ -151,6 +151,9 @@ enum CreateSessionBody {
         /// carried it. Absent from a client that was never shown one.
         #[serde(default)]
         review_copy_warned: Option<String>,
+        /// The client agrees with a flag rather than a box (the command line).
+        #[serde(default)]
+        review_copy_by_flag: bool,
     },
     /// A STANDALONE agent: run a provider in a folder the user already has. It
     /// carries no `project_id`, belonging to no project, and it is the only kind
@@ -199,12 +202,14 @@ impl CreateSessionBody {
                 name,
                 review_copy,
                 review_copy_warned,
+                review_copy_by_flag,
             } => WireCommand::CreateAgentFromPr {
                 project_id,
                 pr,
                 name,
                 review_copy,
                 review_copy_warned,
+                review_copy_by_flag,
             },
             CreateSessionBody::Standalone {
                 folder,

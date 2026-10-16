@@ -1848,15 +1848,7 @@ impl Engine {
                     &pin.state,
                     "",
                 ) {
-                    Ok(_) => crate::status_text![
-                        "It is linked to PR ",
-                        n(pr),
-                        "; a push from it goes to its own branch ",
-                        q(pin.new_branch),
-                        ", never to ",
-                        q(pin.busy_branch),
-                        "."
-                    ],
+                    Ok(_) => crate::status_text!["It is linked to PR ", n(pr), "."],
                     Err(err) => {
                         logger::error(&format!(
                             "could not pin agent {} to PR #{} of {}: {err:#}",

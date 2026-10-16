@@ -6,7 +6,7 @@
 import type { ChangeEvent, KeyboardEvent } from "react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import { Input } from "@/components/ui/input"
 import { sanitizeAgentName } from "@/lib/agentName"
 
@@ -81,15 +81,12 @@ export function RandomizeNameCheckbox({
   onToggle,
 }: RandomizeNameCheckboxProps) {
   return (
-    <div className="flex items-center gap-2">
-      <Checkbox
-        id="randomize-agent-name"
-        checked={checked}
-        onCheckedChange={onToggle}
-      />
-      <label htmlFor="randomize-agent-name" className="text-sm">
-        Use randomized pet name
-      </label>
-    </div>
+    <CheckboxRow
+      id="randomize-agent-name"
+      checked={checked}
+      onCheckedChange={onToggle}
+    >
+      Use randomized pet name
+    </CheckboxRow>
   )
 }

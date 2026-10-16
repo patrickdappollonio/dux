@@ -1922,6 +1922,17 @@ fn is_object_id(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The commit local branch `branch` points at now. The branch is passed fully
+/// qualified, so a dash-leading name is a ref and not an option.
+pub fn branch_tip(repo_path: &Path, branch: &str) -> Result<String> {
+    let branch_ref = format!("refs/heads/{branch}");
+    run_git_capture(
+        repo_path,
+        &["rev-parse", "--verify", "--end-of-options", &branch_ref],
+        &format!("read the tip of branch \"{branch}\""),
+    )
+}
+
 /// The tip of local branch `branch` when it is strictly BEHIND `commit`: the
 /// tip is an ancestor of the commit and not the commit itself, so the branch
 /// holds nothing of its own and moving it to `commit` loses no work. `None`
@@ -1940,12 +1951,7 @@ pub fn branch_behind_commit(
     if !is_object_id(commit) {
         return Err(anyhow!("\"{commit}\" is not a full commit id"));
     }
-    let branch_ref = format!("refs/heads/{branch}");
-    let tip = run_git_capture(
-        repo_path,
-        &["rev-parse", "--verify", "--end-of-options", &branch_ref],
-        &format!("read the tip of branch \"{branch}\""),
-    )?;
+    let tip = branch_tip(repo_path, branch)?;
     if tip == commit {
         return Ok(None);
     }

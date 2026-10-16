@@ -36653,19 +36653,22 @@ cyan = "#00ffff"
     #[test]
     fn a_pull_request_create_refused_for_a_review_copy_waits_for_the_box_before_it_is_sent_again() {
         let mut app = test_app(default_bindings());
-        app.pull_request_create = Some(CreateAgentRequest::PullRequest {
-            project: app.engine.projects[0].clone(),
-            host: "github.com".to_string(),
-            owner_repo: "octo/hello".to_string(),
-            number: 42,
-            title: "Fix".to_string(),
-            state: "OPEN".to_string(),
-            head_branch: "pr-head".to_string(),
-            custom_name: Some("pr-head".to_string()),
-            use_existing_branch: false,
-            review_copy: Default::default(),
-            agents: Vec::new(),
-        });
+        app.pull_request_create = Some((
+            "op-9".to_string(),
+            CreateAgentRequest::PullRequest {
+                project: app.engine.projects[0].clone(),
+                host: "github.com".to_string(),
+                owner_repo: "octo/hello".to_string(),
+                number: 42,
+                title: "Fix".to_string(),
+                state: "OPEN".to_string(),
+                head_branch: "pr-head".to_string(),
+                custom_name: Some("pr-head".to_string()),
+                use_existing_branch: false,
+                review_copy: Default::default(),
+                agents: Vec::new(),
+            },
+        ));
         let ask = dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
             dux_core::status_text::ReviewCopyAsk {
                 warned: "diverged:pr-head-review".to_string(),
@@ -36674,14 +36677,30 @@ cyan = "#00ffff"
                 )],
             },
         ));
-        app.apply_reaction(dux_core::engine::EventReaction::Status(
-            dux_core::engine::StatusUpdate::error(
-                dux_core::status_text::StatusText::plain(
-                    "Pushes would land on the copy. Pass a flag.",
-                )
-                .with_ask(ask),
-            ),
-        ));
+        let refusal = |key: &str| {
+            dux_core::engine::EventReaction::Status(dux_core::engine::StatusUpdate::keyed(
+                key,
+                dux_core::statusline::StatusTone::Error,
+                dux_core::status_text::StatusText::plain("Pushes would land on the copy.")
+                    .with_ask(ask.clone()),
+            ))
+        };
+
+        // A question put to another create (a browser's, the command line's)
+        // is not this prompt's: it shows as the refusal it is.
+        app.apply_reaction(refusal("op-other"));
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.status.most_recent_tui().is_some());
+
+        // This create's spinner is retired by its question.
+        app.status.set(
+            std::time::Instant::now(),
+            Some("op-9".to_string()),
+            dux_core::statusline::StatusTone::Busy,
+            "Creating a new agent worktree...".to_string(),
+        );
+        app.status.clear("op-other", None);
+        app.apply_reaction(refusal("op-9"));
 
         // The prompt is back with the typed name, and the status line did not
         // take the sentence.
@@ -36712,7 +36731,8 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(app.prompt, PromptState::None));
-        let Some(CreateAgentRequest::PullRequest { review_copy, .. }) = &app.pull_request_create
+        let Some((_, CreateAgentRequest::PullRequest { review_copy, .. })) =
+            &app.pull_request_create
         else {
             panic!("the create was sent: {:?}", app.pull_request_create);
         };

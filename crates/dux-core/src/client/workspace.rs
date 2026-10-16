@@ -847,6 +847,8 @@ pub fn agents_add(
                     "pr": reference,
                     "name": name,
                     "review_copy": review_copy,
+                    // This client agrees with a flag, so a refusal names it.
+                    "review_copy_by_flag": true,
                 }),
             )
         }
@@ -1252,6 +1254,7 @@ mod create_wait_tests {
             .unwrap()
         };
         assert_eq!(body_for(true)["review_copy"], true);
+        assert_eq!(body_for(false)["review_copy_by_flag"], true);
         assert_eq!(body_for(false)["review_copy"], false);
     }
 

@@ -1474,8 +1474,9 @@ impl App {
         busy_message: String,
     ) -> Result<()> {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
-        self.pull_request_create =
+        let pull_request =
             matches!(request, CreateAgentRequest::PullRequest { .. }).then(|| request.clone());
+        self.pull_request_create = None;
         // Armed only once the dispatch is known accepted, and taking the
         // in-flight key is what says so. The engine allows one create at a time
         // and refuses a second with an ordinary status rather than an error, so
@@ -1495,6 +1496,9 @@ impl App {
                 .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent)
         {
             self.create_agent_started_here = true;
+            // Armed only now that the create is accepted, under the key its
+            // answer will carry.
+            self.pull_request_create = self.engine.last_created_op_id.clone().zip(pull_request);
         }
         self.apply_reaction(reaction);
         Ok(())

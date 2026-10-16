@@ -669,8 +669,10 @@ describe("a create that asks for a review copy", () => {
     event: "status",
     key: "op-3",
     tone: "error",
-    message: 'Branch "pr-head" has diverged. Pushes would land on "pr-head-review". Pass --review-copy.',
+    message: 'Branch "pr-head" has diverged. Pushes would land on "pr-head-review".',
     ask,
+    // The server scopes a create's answer to the connection that asked.
+    scope: { connection: "c1" },
   }
 
   function createBodies() {
@@ -690,6 +692,9 @@ describe("a create that asks for a review copy", () => {
     expect(mod.getSnapshot().createAgentTarget).toBeNull()
 
     mod.eventsSocket.onEvent(refusal)
+    // The same refusal replayed (a reconnect) does not stack a toast over the
+    // dialog that is asking.
+    mod.eventsSocket.onEvent({ ...refusal, ask: undefined })
     const reopened = mod.getSnapshot()
     expect(toast.error).not.toHaveBeenCalled()
     expect(reopened.createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
@@ -724,5 +729,31 @@ describe("a create that asks for a review copy", () => {
     mod.eventsSocket.onEvent(refusal)
     expect(toast.error).toHaveBeenCalledTimes(1)
     expect(mod.getSnapshot().createAgentTarget).toBeNull()
+  })
+
+  it("leaves another surface's refusal as a toast and keeps waiting for its own", async () => {
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    mod.openCreateAgentFromPr("p1")
+    mod.setCreateAgentPrInput("#42")
+    mod.setCreateAgentDraft("my-review")
+    mod.submitNameDialog("my-review")
+
+    // The command line's create, or the terminal UI's, reaches every page.
+    mod.eventsSocket.onEvent({ ...refusal, key: "op-9", scope: "all" })
+    expect(toast.error).toHaveBeenCalledTimes(1)
+    expect(mod.getSnapshot().createAgentTarget).toBeNull()
+
+    // An unrelated failure of this connection does not end the wait either.
+    mod.eventsSocket.onEvent({
+      event: "status",
+      key: "op-10",
+      tone: "error",
+      message: "Could not rename.",
+      scope: { connection: "c1" },
+    })
+    mod.eventsSocket.onEvent(refusal)
+    expect(mod.getSnapshot().createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
   })
 })
