@@ -2474,7 +2474,7 @@ async fn check_pull_request_clone_destination(
                     number,
                     head_branch,
                     head_commit: head_oid.as_deref(),
-                    agent_name: None,
+                    agent_name: typed_name.as_deref(),
                 })
             }
             _ => None,

@@ -1491,8 +1491,6 @@ impl CreatePlanContext<'_> {
                 by_flag,
                 project_id: None,
                 pull_request: None,
-                reason: None,
-                copy_branch: None,
             },
         ));
         self.send_failure(crate::status_text![warning, review_copy_how(by_flag)].with_ask(ask));

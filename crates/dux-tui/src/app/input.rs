@@ -30603,7 +30603,6 @@ cyan = "#00ffff"
             crate::statusline::StatusTone::Error,
             "The server's sentence about the review copy.",
         );
-        let with_project = project_id.is_some();
         update.ask = Some(dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
             dux_core::status_text::ReviewCopyAsk {
                 warned: "busy:fix-docs-review".to_string(),
@@ -30622,8 +30621,6 @@ cyan = "#00ffff"
                     )
                     .target(),
                 ),
-                reason: (!with_project).then(|| "busy".to_string()),
-                copy_branch: (!with_project).then(|| "fix-docs-review".to_string()),
             },
         )));
         update
@@ -37606,8 +37603,6 @@ cyan = "#00ffff"
                 by_flag: false,
                 project_id: None,
                 pull_request: None,
-                reason: None,
-                copy_branch: None,
             },
         ));
         let refusal = |key: &str| {

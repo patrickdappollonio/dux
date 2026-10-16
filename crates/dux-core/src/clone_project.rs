@@ -293,29 +293,35 @@ pub fn check_pr_destination(
     let home = std::env::home_dir();
     let state = inspect_pr_destination(raw, target, policy, home.as_deref(), projects)?;
     let path = destination_identity(raw, home.as_deref())?;
-    let review_copy = match (state, review) {
-        (PrDestination::Checkout, Some(query)) => {
+    // A name typed like a review copy is asked about whatever the folder
+    // holds; the pull request's own branch only where there is a checkout.
+    let review_copy = match review {
+        Some(query)
+            if query
+                .agent_name
+                .is_some_and(|name| name != query.head_branch)
+                || state == PrDestination::Checkout =>
+        {
             let (folder, root) = (path.clone(), query.worktrees_root.to_path_buf());
             let (branch, commit) = (
                 query.head_branch.to_string(),
                 query.head_commit.map(String::from),
             );
             let number = query.number;
+            let checkout = state == PrDestination::Checkout;
             let typed = query
                 .agent_name
                 .filter(|name| *name != query.head_branch)
                 .map(String::from);
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                // The rule the add itself follows for a typed name.
                 let outlook = match typed {
-                    Some(name) if crate::git::local_branch_exists(&folder, &name) => {
-                        ReviewCopyOutlook::NotNeeded
-                    }
-                    Some(name) => {
-                        crate::agent_job::typed_copy_review_outlook(&branch, &name, number)
-                            .unwrap_or(ReviewCopyOutlook::NotNeeded)
-                    }
+                    Some(name) => crate::agent_job::typed_name_review_copy_outlook(
+                        checkout.then_some(folder.as_path()),
+                        &branch,
+                        &name,
+                        number,
+                    ),
                     None => crate::agent_job::folder_review_copy_outlook(
                         &folder,
                         &root,

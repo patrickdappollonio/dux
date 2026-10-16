@@ -861,11 +861,13 @@ impl App {
         let PrCloneAwaiting {
             mut form, draft, ..
         } = held;
-        if let (Some(reason), Some(copy_branch)) = (&question.reason, &question.copy_branch) {
+        // A refusal before anything was made names the reason and the copy it
+        // asks about as `reason:copy_branch`, which an agreement must repeat.
+        if let Some((reason, copy_branch)) = question.warned.split_once(':') {
             let outlook = ReviewCopyOutlook::Needed {
-                reason: reason.clone(),
+                reason: reason.to_string(),
                 branch: form.offer.head_branch.clone(),
-                copy_branch: copy_branch.clone(),
+                copy_branch: copy_branch.to_string(),
                 warning: question.warning.clone(),
             };
             if draft.agent_name.trim() == form.head_branch() {
