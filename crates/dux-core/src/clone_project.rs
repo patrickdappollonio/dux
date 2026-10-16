@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::engine::{Final, HandlerStatusOp};
 use crate::git::CloneProcesses;
+use crate::pr_reference::PullRequestCloneTarget;
 use crate::status_text::StatusText;
 use crate::worker::WorkerEvent;
 
@@ -26,12 +27,17 @@ use crate::worker::WorkerEvent;
 /// `agent_name` there, or a random name when it is blank, as in the New agent
 /// dialog. `random_name` is that dialog's checkbox, as the client sent it; a
 /// blank name gets a random one either way.
+///
+/// With `pull_request` the clone is for a new agent from that pull request:
+/// the engine builds the address itself and ignores `url`, and a blank name
+/// stays blank until the worker has looked the pull request up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneRequest {
     pub url: String,
     pub path: String,
     pub agent_name: Option<String>,
     pub random_name: bool,
+    pub pull_request: Option<PullRequestCloneTarget>,
 }
 
 /// How a clone's operation ended. The worker answers one of the first three
@@ -66,6 +72,10 @@ impl CloneOutcome {
 pub struct PendingClone {
     pub op: HandlerStatusOp<CloneOutcome>,
     pub from_web: bool,
+    /// The repository key a pull request clone holds, released once the
+    /// project is registered or the clone ends without one; `None` for an
+    /// ordinary clone.
+    pub repository_key: Option<String>,
 }
 
 /// The engine's clones: the operations waiting for their worker, and the git
@@ -74,6 +84,8 @@ pub struct PendingClone {
 pub struct Clones {
     pub pending: HashMap<String, PendingClone>,
     pub processes: CloneProcesses,
+    /// Extra variables for every clone's git, empty outside tests.
+    pub git_env: Vec<(String, String)>,
 }
 
 /// A request that passed the checks the engine thread runs.
@@ -87,8 +99,9 @@ pub struct PreparedClone {
 
 /// Check `request` without git or the destination itself, resolving the agent
 /// name: a blank one gets a random name here, so nothing later sees an empty
-/// one. `projects` are the workspace's project
-/// paths and `home` expands a leading `~`.
+/// one, except for a pull request, whose blank name waits for the worker.
+/// `projects` are the workspace's project paths and `home` expands a leading
+/// `~`.
 pub fn prepare_clone(
     request: &CloneRequest,
     home: Option<&Path>,
@@ -109,6 +122,10 @@ pub fn prepare_clone(
             ]);
         }
         typed.to_string()
+    } else if request.pull_request.is_some() {
+        // The pull request's own branch names the agent, which only the
+        // worker's lookup can say.
+        String::new()
     } else {
         crate::git::docker_style_name()
     };
@@ -178,8 +195,24 @@ pub struct ClonedRepository {
     pub branch: String,
     /// The base new worktrees branch from.
     pub leading_branch: String,
-    /// A branch named like the agent already exists in the clone.
+    /// A branch named like the agent already exists in the clone. Never set
+    /// for a pull request, whose create decides for itself what to do with a
+    /// branch of that name.
     pub name_taken: bool,
+    /// The pull request the worker looked up again, for a clone that ends in
+    /// an agent from one.
+    pub pull_request: Option<ClonedPullRequest>,
+}
+
+/// The pull request a clone's worker looked up, and the agent name it settled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClonedPullRequest {
+    pub target: PullRequestCloneTarget,
+    pub title: String,
+    pub state: String,
+    pub head_branch: String,
+    /// The typed name, or the head branch when none was typed.
+    pub agent_name: String,
 }
 
 /// What a clone's first agent create carries about the clone, so it refuses
@@ -196,7 +229,16 @@ pub struct ClonedFor {
 impl ClonedFor {
     /// `reason` the agent is missing, after what the clone did.
     pub fn agent_missing(&self, reason: StatusText) -> StatusText {
-        crate::status_text![
+        self.agent_missing_named(None, reason)
+    }
+
+    /// [`Self::agent_missing`] naming the agent the create actually tried to
+    /// make when it got as far as settling a name, which a review copy of a
+    /// pull request makes different from the one asked for.
+    pub fn agent_missing_named(&self, attempted: Option<&str>, reason: StatusText) -> StatusText {
+        // Wrapping the reason copies its words, not the question it may put.
+        let ask = reason.ask().cloned();
+        let wrapped = crate::status_text![
             "Cloned ",
             n(self.address),
             " into ",
@@ -204,9 +246,32 @@ impl ClonedFor {
             " and added project ",
             q(self.project_name),
             ", but didn't create agent ",
-            q(self.agent_name),
+            q(attempted.unwrap_or(&self.agent_name)),
             ": ",
             reason
+        ];
+        match ask {
+            Some(ask) => wrapped.with_ask(ask),
+            None => wrapped,
+        }
+    }
+
+    /// The agent exists but its startup command failed, after what the clone
+    /// did.
+    pub fn startup_failed(&self, agent: &str, error: &str) -> StatusText {
+        crate::status_text![
+            "Cloned ",
+            n(self.address),
+            " into ",
+            n(self.path.display()),
+            " and added project ",
+            q(self.project_name),
+            ". Agent ",
+            q(agent),
+            format!(
+                " was created, but its startup command failed: {error}. Open the startup \
+                 command logs for details."
+            )
         ]
     }
 }
@@ -219,6 +284,20 @@ pub struct ClonedProject {
     pub path: PathBuf,
     pub agent_name: String,
     pub cloned: ClonedRepository,
+    /// The repository key the clone held, to release when the pending clone
+    /// is gone.
+    pub repository_key: Option<String>,
+}
+
+/// What a pull request clone's worker checks and looks up before it claims the
+/// folder.
+pub struct PullRequestJob {
+    pub target: PullRequestCloneTarget,
+    /// The projects as they were when the request was accepted.
+    pub projects: Vec<crate::model::Project>,
+    pub policy: crate::gh::GithubHostPolicy,
+    /// The program the lookup runs: `gh`, or a test's stand-in.
+    pub gh_program: std::ffi::OsString,
 }
 
 /// Everything the worker needs.
@@ -226,44 +305,193 @@ pub struct CloneJob {
     pub status_op_id: String,
     pub url: String,
     pub destination: PathBuf,
+    /// Blank for a pull request clone whose name is the pull request's branch.
     pub agent_name: String,
     pub stall: Duration,
     pub processes: CloneProcesses,
+    pub pull_request: Option<PullRequestJob>,
+    /// Held by a pull request clone; carried so the answer can release it.
+    pub repository_key: Option<String>,
+    /// Extra variables for git's environment. Empty outside tests, which use
+    /// it to point an address at a local remote.
+    pub git_env: Vec<(String, String)>,
 }
 
 /// Check the destination and the agent name with git, clone, and read what
 /// was cloned; posts `WorkerEvent::RepositoryCloned` either way.
 pub fn run_clone_job(job: CloneJob, worker_tx: &Sender<WorkerEvent>) {
     let result = clone_and_inspect(&job);
+    // A pull request settles the agent's name on the worker, from the typed
+    // name or the pull request's branch.
+    let agent_name = match &result {
+        Ok(ClonedRepository {
+            pull_request: Some(pull_request),
+            ..
+        }) => pull_request.agent_name.clone(),
+        _ => job.agent_name,
+    };
     let _ = worker_tx.send(WorkerEvent::RepositoryCloned {
         status_op_id: Some(job.status_op_id),
         path: job.destination,
-        agent_name: job.agent_name,
+        agent_name,
+        repository_key: job.repository_key,
         result,
     });
+}
+
+/// What a clone for a pull request settles before it claims any folder: no
+/// project has become a checkout of the repository since the request was
+/// accepted, the pull request still exists (this answer wins over the one the
+/// offer showed), and the agent has a usable name.
+fn settle_pull_request(
+    job: &CloneJob,
+    pull_request: &PullRequestJob,
+    parent: &Path,
+) -> Result<ClonedPullRequest, CloneOutcome> {
+    let target = &pull_request.target;
+    let reference = crate::pr_reference::TypedReference {
+        host: Some(target.host.clone()),
+        owner_repo: Some(target.owner_repo.clone()),
+        number: Some(target.number),
+    };
+    let repository = format!("{}/{}", target.host, target.owner_repo);
+    let resolution = crate::pr_reference::resolve_reference_projects(
+        &reference,
+        &pull_request.projects,
+        &pull_request.policy,
+    );
+    if let Some(project) = resolution.matches.first() {
+        return Err(CloneOutcome::Refused(crate::status_text![
+            q(project.name),
+            " is already a checkout of ",
+            n(repository),
+            ", so dux did not clone it again. Use New agent from PR again; it will find that \
+             project now."
+        ]));
+    }
+    let lookup = crate::worker::PullRequestLookup {
+        host: target.host.clone(),
+        owner_repo: target.owner_repo.clone(),
+        number: target.number,
+    };
+    let metadata =
+        crate::gh::look_up_pull_request(&pull_request.gh_program, &lookup).map_err(|said| {
+            let said = said.trim_end();
+            let stop = if said.ends_with(['.', '!', '?']) {
+                ""
+            } else {
+                "."
+            };
+            CloneOutcome::Refused(crate::status_text![
+                format!("{said}{stop}"),
+                " Nothing was cloned."
+            ])
+        })?;
+    let typed = job.agent_name.trim();
+    let agent_name = if typed.is_empty() {
+        let branch = metadata.head_ref_name.as_str();
+        if !crate::git::is_valid_agent_name(branch)
+            || !crate::git::is_valid_branch_name(parent, branch)
+        {
+            return Err(CloneOutcome::Refused(crate::status_text![
+                "PR ",
+                n(format!("#{}", target.number)),
+                " has head branch ",
+                q(branch),
+                ", which is not a usable agent name. Type a name using only letters, digits, \
+                 dashes, underscores and slashes. Nothing was cloned."
+            ]));
+        }
+        branch.to_string()
+    } else {
+        typed.to_string()
+    };
+    Ok(ClonedPullRequest {
+        target: target.clone(),
+        title: metadata.title,
+        state: metadata.state,
+        head_branch: metadata.head_ref_name,
+        agent_name,
+    })
+}
+
+/// Give a clone made through a test's stand-in transport the same rewrite, so
+/// the fetch that follows reaches the stand-in too: git records the address it
+/// was given, and the rewrite applies only while the variables are set.
+fn keep_env_config(dest: &Path, env: &[(String, String)]) {
+    let count = env
+        .iter()
+        .find(|(key, _)| key == "GIT_CONFIG_COUNT")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let lookup = |name: String| env.iter().find(|(key, _)| *key == name).map(|(_, v)| v);
+    for index in 0..count {
+        let (Some(key), Some(value)) = (
+            lookup(format!("GIT_CONFIG_KEY_{index}")),
+            lookup(format!("GIT_CONFIG_VALUE_{index}")),
+        ) else {
+            continue;
+        };
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dest)
+            .args(["config", "--add", "--", key, value])
+            .output();
+    }
 }
 
 fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
     let address = redact_remote_userinfo(&job.url);
     let dest = &job.destination;
     let parent = dest.parent().unwrap_or(dest);
-    if !crate::git::is_valid_branch_name(parent, &job.agent_name) {
+    let pull_request = match &job.pull_request {
+        Some(request) => Some(settle_pull_request(job, request, parent)?),
+        None => None,
+    };
+    let agent_name = pull_request
+        .as_ref()
+        .map_or(job.agent_name.as_str(), |settled| {
+            settled.agent_name.as_str()
+        });
+    if !crate::git::is_valid_branch_name(parent, agent_name) {
         return Err(CloneOutcome::Refused(crate::status_text![
             "git won't take ",
-            q(job.agent_name),
+            q(agent_name),
             " as a branch name, so it can't name the agent. Pick another name."
         ]));
     }
     let claim = claim_destination(dest).map_err(CloneOutcome::Refused)?;
     crate::logger::info(&format!("cloning {address} into {}", dest.display()));
-    if let Err(error) = crate::git::clone_repository(&job.url, dest, job.stall, &job.processes) {
+    let env: Vec<(&str, &str)> = job
+        .git_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    if let Err(error) =
+        crate::git::clone_repository_with_env(&job.url, dest, job.stall, &job.processes, &env)
+    {
         crate::logger::error(&format!(
             "clone of {address} into {} failed: {error:?}",
             dest.display()
         ));
         claim.release_unused();
-        return Err(CloneOutcome::Failed(clone_failure(&address, dest, &error)));
+        let mut said = clone_failure(&address, dest, &error);
+        if let (Some(request), crate::git::CloneError::Failed(_)) = (&job.pull_request, &error)
+            && job.url.starts_with("git@")
+        {
+            let host = &request.target.host;
+            said = crate::status_text![
+                said,
+                " If this is the first time this machine talks to ",
+                n(host),
+                " over SSH, connect once in a terminal (",
+                n(format!("ssh -T git@{host}")),
+                ") and try again."
+            ];
+        }
+        return Err(CloneOutcome::Failed(said));
     }
+    keep_env_config(dest, &job.git_env);
     match crate::git::repo_commit_state(dest) {
         crate::git::CommitState::Born => {}
         _ if crate::git::has_remote_tracking_refs(dest) => {
@@ -295,15 +523,19 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         .unwrap_or_default();
     let leading_branch =
         crate::project_browser::project_base_for_add(dest, Some(&branch), false).into_branch();
-    let name_taken = matches!(
-        crate::git::create_agent_branch_preflight(dest, &job.agent_name),
-        crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
-    );
+    // A pull request's create decides for itself what to do with a branch of
+    // that name, so only a plain agent is refused one here.
+    let name_taken = pull_request.is_none()
+        && matches!(
+            crate::git::create_agent_branch_preflight(dest, agent_name),
+            crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
+        );
     Ok(ClonedRepository {
         address,
         branch,
         leading_branch,
         name_taken,
+        pull_request,
     })
 }
 

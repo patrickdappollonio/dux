@@ -68,6 +68,11 @@ pub enum InFlightKey {
     /// a clone is refused while either names it. Cleared by the
     /// `RepositoryCloned` handler, which the worker sends however it ended.
     Clone(std::path::PathBuf),
+    /// A repository is being cloned for a new agent from a pull request:
+    /// `host/owner/repo`, lowercased, with no `.git`. Held from the request
+    /// until the project exists, so two quick requests into different folders
+    /// cannot make two projects for one repository.
+    CloneRepository(String),
     /// An operation that switches the branch of the project folder at `path`
     /// is running: "Check out default branch", "Change base branch" or a
     /// project "Pull project". All three run `git switch` in the same folder,

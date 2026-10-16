@@ -443,6 +443,10 @@ pub enum CreateAgentRequest {
         /// agent from one held by anything else. Empty from every constructor;
         /// the dispatch fills it.
         agents: Vec<AgentAtWorktree>,
+        /// Set for the first agent of a clone dux just made, so a create that
+        /// fails says what the clone already did. Every other create leaves
+        /// it empty.
+        cloned: Option<crate::clone_project::ClonedFor>,
     },
     ForkSession {
         project: Project,
@@ -533,6 +537,10 @@ pub enum WorkerEvent {
     CreateAgentFailed {
         status_op_id: String,
         message: crate::status_text::StatusText,
+        /// The name the create had settled on when it failed (a pull request's
+        /// review copy has a different one from the name asked for), or
+        /// `None` when it had not settled one.
+        attempted_name: Option<String>,
     },
     AgentLaunchReady(Box<AgentLaunchReadyData>),
     AgentLaunchFailed(Box<AgentLaunchFailedData>),
@@ -732,6 +740,9 @@ pub enum WorkerEvent {
         status_op_id: Option<String>,
         path: PathBuf,
         agent_name: String,
+        /// The repository key a pull request clone holds, released when the
+        /// pending clone is gone.
+        repository_key: Option<String>,
         result: Result<crate::clone_project::ClonedRepository, crate::clone_project::CloneOutcome>,
     },
     /// Background inspection of the selected project checkout before opening

@@ -64,11 +64,14 @@ pub enum Command {
     /// then start an agent named `agent_name` there (a random name when it is
     /// blank; `random_name` is the New agent dialog's checkbox). Returns the clone's busy, or an error
     /// status saying which check refused it; see [`crate::clone_project`].
+    /// With `pull_request` the agent is created from that pull request, the
+    /// address is built by the engine and `url` is ignored.
     CloneProject {
         url: String,
         path: String,
         agent_name: Option<String>,
         random_name: bool,
+        pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
     },
 
     /// Remove a project and cascade-delete its agents' records and runtime,
@@ -567,12 +570,14 @@ impl Engine {
                 path,
                 agent_name,
                 random_name,
+                pull_request,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
                     path,
                     agent_name,
                     random_name,
+                    pull_request,
                 };
                 Ok(EventReaction::Status(
                     match self.begin_clone_project(&request, false) {
@@ -671,12 +676,23 @@ impl Engine {
                 // A clone's first agent: a create that fails says what the
                 // clone already did, which is on disk and in the workspace.
                 let cloned = match request.as_ref() {
-                    crate::worker::CreateAgentRequest::NewProject { cloned, .. } => cloned.clone(),
+                    crate::worker::CreateAgentRequest::NewProject { cloned, .. }
+                    | crate::worker::CreateAgentRequest::PullRequest { cloned, .. } => {
+                        cloned.clone()
+                    }
                     _ => None,
                 };
-                let after_clone = move |message: crate::status_text::StatusText| match &cloned {
-                    Some(cloned) => cloned.agent_missing(message),
-                    None => message,
+                // `attempted` is the name the create had settled on when it
+                // failed, which a review copy of a pull request makes different
+                // from the name asked for.
+                let after_clone = {
+                    let cloned = cloned.clone();
+                    move |message: crate::status_text::StatusText, attempted: Option<&str>| {
+                        match &cloned {
+                            Some(cloned) => cloned.agent_missing_named(attempted, message),
+                            None => message,
+                        }
+                    }
                 };
                 let op = crate::engine::status_op(busy_message)
                     .resolve_in_handler(move |o: &crate::engine::CreateLaunchOutcome| {
@@ -703,15 +719,21 @@ impl Engine {
                                 // logs, an action outside the toast. The
                                 // failure leads; what the create's notes said
                                 // is still true and follows it.
-                                let failure = crate::status_text![
-                                    "Startup command failed for agent ",
-                                    q(branch_name),
-                                    format!(
-                                        ": {}. \
+                                let failure = match &cloned {
+                                    // The agent exists, so this is not
+                                    // "didn't create": the clone's context
+                                    // leads and the agent follows.
+                                    Some(cloned) => cloned.startup_failed(branch_name, error),
+                                    None => crate::status_text![
+                                        "Startup command failed for agent ",
+                                        q(branch_name),
+                                        format!(
+                                            ": {}. \
                                      Open the startup command logs for details.",
-                                        error
-                                    )
-                                ];
+                                            error
+                                        )
+                                    ],
+                                };
                                 Final::error(match notes {
                                     Some(notes) => {
                                         crate::status_text![failure, " ", notes.clone()]
@@ -720,18 +742,26 @@ impl Engine {
                                 })
                                 .sticky()
                             }
-                            CreateLaunchOutcome::PersistFailed { error } => {
+                            CreateLaunchOutcome::PersistFailed {
+                                error,
+                                attempted_name,
+                            } => {
                                 // Sticky: the worktree exists but its session row
                                 // does not, so dux forgets it on restart and the
                                 // user is left the directory to clean up.
                                 Final::error(after_clone(
                                     format!("Failed to persist session: {error}").into(),
+                                    attempted_name.as_deref(),
                                 ))
                                 .sticky()
                             }
-                            CreateLaunchOutcome::Failed { message } => {
-                                Final::error(after_clone(message.clone()))
-                            }
+                            CreateLaunchOutcome::Failed {
+                                message,
+                                attempted_name,
+                            } => Final::error(after_clone(
+                                message.clone(),
+                                attempted_name.as_deref(),
+                            )),
                         }
                     })
                     // Stamp the originating connection so the busy, every progress
@@ -782,6 +812,7 @@ impl Engine {
                         )),
                         panic_event: Some(Box::new(move |reason| WorkerEvent::CreateAgentFailed {
                             status_op_id: op_id_panic,
+                            attempted_name: None,
                             message: format!("Agent-creation worker panicked: {reason}").into(),
                         })),
                     },

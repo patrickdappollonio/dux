@@ -100,7 +100,7 @@ impl TypedReference {
 }
 
 /// A pull request in a repository dux may clone, as requests carry it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullRequestCloneTarget {
     pub host: String,
     pub owner_repo: String,

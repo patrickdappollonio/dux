@@ -1404,7 +1404,11 @@ pub(crate) mod tests {
         let id = op.id().to_string();
         app.engine.clones.pending.insert(
             id.clone(),
-            dux_core::clone_project::PendingClone { op, from_web },
+            dux_core::clone_project::PendingClone {
+                op,
+                from_web,
+                repository_key: None,
+            },
         );
         id
     }
@@ -1419,11 +1423,13 @@ pub(crate) mod tests {
             status_op_id: Some(id),
             path,
             agent_name: agent.to_string(),
+            repository_key: None,
             result: Ok(dux_core::clone_project::ClonedRepository {
                 address: "/srv/remote.git".to_string(),
                 branch: "main".to_string(),
                 leading_branch: "main".to_string(),
                 name_taken: false,
+                pull_request: None,
             }),
         }
     }

@@ -947,10 +947,17 @@ pub enum CreateLaunchOutcome {
     },
     /// `session_store.upsert_session` failed before the session could be
     /// committed; `error` is the persistence error.
-    PersistFailed { error: String },
+    PersistFailed {
+        error: String,
+        attempted_name: Option<String>,
+    },
     /// The launch (or the create worker) failed; `message` is the already-formatted
-    /// error line.
-    Failed { message: StatusText },
+    /// error line. `attempted_name` is the name the create had settled on, when
+    /// it had.
+    Failed {
+        message: StatusText,
+        attempted_name: Option<String>,
+    },
 }
 
 /// Handler-computed outcome for a reconnect / force-restart launch op, shared by

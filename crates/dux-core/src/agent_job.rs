@@ -387,6 +387,9 @@ struct CreatePlanContext<'a> {
     creation_notes: &'a mut Vec<crate::status_text::StatusText>,
     worktrees: &'a crate::worktree_ops::WorktreeOps,
     moves: &'a crate::checkout_move::CheckoutMoveGuard,
+    /// The name the create has settled on, once it has one, so a failure from
+    /// there on can say which agent it was about.
+    attempted_name: Option<String>,
 }
 
 impl CreatePlanContext<'_> {
@@ -443,6 +446,7 @@ impl CreatePlanContext<'_> {
                 review_copy,
                 ask_id,
                 agents,
+                cloned: _,
             } => self.plan_pull_request(
                 project,
                 host,
@@ -488,6 +492,7 @@ impl CreatePlanContext<'_> {
     fn send_failure(&self, message: impl Into<crate::status_text::StatusText>) {
         let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: self.create_key.to_string(),
+            attempted_name: self.attempted_name.clone(),
             message: message.into(),
         });
     }
@@ -1326,6 +1331,8 @@ impl CreatePlanContext<'_> {
             // (Named `agent_title` to avoid shadowing the PR `title` above.)
             let mut agent_title = custom_name.clone();
             let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            // From here on a failure names the agent that was being made.
+            self.attempted_name = Some(resolved_name.clone());
             // A local branch is reused only when it holds the pull request's
             // own code, so the pull request's head is fetched first. Without
             // a local branch there is nothing to compare, but the head is still
@@ -1401,6 +1408,7 @@ impl CreatePlanContext<'_> {
                     // The copy is named after the branch it actually got, so
                     // the sidebar does not show two rows with the busy name.
                     resolved_name = copy.new_branch.clone();
+                    self.attempted_name = Some(resolved_name.clone());
                     agent_title = Some(copy.new_branch.clone());
                     Some(copy)
                 }
@@ -1454,6 +1462,7 @@ impl CreatePlanContext<'_> {
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: Some(resolved_name.clone()),
                         message: crate::status_text![
                             "Failed to fetch PR ",
                             n(format!("#{}", number)),
@@ -1492,6 +1501,7 @@ impl CreatePlanContext<'_> {
                     }
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: Some(resolved_name.clone()),
                         message: crate::status_text![
                             "Failed to create a worktree for PR ",
                             n(format!("#{}", number)),
@@ -1620,6 +1630,7 @@ impl CreatePlanContext<'_> {
             let Some(custom_name) = custom_name else {
                 let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                     status_op_id: self.create_key.to_string(),
+                    attempted_name: None,
                     message: "Forking an agent requires choosing a name first."
                         .to_string()
                         .into(),
@@ -1637,6 +1648,7 @@ impl CreatePlanContext<'_> {
             ) else {
                 let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                             status_op_id: self.create_key.to_string(),
+                            attempted_name: None,
                             message: crate::status_text!["Agent ", q(source_label), " is a standalone agent, so there is no branch or managed worktree to fork. \
                                  Add its folder as a project if you want several agents working on it, and fork one of those instead."],
                         });
@@ -1659,6 +1671,7 @@ impl CreatePlanContext<'_> {
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: None,
                         message: crate::status_text![
                             "Failed to inspect the source worktree for agent ",
                             q(source_label),
@@ -1686,6 +1699,7 @@ impl CreatePlanContext<'_> {
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: None,
                         message: crate::status_text![
                             "Failed to create a forked worktree from agent ",
                             q(source_label),
@@ -1815,6 +1829,7 @@ impl CreatePlanContext<'_> {
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: None,
                         message: crate::status_text![
                             "Failed to inspect external worktree ",
                             q(source_label),
@@ -1842,6 +1857,7 @@ impl CreatePlanContext<'_> {
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
+                        attempted_name: None,
                         message: crate::status_text![
                             "Failed to create a managed worktree from external worktree ",
                             q(source_label),
@@ -1970,6 +1986,7 @@ fn handle_copy_mismatch(
             };
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key.to_string(),
+                attempted_name: None,
                 message,
             });
             false
@@ -2046,6 +2063,7 @@ fn apply_pending_copy(
                 rollback_managed_create(repo_path, session, owns_worktree, rollback);
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                     status_op_id: create_key.to_string(),
+                    attempted_name: None,
                     message: crate::status_text![
                         "Failed to copy uncommitted changes from ",
                         &copy.source_desc,
@@ -2106,6 +2124,7 @@ fn run_create_standalone_agent_job(
     if !folder.is_dir() {
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key,
+            attempted_name: None,
             message: crate::status_text![
                 "Cannot create a standalone agent in ",
                 q(folder_label),
@@ -2141,6 +2160,7 @@ fn run_create_standalone_agent_job(
         // Nothing to roll back: no directory was created, no branch was minted.
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key,
+            attempted_name: None,
             message: hint.into(),
         });
         return;
@@ -2152,6 +2172,7 @@ fn run_create_standalone_agent_job(
             Err(err) => {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                     status_op_id: create_key,
+                    attempted_name: None,
                     message: format!(
                         "Invalid global environment variables, so the standalone agent was not \
                      started: {err:#}"
@@ -2315,6 +2336,7 @@ fn launch_managed_create(
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key.clone(),
+            attempted_name: Some(session.display_label()),
             message: hint.into(),
         });
         return;
@@ -2378,6 +2400,7 @@ fn launch_managed_create(
             }
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key.clone(),
+                attempted_name: Some(session.display_label()),
                 message: crate::status_text![
                     "Invalid environment variables for project ",
                     q(project.name),
@@ -2537,6 +2560,7 @@ pub fn run_create_agent_job(
             creation_notes: &mut creation_notes,
             worktrees: &worktrees,
             moves: &moves,
+            attempted_name: None,
         };
         let Some(plan) = context.plan(request) else {
             return;
@@ -2751,6 +2775,8 @@ mod tests {
         /// Whether the create's final is a warning rather than an info.
         status_warns: bool,
         failure: Option<String>,
+        /// The agent name the failure says it was making, when it had one.
+        failure_name: Option<String>,
         /// The question the failure puts to the user, when it is one.
         failure_ask: Option<crate::status_text::StatusAsk>,
         progress: Vec<String>,
@@ -2813,6 +2839,7 @@ mod tests {
             status_quiet: crate::statusline::QuietSurfaces::LOUD,
             status_warns: false,
             failure: None,
+            failure_name: None,
             failure_ask: None,
             progress: Vec::new(),
             _paths_root: paths_root,
@@ -2832,9 +2859,14 @@ mod tests {
                         run.status_warns = *status_warns;
                     }
                 }
-                WorkerEvent::CreateAgentFailed { message, .. } => {
+                WorkerEvent::CreateAgentFailed {
+                    message,
+                    attempted_name,
+                    ..
+                } => {
                     run.failure_ask = message.ask().cloned();
                     run.failure = Some(message.to_string());
+                    run.failure_name = attempted_name;
                 }
                 WorkerEvent::CreateAgentProgress { message, .. } => {
                     run.progress.push(message.to_string());
@@ -3121,6 +3153,7 @@ mod tests {
             review_copy: Default::default(),
             ask_id: None,
             agents: Vec::new(),
+            cloned: None,
         };
         let session = drive_create_job(repo.path(), request);
         // The typed name is durable identity (title) and names the branch; the
@@ -3277,6 +3310,7 @@ mod tests {
             review_copy: Default::default(),
             ask_id: None,
             agents: Vec::new(),
+            cloned: None,
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
@@ -3898,6 +3932,7 @@ mod tests {
             review_copy: crate::worker::ReviewCopyConsent::Blanket,
             ask_id: None,
             agents: Vec::new(),
+            cloned: None,
         }
     }
 
@@ -3923,6 +3958,7 @@ mod tests {
         );
         let failure = run
             .failure
+            .as_deref()
             .expect("the worktree add must still fail loudly");
         assert!(
             failure.contains("Failed to create a worktree for PR #42"),
@@ -3932,6 +3968,7 @@ mod tests {
             !crate::git::local_branch_exists(repo.path(), "pr-head"),
             "the branch dux minted moments ago must not outlive the failed create"
         );
+        assert_eq!(run.failure_name.as_deref(), Some("pr-head"));
     }
 
     #[test]
@@ -4539,10 +4576,18 @@ mod tests {
 
         let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
 
-        let failure = run.failure.expect("the worktree step must fail loudly");
+        let failure = run
+            .failure
+            .as_deref()
+            .expect("the worktree step must fail loudly");
         assert!(
             failure.contains("Failed to create a worktree for PR #42"),
             "the error must still surface: {failure}"
+        );
+        assert_eq!(
+            run.failure_name.as_deref(),
+            Some("pr-head-review"),
+            "the failure names the review copy, not the name asked for"
         );
         assert!(
             run.progress
@@ -4973,7 +5018,7 @@ mod tests {
     /// An ordinary create whose startup command fails says exactly what it
     /// always said: it has no notes to add.
     #[test]
-    fn an_ordinary_create_whose_startup_command_fails_adds_nothing() {
+    fn a_create_whose_startup_command_fails_names_the_clone_only_when_there_was_one() {
         let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
         let (_origin, repo) = pr_repo_with_fake_origin();
         let mut request = pull_request_request(repo.path(), None, false);
@@ -4985,6 +5030,43 @@ mod tests {
 
         let failed = create_final(&reactions);
         assert_eq!(failed.tone, crate::statusline::StatusTone::Error);
+        assert!(
+            failed
+                .message
+                .ends_with(". Open the startup command logs for details."),
+            "{}",
+            failed.message
+        );
+
+        // The first agent of a clone says what the clone did, and that the
+        // agent exists.
+        let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest {
+            project, cloned, ..
+        } = &mut request
+        {
+            project.startup_command = Some("exit 3".to_string());
+            *cloned = Some(crate::clone_project::ClonedFor {
+                address: "https://github.com/owner/repo.git".to_string(),
+                path: repo.path().to_path_buf(),
+                project_name: "repo".to_string(),
+                agent_name: "pr-head".to_string(),
+            });
+        }
+        let reactions = drive_create_through_engine(&mut engine, request);
+        let failed = create_final(&reactions);
+        assert!(failed.sticky);
+        assert!(
+            failed.message.starts_with(&format!(
+                "Cloned https://github.com/owner/repo.git into {} and added project \"repo\". \
+                 Agent \"pr-head\" was created, but its startup command failed: ",
+                repo.path().display()
+            )),
+            "{}",
+            failed.message
+        );
         assert!(
             failed
                 .message

@@ -23967,6 +23967,7 @@ mod tests {
                 review_copy: Default::default(),
                 ask_id: None,
                 agents: Vec::new(),
+                cloned: None,
             },
             input,
             randomize_name,

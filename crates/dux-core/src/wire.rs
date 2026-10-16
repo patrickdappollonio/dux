@@ -377,6 +377,10 @@ pub enum WireCommand {
         agent_name: Option<String>,
         #[serde(default)]
         random_name: bool,
+        /// Create the agent from this pull request instead of a plain one:
+        /// the engine builds the clone address itself and `url` is ignored.
+        #[serde(default)]
+        pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
     },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
@@ -1921,12 +1925,14 @@ impl Engine {
                 path,
                 agent_name,
                 random_name,
+                pull_request,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
                     path,
                     agent_name,
                     random_name,
+                    pull_request,
                 };
                 let busy = self
                     .begin_clone_project(&request, true)
@@ -3884,6 +3890,7 @@ impl Engine {
                     review_copy: pr.review_copy.clone(),
                     ask_id: pr.ask_id.clone(),
                     agents: Vec::new(),
+                    cloned: None,
                 };
                 // The nested create dispatch mints its own busy from
                 // `current_origin`, but by now (a worker-completion tick) it has
@@ -9864,6 +9871,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             agent_name: Some(agent_name.to_string()),
             random_name: false,
+            pull_request: None,
         }
     }
 
@@ -9915,6 +9923,87 @@ mod tests {
     /// The statuses that end something, not the spinners.
     fn finals(chain: &WebFollowupStatuses) -> Vec<&WireStatus> {
         chain.statuses.iter().filter(|s| s.tone != "busy").collect()
+    }
+
+    /// What a `gh pr view` of pull request 7 prints for a branch.
+    fn pull_request_json(head_branch: &str) -> String {
+        format!(
+            r#"{{"number":7,"title":"Add the thing","state":"OPEN","headRefName":"{head_branch}"}}"#
+        )
+    }
+
+    /// A pull request clone of `owner_repo` into `path`; any address a client
+    /// sends is ignored, so this one is deliberately wrong.
+    fn pull_request_clone_command(
+        owner_repo: &str,
+        path: &Path,
+        name: Option<&str>,
+    ) -> WireCommand {
+        WireCommand::CloneProject {
+            url: "https://example.invalid/not-this.git".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            agent_name: name.map(str::to_string),
+            random_name: false,
+            pull_request: Some(crate::pr_reference::PullRequestCloneTarget {
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+                number: 7,
+            }),
+        }
+    }
+
+    /// Let `engine` clone pull requests of acme/widget: `gh` is signed in to
+    /// github.com and is the stand-in script `gh`, and git reaches `remote`
+    /// for the address dux builds.
+    fn serve_pull_requests(engine: &mut Engine, gh: &Path, remote: &Path) {
+        enable_gh(engine);
+        engine.set_github_host_policy(crate::gh::GithubHostPolicy::Hosts(
+            ["github.com".to_string()].into(),
+        ));
+        engine.gh_probe.program = gh.into();
+        engine.clones.git_env = vec![
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            (
+                "GIT_CONFIG_KEY_0".to_string(),
+                format!("url.{}.insteadOf", remote.display()),
+            ),
+            (
+                "GIT_CONFIG_VALUE_0".to_string(),
+                "https://github.com/acme/widget.git".to_string(),
+            ),
+        ];
+    }
+
+    /// A shell fragment printing `json` as `gh pr view` does.
+    fn gh_prints(json: &str) -> String {
+        format!("printf '%s' '{json}'")
+    }
+
+    /// [`bare_remote_with_commit`] plus a pull request 7 on a commit of its
+    /// own, which no branch of the remote has. Returns the remote and that
+    /// commit.
+    fn remote_with_pull_request(dir: &Path) -> (PathBuf, String) {
+        let remote = crate::git::test_support::bare_remote_with_commit(dir);
+        let seed = dir.join("seed");
+        let git = |args: &[&str]| {
+            let out = crate::git::test_support::git_command()
+                .arg("-C")
+                .arg(&seed)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["commit", "-q", "--allow-empty", "-m", "pull request work"]);
+        git(&[
+            "push",
+            "-q",
+            &remote.to_string_lossy(),
+            "HEAD:refs/pull/7/head",
+        ]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        (remote, commit)
     }
 
     #[test]
@@ -10176,6 +10265,7 @@ mod tests {
                 path: blank.to_string_lossy().into_owned(),
                 agent_name: Some("  ".to_string()),
                 random_name: false,
+                pull_request: None,
             })
             .expect("a blank name is not refused");
         drive_clone_chain(&mut engine);
@@ -10192,6 +10282,48 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(crate::git::is_valid_agent_name(names[0]), "{names:?}");
+
+        // A clone for a pull request ends in an agent on the pull request's own
+        // commit, not on the remote's branch of the same name, and the project
+        // still leads with the remote's default branch.
+        let tools = tempfile::tempdir().unwrap();
+        let (pr_remote, pr_commit) = remote_with_pull_request(tools.path());
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            tools.path(),
+            &gh_prints(&pull_request_json("feature")),
+        );
+        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        let pr_dest = std::fs::canonicalize(tmp.path()).unwrap().join("pr-dest");
+        let busy = engine
+            .apply_wire(pull_request_clone_command("acme/widget", &pr_dest, None))
+            .expect("dispatch the pull request clone")
+            .status
+            .expect("a keyed busy");
+        let chain = drive_clone_chain(&mut engine);
+        let project = engine
+            .projects
+            .iter()
+            .find(|p| Path::new(&p.path) == pr_dest)
+            .expect("the clone is a project")
+            .clone();
+        assert_eq!(project.leading_branch.as_deref(), Some("main"));
+        let agents: Vec<_> = engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .collect();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].branch_name(), Some("feature"));
+        let head = crate::git::test_support::git_command()
+            .arg("-C")
+            .arg(agents[0].directory())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), pr_commit);
+        assert_eq!(chain.clear_keys, vec![busy.key.unwrap()]);
+        assert!(engine.clones.pending.is_empty());
+        assert!(engine.pending_create_ops.is_empty());
 
         // An agent that cannot start after the clone and the add: the one
         // final says the clone is on disk, the project was added, and why the
@@ -10608,8 +10740,41 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             agent_name: name.map(str::to_string),
             random_name: false,
+            pull_request: None,
         };
         let url = remote.to_string_lossy().into_owned();
+        // A project that is already a checkout of acme/matched, and a `gh`
+        // that finds a pull request in every repository but acme/gone, whose
+        // pull request names a branch no agent can be called in acme/odd.
+        let checkout = root.join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/matched.git",
+            ],
+        ] {
+            let out = crate::git::test_support::git_command()
+                .arg("-C")
+                .arg(&checkout)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &root,
+            &format!(
+                "case \"$*\" in\n  *acme/gone*) echo 'no pull requests found' >&2; exit 1 ;;\n  \
+                 *acme/odd*) {} ;;\n  *) {} ;;\nesac",
+                gh_prints(&pull_request_json("not a name")),
+                gh_prints(&pull_request_json("feature")),
+            ),
+        );
+        let pr_dest = root.join("pr-dest");
         // (what, request, destination it must leave without a clone, words the
         // refusal carries)
         let cases: Vec<(&str, WireCommand, &Path, &[&str])> = vec![
@@ -10667,9 +10832,44 @@ mod tests {
                 &spelled,
                 &["already a project"],
             ),
+            (
+                "a pull request gh cannot find",
+                pull_request_clone_command("acme/gone", &pr_dest, None),
+                &pr_dest,
+                &["no pull requests found", "Nothing was cloned"],
+            ),
+            (
+                "a head branch that is no agent name, with no name typed",
+                pull_request_clone_command("acme/odd", &pr_dest, None),
+                &pr_dest,
+                &[
+                    "not a name",
+                    "not a usable agent name",
+                    "Nothing was cloned",
+                ],
+            ),
+            (
+                "a project that became a checkout of the repository",
+                pull_request_clone_command("acme/matched", &pr_dest, None),
+                &pr_dest,
+                &[
+                    "p3-name",
+                    "is already a checkout of",
+                    "github.com/acme/matched",
+                    "did not clone it again",
+                ],
+            ),
         ];
         for (what, command, untouched, needles) in cases {
+            let existed = untouched.exists();
             let (mut engine, _engine_dir) = test_engine();
+            serve_pull_requests(&mut engine, &gh, &remote);
+            engine
+                .projects
+                .push(crate::engine::test_support::sample_project(
+                    "p3",
+                    &checkout.to_string_lossy(),
+                ));
             engine
                 .projects
                 .push(crate::engine::test_support::sample_project(
@@ -10697,9 +10897,56 @@ mod tests {
                 assert!(sentence.contains(needle), "{what}: {sentence}");
             }
             assert!(!untouched.join(".git").exists(), "{what}: git ran");
-            assert_eq!(engine.projects.len(), 2, "{what}");
+            assert_eq!(untouched.exists(), existed, "{what}: a folder appeared");
+            assert_eq!(engine.projects.len(), 3, "{what}");
             assert!(engine.clones.pending.is_empty(), "{what}");
         }
+
+        // A second pull request clone of the repository while one runs is
+        // refused at once, and leaves the first one's keys alone.
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &gh, &remote);
+        let first = root.join("first");
+        let second = root.join("second");
+        engine
+            .apply_wire(pull_request_clone_command("acme/widget", &first, None))
+            .expect("the first clone is accepted");
+        let refused = engine
+            .apply_wire(pull_request_clone_command("Acme/Widget", &second, None))
+            .expect_err("a second clone of the repository is refused")
+            .to_string();
+        for needle in [
+            "already cloning",
+            "github.com/acme/widget",
+            "for a new agent",
+            "New agent from PR",
+        ] {
+            assert!(refused.contains(needle), "{refused}");
+        }
+        assert!(!second.exists());
+        assert!(engine.is_in_flight(&InFlightKey::Clone(first.clone())));
+        assert!(engine.is_in_flight(&InFlightKey::CloneRepository(
+            "github.com/acme/widget".to_string()
+        )));
+        assert!(!engine.is_in_flight(&InFlightKey::Clone(second)));
+        drive_clone_chain(&mut engine);
+
+        // A pull request clone needs GitHub integration and a host gh is
+        // signed in to; an ordinary clone needs neither.
+        let (mut engine, _engine_dir) = test_engine();
+        let refused = engine
+            .apply_wire(pull_request_clone_command("acme/widget", &first, None))
+            .expect_err("integration is off")
+            .to_string();
+        assert!(refused.contains("requires GitHub integration"), "{refused}");
+        serve_pull_requests(&mut engine, &gh, &remote);
+        engine.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
+        let refused = engine
+            .apply_wire(pull_request_clone_command("acme/widget", &first, None))
+            .expect_err("gh is signed in to no host")
+            .to_string();
+        assert!(refused.contains("not signed in to github.com"), "{refused}");
+        assert!(!engine.is_in_flight(&InFlightKey::Clone(first)));
     }
 
     #[test]
@@ -10789,12 +11036,41 @@ mod tests {
             status_op_id: None,
             path: dest.clone(),
             agent_name: "agent".to_string(),
+            repository_key: None,
             result: Err(crate::clone_project::CloneOutcome::Failed(
                 "the worker stopped".into(),
             )),
         });
         assert!(engine.worktree_ops().holders(&dest).is_empty());
         assert!(!engine.is_in_flight(&key));
+
+        // A pull request clone over ssh that git cannot finish also says how
+        // to make the first contact with the host from a terminal.
+        let (mut engine, _engine_dir) = test_engine();
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &root,
+            &gh_prints(&pull_request_json("feature")),
+        );
+        serve_pull_requests(&mut engine, &gh, &root.join("nothing-here.git"));
+        engine.clones.git_env[2].1 = "git@github.com:acme/widget.git".to_string();
+        engine.set_github_git_protocols(
+            [("github.com".to_string(), crate::gh::GitProtocol::Ssh)].into(),
+        );
+        let dest = root.join("dest-ssh");
+        engine
+            .apply_wire(pull_request_clone_command("acme/widget", &dest, None))
+            .expect("dispatch the pull request clone");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        for needle in [
+            "Couldn't clone git@github.com:acme/widget.git",
+            "first time this machine talks to github.com over SSH",
+            "(ssh -T git@github.com)",
+        ] {
+            assert!(ended[0].message.contains(needle), "{}", ended[0].message);
+        }
+        assert!(!dest.exists());
     }
 
     #[test]
@@ -10846,6 +11122,220 @@ mod tests {
             engine.sessions.is_empty(),
             "the create attached to the branch"
         );
+
+        // A pull request whose head branch the clone does not have and whose
+        // head the remote does not serve: the clone and the project stay, no
+        // agent is made, the final names the project and the agent, and the
+        // repository is free for the next request.
+        let (mut engine, _engine_dir) = test_engine();
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &root,
+            &gh_prints(&pull_request_json("ghost-branch")),
+        );
+        serve_pull_requests(&mut engine, &gh, &remote);
+        let dest = root.join("dest-pull-request");
+        engine
+            .apply_wire(pull_request_clone_command("acme/widget", &dest, None))
+            .expect("dispatch the pull request clone");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert_eq!(ended[0].tone, "error", "{}", ended[0].message);
+        assert!(
+            ended[0].message.starts_with("Cloned"),
+            "{}",
+            ended[0].message
+        );
+        for needle in ["\"dest-pull-request\"", "\"ghost-branch\"", "PR #7"] {
+            assert!(ended[0].message.contains(needle), "{}", ended[0].message);
+        }
+        assert_eq!(engine.projects.len(), 1);
+        assert!(engine.sessions.is_empty());
+        assert!(dest.join(".git").exists(), "the clone was not kept");
+        assert!(!engine.is_in_flight(&InFlightKey::CloneRepository(
+            "github.com/acme/widget".to_string()
+        )));
+
+        // A pull request whose branch is the one the clone has checked out
+        // needs a review copy nobody agreed to: the create refuses and asks,
+        // and the clone's wording around it keeps the question.
+        let (mut engine, _engine_dir) = test_engine();
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &root,
+            &gh_prints(&pull_request_json("main")),
+        );
+        let (pr_remote, _) = remote_with_pull_request(&root.join("with-pr"));
+        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        let dest = root.join("dest-checked-out");
+        engine
+            .apply_wire(pull_request_clone_command("acme/widget", &dest, None))
+            .expect("dispatch the pull request clone");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(
+            ended[0].message.starts_with("Cloned"),
+            "{}",
+            ended[0].message
+        );
+        assert!(
+            matches!(
+                ended[0].ask,
+                Some(crate::status_text::StatusAsk::ReviewCopy(_))
+            ),
+            "the question was lost: {:?}",
+            ended[0]
+        );
+        assert!(engine.sessions.is_empty());
+
+        // A plain clone of the same repository is refused while a pull request
+        // clone of it runs, and the other way round.
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        let plain = |path: &Path| WireCommand::CloneProject {
+            url: "https://github.com/acme/widget.git".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            agent_name: Some("agent".to_string()),
+            random_name: false,
+            pull_request: None,
+        };
+        let (one, two) = (root.join("race-one"), root.join("race-two"));
+        engine
+            .apply_wire(pull_request_clone_command("acme/widget", &one, None))
+            .expect("the pull request clone is accepted");
+        let refused = engine
+            .apply_wire(plain(&two))
+            .expect_err("a plain clone of the same repository is refused")
+            .to_string();
+        assert!(
+            refused.contains("already cloning") && refused.contains("github.com/acme/widget"),
+            "{refused}"
+        );
+        drive_clone_chain(&mut engine);
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        engine.apply_wire(plain(&one)).expect("accepted");
+        let refused = engine
+            .apply_wire(pull_request_clone_command("acme/widget", &two, None))
+            .expect_err("a pull request clone is refused while a plain one runs")
+            .to_string();
+        assert!(refused.contains("already cloning"), "{refused}");
+        drive_clone_chain(&mut engine);
+    }
+
+    #[test]
+    fn a_repository_is_free_for_another_pull_request_clone_after_every_way_one_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (remote, _) = remote_with_pull_request(&root);
+        let gh = |name: &str, body: String| {
+            let dir = root.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            crate::gh::probe_test_support::stand_in_gh(&dir, &body)
+        };
+        let gh_ok = gh("gh-ok", gh_prints(&pull_request_json("feature")));
+        let gh_ghost = gh("gh-ghost", gh_prints(&pull_request_json("ghost-branch")));
+        let gh_gone = gh(
+            "gh-gone",
+            "echo 'no pull requests found' >&2; exit 1".to_string(),
+        );
+        let missing_remote = root.join("missing.git");
+        let cloned_event = |engine: &mut Engine| loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the clone worker's event");
+            if matches!(event, WorkerEvent::RepositoryCloned { .. }) {
+                break event;
+            }
+            engine.process_worker_event(event);
+        };
+        let key = "github.com/acme/widget".to_string();
+        for (index, what) in [
+            "a worker refusal",
+            "a git failure",
+            "a worker that panicked",
+            "a project that could not be added",
+            "an agent that could not be created",
+            "an agent that was created",
+            "a clone whose operation is no longer pending",
+            "a failure whose operation is no longer pending",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut engine, _engine_dir) = test_engine();
+            let (program, from) = match what {
+                "a worker refusal" => (&gh_gone, &remote),
+                "a git failure" => (&gh_ok, &missing_remote),
+                "an agent that could not be created" => (&gh_ghost, &remote),
+                _ => (&gh_ok, &remote),
+            };
+            serve_pull_requests(&mut engine, program, from);
+            if what == "a project that could not be added" {
+                engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+                    engine.paths.config_path.clone(),
+                );
+            }
+            let first = root.join(format!("first-{index}"));
+            let busy = engine
+                .apply_wire(pull_request_clone_command("acme/widget", &first, None))
+                .unwrap_or_else(|refused| panic!("{what}: {refused}"))
+                .status
+                .and_then(|status| status.key)
+                .expect("a keyed busy");
+            match what {
+                "a worker that panicked" => {
+                    let WorkerEvent::RepositoryCloned { status_op_id, .. } =
+                        cloned_event(&mut engine)
+                    else {
+                        unreachable!()
+                    };
+                    engine.process_worker_event(WorkerEvent::RepositoryCloned {
+                        status_op_id,
+                        path: first.clone(),
+                        agent_name: String::new(),
+                        repository_key: Some(key.clone()),
+                        result: Err(crate::clone_project::CloneOutcome::Failed(
+                            "The clone worker stopped unexpectedly.".into(),
+                        )),
+                    });
+                }
+                "a clone whose operation is no longer pending" => {
+                    let event = cloned_event(&mut engine);
+                    engine.clones.pending.clear();
+                    let reaction = engine.process_worker_event(event);
+                    let followup = engine.drive_clone_followup(&reaction);
+                    assert_eq!(followup.clear_keys, vec![busy.clone()], "{what}");
+                }
+                "a failure whose operation is no longer pending" => {
+                    cloned_event(&mut engine);
+                    engine.clones.pending.clear();
+                    let reaction = engine.process_worker_event(WorkerEvent::RepositoryCloned {
+                        status_op_id: Some(busy.clone()),
+                        path: first.clone(),
+                        agent_name: String::new(),
+                        repository_key: Some(key.clone()),
+                        result: Err(crate::clone_project::CloneOutcome::Failed(
+                            "The clone worker stopped unexpectedly.".into(),
+                        )),
+                    });
+                    // The final replaces the busy that is still on screen.
+                    let ended = wire_statuses_from_reaction(&reaction);
+                    assert_eq!(ended.len(), 1, "{what}: {ended:?}");
+                    assert_eq!(ended[0].tone, "error", "{what}");
+                    assert_eq!(ended[0].key.as_deref(), Some(busy.as_str()), "{what}");
+                }
+                _ => {
+                    drive_clone_chain(&mut engine);
+                }
+            }
+            let second = root.join(format!("second-{index}"));
+            engine
+                .apply_wire(pull_request_clone_command("acme/widget", &second, None))
+                .unwrap_or_else(|refused| panic!("{what}: the repository stayed held: {refused}"));
+            drive_clone_chain(&mut engine);
+        }
     }
 
     #[test]
@@ -10876,6 +11366,9 @@ mod tests {
                     agent_name: "agent".to_string(),
                     stall: std::time::Duration::from_secs(60),
                     processes: Default::default(),
+                    pull_request: None,
+                    repository_key: None,
+                    git_env: Vec::new(),
                 },
                 &worker_tx,
             )
@@ -15481,7 +15974,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
             |o: &crate::engine::CreateLaunchOutcome| match o {
-                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                crate::engine::CreateLaunchOutcome::Failed { message, .. } => {
                     crate::engine::Final::error(message.clone())
                 }
                 _ => crate::engine::Final::clear(),
@@ -15492,6 +15985,7 @@ mod tests {
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
             status_op_id: op_id.clone(),
+            attempted_name: None,
             message: "worker panicked".to_string().into(),
         });
         // Project the engine reaction through the wire to confirm the web sees the

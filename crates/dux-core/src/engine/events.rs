@@ -1733,6 +1733,7 @@ impl Engine {
                     &status_op_id,
                     CreateLaunchOutcome::Failed {
                         message: message.clone(),
+                        attempted_name: Some(session.display_label()),
                     },
                 );
                 return (
@@ -1762,6 +1763,7 @@ impl Engine {
                     &status_op_id,
                     CreateLaunchOutcome::PersistFailed {
                         error: err.to_string(),
+                        attempted_name: Some(session.display_label()),
                     },
                 );
                 return (
@@ -2880,6 +2882,7 @@ impl Engine {
                     &status_op_id,
                     CreateLaunchOutcome::Failed {
                         message: message.clone().into(),
+                        attempted_name: Some(session.display_label()),
                     },
                 );
                 (
@@ -4460,12 +4463,16 @@ impl Engine {
         &mut self,
         status_op_id: String,
         message: StatusText,
+        attempted_name: Option<String>,
     ) -> EventReaction {
         self.clear_in_flight(&InFlightKey::CreateAgent);
         self.note_create_finished(&status_op_id);
         match self.pending_create_ops.remove(&status_op_id) {
             Some(op) => op
-                .resolve(&CreateLaunchOutcome::Failed { message })
+                .resolve(&CreateLaunchOutcome::Failed {
+                    message,
+                    attempted_name,
+                })
                 .into_reaction(),
             None => EventReaction::Status(StatusUpdate::error(message).with_key(status_op_id)),
         }
@@ -4584,7 +4591,8 @@ impl Engine {
             WorkerEvent::CreateAgentFailed {
                 status_op_id,
                 message,
-            } => self.process_create_agent_failed(status_op_id, message),
+                attempted_name,
+            } => self.process_create_agent_failed(status_op_id, message, attempted_name),
             WorkerEvent::AgentLaunchReady(boxed) => {
                 let tab_id = boxed.request.tab_id.clone();
                 let (outcome, create_final) = self.process_agent_launch_ready(*boxed);
@@ -4722,8 +4730,15 @@ impl Engine {
                 status_op_id,
                 path,
                 agent_name,
+                repository_key,
                 result,
-            } => self.process_repository_cloned(status_op_id, path, agent_name, result),
+            } => self.process_repository_cloned(
+                status_op_id,
+                path,
+                agent_name,
+                repository_key,
+                result,
+            ),
             WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result,
@@ -8391,7 +8406,7 @@ mod tests {
             .with_live_keys(engine.live_status_keys.clone());
         let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
             |o: &crate::engine::CreateLaunchOutcome| match o {
-                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                crate::engine::CreateLaunchOutcome::Failed { message, .. } => {
                     crate::engine::Final::error(message.clone())
                 }
                 _ => crate::engine::Final::clear(),
@@ -8423,6 +8438,7 @@ mod tests {
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
             status_op_id: op_id.clone(),
+            attempted_name: None,
             message: "nope".to_string().into(),
         });
         let final_status = unwrap_status(reaction);
@@ -8446,7 +8462,7 @@ mod tests {
         // same-key error final.
         let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
             |o: &crate::engine::CreateLaunchOutcome| match o {
-                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                crate::engine::CreateLaunchOutcome::Failed { message, .. } => {
                     crate::engine::Final::error(message.clone())
                 }
                 _ => crate::engine::Final::clear(),
@@ -8457,6 +8473,7 @@ mod tests {
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
             status_op_id: op_id.clone(),
+            attempted_name: None,
             message: "nope".to_string().into(),
         });
 
@@ -8557,7 +8574,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
             |o: &crate::engine::CreateLaunchOutcome| match o {
-                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                crate::engine::CreateLaunchOutcome::Failed { message, .. } => {
                     crate::engine::Final::error(message.clone())
                 }
                 _ => crate::engine::Final::clear(),
@@ -8585,6 +8602,7 @@ mod tests {
 
         let failure = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
             status_op_id: op_id.clone(),
+            attempted_name: None,
             message: "Failed to create a new worktree.".to_string().into(),
         });
         let failure = unwrap_status(failure);
@@ -11116,6 +11134,7 @@ mod tests {
                 already_running_status: None,
                 panic_event: Some(Box::new(|reason| WorkerEvent::CreateAgentFailed {
                     status_op_id: "op-test".to_string(),
+                    attempted_name: None,
                     message: format!("panic: {reason}").into(),
                 })),
             },

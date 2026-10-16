@@ -16,6 +16,7 @@ use crate::worker::BranchWarningKind;
 
 mod clone;
 mod folding;
+pub(crate) use clone::clone_repository_with_env;
 pub use clone::{CloneError, CloneProcesses, clone_repository};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
@@ -7045,7 +7046,7 @@ fn parse_github_remote_with(
 /// caller has to be able to tell "this is not an address" from "this is an
 /// address on a host that is not allowed". Folding the policy in here made the
 /// two indistinguishable.
-fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
+pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
     // used to happen here and then again inside the literal check, which
     // MANUFACTURED matches out of values that are not GitHub remotes:

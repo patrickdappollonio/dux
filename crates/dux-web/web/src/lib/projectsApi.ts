@@ -61,6 +61,10 @@ export const projectsApi = {
     clone_url?: string
     agent_name?: string
     random_name?: boolean
+    // Clone the pull request's repository and create the agent from the pull
+    // request. The server builds the address from it and ignores `clone_url`;
+    // it outranks every other flag.
+    pull_request?: { host: string; owner_repo: string; number: number }
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
   // The record of the operation a 202 named. The server holds the reply until
   // the record has an outcome or `waitSeconds` pass (it caps the wait at 25).

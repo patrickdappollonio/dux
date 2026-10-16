@@ -17085,6 +17085,7 @@ not_a_real_action = ["x"]
                 agents: Vec::new(),
                 review_copy: Default::default(),
                 ask_id: None,
+                cloned: None,
             },
             input: TextInput::with_text("feature/pr-42".to_string()),
             randomize_name: false,
@@ -30083,11 +30084,13 @@ cyan = "#00ffff"
                         status_op_id,
                         path,
                         agent_name,
+                        repository_key: None,
                         result: Ok(dux_core::clone_project::ClonedRepository {
                             address: "/srv/remote.git".to_string(),
                             branch: "main".to_string(),
                             leading_branch: "main".to_string(),
                             name_taken: false,
+                            pull_request: None,
                         }),
                     };
                 }
@@ -36672,6 +36675,7 @@ cyan = "#00ffff"
                 review_copy: Default::default(),
                 ask_id: None,
                 agents: Vec::new(),
+                cloned: None,
             },
         ));
         let ask = dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
@@ -36765,6 +36769,7 @@ cyan = "#00ffff"
             review_copy: Default::default(),
             ask_id: None,
             agents: Vec::new(),
+            cloned: None,
         };
         app.dispatch_create_agent_request(request("first"), "Creating first".to_string())
             .unwrap();

@@ -7,7 +7,9 @@ use std::time::Duration;
 use super::{Command, Engine, EventReaction, InFlightKey, StatusUpdate};
 use crate::clone_project::{
     CloneJob, CloneOutcome, CloneRequest, ClonedProject, ClonedRepository, PendingClone,
+    PullRequestJob,
 };
+use crate::pr_reference::PullRequestCloneTarget;
 use crate::status_text::StatusText;
 use crate::worker::CreateAgentRequest;
 
@@ -22,6 +24,19 @@ impl Engine {
         request: &CloneRequest,
         from_web: bool,
     ) -> Result<StatusUpdate, StatusText> {
+        // For a pull request the address is built here from the policy and the
+        // protocols as they are now, whatever the request carries.
+        let offer = match &request.pull_request {
+            Some(target) => Some(self.clone_offer_for(target)?),
+            None => None,
+        };
+        let request = &match &offer {
+            Some(offer) => CloneRequest {
+                url: offer.address.clone(),
+                ..request.clone()
+            },
+            None => request.clone(),
+        };
         let projects: Vec<&str> = self.projects.iter().map(|p| p.path.as_str()).collect();
         let prepared =
             crate::clone_project::prepare_clone(request, home::home_dir().as_deref(), &projects)?;
@@ -34,12 +49,35 @@ impl Engine {
                 " or setting one up there. Wait for it to finish, or pick another destination."
             ]);
         }
+        // One clone per repository at a time, held until the project exists,
+        // so two quick requests into different folders (a plain clone and a
+        // pull request's included) cannot make two projects. An address that
+        // names no host and repository has nothing to hold.
+        let named = match &offer {
+            Some(offer) => Some((offer.host.clone(), offer.owner_repo.clone())),
+            None => crate::git::parse_remote_address(&prepared.url)
+                .map(|remote| (remote.host, remote.owner_repo)),
+        };
+        let repository_key = named.map(|(host, owner_repo)| {
+            format!("{}/{}", host.to_lowercase(), owner_repo.to_lowercase())
+        });
+        if let Some(repository) = &repository_key
+            && !self.mark_in_flight(InFlightKey::CloneRepository(repository.clone()))
+        {
+            self.clear_in_flight(&key);
+            return Err(crate::status_text![
+                "dux is already cloning ",
+                n(repository),
+                " for a new agent. Wait for it to finish, then use New agent from PR again."
+            ]);
+        }
         if let Err(refused) = self.hold_path_for_in_flight(
             &key,
             &destination,
             crate::worktree_ops::WorktreeOpKind::CloneRepository,
         ) {
             self.clear_in_flight(&key);
+            self.release_repository_key(repository_key.as_deref());
             return Err(refused.sentence("clone a repository there"));
         }
         let address = crate::clone_project::redact_remote_userinfo(&prepared.url);
@@ -55,9 +93,14 @@ impl Engine {
             .with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
         let pending = self.begin_status_op(&op);
-        self.clones
-            .pending
-            .insert(op_id.clone(), PendingClone { op, from_web });
+        self.clones.pending.insert(
+            op_id.clone(),
+            PendingClone {
+                op,
+                from_web,
+                repository_key: repository_key.clone(),
+            },
+        );
         let job = CloneJob {
             status_op_id: op_id.clone(),
             url: prepared.url,
@@ -65,6 +108,14 @@ impl Engine {
             agent_name: prepared.agent_name.clone(),
             stall: Duration::from_secs(self.config.git.clone_stall_seconds.max(1)),
             processes: self.clones.processes.clone(),
+            pull_request: offer.as_ref().map(|offer| PullRequestJob {
+                target: offer.target(),
+                projects: self.projects.clone(),
+                policy: self.github_host_policy(),
+                gh_program: self.gh_probe.program.clone(),
+            }),
+            repository_key: repository_key.clone(),
+            git_env: self.clones.git_env.clone(),
         };
         let worker_tx = self.worker_tx.clone();
         let agent_name = prepared.agent_name;
@@ -79,6 +130,7 @@ impl Engine {
                     status_op_id: Some(op_id),
                     path: destination,
                     agent_name,
+                    repository_key,
                     result: Err(CloneOutcome::Failed(
                         "The clone worker stopped unexpectedly, so the clone may not have \
                          finished. Nothing was added to the workspace."
@@ -88,6 +140,48 @@ impl Engine {
             }
         });
         Ok(pending)
+    }
+
+    /// The offer a pull request clone is built from, from the engine's state
+    /// as it is now: refused when GitHub integration is off, or when the
+    /// target's host is not one `gh` is signed in to.
+    fn clone_offer_for(
+        &self,
+        target: &PullRequestCloneTarget,
+    ) -> Result<crate::pr_reference::PullRequestCloneOffer, StatusText> {
+        if !self.pr_agent_command_available() {
+            return Err(
+                "GitHub PR agent creation requires GitHub integration and an authenticated gh CLI."
+                    .into(),
+            );
+        }
+        let reference = crate::pr_reference::TypedReference {
+            host: Some(target.host.clone()),
+            owner_repo: Some(target.owner_repo.clone()),
+            number: Some(target.number),
+        };
+        crate::pr_reference::pull_request_clone_offer(
+            &reference,
+            &self.github_host_policy(),
+            &self.github_git_protocols(),
+        )
+        .ok_or_else(|| {
+            crate::status_text![
+                "dux can't clone ",
+                n(format!("{}/{}", target.host, target.owner_repo)),
+                " because gh is not signed in to ",
+                n(&target.host),
+                ". Sign in with gh, then use New agent from PR again."
+            ]
+        })
+    }
+
+    /// Let go of the repository a pull request clone held. Releasing a key
+    /// nobody holds does nothing, so every path that might own it calls this.
+    fn release_repository_key(&mut self, key: Option<&str>) {
+        if let Some(key) = key {
+            self.clear_in_flight(&InFlightKey::CloneRepository(key.to_string()));
+        }
     }
 
     /// Whether a clone is running into `path`, so a request to set a
@@ -104,28 +198,49 @@ impl Engine {
         status_op_id: Option<String>,
         path: PathBuf,
         agent_name: String,
+        repository_key: Option<String>,
         result: Result<ClonedRepository, CloneOutcome>,
     ) -> EventReaction {
         self.clear_in_flight(&InFlightKey::Clone(path.clone()));
         match result {
+            // The repository stays held until the project is registered.
             Ok(cloned) => EventReaction::AddProjectAfterClone(Box::new(ClonedProject {
                 status_op_id,
                 path,
                 agent_name,
                 cloned,
+                repository_key,
             })),
-            Err(outcome) => match status_op_id.and_then(|id| self.clones.pending.remove(&id)) {
-                Some(pending) => pending.op.resolve(&outcome).into_reaction(),
-                None => match outcome {
-                    CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
-                        EventReaction::Status(StatusUpdate::error(text))
+            Err(outcome) => {
+                // No project follows this answer, so the repository is free.
+                self.release_repository_key(repository_key.as_deref());
+                match status_op_id
+                    .as_ref()
+                    .and_then(|id| self.clones.pending.remove(id))
+                {
+                    Some(pending) => {
+                        self.release_repository_key(pending.repository_key.as_deref());
+                        pending.op.resolve(&outcome).into_reaction()
                     }
-                    CloneOutcome::Kept(text) => {
-                        EventReaction::Status(StatusUpdate::warning(text).sticky())
+                    // The operation is gone, but its busy may still be on a
+                    // screen: the final carries its key so it replaces it.
+                    None => {
+                        let keyed = |update: StatusUpdate| match &status_op_id {
+                            Some(id) => update.with_key(id.clone()),
+                            None => update,
+                        };
+                        match outcome {
+                            CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
+                                EventReaction::Status(keyed(StatusUpdate::error(text)))
+                            }
+                            CloneOutcome::Kept(text) => {
+                                EventReaction::Status(keyed(StatusUpdate::warning(text).sticky()))
+                            }
+                            CloneOutcome::HandedOff => EventReaction::Nothing,
+                        }
                     }
-                    CloneOutcome::HandedOff => EventReaction::Nothing,
-                },
-            },
+                }
+            }
         }
     }
 
@@ -139,7 +254,12 @@ impl Engine {
             .as_ref()
             .and_then(|id| self.clones.pending.remove_entry(id))
         else {
-            return EventReaction::Nothing;
+            self.release_repository_key(done.repository_key.as_deref());
+            // Nothing follows, so the clone's busy is retired here.
+            return match &done.status_op_id {
+                Some(id) => EventReaction::ClearStatus(id.clone()),
+                None => EventReaction::Nothing,
+            };
         };
         let address = &done.cloned.address;
         let path = done.path.to_string_lossy().into_owned();
@@ -160,6 +280,9 @@ impl Engine {
             pending.op.scope().clone(),
             Some(&op_id),
         );
+        // The project exists or never will: either way the repository is free.
+        self.release_repository_key(done.repository_key.as_deref());
+        self.release_repository_key(pending.repository_key.as_deref());
         let Some(project) = added
             .added
             .as_ref()
@@ -198,21 +321,55 @@ impl Engine {
                 pending.op.resolve(&kept).into_reaction(),
             ]);
         }
-        let request = CreateAgentRequest::NewProject {
-            project: project.clone(),
-            custom_name: Some(agent.clone()),
-            use_existing_branch: false,
-            pull_before_create: false,
-            copy_uncommitted_changes: false,
-            cloned: Some(cloned.clone()),
+        // A pull request's agent starts on the pull request's own code, under
+        // the rules every pull request create follows: the create decides
+        // about a branch of that name and about a review copy, which this
+        // request does not agree to.
+        let (request, busy_message) = match &done.cloned.pull_request {
+            Some(pull_request) => (
+                CreateAgentRequest::PullRequest {
+                    project: project.clone(),
+                    host: pull_request.target.host.clone(),
+                    owner_repo: pull_request.target.owner_repo.clone(),
+                    number: pull_request.target.number,
+                    title: pull_request.title.clone(),
+                    state: pull_request.state.clone(),
+                    head_branch: pull_request.head_branch.clone(),
+                    custom_name: Some(agent.clone()),
+                    use_existing_branch: false,
+                    review_copy: crate::worker::ReviewCopyConsent::default(),
+                    ask_id: None,
+                    agents: Vec::new(),
+                    cloned: Some(cloned.clone()),
+                },
+                crate::status_text![
+                    "Creating a new agent worktree ",
+                    q(agent),
+                    " from PR ",
+                    n(format!("#{}", pull_request.target.number)),
+                    " for project ",
+                    q(project.name),
+                    " and launching a fresh session..."
+                ],
+            ),
+            None => (
+                CreateAgentRequest::NewProject {
+                    project: project.clone(),
+                    custom_name: Some(agent.clone()),
+                    use_existing_branch: false,
+                    pull_before_create: false,
+                    copy_uncommitted_changes: false,
+                    cloned: Some(cloned.clone()),
+                },
+                crate::status_text![
+                    "Creating agent ",
+                    q(agent),
+                    " in project ",
+                    q(project.name),
+                    " and launching a fresh session..."
+                ],
+            ),
         };
-        let busy_message = crate::status_text![
-            "Creating agent ",
-            q(agent),
-            " in project ",
-            q(project.name),
-            " and launching a fresh session..."
-        ];
         // The create mints its busy from `current_origin`, so it reaches the
         // connection that asked for the clone.
         self.current_origin = pending.op.scope().clone();

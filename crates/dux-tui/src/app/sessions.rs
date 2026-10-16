@@ -1091,6 +1091,7 @@ impl App {
             path: destination.text.trim().to_string(),
             agent_name: (!name.is_empty()).then(|| name.to_string()),
             random_name: *randomize_name,
+            pull_request: None,
         };
         match self.engine.apply(command) {
             Ok(reaction) => {

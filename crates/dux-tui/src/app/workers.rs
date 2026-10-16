@@ -1419,6 +1419,7 @@ impl App {
             review_copy: Default::default(),
             ask_id: None,
             agents: Vec::new(),
+            cloned: None,
         };
         if let Err(err) = self.open_name_new_agent_prompt(request) {
             self.set_error(format!("{err:#}"));
@@ -2830,6 +2831,7 @@ mod tests {
             .worker_tx
             .send(WorkerEvent::CreateAgentFailed {
                 status_op_id: "missing-op".to_string(),
+                attempted_name: None,
                 message: "creation failed".to_string().into(),
             })
             .expect("send create failure");

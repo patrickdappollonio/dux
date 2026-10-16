@@ -94,12 +94,18 @@ struct AddProjectBody {
     agent_name: Option<String>,
     #[serde(default)]
     random_name: bool,
+    /// Create the agent from this pull request after cloning its repository.
+    /// The server builds the address itself, so `clone_url` is not needed and
+    /// is ignored; outranks every other flag.
+    #[serde(default)]
+    pull_request: Option<dux_core::pr_reference::PullRequestCloneTarget>,
 }
 
 /// Pick the add command the body's flags ask for.
 ///
-/// A strict precedence ladder: a non-empty `clone_url` makes it a clone, whatever
-/// else is set. Otherwise `init_repo` subsumes `create_initial_commit`, which
+/// A strict precedence ladder: a `pull_request` makes it a clone for a new agent
+/// from that pull request, and a non-empty `clone_url` makes it a clone,
+/// whatever else is set. Otherwise `init_repo` subsumes `create_initial_commit`, which
 /// outranks `checkout_default`, since an unborn repo has no default branch to check
 /// out. The engine validates the path, serializes per repo path and runs the commit
 /// on a worker, so no mutating git work runs on the async reactor and a failure
@@ -114,13 +120,23 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
         clone_url,
         agent_name,
         random_name,
+        pull_request,
     } = body;
-    if let Some(url) = clone_url.filter(|url| !url.trim().is_empty()) {
+    if pull_request.is_some() {
+        WireCommand::CloneProject {
+            url: clone_url.unwrap_or_default(),
+            path,
+            agent_name,
+            random_name,
+            pull_request,
+        }
+    } else if let Some(url) = clone_url.filter(|url| !url.trim().is_empty()) {
         WireCommand::CloneProject {
             url,
             path,
             agent_name,
             random_name,
+            pull_request: None,
         }
     } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
@@ -770,6 +786,7 @@ mod tests {
             clone_url: None,
             agent_name: None,
             random_name: false,
+            pull_request: None,
         }
     }
 
@@ -899,6 +916,7 @@ mod tests {
                 path: "/repo".to_string(),
                 agent_name: Some("first".to_string()),
                 random_name: true,
+                pull_request: None,
             }
         );
         assert!(matches!(
@@ -1015,6 +1033,33 @@ mod tests {
             String::from_utf8_lossy(&sentence).contains("isn't an absolute path"),
             "{sentence:?}"
         );
+
+        // A pull request outranks the clone address and every other flag: the
+        // server takes the pull request path, which here refuses because
+        // GitHub integration is off, where a plain clone would have answered
+        // 202 for either body.
+        for flags in [
+            r#","clone_url":"/nowhere/remote.git","init_repo":true,"pull_request":{"host":"github.com","owner_repo":"acme/widget","number":7}"#,
+            r#","pull_request":{"host":"github.com","owner_repo":"acme/widget","number":7}"#,
+        ] {
+            let (_tmp, app) = router_no_auth();
+            let resp = app
+                .oneshot(post_add_flags(&dest.to_string_lossy(), flags))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{flags}"
+            );
+            let sentence = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&sentence).contains("requires GitHub integration"),
+                "{flags}: {sentence:?}"
+            );
+        }
     }
 
     /// Body of the identity-free add, run by the parent test below in a CHILD
