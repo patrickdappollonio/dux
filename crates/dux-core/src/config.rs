@@ -3065,6 +3065,11 @@ pub enum ConfigLoadProblem {
     /// The file was there when dux started and is gone now. Only a reload
     /// reports this: a first start with no file is the defaults.
     Missing,
+    /// The file is there but holds nothing (or only whitespace). Only a
+    /// reload reports this: an editor that truncates before it writes leaves
+    /// this behind for a moment, and the defaults it would read as have no
+    /// password. A first start with an empty file is the defaults.
+    Empty,
     /// The path is a symbolic link whose target (held here) does not exist.
     /// Counted as missing, on a start as well as a reload: the link says
     /// the user keeps their config somewhere, so the defaults (no password)
@@ -3191,6 +3196,7 @@ impl ConfigLoadProblem {
             | Self::AuthInvalid(reason)
             | Self::AuthMisplaced(reason) => reason,
             Self::Missing => "the file no longer exists",
+            Self::Empty => "the file is empty",
             Self::DanglingLink(_) => "it is a symbolic link to a file that does not exist",
         }
     }
@@ -3223,6 +3229,13 @@ impl std::fmt::Display for ConfigLoadError {
                 "{path} no longer exists, so dux cannot tell whether [server.auth] still sets a \
                  password, and it keeps the running settings, password included. Put the file \
                  back (or use Recover config to write the running settings to it), then reload."
+            ),
+            ConfigLoadProblem::Empty => write!(
+                f,
+                "{path} is empty, so dux cannot tell whether [server.auth] still sets a \
+                 password, and it keeps the running settings, password included. This is usual \
+                 while an editor is mid-save: reload again once it finishes, or put your \
+                 settings back (or use Recover config to write the running settings to it)."
             ),
             ConfigLoadProblem::DanglingLink(target) => write!(
                 f,
@@ -5365,6 +5378,8 @@ pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadEr
 /// [`load_config`] for a reload: a file that has disappeared since dux started
 /// is an error ([`ConfigLoadProblem::Missing`]) rather than the defaults,
 /// because the defaults would quietly drop a password the running dux has.
+/// A file that is empty or only whitespace ([`ConfigLoadProblem::Empty`]) is
+/// refused for the same reason: it is what an editor leaves mid-save.
 pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     config_present_for_reload(paths)?;
     load_config(paths)
@@ -5385,7 +5400,14 @@ pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), Co
             path: paths.config_path.clone(),
             problem: ConfigLoadProblem::Missing,
         }),
-        _ => Ok(()),
+        // An unreadable file is left for the load to report as such.
+        _ => match std::fs::read_to_string(&paths.config_path) {
+            Ok(text) if text.trim().is_empty() => Err(ConfigLoadError {
+                path: paths.config_path.clone(),
+                problem: ConfigLoadProblem::Empty,
+            }),
+            _ => Ok(()),
+        },
     }
 }
 
@@ -7311,6 +7333,37 @@ mod tests {
             "correct horse battery staple".to_string(),
         ))
         .expect("hash")
+    }
+
+    /// An editor that has emptied config.toml mid-save must not make a reload
+    /// read the defaults, which have no password: an empty or blank file is
+    /// refused like a deleted one, and the next real file loads as usual.
+    #[test]
+    fn a_reload_of_an_emptied_config_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let body = format!("[server.auth]\npassword_hash = \"{}\"\n", a_password_hash());
+        std::fs::write(&paths.config_path, &body).unwrap();
+        assert!(
+            load_config_for_reload(&paths)
+                .expect("a real file loads")
+                .server
+                .auth
+                .has_password()
+        );
+
+        for emptied in ["", " \n\t\n"] {
+            std::fs::write(&paths.config_path, emptied).unwrap();
+            let error = load_config_for_reload(&paths).expect_err("refused");
+            assert_eq!(error.problem, ConfigLoadProblem::Empty, "{emptied:?}");
+            assert!(config_present_for_reload(&paths).is_err(), "{emptied:?}");
+            let message = error.to_string();
+            assert!(message.contains("is empty"), "{message}");
+            assert!(message.contains("keeps the running settings"), "{message}");
+        }
+
+        std::fs::write(&paths.config_path, &body).unwrap();
+        assert!(load_config_for_reload(&paths).is_ok());
     }
 
     /// config.toml kept as a symlink (into a dotfiles repository, say) whose

@@ -5570,7 +5570,11 @@ mod tests {
         // browsers still refetch.
         while statuses.try_recv().is_ok() {}
         while reloads.try_recv().is_ok() {}
-        std::fs::write(&paths.config_path, "").unwrap();
+        // Swapped in whole, as dux's own writes are: a plain write truncates
+        // first, and a reload that lands in between reads an empty file.
+        let staged = paths.config_path.with_extension("staged");
+        std::fs::write(&staged, "[ui]\nleft_width_pct = 30\n").unwrap();
+        std::fs::rename(&staged, &paths.config_path).unwrap();
         engine
             .reload_after_own_config_write(|engine| {
                 engine.apply(dux_core::engine::Command::ReloadConfig)

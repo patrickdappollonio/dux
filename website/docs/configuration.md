@@ -320,7 +320,9 @@ Every one of them applies on a reload, with no restart.
 > refuses any value that would leave the section invalid. If `config.toml` is deleted
 > while dux runs, a reload is refused the same way and the running settings, password
 > included, stay until the file is back; `dux config set` refuses to write a fresh file
-> then too, and points you at Recover config.
+> then too, and points you at Recover config. A reload that finds the file empty (an
+> editor leaves it so for a moment mid-save) is refused and keeps the running settings
+> in the same way; reload again once the save finishes.
 
 `dux config regenerate --yes` writes fresh defaults, which have no password; it says so
 when the config it replaces had one.
