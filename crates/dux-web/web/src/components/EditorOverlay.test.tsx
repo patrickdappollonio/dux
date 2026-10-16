@@ -63,6 +63,7 @@ const TYPED = "original contents\nplus a great deal more that the server refuses
 
 let mockState: DuxState
 const editorSetTabDirtyMock = vi.fn()
+const editorSetTabModeMock = vi.fn()
 const closeEditorMock = vi.fn()
 // The two ways a tab can be closed, spied so the deleted-file banner's "Close
 // tab" can be checked for taking the SAME route the tab strip's own close
@@ -76,6 +77,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     editorSetTabDirty: editorSetTabDirtyMock,
+    editorSetTabMode: (...a: unknown[]) => editorSetTabModeMock(...a),
     closeEditor: (...a: unknown[]) => closeEditorMock(...a),
     editorCloseTab: (...a: unknown[]) => editorCloseTabMock(...a),
     openEditorCloseTab: (...a: unknown[]) => openEditorCloseTabMock(...a),
@@ -630,6 +632,8 @@ async function mountTerminalRootedTab(path = "notes.md") {
   const { getSnapshot } = await import("@/lib/store")
   mockState = {
     ...getSnapshot(),
+    // Lists the open path, so only the root can be what hides the switch.
+    changes: { ...changesSlice([path]), sessionId: null },
     editorTarget: { root: TERMINAL_ROOT, initialPath: path },
     editorTabs: {
       [rootKey(TERMINAL_ROOT)]: {
@@ -683,20 +687,19 @@ describe("the File/Diff switch follows the active file's changes", () => {
     vi.unstubAllGlobals()
   })
 
-  async function mountWithChanges(
-    path: string,
-    mode: "file" | "diff",
-    changed: string[],
-  ) {
-    const view = await mountWithTab(path, mode, changed)
-    const { EditorOverlay } = await import("@/components/EditorOverlay")
-    return { view, EditorOverlay }
-  }
-
   const switchGroup = () => screen.queryByRole("group", { name: "View mode" })
 
+  async function setChanges(
+    view: ReturnType<typeof render>,
+    changes: unknown,
+  ) {
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    mockState = { ...mockState, changes } as unknown as DuxState
+    view.rerender(<EditorOverlay />)
+  }
+
   it("offers no switch on a file the changes slice does not list, on the bar or the phone fold", async () => {
-    await mountWithChanges("src/a.ts", "file", ["src/other.ts"])
+    await mountWithTab("src/a.ts", "file", ["src/other.ts"])
     await screen.findByTestId("code-editor")
     expect(switchGroup()).toBeNull()
     fireEvent.click(screen.getByLabelText("More editor actions"))
@@ -705,7 +708,7 @@ describe("the File/Diff switch follows the active file's changes", () => {
   })
 
   it("offers it on a changed file", async () => {
-    await mountWithChanges("src/a.ts", "file", ["src/a.ts"])
+    await mountWithTab("src/a.ts", "file", ["src/a.ts"])
     await screen.findByTestId("code-editor")
     expect(switchGroup()).not.toBeNull()
     fireEvent.click(screen.getByLabelText("More editor actions"))
@@ -713,31 +716,42 @@ describe("the File/Diff switch follows the active file's changes", () => {
     expect(screen.queryByText("Diff view")).not.toBeNull()
   })
 
-  it("keeps it for a file in Diff that stops being changed, until File is chosen", async () => {
-    const { view, EditorOverlay } = await mountWithChanges("src/a.ts", "diff", [
-      "src/a.ts",
-    ])
+  it("keeps the switch through a reload of the changes, and through one that errors", async () => {
+    const view = await mountWithTab("src/a.ts", "file", ["src/a.ts"])
+    await screen.findByTestId("code-editor")
+    const reloading = { ...changesSlice([]), phase: "loading" as const, rev: 0 }
+    await setChanges(view, reloading)
     expect(switchGroup()).not.toBeNull()
-    mockState = { ...mockState, changes: changesSlice([]) } as unknown as DuxState
-    view.rerender(<EditorOverlay />)
+    await setChanges(view, { ...reloading, phase: "error", error: "boom" })
     expect(switchGroup()).not.toBeNull()
-    fireEvent.click(
-      within(switchGroup()!).getByRole("button", { name: /file/i }),
-    )
-    // The mocked state is static, so play the store's mode change by hand.
-    mockState = {
-      ...mockState,
-      editorTabs: {
-        [rootKey(agentRoot(SESSION))]: {
-          tabs: [
-            { id: TAB_ID, path: "src/a.ts", dirty: false, preview: false, mode: "file" },
-          ],
-          activeId: TAB_ID,
-        },
-      },
-    } as unknown as DuxState
-    view.rerender(<EditorOverlay />)
+  })
+
+  it("offers it on the old path of a renamed file", async () => {
+    const view = await mountWithTab("src/old.ts", "file")
+    await screen.findByTestId("code-editor")
     expect(switchGroup()).toBeNull()
+    const renamed = changesSlice(["src/new.ts"])
+    renamed.unstaged[0] = Object.assign(renamed.unstaged[0], {
+      renamed_from: "src/old.ts",
+    })
+    await setChanges(view, renamed)
+    expect(switchGroup()).not.toBeNull()
+  })
+
+  it("keeps it for a file in Diff that stops being changed until File is chosen, then moves focus off the vanishing button", async () => {
+    const view = await mountWithTab("src/a.ts", "diff", ["src/a.ts"])
+    await setChanges(view, changesSlice([]))
+    expect(switchGroup()).not.toBeNull()
+    const fileButton = within(switchGroup()!).getByRole("button", { name: /file/i })
+    fileButton.focus()
+    fireEvent.click(fileButton)
+    expect(editorSetTabModeMock).toHaveBeenCalledWith(
+      agentRoot(SESSION),
+      TAB_ID,
+      "file",
+    )
+    expect(document.activeElement).not.toBe(fileButton)
+    expect(document.activeElement).not.toBe(document.body)
   })
 })
 

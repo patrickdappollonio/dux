@@ -41,9 +41,9 @@ there, so saves, renames, deletes and uploads confirm in the tab you did them in
 The standalone tab works on phones, best-effort. The file explorer starts collapsed so the
 file gets the width (the header's toggle reopens it at a phone-sized width), and the
 editor stays above the soft keyboard. The header keeps the **‹** Back button, the explorer
-toggle, the name of what the editor is rooted at and **Save**; the File/Diff switch, the
-preview toggle, the syntax language and **Open local editor** fold into one `⋯` menu at the
-end of the row. The status bar at the bottom keeps the file's path, the unsaved-changes
+toggle, the name of what the editor is rooted at and **Save**; the File/Diff switch (on
+changed files), the preview toggle, the syntax language and **Open local editor** fold into
+one `⋯` menu at the end of the row. The status bar at the bottom keeps the file's path, the unsaved-changes
 dot, the read-only badge where it applies, the cursor position, and an image's pixel
 dimensions.
 
@@ -454,11 +454,15 @@ This one is for agent worktrees; a terminal-rooted editor has no Diff button.
 
 ![A file's diff against its last committed version, added lines in green and a replaced line in red.](/screens/editor-diff-head.png)
 
-The File/Diff switch only appears on a file that has changes, so an unchanged file never offers an empty diff; a file you are already looking at in Diff keeps it even if the changes disappear (say, you revert them) until you flip back to File. Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
+Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
 syntax-highlighted comparison of the file's working copy against its last committed version,
 shown inline. Added files render as all-insert, deleted files as all-delete. If the file
 changes on disk while you are looking, an amber **Reload** button appears so you refresh on
 your own terms.
+
+The File/Diff switch only appears on a file that has changes, so an unchanged file never
+offers an empty diff. A file you are already looking at in Diff keeps the switch even if its
+changes disappear (say, you revert them), until you flip back to File.
 
 Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
 editor, so a change to a Windows-1252 file is a readable diff. A file too large for the

@@ -651,12 +651,40 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
 
   // The File/Diff switch is for files with something to diff. A file already
   // in Diff keeps it even once it stops being changed, so a revert never
-  // leaves the user stuck in a diff with no way out. Before the slice arrives
-  // nothing is changed, so the switch is never shown and then taken back.
+  // leaves the user stuck in a diff with no way out. The answer comes from the
+  // last LOADED slice of this root: a refetch empties the slice while it
+  // loads, and an error leaves it empty, neither of which says the file
+  // stopped being changed. Before the first load ever nothing is changed, so
+  // the switch is never shown and then taken back.
+  const [loadedChanges, setLoadedChanges] = useState<{
+    key: string
+    slice: ChangesSliceView
+  } | null>(null)
+  if (slice?.phase === "loaded" && loadedChanges?.slice !== slice) {
+    setLoadedChanges({ key, slice })
+  }
+  const knownSlice =
+    slice === null || slice.phase === "loaded"
+      ? slice
+      : loadedChanges?.key === key
+        ? loadedChanges.slice
+        : null
+  const knownChanged = useMemo(() => {
+    const rows = knownSlice ? [knownSlice.unstaged, knownSlice.staged] : []
+    // A renamed file's old path has no row of its own, yet it is a deletion
+    // against HEAD.
+    const renamedFrom = new Set<string>()
+    for (const list of rows) {
+      for (const row of list) if (row.renamed_from) renamedFrom.add(row.renamed_from)
+    }
+    const lookup = changedStatusLookup(rows)
+    return (path: string) => lookup.get(path) !== undefined || renamedFrom.has(path)
+  }, [knownSlice])
+  const contentRef = useRef<HTMLDivElement>(null)
   const showViewSwitch =
     hasDiff &&
     activeTabPath != null &&
-    (changedMap.get(activeTabPath) !== undefined || activeTabMode === "diff")
+    (knownChanged(activeTabPath) || activeTabMode === "diff")
 
   // A per-file change-signal for the open file: status plus line counts, which
   // move when the content changes, though an edit keeping identical +/- counts
@@ -1412,6 +1440,17 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     ))
   }
 
+  // Choosing File on a file that is no longer changed takes the switch away
+  // with the very button pressed, so focus moves to the editor surface first
+  // instead of dropping to the page body.
+  function chooseFileView() {
+    if (!activeTab) return
+    if (activeTabPath != null && !knownChanged(activeTabPath)) {
+      contentRef.current?.focus()
+    }
+    editorSetTabMode(root, activeTab.id, "file")
+  }
+
   function renderDesktopViewActions(): React.ReactNode {
     const previewLabel =
       showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"
@@ -1427,7 +1466,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
                 toggle
                 aria-pressed={activeTab.mode === "file"}
-                onClick={() => editorSetTabMode(root, activeTab.id, "file")}
+                onClick={chooseFileView}
               >
                 <FileText />
                 <HeaderLabel>File</HeaderLabel>
@@ -1566,7 +1605,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <>
               <DropdownMenuItem
                 aria-current={activeTab.mode === "file" ? "true" : undefined}
-                onClick={() => editorSetTabMode(root, activeTab.id, "file")}
+                onClick={chooseFileView}
               >
                 <FileText />
                 File view
@@ -2025,7 +2064,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     }}
                   />
                 ))}
-              <div className="relative min-h-0 flex-1">
+              <div
+                ref={contentRef}
+                tabIndex={-1}
+                className="relative min-h-0 flex-1 outline-none"
+              >
                 <EditorContentPane
                   root={root}
                   tab={activeTab}

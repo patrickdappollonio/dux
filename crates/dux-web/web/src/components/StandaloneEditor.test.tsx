@@ -321,14 +321,14 @@ describe("the standalone editor shell", () => {
 
   it("keeps the desktop header inline: mode toggle, preview-capable controls, Open local editor", async () => {
     await seedState({
-    changes: {
-      sessionId: SESSION,
-      phase: "loaded",
-      rev: 1,
-      staged: [],
-      unstaged: [{ path: PATH, status: "M", additions: 1, deletions: 0, staged: false }],
-      error: null,
-    } as unknown as DuxState["changes"],
+      changes: {
+        sessionId: SESSION,
+        phase: "loaded",
+        rev: 1,
+        staged: [],
+        unstaged: [{ path: PATH, status: "M", additions: 1, deletions: 0, staged: false }],
+        error: null,
+      } as unknown as DuxState["changes"],
     })
     const { StandaloneEditorShell } = await import(
       "@/components/StandaloneEditor"
@@ -348,14 +348,14 @@ describe("the standalone editor shell", () => {
 
   it("folds the phone header's secondary controls into one ⋯ menu", async () => {
     await seedState({
-    changes: {
-      sessionId: SESSION,
-      phase: "loaded",
-      rev: 1,
-      staged: [],
-      unstaged: [{ path: PATH, status: "M", additions: 1, deletions: 0, staged: false }],
-      error: null,
-    } as unknown as DuxState["changes"],
+      changes: {
+        sessionId: SESSION,
+        phase: "loaded",
+        rev: 1,
+        staged: [],
+        unstaged: [{ path: PATH, status: "M", additions: 1, deletions: 0, staged: false }],
+        error: null,
+      } as unknown as DuxState["changes"],
     })
     const { StandaloneEditorShell } = await import(
       "@/components/StandaloneEditor"
