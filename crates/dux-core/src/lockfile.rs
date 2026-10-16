@@ -365,6 +365,41 @@ mod tests {
         tmp
     }
 
+    const DEAD_SOCKET_ENV: &str = "DUX_TEST_BIND_DEAD_SOCKET";
+
+    /// Leave a socket file that nothing listens on, the way a crashed dux does.
+    /// A listener dropped in this process is not dead for long enough to trust:
+    /// a child forked by a test running beside this one holds a copy of the
+    /// descriptor until it execs, and a connection to that copy is accepted. A
+    /// short-lived process of its own binds the socket and exits, so no copy of
+    /// the listener exists anywhere else.
+    fn dead_socket_at(path: &std::path::Path) {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lockfile::tests::bind_a_socket_and_exit_without_removing_it",
+                "--ignored",
+            ])
+            .env(DEAD_SOCKET_ENV, path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the helper process failed to bind");
+        assert!(path.exists(), "the helper left no socket file");
+    }
+
+    /// Run only by `dead_socket_at`, in a process of its own.
+    #[test]
+    #[ignore = "helper process for dead_socket_at"]
+    fn bind_a_socket_and_exit_without_removing_it() {
+        let Some(path) = std::env::var_os(DEAD_SOCKET_ENV) else {
+            return;
+        };
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        // Leaking skips the destructor, which would not unlink either, but this
+        // makes the "left behind" explicit.
+        std::mem::forget(listener);
+    }
+
     /// Call listen() on `listener` again from a forked child, then reap it, so
     /// the process the kernel names as the listener is one that has exited.
     fn listen_from_a_child_that_exits(listener: &std::os::unix::net::UnixListener) {
@@ -488,7 +523,7 @@ mod tests {
         let tmp = private_tmp();
         let path = tmp.path().join("dux.lock");
         let socket = tmp.path().join("dux.sock");
-        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        dead_socket_at(&socket);
 
         let mut lock = SingleInstanceLock::acquire(&path).unwrap();
         lock.open_control_socket(&socket)
@@ -560,7 +595,7 @@ mod tests {
         // Only a refused connection proves a socket dead: one dux cannot even
         // try (its mode lets nobody connect) is left where it is.
         let shut = tmp.path().join("shut.sock");
-        drop(std::os::unix::net::UnixListener::bind(&shut).unwrap());
+        dead_socket_at(&shut);
         fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
         let shut_ino = fs::symlink_metadata(&shut).unwrap().ino();
         assert!(lock.open_control_socket(&shut).is_err());
@@ -571,7 +606,7 @@ mod tests {
         let shared = tmp.path().join("shared");
         fs::create_dir(&shared).unwrap();
         let in_shared = shared.join("dux.sock");
-        drop(std::os::unix::net::UnixListener::bind(&in_shared).unwrap());
+        dead_socket_at(&in_shared);
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
         let shared_ino = fs::symlink_metadata(&in_shared).unwrap().ino();
         let err = lock
