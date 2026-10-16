@@ -9,6 +9,7 @@
 //! will actually happen. When the agent would need a review copy of the pull
 //! request, the form says so up front and holds the button until it is ticked.
 
+use super::components::next_focus;
 use super::*;
 use crate::git::{agent_name_char_map, is_valid_agent_name};
 use dux_core::clone_project::{
@@ -48,20 +49,30 @@ pub(crate) struct PullRequestClone {
     /// Whether the agent will need a review copy, for the folder on screen.
     pub(crate) review_copy: ReviewCopyOutlook,
     pub(crate) review_copy_agreed: bool,
+    /// For a checkout, what the last folder check said about the name it was
+    /// asked about when that name is not the pull request's branch: a name
+    /// spelled like a review copy asks for one only while no local branch of
+    /// that name exists, which only the folder can tell.
+    pub(crate) checked_review: Option<(String, ReviewCopyOutlook)>,
+    /// Counts every change to the name, the box and the folder, so a press
+    /// whose folder check is still out can tell it was overtaken.
+    pub(crate) edits: u64,
     /// A folder check is out; a press waits for it.
     pub(crate) checking: bool,
+    /// That check was asked for by a press, which goes ahead when it agrees.
+    pub(crate) submit_pending: bool,
     /// The folder check's refusal, shown in the form.
     pub(crate) error: Option<String>,
 }
 
 /// What the form asks about a review copy for the name now in its field.
-pub(crate) enum PrReviewQuestion<'a> {
+pub(crate) enum PrReviewQuestion {
     /// Nothing to ask.
     None,
     /// A copy will be made; the box agrees to it.
-    Needed(&'a [ProseSegment]),
+    Needed(Vec<ProseSegment>),
     /// A copy is needed and no name is free; the user must type another name.
-    NoFreeName(&'a [ProseSegment]),
+    NoFreeName(Vec<ProseSegment>),
 }
 
 impl PullRequestClone {
@@ -89,14 +100,29 @@ impl PullRequestClone {
         }
     }
 
-    /// The question is asked only while the name is the pull request's own
-    /// branch: a name typed instead is checked by the server, and its refusal
-    /// is the form's error like any other.
-    pub(crate) fn question_for(&self, name: &str) -> PrReviewQuestion<'_> {
-        if name.trim() != self.head_branch() {
-            return PrReviewQuestion::None;
+    /// Whether the agent named `name` will need a review copy, for the folder
+    /// on screen. The pull request's own branch is told by the offer or the
+    /// folder; a name spelled like a review copy of it is one whatever the
+    /// branch's state, except in a checkout that already has a branch of that
+    /// name, which the last folder check says; any other name needs none.
+    pub(crate) fn outlook_for(&self, name: &str) -> ReviewCopyOutlook {
+        let name = name.trim();
+        let head = self.head_branch();
+        if name == head {
+            return self.review_copy.clone();
         }
-        match &self.review_copy {
+        if let Some((checked, outlook)) = &self.checked_review
+            && checked == name
+        {
+            return outlook.clone();
+        }
+        dux_core::agent_job::typed_copy_review_outlook(&head, name, self.offer.number)
+            .unwrap_or(ReviewCopyOutlook::NotNeeded)
+    }
+
+    /// What the form asks about a review copy for the name now in its field.
+    pub(crate) fn question_for(&self, name: &str) -> PrReviewQuestion {
+        match self.outlook_for(name) {
             ReviewCopyOutlook::Needed { warning, .. } => PrReviewQuestion::Needed(warning),
             ReviewCopyOutlook::NoFreeName { message, .. } => PrReviewQuestion::NoFreeName(message),
             ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => PrReviewQuestion::None,
@@ -106,22 +132,38 @@ impl PullRequestClone {
     /// The agreement the request carries: exactly the reason and the copy
     /// branch the warning showed, and only while the box is shown and ticked.
     pub(crate) fn agreement_for(&self, name: &str) -> UpfrontReviewCopy {
-        match (&self.review_copy, self.question_for(name)) {
-            (
-                ReviewCopyOutlook::Needed {
-                    reason,
-                    copy_branch,
-                    ..
-                },
-                PrReviewQuestion::Needed(_),
-            ) if self.review_copy_agreed => UpfrontReviewCopy {
+        match self.outlook_for(name) {
+            ReviewCopyOutlook::Needed {
+                reason,
+                copy_branch,
+                ..
+            } if self.review_copy_agreed => UpfrontReviewCopy {
                 agreed: true,
-                reason: Some(reason.clone()),
-                branch: Some(copy_branch.clone()),
+                reason: Some(reason),
+                branch: Some(copy_branch),
                 by_flag: false,
             },
             _ => UpfrontReviewCopy::default(),
         }
+    }
+
+    /// The name changed: the answer given to the old question is not one to the
+    /// new, and a press overtaken by this must not go ahead.
+    pub(crate) fn name_edited(&mut self) {
+        self.review_copy_agreed = false;
+        self.edits += 1;
+    }
+
+    /// The folder changed, so everything told about the old one is stale: the
+    /// form goes back to what the offer said, unticked, and the next press
+    /// checks the new folder instead of repeating the old answer.
+    pub(crate) fn destination_edited(&mut self) {
+        self.folder = PrFolder::Free;
+        self.review_copy = self.offer.review_copy.clone();
+        self.checked_review = None;
+        self.review_copy_agreed = false;
+        self.error = None;
+        self.edits += 1;
     }
 
     /// The Tab ring for the name now in the field: each stop and whether it is
@@ -148,12 +190,38 @@ pub(crate) enum PrFolderCheck {
     Submit,
 }
 
+/// What changed in the form, for [`App::note_pr_clone_edit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrEdit {
+    Name,
+    Folder,
+    Box,
+}
+
+/// A clone or add this surface started for a pull request, kept so a question
+/// only the server can ask about it (it comes back under the key of whatever
+/// operation ends it) can put the user back where they were.
+#[derive(Clone, Debug)]
+pub(crate) struct PrCloneAwaiting {
+    form: PullRequestClone,
+    draft: CloneDraft,
+    since: Instant,
+}
+
+/// How long a started clone waits for such a question. A clone and the agent
+/// create after it take minutes at the outside.
+const PR_CLONE_AWAITING_BOUND: Duration = Duration::from_secs(60 * 60);
+
 /// A folder check's answer, from its worker.
 pub(crate) struct PrCloneFolderAnswer {
     /// The folder as it was typed, so an answer for a folder since edited is
     /// dropped.
     pub(crate) destination: String,
-    pub(crate) purpose: PrFolderCheck,
+    /// The name the check was asked about, which decides the question for a
+    /// name spelled like a review copy.
+    pub(crate) agent_name: String,
+    /// The form's edit count when the check started.
+    pub(crate) edits: u64,
     pub(crate) result: Result<(PrFolder, Option<ReviewCopyOutlook>), String>,
 }
 
@@ -225,6 +293,9 @@ impl App {
             has_projects: !self.engine.projects.is_empty(),
             folder: PrFolder::Free,
             review_copy_agreed: false,
+            checked_review: None,
+            edits: 0,
+            submit_pending: false,
             checking: false,
             error: None,
         };
@@ -247,6 +318,7 @@ impl App {
     pub(crate) fn spawn_pr_clone_folder_check(&mut self, purpose: PrFolderCheck) {
         let PromptState::CloneProject {
             destination,
+            agent_name,
             pull_request: Some(form),
             ..
         } = &mut self.prompt
@@ -254,8 +326,11 @@ impl App {
             return;
         };
         form.checking = true;
+        form.submit_pending = purpose == PrFolderCheck::Submit;
         form.error = None;
         let raw = destination.text.trim().to_string();
+        let name = agent_name.text.trim().to_string();
+        let edits = form.edits;
         let offer = form.offer.clone();
         let policy = self.engine.github_host_policy();
         let projects: Vec<String> = self
@@ -280,6 +355,9 @@ impl App {
                     number: offer.number,
                     head_branch: &offer.head_branch,
                     head_commit: offer.head_oid.as_deref(),
+                    agent_name: Some(&name)
+                        .filter(|name| !name.is_empty())
+                        .map(String::as_str),
                 }),
             )
             .map(|check| {
@@ -294,7 +372,8 @@ impl App {
             .map_err(|refused| refused.to_string());
             let _ = tx.send(PrCloneFolderAnswer {
                 destination: raw,
-                purpose,
+                agent_name: name,
+                edits,
                 result,
             });
         });
@@ -332,8 +411,9 @@ impl App {
     }
 
     /// What a folder check's answer does to the form. An answer for a folder
-    /// since edited is dropped. One that differs from what the form shows
-    /// switches it, drops the agreement to a copy that no longer applies, and
+    /// since edited is dropped. One that differs from what the form shows (the
+    /// folder's state, or whether it needs a review copy) switches it, drops
+    /// the agreement to a copy that no longer applies, says what changed, and
     /// waits for another press: the user agrees to what will actually happen.
     pub(crate) fn apply_pr_clone_folder_answer(&mut self, answer: PrCloneFolderAnswer) {
         let confirm_key = self.bindings.label_for(Action::Confirm);
@@ -345,11 +425,11 @@ impl App {
         else {
             return;
         };
+        form.checking = false;
+        let was_pressed = std::mem::take(&mut form.submit_pending);
         if destination.text.trim() != answer.destination {
-            form.checking = false;
             return;
         }
-        form.checking = false;
         let (folder, folder_outlook) = match answer.result {
             Ok(checked) => checked,
             Err(sentence) => {
@@ -358,39 +438,139 @@ impl App {
             }
         };
         form.error = None;
+        let name = answer.agent_name;
+        let folder_before = form.folder.clone();
+        let outlook_before = form.outlook_for(&name);
         // A free folder is cloned fresh, which the offer already told. A
         // checkout is told from the folder itself.
-        let outlook = match (&folder, folder_outlook) {
-            (PrFolder::Checkout { .. }, Some(outlook)) => outlook,
-            (PrFolder::Checkout { .. }, None) => ReviewCopyOutlook::Unknown,
-            (PrFolder::Free, _) => form.offer.review_copy.clone(),
-        };
-        let changed = folder != form.folder || outlook != form.review_copy;
-        let switched_to_add = matches!(folder, PrFolder::Checkout { .. });
+        match &folder {
+            PrFolder::Free => {
+                form.review_copy = form.offer.review_copy.clone();
+                form.checked_review = None;
+            }
+            PrFolder::Checkout { .. } => {
+                let outlook = folder_outlook.unwrap_or(ReviewCopyOutlook::Unknown);
+                if name == form.head_branch() {
+                    form.review_copy = outlook;
+                    form.checked_review = None;
+                } else {
+                    form.checked_review = Some((name.clone(), outlook));
+                }
+            }
+        }
         form.folder = folder;
-        form.review_copy = outlook;
-        if changed {
+        let outlook_after = form.outlook_for(&name);
+        let folder_changed = folder_before != form.folder;
+        let outlook_changed = outlook_before != outlook_after;
+        if folder_changed || outlook_changed {
             form.review_copy_agreed = false;
         }
-        match (answer.purpose, changed) {
-            (PrFolderCheck::Submit, false) => self.send_pull_request_clone(),
-            (PrFolderCheck::Submit, true) => {
-                let repository = form.repository();
-                self.set_info(if switched_to_add {
-                    format!(
-                        "That folder already holds a checkout of {repository}, so the form now \
-                         adds it as a project instead of cloning. Press {confirm_key} again to \
-                         go ahead."
-                    )
-                } else {
-                    format!(
-                        "That folder holds nothing of {repository} now, so the form now clones \
-                         into it. Press {confirm_key} again to go ahead."
-                    )
+        let asks_now = match &outlook_after {
+            ReviewCopyOutlook::Needed { .. } => Some(
+                "Tick Create a review copy, or type another name, then press the confirm key \
+                 again.",
+            ),
+            ReviewCopyOutlook::NoFreeName { .. } => {
+                Some("Every name a review copy could take is taken. Type another name.")
+            }
+            ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => None,
+        };
+        let repository = form.repository();
+        let overtaken = answer.edits != form.edits;
+        let go_ahead = was_pressed && !overtaken && !folder_changed && !outlook_changed;
+        let said = if !was_pressed || go_ahead {
+            None
+        } else if overtaken {
+            Some(format!(
+                "The form changed while the folder was being checked, so nothing was sent. \
+                 Press {confirm_key} again."
+            ))
+        } else if folder_changed {
+            let lead = if matches!(form.folder, PrFolder::Checkout { .. }) {
+                format!(
+                    "That folder already holds a checkout of {repository}, so the form now adds \
+                     it as a project instead of cloning."
+                )
+            } else {
+                format!(
+                    "That folder holds nothing of {repository} now, so the form now clones into \
+                     it."
+                )
+            };
+            Some(match asks_now {
+                Some(ask) => format!("{lead} {}", ask.replace("the confirm key", &confirm_key)),
+                None => format!("{lead} Press {confirm_key} again to go ahead."),
+            })
+        } else {
+            Some(match asks_now {
+                Some(ask) => format!(
+                    "The review copy answer for that folder changed. {}",
+                    ask.replace("the confirm key", &confirm_key)
+                ),
+                None => format!(
+                    "That folder no longer needs a review copy. Press {confirm_key} again to go \
+                     ahead."
+                ),
+            })
+        };
+        if let Some(said) = said {
+            self.set_info(said);
+        }
+        self.settle_pr_clone_focus();
+        if go_ahead {
+            self.send_pull_request_clone();
+        }
+    }
+
+    /// A box that is no longer shown cannot keep focus: it moves on to the
+    /// next stop that is.
+    pub(crate) fn settle_pr_clone_focus(&mut self) {
+        if let PromptState::CloneProject {
+            focus,
+            agent_name,
+            pull_request: Some(form),
+            ..
+        } = &mut self.prompt
+            && *focus == CloneProjectFocus::ReviewCopyCheckbox
+            && !matches!(
+                form.question_for(&agent_name.text),
+                PrReviewQuestion::Needed(_)
+            )
+        {
+            *focus = next_focus(&form.focus_ring(&agent_name.text), *focus, true);
+        }
+    }
+
+    /// The name, the folder or the box changed. The form forgets what the old
+    /// value was told, and a press whose folder check is still out is
+    /// overtaken: it says so in the form, so the user is never left wondering
+    /// why nothing happened.
+    pub(crate) fn note_pr_clone_edit(&mut self, edit: PrEdit) {
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        if let PromptState::CloneProject {
+            pull_request: Some(form),
+            ..
+        } = &mut self.prompt
+        {
+            match edit {
+                PrEdit::Name => form.name_edited(),
+                PrEdit::Folder => form.destination_edited(),
+                PrEdit::Box => form.edits += 1,
+            }
+            if form.submit_pending {
+                form.error = Some(match edit {
+                    PrEdit::Folder => format!(
+                        "The folder changed, so nothing will be sent. Press {confirm_key} to \
+                         check it again."
+                    ),
+                    PrEdit::Name | PrEdit::Box => format!(
+                        "That changed while the folder was being checked, so nothing will be \
+                         sent. Press {confirm_key} again."
+                    ),
                 });
             }
-            (PrFolderCheck::Open, _) => {}
         }
+        self.settle_pr_clone_focus();
     }
 
     /// Enter on the form: check what can be checked on screen, then ask the
@@ -398,11 +578,9 @@ impl App {
     pub(crate) fn confirm_pull_request_clone(&mut self) {
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let PromptState::CloneProject {
-            agent_name,
-            focus,
             pull_request: Some(form),
             ..
-        } = &mut self.prompt
+        } = &self.prompt
         else {
             return;
         };
@@ -412,10 +590,37 @@ impl App {
             ));
             return;
         }
+        if self.pr_clone_blocked() {
+            return;
+        }
+        self.spawn_pr_clone_folder_check(PrFolderCheck::Submit);
+    }
+
+    /// Whether what is in the form now may not be sent, saying why when so: an
+    /// empty or unusable name, a review copy nobody agreed to, a copy with no
+    /// free name. Asked when the press arrives and again right before the
+    /// request leaves, on the form as it is then.
+    fn pr_clone_blocked(&mut self) -> bool {
+        let PromptState::CloneProject {
+            agent_name,
+            focus,
+            pull_request: Some(form),
+            ..
+        } = &mut self.prompt
+        else {
+            return true;
+        };
         let name = agent_name.text.trim().to_string();
         if name.is_empty() {
             self.set_error("Type a name for the agent, or cancel.");
-            return;
+            return true;
+        }
+        if !is_valid_agent_name(&name) {
+            self.set_error(
+                "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
+                 It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
+            );
+            return true;
         }
         match form.question_for(&name) {
             PrReviewQuestion::Needed(_) if !form.review_copy_agreed => {
@@ -424,16 +629,14 @@ impl App {
                     "This agent needs a separate review copy of the pull request. Tick Create a \
                      review copy to go ahead, or cancel.",
                 );
-                return;
+                true
             }
             PrReviewQuestion::NoFreeName(message) => {
-                let sentence = Prose::from_segments(message.to_vec()).plain();
-                self.set_error(sentence);
-                return;
+                self.set_error(Prose::from_segments(message).plain());
+                true
             }
-            PrReviewQuestion::Needed(_) | PrReviewQuestion::None => {}
+            PrReviewQuestion::Needed(_) | PrReviewQuestion::None => false,
         }
-        self.spawn_pr_clone_folder_check(PrFolderCheck::Submit);
     }
 
     /// The request the form would send for the fields as they stand: the
@@ -461,36 +664,21 @@ impl App {
         })
     }
 
-    /// Dispatch the clone or the add. A refusal the engine can give at once
-    /// keeps the form open, so it can be acted on without retyping; a start
-    /// keeps what was typed as the draft a worker refusal hands back.
+    /// Dispatch the clone or the add, from the form as it is now. A refusal the
+    /// engine can give at once keeps the form open, so it can be acted on
+    /// without retyping; a start keeps what was typed as the draft a worker
+    /// refusal hands back, and remembers the form for a question only the
+    /// server can ask.
     fn send_pull_request_clone(&mut self) {
-        let Some(command) = self.pull_request_clone_command() else {
+        if self.pr_clone_blocked() {
             return;
-        };
-        let PromptState::CloneProject {
-            destination,
-            destination_edited,
-            start_folder,
-            agent_name,
-            pull_request: Some(form),
-            ..
-        } = &self.prompt
+        }
+        let (Some(command), Some(awaiting)) =
+            (self.pull_request_clone_command(), self.pr_clone_snapshot())
         else {
             return;
         };
-        let draft = CloneDraft {
-            op_id: String::new(),
-            restorable: false,
-            address: form.offer.address.clone(),
-            destination: destination.text.clone(),
-            destination_edited: *destination_edited,
-            start_folder: start_folder.clone(),
-            agent_name: agent_name.text.clone(),
-            randomize_name: false,
-            randomized_name: None,
-            pull_request: Some(form.offer.clone()),
-        };
+        let draft = awaiting.draft.clone();
         match self.engine.apply(command) {
             Ok(reaction) => {
                 let refused = matches!(
@@ -499,6 +687,7 @@ impl App {
                 );
                 if !refused {
                     self.prompt = PromptState::None;
+                    self.pr_clone_awaiting = Some(awaiting);
                     self.clone_draft = match &reaction {
                         EventReaction::Status(update) => update
                             .key
@@ -513,6 +702,38 @@ impl App {
         }
     }
 
+    /// The form as it stands, kept for the draft a worker refusal hands back
+    /// and for a question only the server can ask about the request.
+    pub(crate) fn pr_clone_snapshot(&self) -> Option<PrCloneAwaiting> {
+        let PromptState::CloneProject {
+            destination,
+            destination_edited,
+            start_folder,
+            agent_name,
+            pull_request: Some(form),
+            ..
+        } = &self.prompt
+        else {
+            return None;
+        };
+        Some(PrCloneAwaiting {
+            form: (**form).clone(),
+            draft: CloneDraft {
+                op_id: String::new(),
+                restorable: false,
+                address: form.offer.address.clone(),
+                destination: destination.text.clone(),
+                destination_edited: *destination_edited,
+                start_folder: start_folder.clone(),
+                agent_name: agent_name.text.clone(),
+                randomize_name: false,
+                randomized_name: None,
+                pull_request: Some(form.offer.clone()),
+            },
+            since: Instant::now(),
+        })
+    }
+
     /// Flip the form's review copy box. Focus follows, so a click is visibly
     /// acted on.
     pub(crate) fn toggle_pr_clone_review_copy(&mut self) {
@@ -525,6 +746,7 @@ impl App {
             *focus = CloneProjectFocus::ReviewCopyCheckbox;
             form.review_copy_agreed = !form.review_copy_agreed;
         }
+        self.note_pr_clone_edit(PrEdit::Box);
     }
 
     /// Leave the form for the project picker, keeping the reference typed.
@@ -545,41 +767,67 @@ impl App {
         }
     }
 
-    /// A clone or add this form started ended in a project with no agent, for
-    /// want of the user's answer on a review copy that only the project could
-    /// tell. Open the name prompt for that project and pull request with the
-    /// question on it, the way a refused create in an existing project does.
-    /// Answers whether it did: an ask that is not this surface's clone, or
-    /// whose project is gone, is left to the status line.
-    pub(crate) fn reopen_pull_request_after_clone(
-        &mut self,
-        key: &str,
-        question: &ReviewCopyAsk,
-    ) -> bool {
-        let (Some(project_id), Some(asked)) = (&question.project_id, &question.pull_request) else {
+    /// The remembered clone this surface started, when `asked` is its pull
+    /// request. The server's final for it comes under the key of whatever
+    /// operation ends it, not the clone's, so the pull request is what ties
+    /// the two together. Kept until a question for it arrives or the bound
+    /// passes.
+    fn awaiting_for(&mut self, asked: &PullRequestCloneTarget) -> Option<PrCloneAwaiting> {
+        let fresh = self
+            .pr_clone_awaiting
+            .as_ref()
+            .is_some_and(|held| held.since.elapsed() < PR_CLONE_AWAITING_BOUND);
+        if !fresh {
+            self.pr_clone_awaiting = None;
+            return None;
+        }
+        if self
+            .pr_clone_awaiting
+            .as_ref()
+            .is_some_and(|held| same_pull_request(&held.form.offer.target(), asked))
+        {
+            return self.pr_clone_awaiting.take();
+        }
+        None
+    }
+
+    /// A question the server asked about a clone or add this surface started.
+    ///
+    /// With a project in it, the project exists and has no agent for want of
+    /// the user's answer: the name prompt opens for that project and pull
+    /// request with the question on it, the way a refused create in an
+    /// existing project does. Without one, the server refused before cloning
+    /// or adding anything: the pull request form comes back with the same
+    /// values and the new question, unticked. Answers whether it did either;
+    /// a question that is not this surface's clone is left to the status line.
+    pub(crate) fn reopen_pull_request_after_clone(&mut self, question: &ReviewCopyAsk) -> bool {
+        let Some(asked) = &question.pull_request else {
             return false;
         };
-        let Some(draft) = self.clone_draft.as_ref().filter(|draft| draft.op_id == key) else {
+        let project = match &question.project_id {
+            Some(project_id) => {
+                let Some(project) = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|project| &project.id == project_id)
+                    .cloned()
+                else {
+                    return false;
+                };
+                Some(project)
+            }
+            None => None,
+        };
+        let Some(held) = self.awaiting_for(asked) else {
             return false;
         };
-        let Some(facts) = draft
-            .pull_request
-            .clone()
-            .filter(|facts| same_pull_request(&facts.target(), asked))
-        else {
-            return false;
+        let facts = held.form.offer.clone();
+        let typed_name = held.draft.agent_name.trim().to_string();
+        let Some(project) = project else {
+            self.reopen_pull_request_form_with(held, question);
+            return true;
         };
-        let typed_name = draft.agent_name.trim().to_string();
-        let Some(project) = self
-            .engine
-            .projects
-            .iter()
-            .find(|project| &project.id == project_id)
-            .cloned()
-        else {
-            return false;
-        };
-        self.clone_draft = None;
         let request = CreateAgentRequest::PullRequest {
             project,
             host: facts.host,
@@ -605,5 +853,45 @@ impl App {
             question.warning.clone(),
         );
         true
+    }
+
+    /// Put the form back as it was sent, with the server's question in place of
+    /// whatever it was told before, unticked.
+    fn reopen_pull_request_form_with(&mut self, held: PrCloneAwaiting, question: &ReviewCopyAsk) {
+        let PrCloneAwaiting {
+            mut form, draft, ..
+        } = held;
+        if let (Some(reason), Some(copy_branch)) = (&question.reason, &question.copy_branch) {
+            let outlook = ReviewCopyOutlook::Needed {
+                reason: reason.clone(),
+                branch: form.offer.head_branch.clone(),
+                copy_branch: copy_branch.clone(),
+                warning: question.warning.clone(),
+            };
+            if draft.agent_name.trim() == form.head_branch() {
+                form.review_copy = outlook;
+            } else {
+                form.checked_review = Some((draft.agent_name.trim().to_string(), outlook));
+            }
+        }
+        form.review_copy_agreed = false;
+        form.checking = false;
+        form.submit_pending = false;
+        form.error = None;
+        let mut agent_name = TextInput::new().with_char_map(agent_name_char_map);
+        agent_name.set_text(draft.agent_name);
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::CloneProject {
+            address: TextInput::with_text(form.offer.address.clone()),
+            destination: TextInput::with_text(draft.destination),
+            destination_edited: draft.destination_edited,
+            start_folder: draft.start_folder,
+            agent_name,
+            randomize_name: false,
+            randomized_name: None,
+            focus: CloneProjectFocus::ReviewCopyCheckbox,
+            pull_request: Some(Box::new(form)),
+        };
     }
 }

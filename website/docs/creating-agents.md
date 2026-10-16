@@ -361,10 +361,11 @@ every project you have.
   code. The folder and the agent's name are editable, and **Choose an existing project**
   keeps the project picker one stop away. When dux can tell before cloning or adding that
   the agent would need a [review copy](#naming-and-fetching), the offer says so and asks
-  first: the same warning and unticked **Create a review copy** box as below, and the
-  button stays disabled until it is ticked. A reference with no number, or a pull request dux
-  could not look up, gets the project picker instead, with the lookup's own sentence when
-  that is what failed.
+  first: the same warning and unticked **Create a review copy** box as below, and dux
+  won't clone or add until you tick it. A name you type that is spelled like a review
+  copy of the pull request's branch gets the same question. A reference with no number,
+  or a pull request dux could not look up, gets the project picker instead, with the
+  lookup's own sentence when that is what failed.
 
 > [!IMPORTANT]
 > The clone is the same one [Cloning a repository](#cloning-a-repository) does. It uses

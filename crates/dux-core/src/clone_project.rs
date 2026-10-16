@@ -260,6 +260,9 @@ pub struct FolderReviewCopyQuery<'a> {
     pub number: u64,
     pub head_branch: &'a str,
     pub head_commit: Option<&'a str>,
+    /// The name the agent will be given: one spelled like a review copy of the
+    /// branch asks for a copy, until a local branch of that name exists.
+    pub agent_name: Option<&'a str>,
 }
 
 /// How long a folder check waits for the repository to say whether a review
@@ -298,15 +301,30 @@ pub fn check_pr_destination(
                 query.head_commit.map(String::from),
             );
             let number = query.number;
+            let typed = query
+                .agent_name
+                .filter(|name| *name != query.head_branch)
+                .map(String::from);
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(crate::agent_job::folder_review_copy_outlook(
-                    &folder,
-                    &root,
-                    &branch,
-                    commit.as_deref(),
-                    number,
-                ));
+                // The rule the add itself follows for a typed name.
+                let outlook = match typed {
+                    Some(name) if crate::git::local_branch_exists(&folder, &name) => {
+                        ReviewCopyOutlook::NotNeeded
+                    }
+                    Some(name) => {
+                        crate::agent_job::typed_copy_review_outlook(&branch, &name, number)
+                            .unwrap_or(ReviewCopyOutlook::NotNeeded)
+                    }
+                    None => crate::agent_job::folder_review_copy_outlook(
+                        &folder,
+                        &root,
+                        &branch,
+                        commit.as_deref(),
+                        number,
+                    ),
+                };
+                let _ = tx.send(outlook);
             });
             Some(
                 rx.recv_timeout(REVIEW_COPY_CHECK_TIMEOUT)
@@ -1356,6 +1374,48 @@ mod tests {
                 "{what}: {refused}"
             );
         }
+        // A checkout is told whether a name typed like a review copy of the
+        // pull request's branch needs the copy: it does until a local branch of
+        // that name exists, and a name that is not spelled like a copy does not.
+        let ask = |name: &str| {
+            check_pr_destination(
+                &ours.to_string_lossy(),
+                &target,
+                &policy,
+                &[],
+                Some(FolderReviewCopyQuery {
+                    worktrees_root: &root.join("worktrees"),
+                    number: 3,
+                    head_branch: "fix-docs",
+                    head_commit: None,
+                    agent_name: Some(name),
+                }),
+            )
+            .expect("a checkout")
+            .review_copy
+        };
+        let Some(ReviewCopyOutlook::Needed {
+            reason,
+            copy_branch,
+            ..
+        }) = ask("fix-docs-review")
+        else {
+            panic!("a typed review copy name needs the copy");
+        };
+        assert_eq!(
+            (reason.as_str(), copy_branch.as_str()),
+            ("typed", "fix-docs-review")
+        );
+        assert_eq!(ask("my-own-name"), Some(ReviewCopyOutlook::NotNeeded));
+        let made = crate::git::test_support::git_command()
+            .arg("-C")
+            .arg(&ours)
+            .args(["branch", "fix-docs-review"])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert_eq!(ask("fix-docs-review"), Some(ReviewCopyOutlook::NotNeeded));
+
         let refused = inspect(&ours, &[project.as_str()])
             .expect_err("a folder that is already a project")
             .to_string();

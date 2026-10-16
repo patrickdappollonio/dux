@@ -303,6 +303,9 @@ pub struct App {
     /// The pull-request clone form's pending folder check. One-shot: set when
     /// a check starts, cleared when its answer lands or the form is gone.
     pub(crate) pr_clone_check_rx: Option<mpsc::Receiver<PrCloneFolderAnswer>>,
+    /// The pull request clone this surface last started, until a question
+    /// about it arrives or a bound passes.
+    pub(crate) pr_clone_awaiting: Option<PrCloneAwaiting>,
     /// Payload channel for the in-flight release-notes worker. The keyed
     /// busy→final status rides the engine's own worker channel; only the notes
     /// themselves come back here. `Some` means a fetch is in flight, which is
@@ -4329,7 +4332,9 @@ mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
 mod pr_clone;
-pub(crate) use pr_clone::{PrCloneFolderAnswer, PrFolder, PrReviewQuestion, PullRequestClone};
+pub(crate) use pr_clone::{
+    PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PrFolder, PrReviewQuestion, PullRequestClone,
+};
 mod project_actions;
 mod pty_ownership;
 mod redraw;
@@ -4661,6 +4666,7 @@ impl App {
             unpushed_count_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
+            pr_clone_awaiting: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),

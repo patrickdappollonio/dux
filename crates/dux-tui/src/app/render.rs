@@ -9489,8 +9489,11 @@ impl App {
 
         let body = self.hanging_prose_lines(&form.body(), text_style, " ", inner_width);
         let facts = Prose::new()
-            .name(ellipsize_middle(&form.offer.title, 56))
-            .text(" on branch ")
+            .name(ellipsize_middle(
+                &dux_core::bidi::strip_bidi_controls(&form.offer.title),
+                56,
+            ))
+            .text(" from branch ")
             .name(form.head_branch());
         let facts_lines = self.hanging_prose_lines(&facts, hint_style, " ", inner_width);
 
@@ -9500,7 +9503,7 @@ impl App {
         let (question_lines, has_box) = match form.question_for(&agent_name.text) {
             PrReviewQuestion::Needed(warning) => (
                 self.hanging_prose_lines(
-                    &Prose::from_segments(warning.to_vec()),
+                    &Prose::from_segments(warning),
                     Style::default().fg(self.theme.warning_fg),
                     " ",
                     inner_width,
@@ -9509,7 +9512,7 @@ impl App {
             ),
             PrReviewQuestion::NoFreeName(message) => (
                 self.hanging_prose_lines(
-                    &Prose::from_segments(message.to_vec()),
+                    &Prose::from_segments(message),
                     Style::default().fg(self.theme.status_error_fg),
                     " ",
                     inner_width,
@@ -9689,11 +9692,10 @@ impl App {
             ),
             Hint::maybe_key(focus_key, "focus"),
         ];
-        if matches!(
-            *focus,
-            CloneProjectFocus::ReviewCopyCheckbox | CloneProjectFocus::ChooseExisting
-        ) {
-            hints.push(Hint::plain("Space toggle"));
+        match *focus {
+            CloneProjectFocus::ReviewCopyCheckbox => hints.push(Hint::plain("Space toggle")),
+            CloneProjectFocus::ChooseExisting => hints.push(Hint::plain("Space act on focus")),
+            _ => {}
         }
         hints.push(Hint::key(close_key, "cancel").pinned());
         Paragraph::new(modal_hint_line(&self.theme, &hints, areas[16].width))

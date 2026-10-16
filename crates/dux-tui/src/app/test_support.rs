@@ -278,6 +278,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         unpushed_count_rx: None,
         rename_pushed_rx: None,
         pr_clone_check_rx: None,
+        pr_clone_awaiting: None,
         notes_fetch_rx: None,
         deferred_first_load_notes: None,
         notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(

@@ -7,6 +7,16 @@ use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, Workt
 /// separator) while the address names no repository yet.
 pub(crate) fn clone_destination_for(start_folder: &Path, address: &str) -> String {
     let name = dux_core::clone_project::clone_dir_name(address).unwrap_or_default();
+    // A start folder spelled relative to the working directory would be read
+    // against the server's directory by the clone, not this one.
+    let start_folder = if start_folder.is_relative() {
+        start_folder
+            .canonicalize()
+            .or_else(|_| std::path::absolute(start_folder))
+            .unwrap_or_else(|_| start_folder.to_path_buf())
+    } else {
+        start_folder.to_path_buf()
+    };
     start_folder.join(name).display().to_string()
 }
 
@@ -5184,6 +5194,7 @@ mod tests {
             unpushed_count_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
+            pr_clone_awaiting: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(

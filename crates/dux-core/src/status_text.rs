@@ -71,6 +71,14 @@ pub struct ReviewCopyAsk {
     /// The pull request that create was for, set with `project_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+    /// Set with `pull_request` and no `project_id` when the clone or add was
+    /// refused before anything was made: why the copy is needed (the word the
+    /// warning's reason begins with) and the branch it would be made on, which
+    /// an agreement must name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_branch: Option<String>,
 }
 
 /// Whether creating an agent from a pull request will need a review copy,

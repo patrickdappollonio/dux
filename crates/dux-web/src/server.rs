@@ -5916,6 +5916,8 @@ mod tests {
                     by_flag: false,
                     project_id: None,
                     pull_request: None,
+                    reason: None,
+                    copy_branch: None,
                 },
             ))),
             scope: StatusScope::All,

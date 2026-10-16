@@ -612,10 +612,8 @@ impl App {
                 // agent for want of that agreement leaves its project behind. The
                 // name prompt for it opens with the question, and the sentence
                 // still goes on the status line below.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask
-                    && let Some(key) = &key
-                {
-                    self.reopen_pull_request_after_clone(key, question);
+                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask {
+                    self.reopen_pull_request_after_clone(question);
                 }
                 // A refused create that asks for agreement to a review copy is
                 // answered in the name prompt, not on the status line, and the

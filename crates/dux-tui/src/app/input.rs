@@ -5698,6 +5698,8 @@ impl App {
         else {
             return;
         };
+        // What the pull request's form must forget when a field changes.
+        let mut changed = None;
         match *focus {
             CloneProjectFocus::Address if pull_request.is_some() => {}
             CloneProjectFocus::Address => {
@@ -5715,21 +5717,22 @@ impl App {
                 edit(destination);
                 if destination.text != before {
                     *destination_edited = true;
+                    changed = Some(PrEdit::Folder);
                 }
             }
             CloneProjectFocus::AgentName => {
+                let before = agent_name.text.clone();
                 edit(agent_name);
-                // The question belongs to the pull request's own branch name:
-                // a name typed away from it, and back, asks again.
-                if let Some(form) = pull_request
-                    && agent_name.text.trim() != form.head_branch()
-                {
-                    form.review_copy_agreed = false;
+                if agent_name.text != before {
+                    changed = Some(PrEdit::Name);
                 }
             }
             CloneProjectFocus::RandomizedNameCheckbox
             | CloneProjectFocus::ReviewCopyCheckbox
             | CloneProjectFocus::ChooseExisting => {}
+        }
+        if let (Some(edit), Some(_)) = (changed, pull_request) {
+            self.note_pr_clone_edit(edit);
         }
     }
 
@@ -29949,6 +29952,46 @@ cyan = "#00ffff"
         }
     }
 
+    fn pr_form_mut(app: &mut App) -> &mut crate::app::PullRequestClone {
+        match &mut app.prompt {
+            PromptState::CloneProject {
+                pull_request: Some(form),
+                ..
+            } => form,
+            other => panic!("expected the pull request form, got {other:?}"),
+        }
+    }
+
+    /// Hand the form a folder check's answer for the fields as they stand,
+    /// as the press that asked for it (`pressed`) or as the check on open.
+    fn apply_pr_answer(
+        app: &mut App,
+        pressed: bool,
+        result: Result<
+            (
+                crate::app::PrFolder,
+                Option<dux_core::status_text::ReviewCopyOutlook>,
+            ),
+            String,
+        >,
+    ) {
+        let (_, destination, name, _) = clone_prompt_fields(app);
+        let edits = pr_form(app).edits;
+        pr_form_mut(app).submit_pending = pressed;
+        app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
+            destination: destination.trim().to_string(),
+            agent_name: name.trim().to_string(),
+            edits,
+            result,
+        });
+    }
+
+    fn checkout_of(app: &App) -> crate::app::PrFolder {
+        crate::app::PrFolder::Checkout {
+            path: clone_prompt_fields(app).1,
+        }
+    }
+
     const PR_REFERENCE: &str = "https://github.com/acme/widget/pull/3";
 
     /// Resolve `PR_REFERENCE` to no project and the given offer, then let the
@@ -30333,18 +30376,15 @@ cyan = "#00ffff"
 
         // A press whose check finds a checkout switches the form to the add
         // and waits for another press, so the user agrees to what will run.
-        let held = crate::app::PrFolder::Checkout {
-            path: destination.clone(),
-        };
-        let answer = |result| crate::app::PrCloneFolderAnswer {
-            destination: destination.clone(),
-            purpose: crate::app::pr_clone::PrFolderCheck::Submit,
-            result,
-        };
-        app.apply_pr_clone_folder_answer(answer(Ok((
-            held.clone(),
-            Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
-        ))));
+        let held = checkout_of(&app);
+        apply_pr_answer(
+            &mut app,
+            true,
+            Ok((
+                held.clone(),
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        );
         assert_eq!(pr_form(&app).folder, held);
         assert_eq!(
             app.status.tone(),
@@ -30360,13 +30400,17 @@ cyan = "#00ffff"
             })
         ));
         // The same answer again is what the press agreed to: it goes ahead.
-        app.apply_pr_clone_folder_answer(answer(Ok((
-            held,
-            Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
-        ))));
+        apply_pr_answer(
+            &mut app,
+            true,
+            Ok((
+                held,
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         // A check that refuses the folder says why in the form and sends nothing.
-        app.apply_pr_clone_folder_answer(answer(Err("That folder is taken.".to_string())));
+        apply_pr_answer(&mut app, true, Err("That folder is taken.".to_string()));
         assert_eq!(
             pr_form(&app).error.as_deref(),
             Some("That folder is taken.")
@@ -30502,15 +30546,15 @@ cyan = "#00ffff"
         );
         app.toggle_pr_clone_review_copy();
         assert!(pr_form(&app).review_copy_agreed);
-        let destination = clone_prompt_fields(&app).1;
-        app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
-            destination: destination.clone(),
-            purpose: crate::app::pr_clone::PrFolderCheck::Open,
-            result: Ok((
-                crate::app::PrFolder::Checkout { path: destination },
+        let held = checkout_of(&app);
+        apply_pr_answer(
+            &mut app,
+            false,
+            Ok((
+                held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
             )),
-        });
+        );
         assert!(!pr_form(&app).review_copy_agreed);
     }
 
@@ -30547,28 +30591,20 @@ cyan = "#00ffff"
         assert!(app.pr_clone_check_rx.is_some(), "another name goes ahead");
     }
 
-    #[test]
-    fn a_clone_that_kept_its_project_for_want_of_a_review_copy_answer_reopens_the_name_prompt() {
-        let start = tempdir().expect("start folder");
-        let mut app = app_with_start_folder(start.path());
-        let project = app.engine.projects[0].clone();
-        let offer = pr_offer(
-            "fix-docs",
-            dux_core::status_text::ReviewCopyOutlook::Unknown,
+    /// A review-copy ask for the pull request of `pr_offer`, as the server
+    /// puts it on a final: with a project when a clone or add left one behind
+    /// without an agent, and without one when it refused before making any.
+    fn pr_review_copy_final(
+        key: &str,
+        project_id: Option<String>,
+    ) -> dux_core::engine::StatusUpdate {
+        let mut update = dux_core::engine::StatusUpdate::keyed(
+            key,
+            crate::statusline::StatusTone::Error,
+            "The server's sentence about the review copy.",
         );
-        app.clone_draft = Some(crate::app::CloneDraft {
-            op_id: "clone-op".to_string(),
-            restorable: false,
-            address: offer.address.clone(),
-            destination: "/srv/widget".to_string(),
-            destination_edited: false,
-            start_folder: start.path().to_path_buf(),
-            agent_name: "fix-docs".to_string(),
-            randomize_name: false,
-            randomized_name: None,
-            pull_request: Some(offer.clone()),
-        });
-        let ask = dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
+        let with_project = project_id.is_some();
+        update.ask = Some(dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
             dux_core::status_text::ReviewCopyAsk {
                 warned: "busy:fix-docs-review".to_string(),
                 warning: dux_core::prose::Prose::new()
@@ -30578,17 +30614,43 @@ cyan = "#00ffff"
                     .into_segments(),
                 request: None,
                 by_flag: false,
-                project_id: Some(project.id.clone()),
-                pull_request: Some(offer.target()),
+                project_id,
+                pull_request: Some(
+                    pr_offer(
+                        "fix-docs",
+                        dux_core::status_text::ReviewCopyOutlook::Unknown,
+                    )
+                    .target(),
+                ),
+                reason: (!with_project).then(|| "busy".to_string()),
+                copy_branch: (!with_project).then(|| "fix-docs-review".to_string()),
             },
-        ));
-        let mut update = dux_core::engine::StatusUpdate::keyed(
-            "clone-op",
-            crate::statusline::StatusTone::Error,
-            "Cloned and added project widget. Agent still needs your answer on a review copy.",
+        )));
+        update
+    }
+
+    #[test]
+    fn a_clone_that_kept_its_project_for_want_of_a_review_copy_answer_reopens_the_name_prompt() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        let project = app.engine.projects[0].clone();
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::Unknown,
+            ),
         );
-        update.ask = Some(ask);
-        app.apply_reaction(dux_core::engine::EventReaction::Status(update));
+        // The clone started; its own answer then succeeded, which settles the
+        // draft the worker would have handed back.
+        app.pr_clone_awaiting = app.pr_clone_snapshot();
+        app.clone_draft = None;
+        app.prompt = PromptState::None;
+
+        // The create the clone handed off to answers under a key of its own.
+        app.apply_reaction(dux_core::engine::EventReaction::Status(
+            pr_review_copy_final("the-creates-own-key", Some(project.id.clone())),
+        ));
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -30613,30 +30675,300 @@ cyan = "#00ffff"
             }
             other => panic!("expected the name prompt with the question, got {other:?}"),
         }
-        assert!(
-            app.status.text().starts_with("Cloned and added project"),
+        assert_eq!(
+            app.status.text(),
+            "The server's sentence about the review copy.",
             "the status line still carries the sentence"
         );
 
-        // A question that is not this surface's clone is left to the status line.
+        // The record is spent, so the same question again is left to the line.
         app.prompt = PromptState::None;
-        let mut update = dux_core::engine::StatusUpdate::keyed(
-            "someone-elses-op",
-            crate::statusline::StatusTone::Error,
-            "Cloned elsewhere.",
-        );
-        update.ask = Some(dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
-            dux_core::status_text::ReviewCopyAsk {
-                warned: "busy:x".to_string(),
-                warning: Vec::new(),
-                request: None,
-                by_flag: false,
-                project_id: Some(project.id),
-                pull_request: Some(offer.target()),
-            },
-        )));
-        app.apply_reaction(dux_core::engine::EventReaction::Status(update));
+        app.apply_reaction(dux_core::engine::EventReaction::Status(
+            pr_review_copy_final("another-key", Some(project.id)),
+        ));
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn a_clone_the_server_refused_for_want_of_a_review_copy_answer_reopens_the_form_with_the_question()
+     {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        let sent_from = clone_prompt_fields(&app).1;
+        app.pr_clone_awaiting = app.pr_clone_snapshot();
+        app.prompt = PromptState::None;
+
+        // Nothing was cloned or added, so the final names no project.
+        app.apply_reaction(dux_core::engine::EventReaction::Status(
+            pr_review_copy_final("the-clones-key", None),
+        ));
+
+        let (_, destination, name, focus) = clone_prompt_fields(&app);
+        assert_eq!((destination, name.as_str()), (sent_from, "fix-docs"));
+        assert_eq!(focus, CloneProjectFocus::ReviewCopyCheckbox);
+        assert!(!pr_form(&app).review_copy_agreed, "unticked");
+        // Ticking it makes the request carry the reason and copy branch the
+        // refusal named.
+        app.toggle_pr_clone_review_copy();
+        let Some(dux_core::engine::Command::CloneProject { review_copy, .. }) =
+            app.pull_request_clone_command()
+        else {
+            panic!("the form builds a clone request");
+        };
+        assert_eq!(
+            review_copy,
+            dux_core::clone_project::UpfrontReviewCopy {
+                agreed: true,
+                reason: Some("busy".to_string()),
+                branch: Some("fix-docs-review".to_string()),
+                by_flag: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_name_typed_like_a_review_copy_is_asked_about_before_the_clone() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-review");
+        assert_eq!(clone_prompt_fields(&app).2, "fix-docs-review");
+        assert!(matches!(
+            pr_form(&app).question_for("fix-docs-review"),
+            crate::app::PrReviewQuestion::Needed(_)
+        ));
+        // Enter is refused until the box is ticked, and the agreement names
+        // the typed name as the copy.
+        tap(&mut app, KeyCode::Enter);
+        assert!(app.pr_clone_check_rx.is_none(), "nothing is sent");
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ReviewCopyCheckbox
+        );
+        app.toggle_pr_clone_review_copy();
+        let Some(dux_core::engine::Command::CloneProject { review_copy, .. }) =
+            app.pull_request_clone_command()
+        else {
+            panic!("the form builds a clone request");
+        };
+        assert_eq!(
+            (review_copy.reason.as_deref(), review_copy.branch.as_deref()),
+            (Some("typed"), Some("fix-docs-review"))
+        );
+        // Any other name needs no question.
+        tap(&mut app, KeyCode::BackTab);
+        tap(&mut app, KeyCode::Backspace);
+        assert!(matches!(
+            pr_form(&app).question_for(&clone_prompt_fields(&app).2),
+            crate::app::PrReviewQuestion::None
+        ));
+
+        // In a checkout the folder says whether a branch of that name exists.
+        let held = checkout_of(&app);
+        type_text(&mut app, "w");
+        apply_pr_answer(
+            &mut app,
+            false,
+            Ok((
+                held,
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        );
+        assert!(matches!(
+            pr_form(&app).question_for("fix-docs-review"),
+            crate::app::PrReviewQuestion::None
+        ));
+    }
+
+    #[test]
+    fn an_edit_while_the_press_is_being_checked_cancels_it_out_loud() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        // The press goes out for its folder check, and the name is edited
+        // before the answer lands.
+        tap(&mut app, KeyCode::Enter);
+        assert!(pr_form(&app).submit_pending);
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "x");
+        assert_eq!(
+            pr_form(&app).error.as_deref(),
+            Some(
+                "That changed while the folder was being checked, so nothing will be sent. \
+                 Press Enter again."
+            )
+        );
+        settle_pr_clone_check(&mut app);
+        assert_eq!(
+            app.status.text(),
+            "The form changed while the folder was being checked, so nothing was sent. Press \
+             Enter again."
+        );
+        assert_ne!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "the engine was never asked"
+        );
+
+        // An empty name is never sent, whatever the form said when the press
+        // went out.
+        let name_is_empty = |app: &mut App| {
+            if let PromptState::CloneProject { agent_name, .. } = &mut app.prompt {
+                agent_name.clear();
+            }
+        };
+        name_is_empty(&mut app);
+        apply_pr_answer(&mut app, true, Ok((crate::app::PrFolder::Free, None)));
+        assert_eq!(app.status.text(), "Type a name for the agent, or cancel.");
+    }
+
+    #[test]
+    fn editing_the_folder_puts_the_form_back_to_the_offer_at_once() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(&mut app, pr_offer("fix-docs", needed_outlook()));
+        let held = checkout_of(&app);
+        apply_pr_answer(
+            &mut app,
+            false,
+            Ok((
+                held,
+                Some(dux_core::status_text::ReviewCopyOutlook::NoFreeName {
+                    reason: "busy".to_string(),
+                    branch: "fix-docs".to_string(),
+                    message: dux_core::prose::Prose::new()
+                        .text("No name is free.")
+                        .into_segments(),
+                }),
+            )),
+        );
+        app.toggle_pr_clone_review_copy();
+        assert!(matches!(
+            pr_form(&app).folder,
+            crate::app::PrFolder::Checkout { .. }
+        ));
+        // A press is out for the old folder when the folder is edited.
+        pr_form_mut(&mut app).submit_pending = true;
+        tap(&mut app, KeyCode::BackTab);
+        tap(&mut app, KeyCode::BackTab);
+        assert_eq!(clone_prompt_fields(&app).3, CloneProjectFocus::Destination);
+        type_text(&mut app, "-other");
+
+        let form = pr_form(&app);
+        assert_eq!(form.folder, crate::app::PrFolder::Free);
+        assert!(!form.review_copy_agreed);
+        assert!(
+            matches!(
+                form.question_for("fix-docs"),
+                crate::app::PrReviewQuestion::Needed(_)
+            ),
+            "the offer's own question, not the old folder's refusal"
+        );
+        assert_eq!(
+            form.error.as_deref(),
+            Some("The folder changed, so nothing will be sent. Press Enter to check it again.")
+        );
+        // The next press checks the new folder instead of repeating the old
+        // answer: it is the unticked box that stops it now.
+        tap(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.status.text(),
+            "This agent needs a separate review copy of the pull request. Tick Create a review \
+             copy to go ahead, or cancel."
+        );
+    }
+
+    #[test]
+    fn a_folder_that_only_changes_the_review_copy_answer_says_so() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        let held = checkout_of(&app);
+        apply_pr_answer(
+            &mut app,
+            false,
+            Ok((
+                held.clone(),
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        );
+        // Still a checkout, but now the copy is needed.
+        apply_pr_answer(&mut app, true, Ok((held, Some(needed_outlook()))));
+        let said = app.status.text();
+        assert!(
+            said.starts_with("The review copy answer for that folder changed."),
+            "{said}"
+        );
+        assert!(
+            !said.contains("instead of cloning"),
+            "the folder is the same one: {said}"
+        );
+        assert!(said.contains("Tick Create a review copy"), "{said}");
+    }
+
+    #[test]
+    fn focus_leaves_the_review_copy_box_when_the_box_goes_away() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(&mut app, pr_offer("fix-docs", needed_outlook()));
+        tap(&mut app, KeyCode::Enter);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ReviewCopyCheckbox
+        );
+        let held = checkout_of(&app);
+        apply_pr_answer(
+            &mut app,
+            false,
+            Ok((
+                held,
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        );
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ChooseExisting,
+            "the next stop that is still there"
+        );
+    }
+
+    #[test]
+    fn a_relative_start_folder_gives_an_absolute_default_destination() {
+        let relative = std::path::Path::new(".");
+        let destination = super::super::sessions::clone_destination_for(
+            relative,
+            "https://example.com/acme/w.git",
+        );
+        assert!(
+            std::path::Path::new(&destination).is_absolute() && destination.ends_with("/w"),
+            "{destination}"
+        );
     }
 
     #[test]
@@ -30801,6 +31133,26 @@ cyan = "#00ffff"
         let before = clone_prompt_fields(&app);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, chip_row));
         assert_eq!(clone_prompt_fields(&app), before);
+
+        // On the button to an existing project the footer says what Space does
+        // there, as every other button's footer does.
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Tab);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ChooseExisting
+        );
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render with the button focused");
+        let shown: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(shown.contains("Space act on focus"), "{shown}");
     }
 
     #[test]
@@ -37254,6 +37606,8 @@ cyan = "#00ffff"
                 by_flag: false,
                 project_id: None,
                 pull_request: None,
+                reason: None,
+                copy_branch: None,
             },
         ));
         let refusal = |key: &str| {

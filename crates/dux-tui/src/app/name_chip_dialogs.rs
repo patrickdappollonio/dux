@@ -1201,7 +1201,7 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
         host: "github.com".to_string(),
         owner_repo: "acme/widget-pr".to_string(),
         number: 3,
-        title: "Fix the docs-pr".to_string(),
+        title: "Fix the \u{202e}docs-pr".to_string(),
         state: "OPEN".to_string(),
         head_branch: "fix-docs-pr".to_string(),
         head_oid: None,
@@ -1234,6 +1234,9 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
                     path: "/srv/code/checkout-pr".to_string(),
                 },
                 review_copy_agreed: false,
+                checked_review: None,
+                edits: 0,
+                submit_pending: false,
                 checking: false,
                 error: None,
             })),
@@ -1243,7 +1246,7 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
     assert_chipped(&app, &buf, "/srv/code/checkout-pr");
     assert_chipped(&app, &buf, "Fix the docs-pr");
     assert_chipped(&app, &buf, "https://ghe.example/acme/widget-pr.git");
-    assert_chipped_on_row(&app, &buf, "on branch", "fix-docs-pr");
+    assert_chipped_on_row(&app, &buf, "from branch", "fix-docs-pr");
     assert_chipped_on_row(&app, &buf, "will be checked out", "fix-docs-pr");
 }
 
