@@ -137,6 +137,19 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the sentence that says how to agree to a review copy",
     ),
     (
+        "dux_core::agent_job::typed_copy_review_outlook",
+        Vetted::Function(
+            "crates/dux-core/src/agent_job.rs",
+            "typed_copy_review_outlook",
+        ),
+        "tells whether a typed agent name is spelled like a review copy of a branch",
+    ),
+    (
+        "dux_core::project_browser::same_directory",
+        Vetted::Function("crates/dux-core/src/project_browser.rs", "same_directory"),
+        "whether two paths name one directory on disk",
+    ),
+    (
         "dux_core::config_keys::NOT_SHOWN",
         Vetted::Data,
         "the placeholder printed for a hidden value",

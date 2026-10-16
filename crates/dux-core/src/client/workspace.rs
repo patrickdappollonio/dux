@@ -1034,7 +1034,21 @@ fn pull_request_anywhere(
         .unwrap_or_else(|| reference.to_string());
     match resolved.projects.as_slice() {
         [project] => {
-            if let Some(path) = path {
+            // Running the command again with the folder the first run used is
+            // how a review copy asked about afterwards is agreed to, so the
+            // project's own folder is not a different folder.
+            let own_folder = path.is_some_and(|path| {
+                let Ok(typed) = output::path_for_target(path, client.remote_name(), cwd) else {
+                    return false;
+                };
+                projects(client).is_ok_and(|all| {
+                    all.iter().any(|p| {
+                        p.id == project.id
+                            && crate::project_browser::same_directory(&p.path, &typed)
+                    })
+                })
+            });
+            if let Some(path) = path.filter(|_| !own_folder) {
                 return Err(CliError::new(
                     Exit::Refused,
                     format!(
@@ -1082,11 +1096,17 @@ fn pull_request_anywhere(
             None => format!("No project in dux is a checkout of {repository}."),
         };
         if let Some(why) = &resolved.clone_unavailable {
+            let why = why.trim_end();
+            let stop = if why.ends_with(['.', '!', '?']) {
+                ""
+            } else {
+                "."
+            };
             sentence.push_str(&format!(
-                " dux could not look the pull request up to offer a clone: {why}"
+                " dux could not look the pull request up to offer a clone: {why}{stop}"
             ));
         }
-        sentence.push_str(" add --project to choose one.");
+        sentence.push_str(" Add --project to choose one.");
         return Err(CliError::new(Exit::Refused, sentence));
     };
 
@@ -1123,43 +1143,61 @@ fn pull_request_anywhere(
         post_for_answer(client, "/api/v1/pull-requests/clone-destination", &check)?;
     let adding = checked.state == "checkout";
 
-    // A checkout's answer is worked out against that folder and replaces the
-    // offer's. Both only describe the agent when it takes the branch's name.
-    let outlook = if adding {
-        checked.review_copy.unwrap_or(ReviewCopyOutlook::Unknown)
+    let typed = name.trim();
+    let refusal_ending = if adding {
+        "Nothing was added."
     } else {
-        offer.review_copy
+        "Nothing was cloned."
     };
-    let mut notice = None;
-    if name.is_empty() || name == offer.head_branch {
-        match outlook {
-            ReviewCopyOutlook::NoFreeName { message, .. } => {
+    // A checkout's answer is worked out against that folder and replaces the
+    // offer's; both describe the agent only when it takes the branch's name. A
+    // name spelled like a copy of the branch is one whatever the branch holds.
+    // An add cannot tell whether a branch of that name already exists, which
+    // makes a copy unnecessary, so the server asks for that one.
+    let outlook = if typed.is_empty() || typed == offer.head_branch {
+        if adding {
+            checked.review_copy.unwrap_or(ReviewCopyOutlook::Unknown)
+        } else {
+            offer.review_copy
+        }
+    } else if adding {
+        ReviewCopyOutlook::NotNeeded
+    } else {
+        crate::agent_job::typed_copy_review_outlook(&offer.head_branch, typed, offer.number)
+            .unwrap_or(ReviewCopyOutlook::NotNeeded)
+    };
+    let mut notices = Vec::new();
+    if !adding && let Some(summary) = &resolved.uninspected_summary {
+        notices.push(format!(
+            "dux could not find a checked project for {repository}. dux could not check every \
+             project ({summary}), so one of them may already be a checkout of it. dux will \
+             clone it, add it as a project, and create the agent from pull request #{}.",
+            offer.number
+        ));
+    }
+    match outlook {
+        ReviewCopyOutlook::NoFreeName { message, .. } => {
+            return Err(CliError::new(
+                Exit::Refused,
+                format!("{} {refusal_ending}", Prose::from_segments(message).plain()),
+            ));
+        }
+        ReviewCopyOutlook::Needed { warning, .. } => {
+            let warning = Prose::from_segments(warning).plain();
+            if !review_copy {
                 return Err(CliError::new(
                     Exit::Refused,
-                    Prose::from_segments(message).plain(),
+                    format!(
+                        "{warning}{} {refusal_ending}",
+                        crate::agent_job::review_copy_how(true)
+                    ),
                 ));
             }
-            ReviewCopyOutlook::Needed { warning, .. } => {
-                let warning = Prose::from_segments(warning).plain();
-                if !review_copy {
-                    return Err(CliError::new(
-                        Exit::Refused,
-                        format!(
-                            "{warning}{} {}",
-                            crate::agent_job::review_copy_how(true),
-                            if adding {
-                                "Nothing was added."
-                            } else {
-                                "Nothing was cloned."
-                            }
-                        ),
-                    ));
-                }
-                notice = Some(warning);
-            }
-            ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => {}
+            notices.push(warning);
         }
+        ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => {}
     }
+    let notice = (!notices.is_empty()).then(|| notices.join("\n"));
 
     let question = if adding {
         format!(
@@ -1184,8 +1222,8 @@ fn pull_request_anywhere(
         // This client agrees with a flag, so a refusal names it.
         "review_copy_by_flag": !review_copy,
     });
-    if !name.is_empty() {
-        body["agent_name"] = json!(name);
+    if !typed.is_empty() {
+        body["agent_name"] = json!(typed);
     }
     let mut planned = Planned::new(
         question,
@@ -1724,6 +1762,9 @@ mod pull_request_anywhere_tests {
             "/api/v1/pull-requests/resolve" => Reply::json(200, &resolve),
             "/api/v1/pull-requests/clone-destination" => Reply::json(200, folder),
             "/api/v1/browse" => Reply::json(200, r#"{"path":"/srv/src","entries":[]}"#),
+            "/api/v1/projects" => {
+                Reply::json(200, r#"[{"id":"p1","name":"app","path":"/src/app"}]"#)
+            }
             _ => Reply::json(404, "{}"),
         });
         let lock_path = dir.path().join("dux.lock");
@@ -1864,12 +1905,6 @@ mod pull_request_anywhere_tests {
             Some("Branch \"fix\" is busy, so the agent would work on a review copy.")
         );
         assert_eq!(agreed.body.as_ref().unwrap()["review_copy"], true);
-        assert!(
-            dux.fake
-                .seen()
-                .iter()
-                .all(|seen| seen.path != "/api/v1/projects?operation=1")
-        );
     }
 
     #[test]
@@ -1894,9 +1929,51 @@ mod pull_request_anywhere_tests {
         let refused = none.plan(None, true, None).err().unwrap();
         assert_eq!(
             refused.message,
-            "Every review name is taken. Type another name for the agent from PR #5."
+            "Every review name is taken. Type another name for the agent from PR #5. Nothing was cloned."
         );
         assert!(none.plan(None, false, Some("elsewhere")).is_ok());
+    }
+
+    #[test]
+    fn a_typed_name_spelled_like_a_copy_is_asked_about_and_names_are_trimmed() {
+        let clone = dux(free(NOT_NEEDED), FREE_FOLDER);
+        let refused = clone.plan(None, false, Some(" fix-review ")).err().unwrap();
+        assert_eq!(refused.exit, Exit::Refused);
+        assert!(
+            refused.message.ends_with(
+                " To go ahead anyway, run the command again with --review-copy. Nothing was cloned."
+            ),
+            "{}",
+            refused.message
+        );
+        let agreed = clone.plan(None, true, Some("fix-review")).unwrap();
+        assert!(agreed.notice.is_some());
+        // Spaces around the branch's own name do not make it another name.
+        let offered = dux(free(NEEDED), FREE_FOLDER);
+        assert!(offered.plan(None, false, Some(" fix ")).is_err());
+        // An add cannot tell whether a branch of that name exists, so the
+        // server asks.
+        let add = dux(free(NOT_NEEDED), CHECKOUT_PLAIN);
+        assert!(
+            add.plan(Some("/work/other"), false, Some("fix-review"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_incomplete_check_of_projects_is_said_before_the_clone_is_asked() {
+        let reply = resolve_reply("[]", Some(NOT_NEEDED), None).replace(
+            r#""uninspected_summary":null"#,
+            r#""uninspected_summary":"1 has an address dux could not read""#,
+        );
+        let dux = dux(reply, FREE_FOLDER);
+        let planned = dux.plan(None, false, None).unwrap();
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "dux could not find a checked project for github.com/octo/other. dux could not check every project (1 has an address dux could not read), so one of them may already be a checkout of it. dux will clone it, add it as a project, and create the agent from pull request #5."
+            )
+        );
     }
 
     #[test]
@@ -1911,6 +1988,8 @@ mod pull_request_anywhere_tests {
             "Create an agent from pull request octo/other#5 in project app"
         );
         assert_eq!(planned.body.unwrap()["project_id"], "p1");
+        // The folder of the project itself is not a different folder.
+        assert!(one.plan(Some("/src/app"), false, None).is_ok());
         let refused = one.plan(Some("/x"), false, None).err().unwrap();
         assert_eq!(
             refused.message,
@@ -1938,7 +2017,19 @@ mod pull_request_anywhere_tests {
         let refused = none.plan(None, false, None).err().unwrap();
         assert_eq!(
             refused.message,
-            "No project in dux is a checkout of github.com/octo/other. dux could not look the pull request up to offer a clone: Failed to resolve PR #5. add --project to choose one."
+            "No project in dux is a checkout of github.com/octo/other. dux could not look the pull request up to offer a clone: Failed to resolve PR #5. Add --project to choose one."
+        );
+        let unpunctuated = dux(
+            resolve_reply("[]", None, Some("gh did not answer")),
+            FREE_FOLDER,
+        );
+        let refused = unpunctuated.plan(None, false, None).err().unwrap();
+        assert!(
+            refused
+                .message
+                .ends_with("gh did not answer. Add --project to choose one."),
+            "{}",
+            refused.message
         );
     }
 }

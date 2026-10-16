@@ -67,10 +67,18 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
     // config so a reload is reflected; `$HOME` then `/` if the engine is gone.
     let dir = match query.path.filter(|p| !p.is_empty()) {
         Some(p) => p,
-        None => match state.engine.browse_start_dir().await {
-            Some(dir) => dir,
-            None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
-        },
+        None => {
+            let dir = match state.engine.browse_start_dir().await {
+                Some(dir) => dir,
+                None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+            };
+            // A configured start folder may be relative; the answer is the
+            // folder it means, so a client can join onto it.
+            std::path::absolute(&dir)
+                .map(|abs| dux_core::project_browser::canonical_or_original(&abs))
+                .map(|abs| abs.to_string_lossy().into_owned())
+                .unwrap_or(dir)
+        }
     };
 
     if dir.chars().count() > MAX_PATH_LEN {
@@ -304,17 +312,13 @@ mod tests {
     /// This is the web side of the start-directory wiring (the TUI already honored
     /// it). Boots a real engine from a config.toml that points start_directory at a
     /// temp dir and asserts the no-path browse echoes that dir.
-    #[tokio::test]
-    async fn browse_without_a_path_opens_the_configured_start_directory() {
+    /// The no-path browse of an engine whose `defaults.start_directory` is `start`.
+    async fn browse_with_start_directory(start: &str) -> serde_json::Value {
         let cfg_root = tempfile::tempdir().unwrap();
-        let start = tempfile::tempdir().unwrap();
-        std::fs::create_dir(start.path().join("alpha")).unwrap();
-        let start_path = start.path().to_string_lossy().to_string();
-
         // Minimal config: only set the one key under test; everything else defaults.
         std::fs::write(
             cfg_root.path().join("config.toml"),
-            format!("[defaults]\nstart_directory = \"{start_path}\"\n"),
+            format!("[defaults]\nstart_directory = \"{start}\"\n"),
         )
         .unwrap();
 
@@ -342,8 +346,31 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["path"], start_path);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// With `path` omitted, the picker must open at the configured
+    /// `defaults.start_directory` (resolved through the live engine), not `$HOME`.
+    /// This is the web side of the start-directory wiring (the TUI already honored
+    /// it). A relative setting is answered as the absolute folder it means, because
+    /// clients join a folder name onto this answer and the server wants absolute
+    /// destinations.
+    #[tokio::test]
+    async fn browse_without_a_path_opens_the_configured_start_directory() {
+        let start = tempfile::tempdir().unwrap();
+        std::fs::create_dir(start.path().join("alpha")).unwrap();
+        let start_path = start.path().to_string_lossy().to_string();
+
+        let value = browse_with_start_directory(&start_path).await;
+        assert_eq!(
+            value["path"],
+            start
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
         let labels: Vec<&str> = value["entries"]
             .as_array()
             .unwrap()
@@ -351,6 +378,10 @@ mod tests {
             .map(|e| e["label"].as_str().unwrap())
             .collect();
         assert!(labels.contains(&"alpha/"));
+
+        let value = browse_with_start_directory(".").await;
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(value["path"], here.to_string_lossy().as_ref());
     }
 
     #[tokio::test]
