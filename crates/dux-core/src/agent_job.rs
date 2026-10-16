@@ -64,21 +64,6 @@ fn rollback_created_worktree(
         ));
         return;
     };
-    // The branch was moved for this agent, and the agent is not coming, so it
-    // goes back where the user had it. Done inside the worktree that holds the
-    // branch, while it still does, so no other worktree can check the branch
-    // out between the move and the undo; refused if the branch has moved on
-    // since.
-    let mut rewind_failed = false;
-    if let Some(moved) = &rollback.moved_forward
-        && let Err(err) = git::rewind_worktree(worktree, &moved.commit, &moved.old_tip)
-    {
-        logger::warn(&format!(
-            "could not put \"{}\" back from inside its worktree: {err:#}",
-            moved.branch
-        ));
-        rewind_failed = true;
-    }
     let registry = &rollback.registries.processes;
     let ops = &rollback.registries.worktrees;
     // Everything the agent's create started (its startup command, and
@@ -88,6 +73,25 @@ fn rollback_created_worktree(
     sessions.extend(registry.sessions_in(worktree));
     sessions.sort_by_key(|session| (session.sid, session.started_at));
     sessions.dedup();
+    // The branch was moved for this agent, and the agent is not coming, so it
+    // goes back where the user had it. Done inside the worktree that holds the
+    // branch, while it still does, so no other worktree can check the branch
+    // out between the move and the undo, and refused if the branch has moved
+    // on since. Only when nothing runs in the folder: the create's startup
+    // command may be writing there, and the removal below ends it first, so
+    // with anything running the branch is put back after the removal instead.
+    let mut rewind_failed = !sessions.is_empty() && rollback.moved_forward.is_some();
+    if !sessions.is_empty() {
+        // Left to the guarded fallback after the removal.
+    } else if let Some(moved) = &rollback.moved_forward
+        && let Err(err) = git::rewind_worktree(worktree, &moved.commit, &moved.old_tip)
+    {
+        logger::warn(&format!(
+            "could not put \"{}\" back from inside its worktree: {err:#}",
+            moved.branch
+        ));
+        rewind_failed = true;
+    }
     let snapshot = std::sync::OnceLock::new();
     let _ = snapshot.set(crate::process_sessions::snapshot(&sessions));
     let processes = crate::engine::RemovalProcesses {

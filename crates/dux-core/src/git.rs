@@ -2021,19 +2021,43 @@ pub fn worktree_head_contains(worktree: &Path, commit: &str) -> Result<bool> {
 }
 
 /// Fast-forward what `worktree` has checked out to `commit`, files and index
-/// with it. `--ff-only` refuses anything that is not a pure fast-forward and
-/// leaves the branch where it was. The worktree holds the branch, so git keeps
-/// every other worktree from checking it out while this runs.
+/// with it, and confirm it got there. The target must descend from where the
+/// worktree is, and `reset --keep` then moves the branch, index and files:
+/// unlike `merge`, nothing in the user's configuration (`mergeOptions`,
+/// `merge.ff`, a pull strategy) is consulted, and it refuses to overwrite a
+/// local change instead of losing it. The worktree holds the branch, so git
+/// keeps every other worktree from checking it out while this runs.
 pub fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()> {
     if !is_object_id(commit) {
         return Err(anyhow!("a branch moves to a full commit id only"));
     }
-    let out = worktree_git(worktree, &["merge", "--ff-only", "--no-edit", commit])
+    let head = head_commit(worktree)?;
+    let descends = worktree_git(
+        worktree,
+        &["merge-base", "--is-ancestor", &head, commit, "--"],
+    )
+    .stdin(Stdio::null())
+    .output()
+    .with_context(|| format!("failed to inspect {}", worktree.display()))?;
+    if descends.status.code() != Some(0) {
+        return Err(anyhow!(
+            "{commit} is not a fast-forward of {} at {head}",
+            worktree.display()
+        ));
+    }
+    let out = worktree_git(worktree, &["reset", "--keep", "--quiet", commit])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to fast-forward {}", worktree.display()))?;
     if !out.status.success() {
-        return Err(git_failure("git merge --ff-only", worktree, &out));
+        return Err(git_failure("git reset --keep", worktree, &out));
+    }
+    let now = head_commit(worktree)?;
+    if now != commit {
+        return Err(anyhow!(
+            "{} is at {now} after the move, not at {commit}",
+            worktree.display()
+        ));
     }
     Ok(())
 }
@@ -11029,6 +11053,11 @@ mod tests {
         run_git(
             repo.path(),
             &["worktree", "add", wt.to_str().unwrap(), "behind"],
+        );
+        // A user's merge settings must not change what the move does.
+        run_git(
+            repo.path(),
+            &["config", "branch.behind.mergeOptions", "--squash"],
         );
         assert_eq!(head_commit(&wt).unwrap(), base);
         assert!(!worktree_head_contains(&wt, &ahead).unwrap());

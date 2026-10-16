@@ -190,6 +190,7 @@ describe("the reference-first from-PR flow", () => {
           project_id: "p1",
           pr: "https://github.com/acme/widget/pull/17",
           name: "",
+          ask_id: expect.any(String),
         },
       ])
     })
@@ -281,7 +282,13 @@ describe("the reference-first from-PR flow", () => {
     mod.submitNameDialog("")
     await vi.waitFor(() => {
       expect(createBodies()).toEqual([
-        { kind: "from_pr", project_id: "p2", pr: "acme/widget#8", name: "" },
+        {
+          kind: "from_pr",
+          project_id: "p2",
+          pr: "acme/widget#8",
+          name: "",
+          ask_id: expect.any(String),
+        },
       ])
     })
   })
@@ -560,7 +567,13 @@ describe("the reference-first from-PR flow", () => {
 
     await vi.waitFor(() => {
       expect(createBodies()).toEqual([
-        { kind: "from_pr", project_id: "p1", pr: "#123", name: "" },
+        {
+          kind: "from_pr",
+          project_id: "p1",
+          pr: "#123",
+          name: "",
+          ask_id: expect.any(String),
+        },
       ])
     })
     expect(

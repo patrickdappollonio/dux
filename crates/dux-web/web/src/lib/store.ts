@@ -6787,7 +6787,7 @@ export function createAgentFromPr(
   for (const [id, old] of pendingPrSubmissions) {
     if (now - old.at > PENDING_PR_SUBMISSION_MS) pendingPrSubmissions.delete(id)
   }
-  const askId = `pr-${now.toString(36)}-${(prSubmissionSeq++).toString(36)}`
+  const askId = randomAskId()
   pendingPrSubmissions.set(askId, { projectId, pr, name, at: now })
   // The request ends the wait when it fails or the agent exists. A reply of
   // "under way" does not: the answer comes later on the events socket.
@@ -6821,7 +6821,14 @@ const pendingPrSubmissions = new Map<
   string,
   { projectId: string; pr: string; name: string; at: number }
 >()
-let prSubmissionSeq = 0
+
+// 128 random bits as hex, from `getRandomValues`: `randomUUID` does not exist
+// on the plain-HTTP origins dux is served from, and two tabs must not collide.
+function randomAskId(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return `pr-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`
+}
 const PENDING_PR_SUBMISSION_MS = 120_000
 // Keys of the refusals already put to the user as a question.
 const askedKeys = new Set<string>()
