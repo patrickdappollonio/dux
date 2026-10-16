@@ -282,7 +282,10 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     assert_eq!(status, 200, "{body}");
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["state"], "checkout");
-    assert_eq!(value["path"], hand_made.to_string_lossy().as_ref());
+    // The answer names the folder by its canonical spelling, which on macOS
+    // turns the temporary directory's /var into /private/var.
+    let canonical = std::fs::canonicalize(&hand_made).unwrap();
+    assert_eq!(value["path"], canonical.to_string_lossy().as_ref());
     let (status, body) = check_destination(addr, &hand_made, "acme/other").await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(
@@ -290,7 +293,7 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
         format!(
             "{} already holds something that isn't a checkout of github.com/acme/other. \
              Pick another folder.",
-            hand_made.display()
+            canonical.display()
         )
     );
     let not_yet = tmp.path().join("not-yet");
