@@ -84,7 +84,17 @@ pub enum ReviewCopyConsent {
     /// existed), after being shown a warning of this reason, the word a
     /// warning's identifier begins with. Covers a copy for that reason under
     /// whatever name turns out free, and nothing for another reason.
-    Reason(Box<str>),
+    Reason(Box<ShownReason>),
+}
+
+/// The warning an agreement given before the project existed was given for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownReason {
+    /// The word the warning's reason began with.
+    pub kind: String,
+    /// The branch the copy would be made on, when the warning named one; an
+    /// agreement that names none covers the reason under any name.
+    pub branch: Option<String>,
 }
 
 impl ReviewCopyConsent {
@@ -101,9 +111,14 @@ impl ReviewCopyConsent {
 
     /// [`Self::from_request`] for an agreement given before the project
     /// existed, which names the reason it was shown rather than a full warning.
-    pub fn from_upfront(agreed: bool, reason: Option<String>, by_flag: bool) -> Self {
+    pub fn from_upfront(
+        agreed: bool,
+        reason: Option<String>,
+        branch: Option<String>,
+        by_flag: bool,
+    ) -> Self {
         match (agreed, reason) {
-            (true, Some(reason)) => Self::Reason(reason.into()),
+            (true, Some(kind)) => Self::Reason(Box::new(ShownReason { kind, branch })),
             (agreed, _) => Self::from_request(agreed, None, by_flag),
         }
     }
@@ -114,17 +129,27 @@ impl ReviewCopyConsent {
             Self::Withheld | Self::WithheldByFlag => false,
             Self::Blanket => true,
             Self::Warned(seen) => seen == warned,
-            Self::Reason(kind) => warned.split(':').next() == Some(&**kind),
+            Self::Reason(shown) => {
+                // `reason:#number:copy:detail`
+                let mut parts = warned.split(':');
+                parts.next() == Some(shown.kind.as_str())
+                    && shown
+                        .branch
+                        .as_deref()
+                        .is_none_or(|branch| parts.nth(1) == Some(branch))
+            }
         }
     }
 
-    /// Whether this agreement covers a copy for `kind`, before any name or
-    /// holder is known.
-    pub fn covers_reason(&self, kind: &str) -> bool {
+    /// Whether this agreement covers the copy on `copy_branch` for `kind`
+    /// that a warning shown now would describe.
+    pub fn covers_shown(&self, kind: &str, copy_branch: &str) -> bool {
         match self {
             Self::Withheld | Self::WithheldByFlag | Self::Warned(_) => false,
             Self::Blanket => true,
-            Self::Reason(seen) => &**seen == kind,
+            Self::Reason(shown) => {
+                shown.kind == kind && shown.branch.as_deref().is_none_or(|b| b == copy_branch)
+            }
         }
     }
 }

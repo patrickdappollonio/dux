@@ -403,6 +403,13 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             ],
         })
     );
+    // The copy takes the name the create would pick, so a folder already
+    // sitting where its worktree would go counts as taken.
+    std::fs::create_dir_all(tmp.path().join("worktrees/hand-made/feature-review")).unwrap();
+    assert_eq!(
+        review_copy("feature", head.clone()).await["copy_branch"],
+        "feature-review-2"
+    );
     let diverged = review_copy("side", head.clone()).await;
     assert_eq!(diverged["state"], "needed");
     assert_eq!(diverged["reason"], "diverged");

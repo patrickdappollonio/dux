@@ -2311,22 +2311,30 @@ fn look_up_clone_offer(
     offer: dux_core::pr_reference::PullRequestCloneOffer,
 ) -> Result<PullRequestCloneReply, String> {
     let target = offer.target();
-    let metadata = dux_core::gh::look_up_pull_request(
-        gh_program,
-        &dux_core::worker::PullRequestLookup {
-            host: target.host.clone(),
-            owner_repo: target.owner_repo.clone(),
-            number: target.number,
-        },
-    )?;
+    // The two lookups are independent, so they run together and the worst case
+    // stays one bound rather than two.
+    let (metadata, default_branch) = std::thread::scope(|scope| {
+        let default_branch = scope.spawn(|| {
+            dux_core::gh::look_up_default_branch(gh_program, &target.host, &target.owner_repo)
+        });
+        let metadata = dux_core::gh::look_up_pull_request(
+            gh_program,
+            &dux_core::worker::PullRequestLookup {
+                host: target.host.clone(),
+                owner_repo: target.owner_repo.clone(),
+                number: target.number,
+            },
+        );
+        (metadata, default_branch.join().ok().and_then(Result::ok))
+    });
+    let metadata = metadata?;
     // A default branch gh cannot name leaves the offer standing with the
     // question open: it is asked after the project exists instead.
-    let default_branch =
-        dux_core::gh::look_up_default_branch(gh_program, &target.host, &target.owner_repo).ok();
     let review_copy = dux_core::agent_job::clone_review_copy_outlook(
         &metadata.head_ref_name,
         default_branch.as_deref(),
         metadata.number,
+        &|_| true,
     );
     Ok(PullRequestCloneReply {
         address: offer.address,
@@ -2376,6 +2384,7 @@ async fn resolve_pull_request_reference(
         protocols,
         gh_program,
         gh_available,
+        ..
     } = inputs;
     // The same gate the create carries: a raw or stale client must not reach a
     // resolution the create would then refuse.
@@ -2505,6 +2514,7 @@ async fn check_pull_request_clone_destination(
         number: 0,
     };
     let (number, head_branch, head_oid) = (body.number, body.head_branch, body.head_oid);
+    let worktrees_root = inputs.worktrees_root.clone();
     match tokio::task::spawn_blocking(move || {
         let home = std::env::home_dir();
         let projects: Vec<&str> = inputs.projects.iter().map(|p| p.path.as_str()).collect();
@@ -2517,31 +2527,46 @@ async fn check_pull_request_clone_destination(
         )?;
         // The path again, in the form the operation will use.
         let path = dux_core::clone_project::destination_identity(&body.path, home.as_deref())?;
-        // Told from the folder as dux will use it, never from a write.
-        let review_copy = match (state, number, head_branch) {
-            (dux_core::clone_project::PrDestination::Checkout, Some(number), Some(branch)) => {
-                Some(dux_core::agent_job::folder_review_copy_outlook(
-                    &path,
-                    &branch,
-                    head_oid.as_deref(),
-                    number,
-                ))
-            }
-            _ => None,
-        };
-        Ok::<_, dux_core::status_text::StatusText>((state, path, review_copy))
+        Ok::<_, dux_core::status_text::StatusText>((state, path))
     })
     .await
     {
-        Ok(Ok((state, path, review_copy))) => Json(PullRequestCloneDestinationReply {
-            state: match state {
-                dux_core::clone_project::PrDestination::Free => "free",
-                dux_core::clone_project::PrDestination::Checkout => "checkout",
-            },
-            path: path.to_string_lossy().into_owned(),
-            review_copy,
-        })
-        .into_response(),
+        Ok(Ok((state, path))) => {
+            // Told from the folder as dux will use it, never from a write. It
+            // runs several git commands, so it has the same bound a `gh` call
+            // has, and a folder that does not answer in time leaves the
+            // question open for the create to ask.
+            let review_copy = match (state, number, head_branch) {
+                (dux_core::clone_project::PrDestination::Checkout, Some(number), Some(branch)) => {
+                    let folder = path.clone();
+                    let outlook = tokio::task::spawn_blocking(move || {
+                        dux_core::agent_job::folder_review_copy_outlook(
+                            &folder,
+                            &worktrees_root,
+                            &branch,
+                            head_oid.as_deref(),
+                            number,
+                        )
+                    });
+                    Some(
+                        match tokio::time::timeout(REVIEW_COPY_CHECK_TIMEOUT, outlook).await {
+                            Ok(Ok(outlook)) => outlook,
+                            _ => dux_core::status_text::ReviewCopyOutlook::Unknown,
+                        },
+                    )
+                }
+                _ => None,
+            };
+            Json(PullRequestCloneDestinationReply {
+                state: match state {
+                    dux_core::clone_project::PrDestination::Free => "free",
+                    dux_core::clone_project::PrDestination::Checkout => "checkout",
+                },
+                path: path.to_string_lossy().into_owned(),
+                review_copy,
+            })
+            .into_response()
+        }
         Ok(Err(refused)) => (StatusCode::BAD_REQUEST, refused.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2550,3 +2575,7 @@ async fn check_pull_request_clone_destination(
             .into_response(),
     }
 }
+
+/// How long the folder check waits for the repository to say whether a review
+/// copy will be needed, the bound a `gh` call has.
+const REVIEW_COPY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

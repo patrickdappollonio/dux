@@ -98,6 +98,14 @@ pub enum ReviewCopyOutlook {
         /// The warning, in parts.
         warning: Vec<ProseSegment>,
     },
+    /// A copy will be needed and every name it could take is taken, so nothing
+    /// can be done until the user types another name for the agent.
+    NoFreeName {
+        reason: String,
+        branch: String,
+        /// The refusal's sentence, in parts.
+        message: Vec<ProseSegment>,
+    },
 }
 
 impl StatusText {

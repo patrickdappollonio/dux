@@ -554,6 +554,21 @@ fn review_copy_warning(copy: &FreshCopy, number: u64) -> crate::status_text::Sta
     review_copy_warning_after(why, number, &copy.new_branch)
 }
 
+/// How a refusal made before the project exists says to give the agreement:
+/// the command line's flag, or a dialog's box and then its button again.
+pub(crate) fn review_copy_how_before(by_flag: bool, adding: bool) -> &'static str {
+    match (by_flag, adding) {
+        (true, _) => review_copy_how(true),
+        (false, false) => {
+            " To go ahead anyway, tick Create a review copy and press Clone and create again."
+        }
+        (false, true) => {
+            " To go ahead anyway, tick Create a review copy and press Add this folder as a \
+             project again."
+        }
+    }
+}
+
 /// How a refusal for want of agreement says to give it: the command line's
 /// flag, or a dialog's box.
 pub(crate) fn review_copy_how(by_flag: bool) -> &'static str {
@@ -578,17 +593,93 @@ fn needed(
     }
 }
 
+/// Whether nothing is at the folder a worktree of `candidate` would get. Only
+/// a folder that is certainly absent is free.
+pub(crate) fn worktree_folder_is_free(
+    worktrees_root: &Path,
+    project_name: &str,
+    candidate: &str,
+) -> bool {
+    let folder = git::managed_worktree_path(worktrees_root, project_name, candidate);
+    match std::fs::symlink_metadata(&folder) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(_) => false,
+        Err(err) => {
+            logger::error(&format!(
+                "could not check the folder {} for \"{candidate}\"; passing the name over: {err:#}",
+                folder.display()
+            ));
+            false
+        }
+    }
+}
+
+/// The refusal for a pull request whose branch needs a copy when every name
+/// `<branch>-review` up to the limit is taken; `taken` finishes the clause that
+/// says why the branch itself cannot be used.
+fn no_free_review_name(
+    taken: crate::status_text::StatusText,
+    branch: &str,
+    number: u64,
+) -> crate::status_text::StatusText {
+    crate::status_text![
+        "Branch ",
+        q(branch),
+        taken,
+        " and every name up to ",
+        q(review_name(branch, REVIEW_NAME_LIMIT)),
+        " is taken. Type another name for the agent from PR ",
+        n(format!("#{}", number)),
+        "."
+    ]
+}
+
+/// How the branch's trouble ends the clause in [`no_free_review_name`].
+fn taken_clause(reason: &FreshCopyReason) -> crate::status_text::StatusText {
+    match reason {
+        FreshCopyReason::Busy(holder) => crate::status_text![
+            " is checked out at ",
+            q(crate::home_path::shorten_home(&holder.worktree.path))
+        ],
+        FreshCopyReason::Diverged => {
+            crate::status_text![" does not contain the pull request's head commit"]
+        }
+        FreshCopyReason::Unknown(reason) => crate::status_text![format!(
+            ": dux could not check whether it holds the pull request's latest commit ({reason})"
+        )],
+        FreshCopyReason::HolderUnknown(reason) => crate::status_text![format!(
+            ": dux could not check whether it is checked out elsewhere ({reason})"
+        )],
+        FreshCopyReason::Typed => crate::status_text![" has a review copy name"],
+    }
+}
+
+fn no_free_name(
+    kind: &str,
+    branch: &str,
+    message: &crate::status_text::StatusText,
+) -> crate::status_text::ReviewCopyOutlook {
+    crate::status_text::ReviewCopyOutlook::NoFreeName {
+        reason: kind.to_string(),
+        branch: branch.to_string(),
+        message: message.segments().map(<[_]>::to_vec).unwrap_or_default(),
+    }
+}
+
 /// Whether a clone of a repository will need a review copy for pull request
 /// `number`, whose head branch is `head_branch`, told before anything is
 /// cloned. A clone checks out the repository's default branch in the project
 /// folder and has no other local branch, so the agent on the pull request's
 /// own branch needs a copy exactly when that branch is the default one: it is
 /// then checked out in another folder, the case a copy exists for. `None` for
-/// the default branch means it could not be learned.
+/// the default branch means it could not be learned. `name_free` says whether
+/// a copy may take a name; before the project folder is known it can say
+/// nothing but yes.
 pub fn clone_review_copy_outlook(
     head_branch: &str,
     default_branch: Option<&str>,
     number: u64,
+    name_free: &dyn Fn(&str) -> bool,
 ) -> crate::status_text::ReviewCopyOutlook {
     use crate::status_text::ReviewCopyOutlook;
     let Some(default_branch) = default_branch else {
@@ -597,7 +688,17 @@ pub fn clone_review_copy_outlook(
     if default_branch != head_branch {
         return ReviewCopyOutlook::NotNeeded;
     }
-    let copy_branch = review_name(head_branch, 1);
+    let taken = crate::status_text![" will be checked out in the project folder"];
+    let Some(copy_branch) = (1..=REVIEW_NAME_LIMIT)
+        .map(|n| review_name(head_branch, n))
+        .find(|candidate| name_free(candidate))
+    else {
+        return no_free_name(
+            BUSY_KIND,
+            head_branch,
+            &no_free_review_name(taken, head_branch, number),
+        );
+    };
     let why = crate::status_text![
         "Branch ",
         q(head_branch),
@@ -607,15 +708,43 @@ pub fn clone_review_copy_outlook(
     needed(BUSY_KIND, head_branch, copy_branch, &warning)
 }
 
+/// Whether the agent will need a review copy when the user types `typed` as
+/// its name for pull request `number` with head branch `head_branch`: a name
+/// spelled like a review copy of the branch is one, whatever the branch's own
+/// state. `None` for any other name. The caller says whether a branch of that
+/// name already exists, which is a different question the create answers.
+pub fn typed_copy_review_outlook(
+    head_branch: &str,
+    typed: &str,
+    number: u64,
+) -> Option<crate::status_text::ReviewCopyOutlook> {
+    if typed == head_branch || !is_copy_of(typed, head_branch) {
+        return None;
+    }
+    let copy = FreshCopy {
+        busy_branch: head_branch.to_string(),
+        reason: FreshCopyReason::Typed,
+        new_branch: typed.to_string(),
+    };
+    Some(needed(
+        copy.reason.kind(),
+        head_branch,
+        typed.to_string(),
+        &review_copy_warning(&copy, number),
+    ))
+}
+
 /// Whether adding the checkout at `repo_path` as a project will need a review
 /// copy for pull request `number`, whose head branch is `head_branch` and head
 /// commit `head_commit`, told before anything is added. The same rule the
 /// create follows, applied to what the folder holds now: nothing is fetched or
 /// written, so a head commit the folder does not have cannot be compared, and
 /// the answer is unknown unless the branch is held elsewhere, which needs no
-/// comparison.
+/// comparison. The copy's name is the one the create would pick, so the
+/// project's managed worktree folders under `worktrees_root` count as taken.
 pub fn folder_review_copy_outlook(
     repo_path: &Path,
+    worktrees_root: &Path,
     head_branch: &str,
     head_commit: Option<&str>,
     number: u64,
@@ -653,11 +782,19 @@ pub fn folder_review_copy_outlook(
         }
         HeadBranchVerdict::Copy(reason) => reason,
     };
+    let project_name = crate::wire::display_project_name("", &repo_path.to_string_lossy());
     let Some(new_branch) = (1..=REVIEW_NAME_LIMIT)
         .map(|n| review_name(head_branch, n))
-        .find(|candidate| branch_name_is_free(repo_path, candidate))
+        .find(|candidate| {
+            branch_name_is_free(repo_path, candidate)
+                && worktree_folder_is_free(worktrees_root, &project_name, candidate)
+        })
     else {
-        return ReviewCopyOutlook::Unknown;
+        return no_free_name(
+            reason.kind(),
+            head_branch,
+            &no_free_review_name(taken_clause(&reason), head_branch, number),
+        );
     };
     let copy = FreshCopy {
         busy_branch: head_branch.to_string(),
@@ -1208,32 +1345,11 @@ impl CreatePlanContext<'_> {
             .map(|n| review_name(resolved_name, n))
             .find(|candidate| self.review_name_is_free(project, repo_path, candidate));
         let Some(new_branch) = free else {
-            let taken = match &reason {
-                FreshCopyReason::Busy(holder) => crate::status_text![
-                    " is checked out at ",
-                    q(crate::home_path::shorten_home(&holder.worktree.path))
-                ],
-                FreshCopyReason::Diverged => {
-                    crate::status_text![" does not contain the pull request's head commit"]
-                }
-                FreshCopyReason::Unknown(reason) => crate::status_text![format!(
-                    ": dux could not check whether it holds the pull request's latest commit ({reason})"
-                )],
-                FreshCopyReason::HolderUnknown(reason) => crate::status_text![format!(
-                    ": dux could not check whether it is checked out elsewhere ({reason})"
-                )],
-                FreshCopyReason::Typed => crate::status_text![" has a review copy name"],
-            };
-            self.send_failure(crate::status_text![
-                "Branch ",
-                q(resolved_name),
-                taken,
-                " and every name up to ",
-                q(review_name(resolved_name, REVIEW_NAME_LIMIT)),
-                " is taken. Type another name for the agent from PR ",
-                n(format!("#{}", number)),
-                "."
-            ]);
+            self.send_failure(no_free_review_name(
+                taken_clause(&reason),
+                resolved_name,
+                number,
+            ));
             return BusyBranchCheck::Refused;
         };
         let copy = FreshCopy {
@@ -1421,19 +1537,7 @@ impl CreatePlanContext<'_> {
         if !branch_name_is_free(repo_path, candidate) {
             return false;
         }
-        let folder =
-            git::managed_worktree_path(&self.paths.worktrees_root, &project.name, candidate);
-        match std::fs::symlink_metadata(&folder) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-            Ok(_) => false,
-            Err(err) => {
-                logger::error(&format!(
-                    "could not check the folder {} for \"{candidate}\"; passing the name over: {err:#}",
-                    folder.display()
-                ));
-                false
-            }
-        }
+        worktree_folder_is_free(&self.paths.worktrees_root, &project.name, candidate)
     }
 
     /// Say what a fresh copy is, once its worktree exists. Returns the

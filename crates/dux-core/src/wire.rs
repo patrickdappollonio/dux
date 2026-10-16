@@ -9966,11 +9966,16 @@ mod tests {
 
     /// `command` with the agreement to a review copy of `reason` given before
     /// the clone, as a dialog that showed the warning sends it.
-    fn agreeing_to_a_copy_for(mut command: WireCommand, reason: &str) -> WireCommand {
+    fn agreeing_to_a_copy_for(
+        mut command: WireCommand,
+        reason: &str,
+        branch: Option<&str>,
+    ) -> WireCommand {
         if let WireCommand::CloneProject { review_copy, .. } = &mut command {
             *review_copy = crate::clone_project::UpfrontReviewCopy {
                 agreed: true,
                 reason: Some(reason.to_string()),
+                branch: branch.map(str::to_string),
                 by_flag: false,
             };
         }
@@ -11291,15 +11296,37 @@ mod tests {
                 &[
                     "Branch \"feature\" will be checked out in the project folder dux clones into.",
                     "pushes from this agent would land on \"feature-review\"",
-                    "tick Create a review copy",
+                    "tick Create a review copy and press Clone and create again.",
                     "Nothing was cloned.",
                 ],
+            ),
+            // A name spelled like a review copy of the branch is a copy all
+            // the same, and only an agreement for that reason covers it.
+            (
+                "a clone named like a review copy of the pull request's branch",
+                pull_request_clone_command("acme/widget", &pr_dest, Some("feature-review-2")),
+                &pr_dest,
+                &[
+                    "The name \"feature-review-2\" is a review copy of branch \"feature\".",
+                    "Nothing was cloned.",
+                ],
+            ),
+            (
+                "a clone that needs a review copy, agreed to for another copy name",
+                agreeing_to_a_copy_for(
+                    pull_request_clone_command("acme/widget", &pr_dest, None),
+                    "busy",
+                    Some("elsewhere-review"),
+                ),
+                &pr_dest,
+                &["on \"feature-review\"", "Nothing was cloned."],
             ),
             (
                 "a clone that needs a review copy, agreed to for another reason",
                 agreeing_to_a_copy_for(
                     pull_request_clone_command("acme/widget", &pr_dest, None),
                     "diverged",
+                    None,
                 ),
                 &pr_dest,
                 &[
@@ -11623,6 +11650,12 @@ mod tests {
             agreeing_to_a_copy_for(
                 pull_request_clone_command("acme/widget", &root.join("dest-checked-out-1"), None),
                 "diverged",
+                None,
+            ),
+            agreeing_to_a_copy_for(
+                pull_request_clone_command("acme/widget", &root.join("dest-checked-out-2"), None),
+                "busy",
+                Some("wrong-review"),
             ),
         ]
         .into_iter()
@@ -11666,7 +11699,8 @@ mod tests {
                      review copy: Branch \"main\" is checked out in the project folder \"{dest}\". \
                      Creating this agent from PR #7 needs a separate review copy on \
                      \"main-review\", and pushes from this agent would land on \"main-review\", \
-                     not on the pull request.",
+                     not on the pull request. To go ahead anyway, use New agent from PR in \
+                     project \"dest-checked-out-{index}\" and tick Create a review copy.",
                     dest = dest.display()
                 )
             );
@@ -11685,6 +11719,7 @@ mod tests {
             .apply_wire(agreeing_to_a_copy_for(
                 pull_request_clone_command("acme/widget", &dest, None),
                 "busy",
+                Some("main-review"),
             ))
             .expect("dispatch the agreed pull request clone");
         drive_clone_chain(&mut engine);
@@ -11720,11 +11755,51 @@ mod tests {
             ended[0].message.starts_with(&format!(
                 "Branch \"feature\" is checked out in the project folder \"{}\".",
                 folder.display()
-            )) && ended[0].message.ends_with(" Nothing was added."),
+            )) && ended[0].message.ends_with(
+                " To go ahead anyway, tick Create a review copy and press Add this folder as a \
+                 project again. Nothing was added.",
+            ),
             "{}",
             ended[0].message
         );
         assert!(engine.projects.is_empty() && engine.sessions.is_empty());
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
+        let crowded = checkout_of_widget(&root, "held-crowded", &pr_remote, "");
+        for n in 1..=20 {
+            let name = if n == 1 {
+                "feature-review".to_string()
+            } else {
+                format!("feature-review-{n}")
+            };
+            let out = crate::git::test_support::git_command()
+                .arg("-C")
+                .arg(&crowded)
+                .args(["branch", &name])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        engine
+            .apply_wire(agreeing_to_a_copy_for(
+                pull_request_add_command("acme/widget", &crowded, None),
+                "busy",
+                Some("feature-review"),
+            ))
+            .expect("dispatch the add");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert_eq!(
+            ended[0].message,
+            format!(
+                "Branch \"feature\" is checked out at \"{}\" and every name up to \
+                 \"feature-review-20\" is taken. Type another name for the agent from PR #7. \
+                 Nothing was added.",
+                crowded.display()
+            )
+        );
+        assert!(engine.projects.is_empty());
         let (mut engine, _engine_dir) = test_engine();
         serve_pull_requests(&mut engine, &held_gh, &pr_remote);
         let folder = checkout_of_widget(&root, "held-agreed", &pr_remote, "");
@@ -11732,6 +11807,7 @@ mod tests {
             .apply_wire(agreeing_to_a_copy_for(
                 pull_request_add_command("acme/widget", &folder, None),
                 "busy",
+                Some("feature-review"),
             ))
             .expect("dispatch the agreed add");
         drive_clone_chain(&mut engine);

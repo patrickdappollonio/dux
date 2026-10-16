@@ -157,6 +157,7 @@ impl Engine {
                 policy: self.github_host_policy(),
                 gh_program: self.gh_probe.program.clone(),
                 review_copy: request.review_copy.consent(),
+                worktrees_root: self.paths.worktrees_root.clone(),
             }),
             repository_key: repository_key.clone(),
             mode,

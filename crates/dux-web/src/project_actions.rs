@@ -113,6 +113,10 @@ struct AddProjectBody {
     review_copy: bool,
     #[serde(default)]
     review_copy_reason: Option<String>,
+    /// The branch that warning said the copy would be made on. Without it the
+    /// agreement covers the reason under any name.
+    #[serde(default)]
+    review_copy_branch: Option<String>,
     #[serde(default)]
     review_copy_by_flag: bool,
 }
@@ -140,6 +144,7 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
         add_existing,
         review_copy,
         review_copy_reason,
+        review_copy_branch,
         review_copy_by_flag,
     } = body;
     // `add_existing` without a pull request goes the same way, so the engine
@@ -155,6 +160,7 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
             review_copy: dux_core::clone_project::UpfrontReviewCopy {
                 agreed: review_copy,
                 reason: review_copy_reason,
+                branch: review_copy_branch,
                 by_flag: review_copy_by_flag,
             },
         }
@@ -820,6 +826,7 @@ mod tests {
             add_existing: false,
             review_copy: false,
             review_copy_reason: None,
+            review_copy_branch: None,
             review_copy_by_flag: false,
         }
     }
@@ -1002,10 +1009,15 @@ mod tests {
             }
         };
         assert_eq!(
-            agreed(serde_json::json!({ "review_copy": true, "review_copy_reason": "busy" })),
+            agreed(serde_json::json!({
+                "review_copy": true,
+                "review_copy_reason": "busy",
+                "review_copy_branch": "x-review",
+            })),
             dux_core::clone_project::UpfrontReviewCopy {
                 agreed: true,
                 reason: Some("busy".to_string()),
+                branch: Some("x-review".to_string()),
                 by_flag: false,
             }
         );
@@ -1014,6 +1026,7 @@ mod tests {
             dux_core::clone_project::UpfrontReviewCopy {
                 agreed: false,
                 reason: None,
+                branch: None,
                 by_flag: true,
             }
         );

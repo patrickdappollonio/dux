@@ -57,6 +57,10 @@ pub struct UpfrontReviewCopy {
     pub agreed: bool,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The branch the warning said the copy would be made on. An agreement that
+    /// names none covers the reason under any name.
+    #[serde(default)]
+    pub branch: Option<String>,
     #[serde(default)]
     pub by_flag: bool,
 }
@@ -66,6 +70,7 @@ impl UpfrontReviewCopy {
         crate::worker::ReviewCopyConsent::from_upfront(
             self.agreed,
             self.reason.clone(),
+            self.branch.clone(),
             self.by_flag,
         )
     }
@@ -394,9 +399,13 @@ impl ClonedFor {
         // flag.
         let warning = crate::prose::Prose::from_segments(question.warning.clone());
         let how = if question.by_flag {
-            " To go ahead anyway, run the command again with --review-copy."
+            crate::status_text![crate::agent_job::review_copy_how(true)]
         } else {
-            ""
+            crate::status_text![
+                " To go ahead anyway, use New agent from PR in project ",
+                q(&self.project_name),
+                " and tick Create a review copy."
+            ]
         };
         question.project_id = Some(self.project_id.clone());
         question.pull_request = self.pull_request.clone();
@@ -451,6 +460,8 @@ pub struct PullRequestJob {
     pub gh_program: std::ffi::OsString,
     /// The agreement to a review copy the request came with.
     pub review_copy: crate::worker::ReviewCopyConsent,
+    /// Where managed worktrees live, which decides what name a copy can take.
+    pub worktrees_root: PathBuf,
 }
 
 /// Everything the worker needs.
@@ -568,22 +579,48 @@ fn settle_pull_request(
     };
     // A clone has the repository's default branch checked out and no other
     // local branch, so an agent on the pull request's own branch needs a copy
-    // when that is the default branch. An add is told from the folder instead,
-    // once it is known to be a checkout.
-    if job.mode == CloneMode::Clone && agent_name == metadata.head_ref_name {
-        let default_branch = crate::gh::look_up_default_branch(
-            &pull_request.gh_program,
-            &target.host,
-            &target.owner_repo,
+    // when that is the default branch, and so does one named like a copy of it.
+    // An add is told from the folder instead, once it is known to be a
+    // checkout. An agreement that covers whatever copy is needed makes the
+    // question moot, so it skips the lookup.
+    if job.mode == CloneMode::Clone
+        && !matches!(
+            pull_request.review_copy,
+            crate::worker::ReviewCopyConsent::Blanket
         )
-        .ok();
-        refuse_unagreed_review_copy(
-            &pull_request.review_copy,
+    {
+        let outlook = if agent_name == metadata.head_ref_name {
+            let default_branch = crate::gh::look_up_default_branch(
+                &pull_request.gh_program,
+                &target.host,
+                &target.owner_repo,
+            )
+            .ok();
+            let project = crate::wire::display_project_name("", &job.destination.to_string_lossy());
             crate::agent_job::clone_review_copy_outlook(
                 &metadata.head_ref_name,
                 default_branch.as_deref(),
                 target.number,
-            ),
+                &|candidate| {
+                    crate::agent_job::worktree_folder_is_free(
+                        &pull_request.worktrees_root,
+                        &project,
+                        candidate,
+                    )
+                },
+            )
+        } else {
+            crate::agent_job::typed_copy_review_outlook(
+                &metadata.head_ref_name,
+                &agent_name,
+                target.number,
+            )
+            .unwrap_or(ReviewCopyOutlook::NotNeeded)
+        };
+        refuse_unagreed_review_copy(
+            &pull_request.review_copy,
+            outlook,
+            CloneMode::Clone,
             nothing_was,
         )?;
     }
@@ -597,29 +634,41 @@ fn settle_pull_request(
     })
 }
 
-/// Refuse a pull request whose agent will need a review copy that nobody
-/// agreed to, before anything is cloned or added. An agreement counts only for
-/// the reason it was given for.
+/// Refuse, before anything is cloned or added, a pull request whose agent
+/// will need a review copy that nobody agreed to, or one that no free name can
+/// be given to. An agreement counts only for the reason and the copy branch it
+/// was shown.
 fn refuse_unagreed_review_copy(
     consent: &crate::worker::ReviewCopyConsent,
     outlook: ReviewCopyOutlook,
+    mode: CloneMode,
     nothing_was: &str,
 ) -> Result<(), CloneOutcome> {
-    let ReviewCopyOutlook::Needed {
-        reason, warning, ..
-    } = outlook
-    else {
-        return Ok(());
-    };
-    if consent.covers_reason(&reason) {
-        return Ok(());
+    match outlook {
+        ReviewCopyOutlook::Needed {
+            reason,
+            copy_branch,
+            warning,
+            ..
+        } => {
+            if consent.covers_shown(&reason, &copy_branch) {
+                return Ok(());
+            }
+            let by_flag = matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag);
+            Err(CloneOutcome::Refused(crate::status_text![
+                crate::prose::Prose::from_segments(warning),
+                crate::agent_job::review_copy_how_before(by_flag, mode == CloneMode::AddExisting),
+                nothing_was
+            ]))
+        }
+        ReviewCopyOutlook::NoFreeName { message, .. } => {
+            Err(CloneOutcome::Refused(crate::status_text![
+                crate::prose::Prose::from_segments(message),
+                nothing_was
+            ]))
+        }
+        ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => Ok(()),
     }
-    let by_flag = matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag);
-    Err(CloneOutcome::Refused(crate::status_text![
-        crate::prose::Prose::from_segments(warning),
-        crate::agent_job::review_copy_how(by_flag),
-        nothing_was
-    ]))
 }
 
 /// Give a clone made through a test's stand-in transport the same rewrite, so
@@ -789,18 +838,30 @@ fn add_existing_checkout(
         }
         Err(refused) => return Err(refuse(refused)),
     }
-    if pull_request.agent_name == pull_request.head_branch {
-        refuse_unagreed_review_copy(
-            &request.review_copy,
-            crate::agent_job::folder_review_copy_outlook(
-                dest,
-                &pull_request.head_branch,
-                pull_request.head_oid.as_deref(),
-                request.target.number,
-            ),
-            " Nothing was added.",
-        )?;
-    }
+    let outlook = if pull_request.agent_name == pull_request.head_branch {
+        crate::agent_job::folder_review_copy_outlook(
+            dest,
+            &request.worktrees_root,
+            &pull_request.head_branch,
+            pull_request.head_oid.as_deref(),
+            request.target.number,
+        )
+    } else if !crate::git::local_branch_exists(dest, &pull_request.agent_name) {
+        crate::agent_job::typed_copy_review_outlook(
+            &pull_request.head_branch,
+            &pull_request.agent_name,
+            request.target.number,
+        )
+        .unwrap_or(ReviewCopyOutlook::NotNeeded)
+    } else {
+        ReviewCopyOutlook::NotNeeded
+    };
+    refuse_unagreed_review_copy(
+        &request.review_copy,
+        outlook,
+        CloneMode::AddExisting,
+        " Nothing was added.",
+    )?;
     crate::logger::info(&format!("adding {} as a project", dest.display()));
     let unreadable = || {
         refuse(crate::status_text![

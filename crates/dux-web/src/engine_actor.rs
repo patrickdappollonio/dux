@@ -140,6 +140,9 @@ pub struct PullRequestResolutionInputs {
     /// The program the pull request lookup runs: `gh`, or a test's stand-in.
     pub gh_program: std::ffi::OsString,
     pub gh_available: bool,
+    /// Where managed worktrees live, which decides what name a review copy
+    /// can take.
+    pub worktrees_root: std::path::PathBuf,
 }
 
 /// One unit of work for the engine thread.
@@ -4795,6 +4798,7 @@ fn handle_request(
                 protocols: engine.github_git_protocols(),
                 gh_program: engine.gh_probe.program.clone(),
                 gh_available: engine.pr_agent_command_available(),
+                worktrees_root: engine.paths.worktrees_root.clone(),
             });
         }
         EngineRequest::DestructiveCheck(path, reply) => {
