@@ -2296,6 +2296,12 @@ struct PullRequestCloneReply {
     title: String,
     state: String,
     head_branch: String,
+    /// The pull request's head commit, when `gh` reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_oid: Option<String>,
+    /// Whether the agent will need a review copy, told before the clone: see
+    /// [`dux_core::status_text::ReviewCopyOutlook`].
+    review_copy: dux_core::status_text::ReviewCopyOutlook,
 }
 
 /// Look the pull request up through `gh_program` and pair it with the offer.
@@ -2308,11 +2314,20 @@ fn look_up_clone_offer(
     let metadata = dux_core::gh::look_up_pull_request(
         gh_program,
         &dux_core::worker::PullRequestLookup {
-            host: target.host,
-            owner_repo: target.owner_repo,
+            host: target.host.clone(),
+            owner_repo: target.owner_repo.clone(),
             number: target.number,
         },
     )?;
+    // A default branch gh cannot name leaves the offer standing with the
+    // question open: it is asked after the project exists instead.
+    let default_branch =
+        dux_core::gh::look_up_default_branch(gh_program, &target.host, &target.owner_repo).ok();
+    let review_copy = dux_core::agent_job::clone_review_copy_outlook(
+        &metadata.head_ref_name,
+        default_branch.as_deref(),
+        metadata.number,
+    );
     Ok(PullRequestCloneReply {
         address: offer.address,
         host: offer.host,
@@ -2321,6 +2336,8 @@ fn look_up_clone_offer(
         title: metadata.title,
         state: metadata.state,
         head_branch: metadata.head_ref_name,
+        head_oid: metadata.head_ref_oid,
+        review_copy,
     })
 }
 
@@ -2441,6 +2458,15 @@ struct PullRequestCloneDestinationBody {
     path: String,
     host: String,
     owner_repo: String,
+    /// The pull request's number, head branch and head commit, which let the
+    /// answer for a checkout say whether the agent will need a review copy.
+    /// Without the number and the branch it says nothing about one.
+    #[serde(default)]
+    number: Option<u64>,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    head_oid: Option<String>,
 }
 
 /// What the folder holds: `free` for a clone, `checkout` for an add. `path` is
@@ -2449,6 +2475,11 @@ struct PullRequestCloneDestinationBody {
 struct PullRequestCloneDestinationReply {
     state: &'static str,
     path: String,
+    /// For a checkout, and only when the request named the pull request's
+    /// branch: whether the agent will need a review copy, from what the folder
+    /// holds. Nothing is fetched or written to find out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_copy: Option<dux_core::status_text::ReviewCopyOutlook>,
 }
 
 /// Say what a folder holds for a pull request's repository, so the client can
@@ -2473,6 +2504,7 @@ async fn check_pull_request_clone_destination(
         owner_repo: body.owner_repo,
         number: 0,
     };
+    let (number, head_branch, head_oid) = (body.number, body.head_branch, body.head_oid);
     match tokio::task::spawn_blocking(move || {
         let home = std::env::home_dir();
         let projects: Vec<&str> = inputs.projects.iter().map(|p| p.path.as_str()).collect();
@@ -2485,16 +2517,29 @@ async fn check_pull_request_clone_destination(
         )?;
         // The path again, in the form the operation will use.
         let path = dux_core::clone_project::destination_identity(&body.path, home.as_deref())?;
-        Ok::<_, dux_core::status_text::StatusText>((state, path))
+        // Told from the folder as dux will use it, never from a write.
+        let review_copy = match (state, number, head_branch) {
+            (dux_core::clone_project::PrDestination::Checkout, Some(number), Some(branch)) => {
+                Some(dux_core::agent_job::folder_review_copy_outlook(
+                    &path,
+                    &branch,
+                    head_oid.as_deref(),
+                    number,
+                ))
+            }
+            _ => None,
+        };
+        Ok::<_, dux_core::status_text::StatusText>((state, path, review_copy))
     })
     .await
     {
-        Ok(Ok((state, path))) => Json(PullRequestCloneDestinationReply {
+        Ok(Ok((state, path, review_copy))) => Json(PullRequestCloneDestinationReply {
             state: match state {
                 dux_core::clone_project::PrDestination::Free => "free",
                 dux_core::clone_project::PrDestination::Checkout => "checkout",
             },
             path: path.to_string_lossy().into_owned(),
+            review_copy,
         })
         .into_response(),
         Ok(Err(refused)) => (StatusCode::BAD_REQUEST, refused.to_string()).into_response(),

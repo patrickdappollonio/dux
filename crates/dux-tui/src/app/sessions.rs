@@ -1093,6 +1093,7 @@ impl App {
             random_name: *randomize_name,
             pull_request: None,
             add_existing: false,
+            review_copy: Default::default(),
         };
         match self.engine.apply(command) {
             Ok(reaction) => {

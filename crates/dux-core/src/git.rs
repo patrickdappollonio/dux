@@ -1934,6 +1934,19 @@ pub fn branch_tip(repo_path: &Path, branch: &str) -> Result<String> {
     )
 }
 
+/// Whether `commit`, a full object id, is a commit this repository has. Reads
+/// only; nothing is fetched.
+pub fn commit_is_present(repo_path: &Path, commit: &str) -> bool {
+    is_object_id(commit)
+        && Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|out| out.status.success())
+}
+
 /// The tip of local branch `branch` when it is strictly BEHIND `commit`: the
 /// tip is an ancestor of the commit and not the commit itself, so the branch
 /// holds nothing of its own and moving it to `commit` loses no work. `None`

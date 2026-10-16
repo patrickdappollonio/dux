@@ -1947,7 +1947,7 @@ pub(crate) fn pr_view_args(host: &str, owner_repo: &str, number: u64) -> Vec<Str
         "--repo".to_string(),
         gh_repo_arg(host, owner_repo),
         "--json".to_string(),
-        "number,title,state,headRefName".to_string(),
+        "number,title,state,headRefName,headRefOid".to_string(),
     ]
 }
 
@@ -2224,6 +2224,8 @@ pub struct PullRequestMetadata {
     pub title: String,
     pub state: String,
     pub head_ref_name: String,
+    /// The head commit, when `gh` reported one.
+    pub head_ref_oid: Option<String>,
 }
 
 /// Run `gh pr view` through `program` for `lookup` and read its answer. Needs no
@@ -2298,12 +2300,55 @@ fn parse_pull_request_metadata_json(json: &str) -> Result<PullRequestMetadata, S
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "gh PR response did not include a head branch.".to_string())?
         .to_string();
+    let head_ref_oid = obj
+        .get("headRefOid")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
     Ok(PullRequestMetadata {
         number,
         title,
         state,
         head_ref_name,
+        head_ref_oid,
     })
+}
+
+/// The default branch of `host/owner_repo`, asked of `gh repo view` through
+/// `program` under the same bound as the pull request lookup. Needs no project.
+pub fn look_up_default_branch(
+    program: &OsStr,
+    host: &str,
+    owner_repo: &str,
+) -> Result<String, String> {
+    let repo = gh_repo_arg(host, owner_repo);
+    let args = ["repo", "view", repo.as_str(), "--json", "defaultBranchRef"];
+    match run_program_with_timeout(program, &args, GH_CALL_TIMEOUT) {
+        GhCallOutcome::Completed(output) if output.status.success() => {
+            let json: serde_json::Value =
+                serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+                    .map_err(|err| format!("gh returned invalid repository JSON: {err}"))?;
+            json.get("defaultBranchRef")
+                .and_then(|branch| branch.get("name"))
+                .and_then(|name| name.as_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!(
+                        "gh repository response did not name a default branch for {owner_repo}."
+                    )
+                })
+        }
+        GhCallOutcome::Completed(output) => Err(format!(
+            "Failed to look up the default branch of {owner_repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        GhCallOutcome::TimedOut => Err(format!(
+            "gh repo view timed out after {}s looking up the default branch of {owner_repo}.",
+            GH_CALL_TIMEOUT.as_secs()
+        )),
+        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh repo view: {msg}")),
+    }
 }
 
 /// Stand-in `gh` builders, shared by the probe's own tests and by the wiring
@@ -2384,6 +2429,28 @@ pub mod probe_test_support {
         hosts: &[(&str, &str)],
         pull_request: Result<&str, &str>,
     ) -> PathBuf {
+        stand_in_gh_with_pull_request_and_repository(
+            dir,
+            hosts,
+            pull_request,
+            Err("no repository answers here"),
+        )
+    }
+
+    /// A stand-in that answers only `repo view ...`: `repository` is printed
+    /// when it is `Ok`, and is a message on stderr with a failing exit when it
+    /// is `Err`.
+    pub fn stand_in_gh_with_repository(dir: &Path, repository: Result<&str, &str>) -> PathBuf {
+        stand_in_gh_with_pull_request_and_repository(dir, &[], Err("not found"), repository)
+    }
+
+    /// [`stand_in_gh_with_pull_request`] that also answers `repo view ...`.
+    pub fn stand_in_gh_with_pull_request_and_repository(
+        dir: &Path,
+        hosts: &[(&str, &str)],
+        pull_request: Result<&str, &str>,
+        repository: Result<&str, &str>,
+    ) -> PathBuf {
         let entries: Vec<String> = hosts
             .iter()
             .map(|(h, protocol)| {
@@ -2393,14 +2460,15 @@ pub mod probe_test_support {
             })
             .collect();
         let auth = format!(r#"{{"hosts":{{{}}}}}"#, entries.join(","));
-        let pr = match pull_request {
+        let answer = |outcome: Result<&str, &str>| match outcome {
             Ok(json) => format!("printf '%s' '{json}'"),
             Err(message) => format!("echo '{message}' >&2; exit 1"),
         };
+        let (pr, repo) = (answer(pull_request), answer(repository));
         stand_in_gh(
             dir,
             &format!(
-                "case \"$1\" in\n  auth) printf '%s' '{auth}' ;;\n  pr) {pr} ;;\n  *) exit 1 ;;\nesac\n"
+                "case \"$1\" in\n  auth) printf '%s' '{auth}' ;;\n  pr) {pr} ;;\n  repo) {repo} ;;\n  *) exit 1 ;;\nesac\n"
             ),
         )
     }
@@ -4822,7 +4890,9 @@ mod tests {
         let found = probe_test_support::stand_in_gh_with_pull_request(
             dir.path(),
             &[],
-            Ok(r#"{"number":7,"title":"Add a thing","state":"OPEN","headRefName":"add-thing"}"#),
+            Ok(
+                r#"{"number":7,"title":"Add a thing","state":"OPEN","headRefName":"add-thing","headRefOid":"0123456789abcdef0123456789abcdef01234567"}"#,
+            ),
         );
         assert_eq!(
             look_up_pull_request(found.as_os_str(), &lookup).unwrap(),
@@ -4831,6 +4901,7 @@ mod tests {
                 title: "Add a thing".to_string(),
                 state: "OPEN".to_string(),
                 head_ref_name: "add-thing".to_string(),
+                head_ref_oid: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
             }
         );
 
@@ -4839,6 +4910,36 @@ mod tests {
         assert_eq!(
             look_up_pull_request(missing.as_os_str(), &lookup).unwrap_err(),
             "Failed to resolve PR #7 from acme/widget: not found"
+        );
+    }
+
+    #[test]
+    fn a_repository_s_default_branch_is_read_from_gh_and_failures_keep_their_sentences() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = probe_test_support::stand_in_gh_with_repository(
+            dir.path(),
+            Ok(r#"{"defaultBranchRef":{"name":"trunk"}}"#),
+        );
+        assert_eq!(
+            look_up_default_branch(found.as_os_str(), "github.com", "acme/widget").unwrap(),
+            "trunk"
+        );
+
+        let missing = probe_test_support::stand_in_gh_with_repository(dir.path(), Err("boom"));
+        assert_eq!(
+            look_up_default_branch(missing.as_os_str(), "github.com", "acme/widget").unwrap_err(),
+            "Failed to look up the default branch of acme/widget: boom"
+        );
+
+        // A repository with no default branch (an empty one) is not an answer.
+        let empty = probe_test_support::stand_in_gh_with_repository(
+            dir.path(),
+            Ok(r#"{"defaultBranchRef":null}"#),
+        );
+        assert!(
+            look_up_default_branch(empty.as_os_str(), "github.com", "acme/widget")
+                .unwrap_err()
+                .contains("did not name a default branch")
         );
     }
 

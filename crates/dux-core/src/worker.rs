@@ -80,6 +80,11 @@ pub enum ReviewCopyConsent {
     /// Agreed after being shown the warning identified by this text, which
     /// covers a copy for that reason under that name and nothing else.
     Warned(String),
+    /// Agreed before the copy's name could be known (before the project
+    /// existed), after being shown a warning of this reason, the word a
+    /// warning's identifier begins with. Covers a copy for that reason under
+    /// whatever name turns out free, and nothing for another reason.
+    Reason(Box<str>),
 }
 
 impl ReviewCopyConsent {
@@ -94,12 +99,32 @@ impl ReviewCopyConsent {
         }
     }
 
+    /// [`Self::from_request`] for an agreement given before the project
+    /// existed, which names the reason it was shown rather than a full warning.
+    pub fn from_upfront(agreed: bool, reason: Option<String>, by_flag: bool) -> Self {
+        match (agreed, reason) {
+            (true, Some(reason)) => Self::Reason(reason.into()),
+            (agreed, _) => Self::from_request(agreed, None, by_flag),
+        }
+    }
+
     /// Whether this agreement covers the copy described by `warned`.
     pub fn covers(&self, warned: &str) -> bool {
         match self {
             Self::Withheld | Self::WithheldByFlag => false,
             Self::Blanket => true,
             Self::Warned(seen) => seen == warned,
+            Self::Reason(kind) => warned.split(':').next() == Some(&**kind),
+        }
+    }
+
+    /// Whether this agreement covers a copy for `kind`, before any name or
+    /// holder is known.
+    pub fn covers_reason(&self, kind: &str) -> bool {
+        match self {
+            Self::Withheld | Self::WithheldByFlag | Self::Warned(_) => false,
+            Self::Blanket => true,
+            Self::Reason(seen) => &**seen == kind,
         }
     }
 }

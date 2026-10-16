@@ -302,13 +302,30 @@ enum FreshCopyReason {
     Typed,
 }
 
+impl FreshCopyReason {
+    /// The word that opens the identifier of a warning about this reason, and
+    /// that an agreement given before the copy's name was known is matched on.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Busy(_) => BUSY_KIND,
+            Self::Typed => "typed",
+            Self::Diverged => "diverged",
+            Self::Unknown(_) => "unknown",
+            Self::HolderUnknown(_) => "holder-unknown",
+        }
+    }
+}
+
+/// [`FreshCopyReason::kind`] of a branch another worktree has checked out.
+const BUSY_KIND: &str = "busy";
+
 impl FreshCopy {
     /// What the user is agreeing to by agreeing to this copy: the pull
     /// request, why the branch was left alone with the detail the warning
     /// shows, and the name the copy gets. Consent given for one such answer
     /// does not cover another.
     fn warned(&self, number: u64) -> String {
-        let (why, detail) = match &self.reason {
+        let detail = match &self.reason {
             FreshCopyReason::Busy(holder) => {
                 // What the warning says about the holder: where, and whether
                 // that is the project folder or a folder that is gone.
@@ -319,17 +336,18 @@ impl FreshCopy {
                 } else {
                     "live"
                 };
-                (
-                    "busy",
-                    format!("{}|{state}", holder.worktree.path.display()),
-                )
+                format!("{}|{state}", holder.worktree.path.display())
             }
-            FreshCopyReason::Typed => ("typed", String::new()),
-            FreshCopyReason::Diverged => ("diverged", String::new()),
-            FreshCopyReason::Unknown(reason) => ("unknown", reason.clone()),
-            FreshCopyReason::HolderUnknown(reason) => ("holder-unknown", reason.clone()),
+            FreshCopyReason::Typed | FreshCopyReason::Diverged => String::new(),
+            FreshCopyReason::Unknown(reason) | FreshCopyReason::HolderUnknown(reason) => {
+                reason.clone()
+            }
         };
-        format!("{why}:#{number}:{}:{detail}", self.new_branch)
+        format!(
+            "{}:#{number}:{}:{detail}",
+            self.reason.kind(),
+            self.new_branch
+        )
     }
 
     /// Where the busy branch is held, finishing a sentence that has just named
@@ -378,6 +396,280 @@ enum BusyBranchCheck {
     FastForward { old_tip: String, commit: String },
     /// The create was refused and the failure already sent.
     Refused,
+}
+
+/// Who has branch `name` checked out, and the reason git could not say. A
+/// lookup that failed is not an answer: a branch that may be checked out is
+/// never moved or reused.
+fn branch_holder(repo_path: &Path, name: &str) -> (Option<git::BranchHolder>, Option<String>) {
+    match git::worktree_holding_branch(repo_path, name) {
+        Ok(holder) => (holder, None),
+        Err(err) => {
+            logger::error(&format!(
+                "could not check whether branch \"{name}\" is checked out in {}: {err:#}",
+                repo_path.display()
+            ));
+            (None, Some(format!("{err:#}")))
+        }
+    }
+}
+
+/// Whether no branch has the name `candidate`, locally or on `origin`, and no
+/// branch lives below it (git stores refs as paths, so `<candidate>/x` blocks
+/// `<candidate>`). A question that cannot be answered counts as taken.
+fn branch_name_is_free(repo_path: &Path, candidate: &str) -> bool {
+    if git::branch_exists(repo_path, candidate).is_some() {
+        return false;
+    }
+    match git::refs_exist_below(repo_path, candidate) {
+        Ok(below) => !below,
+        Err(err) => {
+            logger::error(&format!(
+                "could not check for branches below \"{candidate}\" in {}; passing the name over: {err:#}",
+                repo_path.display()
+            ));
+            false
+        }
+    }
+}
+
+/// What the pull request's own branch needs, given who holds it and whether it
+/// has the pull request's head commit. The one rule for a branch the agent
+/// would take as its own name, which the create and the up-front answers share.
+enum HeadBranchVerdict {
+    /// The branch is used as it is.
+    Free,
+    /// The branch is free and has no commits of its own, only fewer than the
+    /// pull request: move it to the pull request's head and reuse it.
+    FastForward { old_tip: String, commit: String },
+    /// The branch is left alone and the pull request goes into a copy.
+    Copy(FreshCopyReason),
+}
+
+fn head_branch_verdict(
+    repo_path: &Path,
+    name: &str,
+    number: u64,
+    head_commit: Option<&str>,
+    holder: Option<git::BranchHolder>,
+    holder_failed: Option<String>,
+    containment: &HeadContainment,
+) -> HeadBranchVerdict {
+    let needs_copy = holder.is_some()
+        || holder_failed.is_some()
+        || matches!(
+            containment,
+            HeadContainment::Lacks | HeadContainment::Unknown(_)
+        );
+    if !needs_copy {
+        return HeadBranchVerdict::Free;
+    }
+    // A free branch with nothing of its own on it is the pull request a few
+    // commits ago: move it up and use it, no copy.
+    let mut reason = match (holder, holder_failed, containment) {
+        (Some(holder), _, _) => Some(FreshCopyReason::Busy(holder)),
+        (None, Some(failure), _) => Some(FreshCopyReason::HolderUnknown(failure)),
+        (None, None, HeadContainment::Unknown(reason)) => {
+            Some(FreshCopyReason::Unknown(reason.clone()))
+        }
+        (None, None, _) => None,
+    };
+    if reason.is_none()
+        && let Some(commit) = head_commit
+    {
+        match git::branch_behind_commit(repo_path, name, commit) {
+            Ok(Some(old_tip)) => {
+                return HeadBranchVerdict::FastForward {
+                    old_tip,
+                    commit: commit.to_string(),
+                };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                logger::error(&format!(
+                    "could not tell whether \"{name}\" is behind the head commit of PR #{number}: {err:#}"
+                ));
+                reason = Some(FreshCopyReason::Unknown(format!("{err:#}")));
+            }
+        }
+    }
+    HeadBranchVerdict::Copy(reason.unwrap_or(FreshCopyReason::Diverged))
+}
+
+/// The tail of every review copy warning: the copy it needs and what a push
+/// from it does, after `why` the branch cannot be used as it is.
+fn review_copy_warning_after(
+    why: crate::status_text::StatusText,
+    number: u64,
+    new_branch: &str,
+) -> crate::status_text::StatusText {
+    crate::status_text![
+        why,
+        " Creating this agent from PR ",
+        n(format!("#{}", number)),
+        " needs a separate review copy on ",
+        q(new_branch),
+        ", and pushes from this agent would land on ",
+        q(new_branch),
+        ", not on the pull request."
+    ]
+}
+
+/// The warning shown beside the agreement to `copy`: why the branch was left
+/// alone, and what the copy means for a push.
+fn review_copy_warning(copy: &FreshCopy, number: u64) -> crate::status_text::StatusText {
+    let why = match &copy.reason {
+        FreshCopyReason::Busy(holder) => {
+            crate::status_text!["Branch ", q(&copy.busy_branch), copy.busy_clause(holder)]
+        }
+        FreshCopyReason::Diverged => crate::status_text![
+            "Branch ",
+            q(&copy.busy_branch),
+            " has diverged from the pull request: each has commits the other lacks."
+        ],
+        FreshCopyReason::Unknown(reason) => crate::status_text![
+            "dux could not check whether branch ",
+            q(&copy.busy_branch),
+            format!(
+                " holds the pull request's latest commit ({}).",
+                reason.trim_end_matches('.')
+            )
+        ],
+        FreshCopyReason::HolderUnknown(reason) => crate::status_text![
+            "dux could not check whether branch ",
+            q(&copy.busy_branch),
+            format!(
+                " is checked out elsewhere ({}).",
+                reason.trim_end_matches('.')
+            )
+        ],
+        FreshCopyReason::Typed => crate::status_text![
+            "The name ",
+            q(&copy.new_branch),
+            " is a review copy of branch ",
+            q(&copy.busy_branch),
+            "."
+        ],
+    };
+    review_copy_warning_after(why, number, &copy.new_branch)
+}
+
+/// How a refusal for want of agreement says to give it: the command line's
+/// flag, or a dialog's box.
+pub(crate) fn review_copy_how(by_flag: bool) -> &'static str {
+    if by_flag {
+        " To go ahead anyway, run the command again with --review-copy."
+    } else {
+        " To go ahead anyway, tick Create a review copy and create the agent again."
+    }
+}
+
+fn needed(
+    kind: &str,
+    branch: &str,
+    copy_branch: String,
+    warning: &crate::status_text::StatusText,
+) -> crate::status_text::ReviewCopyOutlook {
+    crate::status_text::ReviewCopyOutlook::Needed {
+        reason: kind.to_string(),
+        branch: branch.to_string(),
+        copy_branch,
+        warning: warning.segments().map(<[_]>::to_vec).unwrap_or_default(),
+    }
+}
+
+/// Whether a clone of a repository will need a review copy for pull request
+/// `number`, whose head branch is `head_branch`, told before anything is
+/// cloned. A clone checks out the repository's default branch in the project
+/// folder and has no other local branch, so the agent on the pull request's
+/// own branch needs a copy exactly when that branch is the default one: it is
+/// then checked out in another folder, the case a copy exists for. `None` for
+/// the default branch means it could not be learned.
+pub fn clone_review_copy_outlook(
+    head_branch: &str,
+    default_branch: Option<&str>,
+    number: u64,
+) -> crate::status_text::ReviewCopyOutlook {
+    use crate::status_text::ReviewCopyOutlook;
+    let Some(default_branch) = default_branch else {
+        return ReviewCopyOutlook::Unknown;
+    };
+    if default_branch != head_branch {
+        return ReviewCopyOutlook::NotNeeded;
+    }
+    let copy_branch = review_name(head_branch, 1);
+    let why = crate::status_text![
+        "Branch ",
+        q(head_branch),
+        " will be checked out in the project folder dux clones into."
+    ];
+    let warning = review_copy_warning_after(why, number, &copy_branch);
+    needed(BUSY_KIND, head_branch, copy_branch, &warning)
+}
+
+/// Whether adding the checkout at `repo_path` as a project will need a review
+/// copy for pull request `number`, whose head branch is `head_branch` and head
+/// commit `head_commit`, told before anything is added. The same rule the
+/// create follows, applied to what the folder holds now: nothing is fetched or
+/// written, so a head commit the folder does not have cannot be compared, and
+/// the answer is unknown unless the branch is held elsewhere, which needs no
+/// comparison.
+pub fn folder_review_copy_outlook(
+    repo_path: &Path,
+    head_branch: &str,
+    head_commit: Option<&str>,
+    number: u64,
+) -> crate::status_text::ReviewCopyOutlook {
+    use crate::status_text::ReviewCopyOutlook;
+    if !git::local_branch_exists(repo_path, head_branch) {
+        return ReviewCopyOutlook::NotNeeded;
+    }
+    let (holder, holder_failed) = branch_holder(repo_path, head_branch);
+    let present = head_commit.filter(|commit| git::commit_is_present(repo_path, commit));
+    if present.is_none() && holder.is_none() && holder_failed.is_none() {
+        return ReviewCopyOutlook::Unknown;
+    }
+    let containment = match present {
+        None => {
+            HeadContainment::Unknown("the pull request's head commit is not in the folder".into())
+        }
+        Some(commit) => match git::branch_contains_commit(repo_path, commit, head_branch) {
+            Ok(true) => HeadContainment::Contains,
+            Ok(false) => HeadContainment::Lacks,
+            Err(err) => HeadContainment::Unknown(format!("{err:#}")),
+        },
+    };
+    let reason = match head_branch_verdict(
+        repo_path,
+        head_branch,
+        number,
+        present,
+        holder,
+        holder_failed,
+        &containment,
+    ) {
+        HeadBranchVerdict::Free | HeadBranchVerdict::FastForward { .. } => {
+            return ReviewCopyOutlook::NotNeeded;
+        }
+        HeadBranchVerdict::Copy(reason) => reason,
+    };
+    let Some(new_branch) = (1..=REVIEW_NAME_LIMIT)
+        .map(|n| review_name(head_branch, n))
+        .find(|candidate| branch_name_is_free(repo_path, candidate))
+    else {
+        return ReviewCopyOutlook::Unknown;
+    };
+    let copy = FreshCopy {
+        busy_branch: head_branch.to_string(),
+        reason,
+        new_branch,
+    };
+    needed(
+        copy.reason.kind(),
+        head_branch,
+        copy.new_branch.clone(),
+        &review_copy_warning(&copy, number),
+    )
 }
 
 struct CreatePlanContext<'a> {
@@ -799,16 +1091,7 @@ impl CreatePlanContext<'_> {
         // A lookup that failed is not an answer: a branch that may be checked
         // out is never moved or reused, so on the copy path it counts as
         // unknown, and the user is asked about a copy.
-        let (holder, holder_failed) = match git::worktree_holding_branch(repo_path, resolved_name) {
-            Ok(holder) => (holder, None),
-            Err(err) => {
-                logger::error(&format!(
-                    "could not check whether branch \"{resolved_name}\" is checked out in {}: {err:#}",
-                    project.path
-                ));
-                (None, Some(format!("{err:#}")))
-            }
-        };
+        let (holder, holder_failed) = branch_holder(repo_path, resolved_name);
         // Whatever name the agent gets, an agent of the project that already
         // has the pull request's code is the one to point to. A typed name is
         // no way around it.
@@ -906,45 +1189,21 @@ impl CreatePlanContext<'_> {
             }
             return BusyBranchCheck::Free;
         }
-        let needs_copy = holder.is_some()
-            || holder_failed.is_some()
-            || matches!(
-                containment,
-                HeadContainment::Lacks | HeadContainment::Unknown(_)
-            );
-        if !needs_copy {
-            return BusyBranchCheck::Free;
-        }
-        // A free branch with nothing of its own on it is the pull request a
-        // few commits ago: move it up and use it, no copy.
-        let mut reason = match (holder, holder_failed, containment) {
-            (Some(holder), _, _) => Some(FreshCopyReason::Busy(holder)),
-            (None, Some(failure), _) => Some(FreshCopyReason::HolderUnknown(failure)),
-            (None, None, HeadContainment::Unknown(reason)) => {
-                Some(FreshCopyReason::Unknown(reason.clone()))
+        let reason = match head_branch_verdict(
+            repo_path,
+            resolved_name,
+            number,
+            head_commit,
+            holder,
+            holder_failed,
+            containment,
+        ) {
+            HeadBranchVerdict::Free => return BusyBranchCheck::Free,
+            HeadBranchVerdict::FastForward { old_tip, commit } => {
+                return BusyBranchCheck::FastForward { old_tip, commit };
             }
-            (None, None, _) => None,
+            HeadBranchVerdict::Copy(reason) => reason,
         };
-        if reason.is_none()
-            && let Some(commit) = head_commit
-        {
-            match git::branch_behind_commit(repo_path, resolved_name, commit) {
-                Ok(Some(old_tip)) => {
-                    return BusyBranchCheck::FastForward {
-                        old_tip,
-                        commit: commit.to_string(),
-                    };
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    logger::error(&format!(
-                        "could not tell whether \"{resolved_name}\" is behind the head commit of PR #{number}: {err:#}"
-                    ));
-                    reason = Some(FreshCopyReason::Unknown(format!("{err:#}")));
-                }
-            }
-        }
-        let reason = reason.unwrap_or(FreshCopyReason::Diverged);
         let free = (1..=REVIEW_NAME_LIMIT)
             .map(|n| review_name(resolved_name, n))
             .find(|candidate| self.review_name_is_free(project, repo_path, candidate));
@@ -1089,62 +1348,19 @@ impl CreatePlanContext<'_> {
         consent: &crate::worker::ReviewCopyConsent,
         ask_id: Option<&str>,
     ) {
-        let why = match &copy.reason {
-            FreshCopyReason::Busy(holder) => {
-                crate::status_text!["Branch ", q(copy.busy_branch), copy.busy_clause(holder)]
-            }
-            FreshCopyReason::Diverged => crate::status_text![
-                "Branch ",
-                q(copy.busy_branch),
-                " has diverged from the pull request: each has commits the other lacks."
-            ],
-            FreshCopyReason::Unknown(reason) => crate::status_text![
-                "dux could not check whether branch ",
-                q(copy.busy_branch),
-                format!(
-                    " holds the pull request's latest commit ({}).",
-                    reason.trim_end_matches('.')
-                )
-            ],
-            FreshCopyReason::HolderUnknown(reason) => crate::status_text![
-                "dux could not check whether branch ",
-                q(copy.busy_branch),
-                format!(
-                    " is checked out elsewhere ({}).",
-                    reason.trim_end_matches('.')
-                )
-            ],
-            FreshCopyReason::Typed => crate::status_text![
-                "The name ",
-                q(copy.new_branch),
-                " is a review copy of branch ",
-                q(copy.busy_branch),
-                "."
-            ],
-        };
-        let warning = crate::status_text![
-            why,
-            " Creating this agent from PR ",
-            n(format!("#{}", number)),
-            " needs a separate review copy on ",
-            q(copy.new_branch),
-            ", and pushes from this agent would land on ",
-            q(copy.new_branch),
-            ", not on the pull request."
-        ];
-        let how = if matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag) {
-            " To go ahead anyway, run the command again with --review-copy."
-        } else {
-            " To go ahead anyway, tick Create a review copy and create the agent again."
-        };
+        let warning = review_copy_warning(copy, number);
+        let by_flag = matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag);
         let ask = crate::status_text::StatusAsk::ReviewCopy(Box::new(
             crate::status_text::ReviewCopyAsk {
                 warned: copy.warned(number),
                 warning: warning.segments().map(<[_]>::to_vec).unwrap_or_default(),
                 request: ask_id.map(str::to_string),
+                by_flag,
+                project_id: None,
+                pull_request: None,
             },
         ));
-        self.send_failure(crate::status_text![warning, how].with_ask(ask));
+        self.send_failure(crate::status_text![warning, review_copy_how(by_flag)].with_ask(ask));
     }
 
     /// The first agent of the request's project that has the pull request's
@@ -1202,19 +1418,8 @@ impl CreatePlanContext<'_> {
         repo_path: &Path,
         candidate: &str,
     ) -> bool {
-        if git::branch_exists(repo_path, candidate).is_some() {
+        if !branch_name_is_free(repo_path, candidate) {
             return false;
-        }
-        match git::refs_exist_below(repo_path, candidate) {
-            Ok(false) => {}
-            Ok(true) => return false,
-            Err(err) => {
-                logger::error(&format!(
-                    "could not check for branches below \"{candidate}\" in {}; passing the name over: {err:#}",
-                    project.path
-                ));
-                return false;
-            }
         }
         let folder =
             git::managed_worktree_path(&self.paths.worktrees_root, &project.name, candidate);
@@ -5052,8 +5257,10 @@ mod tests {
                 address: "https://github.com/owner/repo.git".to_string(),
                 path: repo.path().to_path_buf(),
                 project_name: "repo".to_string(),
+                project_id: "p1".to_string(),
                 agent_name: "pr-head".to_string(),
                 mode: crate::clone_project::CloneMode::Clone,
+                pull_request: None,
             });
         }
         let reactions = drive_create_through_engine(&mut engine, request);

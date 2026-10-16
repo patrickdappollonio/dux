@@ -14,7 +14,7 @@ use std::path::Path;
 use axum::Router;
 use dux_core::config::{DuxPaths, ProjectConfig};
 use dux_core::gh::GithubHostPolicy;
-use dux_core::gh::probe_test_support::stand_in_gh_with_pull_request;
+use dux_core::gh::probe_test_support::stand_in_gh_with_pull_request_and_repository;
 use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
@@ -48,15 +48,23 @@ async fn boot(
     projects: &[(&str, &str, &str)],
     hosts: &[&str],
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
-    boot_with_lookup(projects, hosts, Err("no pull request answers here\u{202E}")).await
+    boot_with_lookup(
+        projects,
+        hosts,
+        Err("no pull request answers here\u{202E}"),
+        Err("no repository answers here"),
+    )
+    .await
 }
 
-/// [`boot`] with `gh pr view` answering `pull_request`: its JSON, or a message
-/// on stderr with a failing exit.
+/// [`boot`] with `gh pr view` answering `pull_request` and `gh repo view`
+/// answering `repository`: each its JSON, or a message on stderr with a
+/// failing exit.
 async fn boot_with_lookup(
     projects: &[(&str, &str, &str)],
     hosts: &[&str],
     pull_request: Result<&str, &str>,
+    repository: Result<&str, &str>,
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
@@ -102,7 +110,9 @@ async fn boot_with_lookup(
     // With the stand-in, the production probe code path runs unchanged and the
     // answer it gets is the one this test wrote.
     let signed_in: Vec<(&str, &str)> = hosts.iter().map(|h| (*h, "ssh")).collect();
-    engine.gh_probe.program = stand_in_gh_with_pull_request(&root, &signed_in, pull_request).into();
+    engine.gh_probe.program =
+        stand_in_gh_with_pull_request_and_repository(&root, &signed_in, pull_request, repository)
+            .into();
     // The placed pair covers the window BEFORE the probe reports, so the answer
     // is the same at every instant of the test rather than only after it lands.
     engine.gh_status = GhStatus::Available;
@@ -305,19 +315,153 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     );
     assert!(!not_yet.exists(), "the check created the folder");
 
-    // With a pull request gh can find, the reply carries the offer: the
-    // address follows the host's ssh setting.
-    let (addr, _tmp) = boot_with_lookup(
-        &[("p1", "widget", "git@github.com:acme/widget.git")],
-        &["github.com"],
-        Ok(r#"{"number":3,"title":"Add a thing","state":"OPEN","headRefName":"add-thing"}"#),
+    // For a checkout it also says whether the agent will need a review copy,
+    // from what the folder holds: a branch checked out in the folder or
+    // diverged from the pull request needs one, a branch the pull request has
+    // moved past or one that contains it does not, and a head commit the folder
+    // does not have leaves the question open. Nothing is fetched or written.
+    let commit = |message: &str| {
+        git_isolated(
+            &hand_made,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+        )
+    };
+    git_isolated(&hand_made, &["branch", "behind"]);
+    commit("pull request work");
+    let head = String::from_utf8(
+        dux_core::test_git::fixture_git()
+            .args(["-C"])
+            .arg(&hand_made)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
     )
-    .await;
-    let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
-    assert_eq!(status, 200, "{body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    .unwrap()
+    .trim()
+    .to_string();
+    git_isolated(&hand_made, &["checkout", "-q", "-b", "ahead"]);
+    commit("more work");
+    git_isolated(&hand_made, &["checkout", "-q", "behind"]);
+    git_isolated(&hand_made, &["checkout", "-q", "-b", "side"]);
+    commit("my own work");
+    git_isolated(&hand_made, &["checkout", "-q", "feature"]);
+    let review_copy = |branch: &'static str, oid: String| {
+        let (hand_made, canonical) = (hand_made.clone(), canonical.clone());
+        async move {
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/v1/pull-requests/clone-destination"
+                ))
+                .json(&serde_json::json!({
+                    "path": hand_made,
+                    "host": "github.com",
+                    "owner_repo": "acme/unknown",
+                    "number": 3,
+                    "head_branch": branch,
+                    "head_oid": oid,
+                }))
+                .send()
+                .await
+                .expect("check the folder");
+            assert_eq!(res.status(), 200);
+            let value: serde_json::Value = res.json().await.unwrap();
+            assert_eq!(value["path"], canonical.to_string_lossy().as_ref());
+            value["review_copy"].clone()
+        }
+    };
+    let checked_out = review_copy("feature", head.clone()).await;
     assert_eq!(
-        value["clone"],
+        checked_out,
+        serde_json::json!({
+            "state": "needed",
+            "reason": "busy",
+            "branch": "feature",
+            "copy_branch": "feature-review",
+            "warning": [
+                "Branch ",
+                { "name": "feature", "quoted": true },
+                " is checked out in the project folder ",
+                { "name": canonical.to_string_lossy(), "quoted": true },
+                ". Creating this agent from PR ",
+                { "name": "#3", "quoted": false },
+                " needs a separate review copy on ",
+                { "name": "feature-review", "quoted": true },
+                ", and pushes from this agent would land on ",
+                { "name": "feature-review", "quoted": true },
+                ", not on the pull request.",
+            ],
+        })
+    );
+    let diverged = review_copy("side", head.clone()).await;
+    assert_eq!(diverged["state"], "needed");
+    assert_eq!(diverged["reason"], "diverged");
+    assert_eq!(diverged["copy_branch"], "side-review");
+    for (branch, why) in [
+        ("nothing-like-this", "no branch of that name"),
+        ("behind", "a branch the pull request has moved past"),
+        ("ahead", "a branch that contains the pull request"),
+    ] {
+        assert_eq!(
+            review_copy(branch, head.clone()).await,
+            serde_json::json!({ "state": "not_needed" }),
+            "{why}"
+        );
+    }
+    assert_eq!(
+        review_copy("behind", "f".repeat(40)).await,
+        serde_json::json!({ "state": "unknown" }),
+        "a head commit the folder does not have cannot be compared"
+    );
+    // A caller that sends no pull request facts gets the answer it always did.
+    let (_, body) = check_destination(addr, &hand_made, "acme/unknown").await;
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap()
+            .get("review_copy")
+            .is_none(),
+        "{body}"
+    );
+
+    // With a pull request gh can find, the reply carries the offer: the
+    // address follows the host's ssh setting, and it says up front whether the
+    // agent will need a review copy. A clone checks out the repository's
+    // default branch, so a pull request from that branch will.
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+    let found = format!(
+        r#"{{"number":3,"title":"Add a thing","state":"OPEN","headRefName":"add-thing","headRefOid":"{HEAD}"}}"#
+    );
+    let offer = |repository: Result<&'static str, &'static str>| {
+        let found = found.clone();
+        async move {
+            let (addr, tmp) = boot_with_lookup(
+                &[("p1", "widget", "git@github.com:acme/widget.git")],
+                &["github.com"],
+                Ok(&found),
+                repository,
+            )
+            .await;
+            let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
+            assert_eq!(status, 200, "{body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(value.get("clone_unavailable").is_none(), "{body}");
+            (value["clone"].clone(), tmp)
+        }
+    };
+
+    let (clone, _tmp) = offer(Ok(r#"{"defaultBranchRef":{"name":"main"}}"#)).await;
+    assert_eq!(
+        clone,
         serde_json::json!({
             "address": "git@github.com:acme/unknown.git",
             "host": "github.com",
@@ -326,9 +470,41 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             "title": "Add a thing",
             "state": "OPEN",
             "head_branch": "add-thing",
+            "head_oid": HEAD,
+            "review_copy": { "state": "not_needed" },
         })
     );
-    assert!(value.get("clone_unavailable").is_none(), "{body}");
+
+    let (clone, _tmp) = offer(Ok(r#"{"defaultBranchRef":{"name":"add-thing"}}"#)).await;
+    assert_eq!(
+        clone["review_copy"],
+        serde_json::json!({
+            "state": "needed",
+            "reason": "busy",
+            "branch": "add-thing",
+            "copy_branch": "add-thing-review",
+            "warning": [
+                "Branch ",
+                { "name": "add-thing", "quoted": true },
+                " will be checked out in the project folder dux clones into. Creating this agent from PR ",
+                { "name": "#3", "quoted": false },
+                " needs a separate review copy on ",
+                { "name": "add-thing-review", "quoted": true },
+                ", and pushes from this agent would land on ",
+                { "name": "add-thing-review", "quoted": true },
+                ", not on the pull request.",
+            ],
+        })
+    );
+
+    // A default branch gh cannot name leaves the offer standing with the
+    // question open, rather than turning the offer into a failure.
+    let (clone, _tmp) = offer(Err("boom")).await;
+    assert_eq!(clone["head_branch"], "add-thing");
+    assert_eq!(
+        clone["review_copy"],
+        serde_json::json!({ "state": "unknown" })
+    );
 }
 
 #[tokio::test]

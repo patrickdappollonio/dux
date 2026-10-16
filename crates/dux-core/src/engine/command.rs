@@ -75,6 +75,9 @@ pub enum Command {
         random_name: bool,
         pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
         add_existing: bool,
+        /// With `pull_request`: the agreement to a review copy given before
+        /// the clone or the add.
+        review_copy: crate::clone_project::UpfrontReviewCopy,
     },
 
     /// Remove a project and cascade-delete its agents' records and runtime,
@@ -575,6 +578,7 @@ impl Engine {
                 random_name,
                 pull_request,
                 add_existing,
+                review_copy,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
@@ -583,6 +587,7 @@ impl Engine {
                     random_name,
                     pull_request,
                     add_existing,
+                    review_copy,
                 };
                 Ok(EventReaction::Status(
                     match self.begin_clone_project(&request, false) {

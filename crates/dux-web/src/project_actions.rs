@@ -104,6 +104,17 @@ struct AddProjectBody {
     /// it. Refused without a `pull_request`.
     #[serde(default)]
     add_existing: bool,
+    /// With `pull_request`: the user agreed, before the clone or the add, to
+    /// the agent being made on a review copy, after being shown a warning
+    /// whose reason was `review_copy_reason`. The command line agrees with a
+    /// flag instead, which names no reason and sets `review_copy_by_flag`
+    /// when it does not agree.
+    #[serde(default)]
+    review_copy: bool,
+    #[serde(default)]
+    review_copy_reason: Option<String>,
+    #[serde(default)]
+    review_copy_by_flag: bool,
 }
 
 /// Pick the add command the body's flags ask for.
@@ -127,6 +138,9 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
         random_name,
         pull_request,
         add_existing,
+        review_copy,
+        review_copy_reason,
+        review_copy_by_flag,
     } = body;
     // `add_existing` without a pull request goes the same way, so the engine
     // refuses it by name rather than the body quietly meaning an ordinary add.
@@ -138,6 +152,11 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
             random_name,
             pull_request,
             add_existing,
+            review_copy: dux_core::clone_project::UpfrontReviewCopy {
+                agreed: review_copy,
+                reason: review_copy_reason,
+                by_flag: review_copy_by_flag,
+            },
         }
     } else if let Some(url) = clone_url.filter(|url| !url.trim().is_empty()) {
         WireCommand::CloneProject {
@@ -147,6 +166,7 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
             random_name,
             pull_request: None,
             add_existing: false,
+            review_copy: Default::default(),
         }
     } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
@@ -798,6 +818,9 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
+            review_copy: false,
+            review_copy_reason: None,
+            review_copy_by_flag: false,
         }
     }
 
@@ -929,6 +952,7 @@ mod tests {
                 random_name: true,
                 pull_request: None,
                 add_existing: false,
+                review_copy: Default::default(),
             }
         );
         // A pull request, or the add of a checkout for one, outranks a clone
@@ -957,9 +981,42 @@ mod tests {
                     random_name: true,
                     pull_request,
                     add_existing,
+                    review_copy: Default::default(),
                 }
             );
         }
+        // The agreement to a review copy a dialog gives before the clone rides
+        // the request: the reason it was shown is kept, and a command line's
+        // flag carries none.
+        let agreed = |fields: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "path": "/repo",
+                "pull_request": { "host": "github.com", "owner_repo": "acme/widget", "number": 7 },
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            match super::add_project_command(super::parse_add_project_body(body).unwrap()) {
+                WireCommand::CloneProject { review_copy, .. } => review_copy,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            agreed(serde_json::json!({ "review_copy": true, "review_copy_reason": "busy" })),
+            dux_core::clone_project::UpfrontReviewCopy {
+                agreed: true,
+                reason: Some("busy".to_string()),
+                by_flag: false,
+            }
+        );
+        assert_eq!(
+            agreed(serde_json::json!({ "review_copy_by_flag": true })),
+            dux_core::clone_project::UpfrontReviewCopy {
+                agreed: false,
+                reason: None,
+                by_flag: true,
+            }
+        );
         assert!(matches!(
             super::add_project_command(clone("  ")),
             WireCommand::AddProjectInitRepo { .. }

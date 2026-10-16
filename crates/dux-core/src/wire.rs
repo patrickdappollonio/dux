@@ -385,6 +385,10 @@ pub enum WireCommand {
         /// repository, so add that folder as the project instead of cloning.
         #[serde(default)]
         add_existing: bool,
+        /// With `pull_request`: the agreement to a review copy the user gave
+        /// before the clone or the add, after being shown the warning.
+        #[serde(default)]
+        review_copy: crate::clone_project::UpfrontReviewCopy,
     },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
@@ -1931,6 +1935,7 @@ impl Engine {
                 random_name,
                 pull_request,
                 add_existing,
+                review_copy,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
@@ -1939,6 +1944,7 @@ impl Engine {
                     random_name,
                     pull_request,
                     add_existing,
+                    review_copy,
                 };
                 let busy = self
                     .begin_clone_project(&request, true)
@@ -9875,6 +9881,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
+            review_copy: Default::default(),
         }
     }
 
@@ -9953,7 +9960,36 @@ mod tests {
                 number: 7,
             }),
             add_existing: false,
+            review_copy: Default::default(),
         }
+    }
+
+    /// `command` with the agreement to a review copy of `reason` given before
+    /// the clone, as a dialog that showed the warning sends it.
+    fn agreeing_to_a_copy_for(mut command: WireCommand, reason: &str) -> WireCommand {
+        if let WireCommand::CloneProject { review_copy, .. } = &mut command {
+            *review_copy = crate::clone_project::UpfrontReviewCopy {
+                agreed: true,
+                reason: Some(reason.to_string()),
+                by_flag: false,
+            };
+        }
+        command
+    }
+
+    /// A `gh` whose pull request has head branch `head_branch` and whose
+    /// repository's default branch is `default_branch`.
+    fn gh_with_default_branch(dir: &Path, head_branch: &str, default_branch: &str) -> PathBuf {
+        crate::gh::probe_test_support::stand_in_gh(
+            dir,
+            &format!(
+                "case \"$1\" in\n  repo) {} ;;\n  *) {} ;;\nesac",
+                gh_prints(&format!(
+                    r#"{{"defaultBranchRef":{{"name":"{default_branch}"}}}}"#
+                )),
+                gh_prints(&pull_request_json(head_branch)),
+            ),
+        )
     }
 
     /// [`pull_request_clone_command`] for a folder that already holds a
@@ -9974,6 +10010,7 @@ mod tests {
                 random_name,
                 pull_request,
                 add_existing: true,
+                review_copy: Default::default(),
             },
             other => other,
         }
@@ -10355,6 +10392,7 @@ mod tests {
                 random_name: false,
                 pull_request: None,
                 add_existing: false,
+                review_copy: Default::default(),
             })
             .expect("a blank name is not refused");
         drive_clone_chain(&mut engine);
@@ -11083,6 +11121,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
+            review_copy: Default::default(),
         };
         let url = remote.to_string_lossy().into_owned();
         // A project that is already a checkout of acme/matched, and a `gh`
@@ -11110,8 +11149,10 @@ mod tests {
         let gh = crate::gh::probe_test_support::stand_in_gh(
             &root,
             &format!(
-                "case \"$*\" in\n  *acme/gone*) echo 'no pull requests found' >&2; exit 1 ;;\n  \
+                "case \"$*\" in\n  \"repo view\"*) {} ;;\n  \
+                 *acme/gone*) echo 'no pull requests found' >&2; exit 1 ;;\n  \
                  *acme/odd*) {} ;;\n  *) {} ;;\nesac",
+                gh_prints(r#"{"defaultBranchRef":{"name":"feature"}}"#),
                 gh_prints(&pull_request_json("not a name")),
                 gh_prints(&pull_request_json("feature")),
             ),
@@ -11210,6 +11251,7 @@ mod tests {
                     random_name: false,
                     pull_request: None,
                     add_existing: true,
+                    review_copy: Default::default(),
                 },
                 &dest,
                 &["add_existing needs a pull request."],
@@ -11237,6 +11279,32 @@ mod tests {
                 &[
                     "already holds something that isn't a checkout of github.com/acme/widget",
                     "Nothing was added",
+                ],
+            ),
+            // The branch the clone would check out in the project folder is
+            // the pull request's own, so the agent needs a copy: refused before
+            // anything is cloned unless the agreement was for that reason.
+            (
+                "a clone that needs a review copy nobody agreed to",
+                pull_request_clone_command("acme/widget", &pr_dest, None),
+                &pr_dest,
+                &[
+                    "Branch \"feature\" will be checked out in the project folder dux clones into.",
+                    "pushes from this agent would land on \"feature-review\"",
+                    "tick Create a review copy",
+                    "Nothing was cloned.",
+                ],
+            ),
+            (
+                "a clone that needs a review copy, agreed to for another reason",
+                agreeing_to_a_copy_for(
+                    pull_request_clone_command("acme/widget", &pr_dest, None),
+                    "diverged",
+                ),
+                &pr_dest,
+                &[
+                    "will be checked out in the project folder",
+                    "Nothing was cloned.",
                 ],
             ),
         ];
@@ -11538,36 +11606,142 @@ mod tests {
         )));
 
         // A pull request whose branch is the one the clone has checked out
-        // needs a review copy nobody agreed to: the create refuses and asks,
-        // and the clone's wording around it keeps the question.
-        let (mut engine, _engine_dir) = test_engine();
+        // needs a review copy, and nothing before the clone could say so (this
+        // `gh` cannot name the default branch), so the create refuses and asks
+        // once the project exists. The project stays, the sentence says the
+        // agent still needs an answer rather than naming a box the user cannot
+        // see, and the question carries what a surface needs to reopen New
+        // agent from PR for that project. An agreement given for another
+        // reason does not cover this copy.
         let gh = crate::gh::probe_test_support::stand_in_gh(
             &root,
             &gh_prints(&pull_request_json("main")),
         );
         let (pr_remote, _) = remote_with_pull_request(&root.join("with-pr"));
+        for (index, command) in [
+            pull_request_clone_command("acme/widget", &root.join("dest-checked-out-0"), None),
+            agreeing_to_a_copy_for(
+                pull_request_clone_command("acme/widget", &root.join("dest-checked-out-1"), None),
+                "diverged",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut engine, _engine_dir) = test_engine();
+            serve_pull_requests(&mut engine, &gh, &pr_remote);
+            let dest = root.join(format!("dest-checked-out-{index}"));
+            engine
+                .apply_wire(command)
+                .expect("dispatch the pull request clone");
+            let chain = drive_clone_chain(&mut engine);
+            let ended = self::finals(&chain);
+            assert_eq!(ended.len(), 1, "{ended:?}");
+            let Some(crate::status_text::StatusAsk::ReviewCopy(ask)) = &ended[0].ask else {
+                panic!("the question was lost: {:?}", ended[0]);
+            };
+            assert_eq!(engine.projects.len(), 1, "the project stays");
+            assert_eq!(
+                ask.project_id.as_deref(),
+                Some(engine.projects[0].id.as_str())
+            );
+            assert_eq!(
+                ask.pull_request,
+                Some(crate::pr_reference::PullRequestCloneTarget {
+                    host: "github.com".to_string(),
+                    owner_repo: "acme/widget".to_string(),
+                    number: 7,
+                })
+            );
+            assert!(
+                ask.warned.starts_with("busy:#7:main-review:"),
+                "{}",
+                ask.warned
+            );
+            assert_eq!(
+                ended[0].message,
+                format!(
+                    "Cloned https://github.com/acme/widget.git into {dest} and added project \
+                     \"dest-checked-out-{index}\". Agent \"main\" still needs your answer on a \
+                     review copy: Branch \"main\" is checked out in the project folder \"{dest}\". \
+                     Creating this agent from PR #7 needs a separate review copy on \
+                     \"main-review\", and pushes from this agent would land on \"main-review\", \
+                     not on the pull request.",
+                    dest = dest.display()
+                )
+            );
+            assert!(engine.sessions.is_empty());
+        }
+
+        // The same pull request, with the default branch known before the
+        // clone: the agreement that was asked for lets the clone end in the
+        // agent on the copy, and the project still leads with the default.
+        let (mut engine, _engine_dir) = test_engine();
+        std::fs::create_dir(root.join("with-default")).unwrap();
+        let gh = gh_with_default_branch(&root.join("with-default"), "main", "main");
         serve_pull_requests(&mut engine, &gh, &pr_remote);
-        let dest = root.join("dest-checked-out");
+        let dest = root.join("dest-agreed");
         engine
-            .apply_wire(pull_request_clone_command("acme/widget", &dest, None))
-            .expect("dispatch the pull request clone");
+            .apply_wire(agreeing_to_a_copy_for(
+                pull_request_clone_command("acme/widget", &dest, None),
+                "busy",
+            ))
+            .expect("dispatch the agreed pull request clone");
+        drive_clone_chain(&mut engine);
+        assert_eq!(engine.projects.len(), 1);
+        assert_eq!(engine.projects[0].leading_branch.as_deref(), Some("main"));
+        let branches: Vec<_> = engine
+            .sessions
+            .iter()
+            .filter_map(|s| s.branch_name())
+            .collect();
+        assert_eq!(branches, vec!["main-review"]);
+
+        // A checkout that has the pull request's branch out needs a copy, and
+        // the folder says so before anything is added: refused without the
+        // agreement, and with it the agent goes on the copy while the folder
+        // keeps its branch.
+        let held_gh_dir = root.join("held-gh");
+        std::fs::create_dir(&held_gh_dir).unwrap();
+        let held_gh = crate::gh::probe_test_support::stand_in_gh(
+            &held_gh_dir,
+            &gh_prints(&pull_request_json("feature")),
+        );
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
+        let folder = checkout_of_widget(&root, "held-refused", &pr_remote, "");
+        engine
+            .apply_wire(pull_request_add_command("acme/widget", &folder, None))
+            .expect("dispatch the add");
         let chain = drive_clone_chain(&mut engine);
         let ended = self::finals(&chain);
         assert_eq!(ended.len(), 1, "{ended:?}");
         assert!(
-            ended[0].message.starts_with("Cloned"),
+            ended[0].message.starts_with(&format!(
+                "Branch \"feature\" is checked out in the project folder \"{}\".",
+                folder.display()
+            )) && ended[0].message.ends_with(" Nothing was added."),
             "{}",
             ended[0].message
         );
-        assert!(
-            matches!(
-                ended[0].ask,
-                Some(crate::status_text::StatusAsk::ReviewCopy(_))
-            ),
-            "the question was lost: {:?}",
-            ended[0]
-        );
-        assert!(engine.sessions.is_empty());
+        assert!(engine.projects.is_empty() && engine.sessions.is_empty());
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
+        let folder = checkout_of_widget(&root, "held-agreed", &pr_remote, "");
+        engine
+            .apply_wire(agreeing_to_a_copy_for(
+                pull_request_add_command("acme/widget", &folder, None),
+                "busy",
+            ))
+            .expect("dispatch the agreed add");
+        drive_clone_chain(&mut engine);
+        let branches: Vec<_> = engine
+            .sessions
+            .iter()
+            .filter_map(|s| s.branch_name())
+            .collect();
+        assert_eq!(branches, vec!["feature-review"]);
+        assert_eq!(engine.projects[0].current_branch, "feature");
 
         // A folder that cannot be registered as a project stays exactly as it
         // was, and the final says so without claiming a clone.
@@ -11621,6 +11795,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
+            review_copy: Default::default(),
         };
         let (one, two) = (root.join("race-one"), root.join("race-two"));
         engine

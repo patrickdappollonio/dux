@@ -1,7 +1,7 @@
 #!/bin/sh
 # Stand-in `gh` for the screenshot container, so the pull-request chip, the
 # banner and the from-PR dialog can be shot without a GitHub login. It answers
-# only the two calls dux makes, and fails loudly on anything else rather than
+# only the calls dux makes, and fails loudly on anything else rather than
 # pretending: a screenshot of a lie is worse than a screenshot that did not
 # happen. Installed by entrypoint.sh only when DUX_SCREENS=1.
 case "$1 $2" in
@@ -10,7 +10,11 @@ case "$1 $2" in
     exit 0
     ;;
   "pr view")
-    printf '{"number":123,"title":"Fix the login redirect loop","state":"OPEN","headRefName":"fix-login-redirect"}\n'
+    printf '{"number":123,"title":"Fix the login redirect loop","state":"OPEN","headRefName":"fix-login-redirect","headRefOid":"0123456789abcdef0123456789abcdef01234567"}\n'
+    exit 0
+    ;;
+  "repo view")
+    printf '{"defaultBranchRef":{"name":"main"}}\n'
     exit 0
     ;;
 esac

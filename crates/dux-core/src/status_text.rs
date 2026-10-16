@@ -60,6 +60,44 @@ pub struct ReviewCopyAsk {
     /// answer to that create and not to a later one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
+    /// The request came from the command line, which agrees with a flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_flag: bool,
+    /// Set when a clone or an add made the project and stopped short of the
+    /// agent for want of this answer: the project the agent goes in, so the
+    /// surface can reopen New agent from PR for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The pull request that create was for, set with `project_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+}
+
+/// Whether creating an agent from a pull request will need a review copy,
+/// told before the project exists or the folder is added, so a surface can put
+/// the question beside the button that would start it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewCopyOutlook {
+    /// The branch can be used as it is.
+    NotNeeded,
+    /// Nothing available before the clone or the add can say. The question, if
+    /// there is one, is asked after the project exists.
+    Unknown,
+    /// A copy will be needed.
+    Needed {
+        /// Why, as the word a [`ReviewCopyAsk::warned`] begins with: `busy`,
+        /// `diverged`, `unknown` or `holder-unknown`. Agreeing with this word
+        /// covers a copy for the same reason under whatever name turns out
+        /// free.
+        reason: String,
+        /// The pull request's own branch, which is left alone.
+        branch: String,
+        /// The branch the copy would be made on.
+        copy_branch: String,
+        /// The warning, in parts.
+        warning: Vec<ProseSegment>,
+    },
 }
 
 impl StatusText {

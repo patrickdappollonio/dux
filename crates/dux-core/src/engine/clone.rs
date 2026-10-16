@@ -141,6 +141,7 @@ impl Engine {
                 repository_key: repository_key.clone(),
                 mode,
                 destination: destination.clone(),
+                review_copy: request.review_copy.consent(),
             },
         );
         let job = CloneJob {
@@ -155,6 +156,7 @@ impl Engine {
                 projects: self.projects.clone(),
                 policy: self.github_host_policy(),
                 gh_program: self.gh_probe.program.clone(),
+                review_copy: request.review_copy.consent(),
             }),
             repository_key: repository_key.clone(),
             mode,
@@ -396,8 +398,14 @@ impl Engine {
             address: address.clone(),
             path: done.path.clone(),
             project_name: project.name.clone(),
+            project_id: project.id.clone(),
             agent_name: agent.clone(),
             mode: done.mode,
+            pull_request: done
+                .cloned
+                .pull_request
+                .as_ref()
+                .map(|pull_request| pull_request.target.clone()),
         };
         let not_created = |reason: StatusText| CloneOutcome::Kept(cloned.agent_missing(reason));
         if done.cloned.name_taken {
@@ -427,7 +435,7 @@ impl Engine {
                     head_branch: pull_request.head_branch.clone(),
                     custom_name: Some(agent.clone()),
                     use_existing_branch: false,
-                    review_copy: crate::worker::ReviewCopyConsent::default(),
+                    review_copy: pending.review_copy.clone(),
                     ask_id: None,
                     agents: Vec::new(),
                     cloned: Some(cloned.clone()),

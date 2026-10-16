@@ -1410,6 +1410,7 @@ pub(crate) mod tests {
                 repository_key: None,
                 mode: dux_core::clone_project::CloneMode::Clone,
                 destination: std::path::PathBuf::new(),
+                review_copy: Default::default(),
             },
         );
         id

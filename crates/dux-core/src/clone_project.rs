@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::engine::{Final, HandlerStatusOp};
 use crate::git::CloneProcesses;
 use crate::pr_reference::PullRequestCloneTarget;
-use crate::status_text::StatusText;
+use crate::status_text::{ReviewCopyOutlook, StatusAsk, StatusText};
 use crate::worker::WorkerEvent;
 
 /// What a client asks for: clone `url` into `path` and start an agent named
@@ -41,6 +41,34 @@ pub struct CloneRequest {
     pub random_name: bool,
     pub pull_request: Option<PullRequestCloneTarget>,
     pub add_existing: bool,
+    /// With `pull_request`: the agreement to a review copy given before the
+    /// clone or the add.
+    pub review_copy: UpfrontReviewCopy,
+}
+
+/// The agreement to a review copy that came with a request made before the
+/// project existed, from a dialog that showed the warning or a command-line
+/// flag. `reason` is the word the warning's reason began with (see
+/// [`crate::status_text::ReviewCopyOutlook::Needed`]); an agreement with no
+/// reason, the flag's, covers whatever copy turns out to be needed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpfrontReviewCopy {
+    #[serde(default)]
+    pub agreed: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub by_flag: bool,
+}
+
+impl UpfrontReviewCopy {
+    pub fn consent(&self) -> crate::worker::ReviewCopyConsent {
+        crate::worker::ReviewCopyConsent::from_upfront(
+            self.agreed,
+            self.reason.clone(),
+            self.by_flag,
+        )
+    }
 }
 
 /// What the operation does to its folder, which every sentence it can print
@@ -102,6 +130,9 @@ pub struct PendingClone {
     /// The folder the operation clones into or adds, to word a refusal by what
     /// the holder of that folder is doing.
     pub destination: PathBuf,
+    /// The agreement to a review copy the request came with, handed to the
+    /// agent's create after the project exists.
+    pub review_copy: crate::worker::ReviewCopyConsent,
 }
 
 /// The engine's clones: the operations waiting for their worker, and the git
@@ -296,6 +327,8 @@ pub struct ClonedPullRequest {
     pub head_branch: String,
     /// The typed name, or the head branch when none was typed.
     pub agent_name: String,
+    /// The pull request's head commit, when `gh` reported it.
+    pub head_oid: Option<String>,
 }
 
 /// What a clone's first agent create carries about the clone, so it refuses
@@ -306,8 +339,11 @@ pub struct ClonedFor {
     pub address: String,
     pub path: PathBuf,
     pub project_name: String,
+    pub project_id: String,
     pub agent_name: String,
     pub mode: CloneMode,
+    /// The pull request the agent is for, when it is for one.
+    pub pull_request: Option<PullRequestCloneTarget>,
 }
 
 impl ClonedFor {
@@ -341,19 +377,38 @@ impl ClonedFor {
     /// make when it got as far as settling a name, which a review copy of a
     /// pull request makes different from the one asked for.
     pub fn agent_missing_named(&self, attempted: Option<&str>, reason: StatusText) -> StatusText {
+        let agent = attempted.unwrap_or(&self.agent_name);
         // Wrapping the reason copies its words, not the question it may put.
-        let ask = reason.ask().cloned();
-        let wrapped = crate::status_text![
+        let Some(StatusAsk::ReviewCopy(mut question)) = reason.ask().cloned() else {
+            return crate::status_text![
+                self.done_so_far(),
+                ", but didn't create agent ",
+                q(agent),
+                ": ",
+                reason
+            ];
+        };
+        // The question is put again, where the project now is. Its sentence
+        // does not send the user to a box they cannot see: the surface reopens
+        // New agent from PR for the project, and the command line is told its
+        // flag.
+        let warning = crate::prose::Prose::from_segments(question.warning.clone());
+        let how = if question.by_flag {
+            " To go ahead anyway, run the command again with --review-copy."
+        } else {
+            ""
+        };
+        question.project_id = Some(self.project_id.clone());
+        question.pull_request = self.pull_request.clone();
+        crate::status_text![
             self.done_so_far(),
-            ", but didn't create agent ",
-            q(attempted.unwrap_or(&self.agent_name)),
-            ": ",
-            reason
-        ];
-        match ask {
-            Some(ask) => wrapped.with_ask(ask),
-            None => wrapped,
-        }
+            ". Agent ",
+            q(agent),
+            " still needs your answer on a review copy: ",
+            warning,
+            how
+        ]
+        .with_ask(StatusAsk::ReviewCopy(question))
     }
 
     /// The agent exists but its startup command failed, after what the clone
@@ -394,6 +449,8 @@ pub struct PullRequestJob {
     pub policy: crate::gh::GithubHostPolicy,
     /// The program the lookup runs: `gh`, or a test's stand-in.
     pub gh_program: std::ffi::OsString,
+    /// The agreement to a review copy the request came with.
+    pub review_copy: crate::worker::ReviewCopyConsent,
 }
 
 /// Everything the worker needs.
@@ -509,13 +566,60 @@ fn settle_pull_request(
     } else {
         typed.to_string()
     };
+    // A clone has the repository's default branch checked out and no other
+    // local branch, so an agent on the pull request's own branch needs a copy
+    // when that is the default branch. An add is told from the folder instead,
+    // once it is known to be a checkout.
+    if job.mode == CloneMode::Clone && agent_name == metadata.head_ref_name {
+        let default_branch = crate::gh::look_up_default_branch(
+            &pull_request.gh_program,
+            &target.host,
+            &target.owner_repo,
+        )
+        .ok();
+        refuse_unagreed_review_copy(
+            &pull_request.review_copy,
+            crate::agent_job::clone_review_copy_outlook(
+                &metadata.head_ref_name,
+                default_branch.as_deref(),
+                target.number,
+            ),
+            nothing_was,
+        )?;
+    }
     Ok(ClonedPullRequest {
         target: target.clone(),
         title: metadata.title,
         state: metadata.state,
         head_branch: metadata.head_ref_name,
         agent_name,
+        head_oid: metadata.head_ref_oid,
     })
+}
+
+/// Refuse a pull request whose agent will need a review copy that nobody
+/// agreed to, before anything is cloned or added. An agreement counts only for
+/// the reason it was given for.
+fn refuse_unagreed_review_copy(
+    consent: &crate::worker::ReviewCopyConsent,
+    outlook: ReviewCopyOutlook,
+    nothing_was: &str,
+) -> Result<(), CloneOutcome> {
+    let ReviewCopyOutlook::Needed {
+        reason, warning, ..
+    } = outlook
+    else {
+        return Ok(());
+    };
+    if consent.covers_reason(&reason) {
+        return Ok(());
+    }
+    let by_flag = matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag);
+    Err(CloneOutcome::Refused(crate::status_text![
+        crate::prose::Prose::from_segments(warning),
+        crate::agent_job::review_copy_how(by_flag),
+        nothing_was
+    ]))
 }
 
 /// Give a clone made through a test's stand-in transport the same rewrite, so
@@ -684,6 +788,18 @@ fn add_existing_checkout(
             ]));
         }
         Err(refused) => return Err(refuse(refused)),
+    }
+    if pull_request.agent_name == pull_request.head_branch {
+        refuse_unagreed_review_copy(
+            &request.review_copy,
+            crate::agent_job::folder_review_copy_outlook(
+                dest,
+                &pull_request.head_branch,
+                pull_request.head_oid.as_deref(),
+                request.target.number,
+            ),
+            " Nothing was added.",
+        )?;
     }
     crate::logger::info(&format!("adding {} as a project", dest.display()));
     let unreadable = || {
