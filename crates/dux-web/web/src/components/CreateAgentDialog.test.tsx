@@ -50,6 +50,7 @@ function seed(target: CreateAgentTarget, overrides: Partial<DuxState> = {}) {
     createAgentPrInput: "",
     createAgentPrResolving: false,
     createAgentPrError: null,
+    createAgentReviewCopy: null,
     spine: { projects: [project], sessions: [session] },
     ...overrides,
   } as unknown as DuxState
@@ -120,5 +121,36 @@ describe("CreateAgentDialog", () => {
       "That repository is not open.",
     )
     expect(screen.getByText("or choose an existing project")).toBeTruthy()
+  })
+
+  it("holds Create back until the review copy box is ticked", async () => {
+    const reviewCopy = {
+      warned: "diverged:pr-head-review",
+      warning: ["Pushes would land on ", { name: "pr-head-review", quoted: true }, "."],
+      agreed: false,
+    }
+    seed(
+      { kind: "pr", projectId: "p1" },
+      { createAgentPrInput: "#42", createAgentReviewCopy: reviewCopy },
+    )
+    const { CreateAgentDialog } = await import("./CreateAgentDialog")
+    const { rerender } = render(<CreateAgentDialog />)
+
+    expect(screen.getByText("pr-head-review", { selector: "code" })).toBeTruthy()
+    const create = () =>
+      screen.getByRole("button", { name: "Create from PR" }) as HTMLButtonElement
+    expect(create().disabled).toBe(true)
+    const box = screen.getByRole("checkbox", { name: "Create a review copy" })
+    expect(box.getAttribute("aria-checked")).toBe("false")
+
+    seed(
+      { kind: "pr", projectId: "p1" },
+      {
+        createAgentPrInput: "#42",
+        createAgentReviewCopy: { ...reviewCopy, agreed: true },
+      },
+    )
+    rerender(<CreateAgentDialog />)
+    expect(create().disabled).toBe(false)
   })
 })

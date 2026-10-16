@@ -10760,6 +10760,7 @@ impl App {
             input,
             randomize_name,
             copy_changes,
+            review_copy,
             focus,
             ..
         } = &self.prompt
@@ -10801,6 +10802,33 @@ impl App {
         } else {
             0
         };
+        // The question a refused pull-request create puts: the warning in
+        // the warning color, wrapped to the dialog, and the box under it.
+        let review_label = "Create a review copy";
+        let review_warning = review_copy.as_ref().map(|question| {
+            self.hanging_prose_lines(
+                &question.warning,
+                Style::default().fg(self.theme.warning_fg),
+                " ",
+                inner_width,
+            )
+        });
+        let review_checkbox_height = if review_warning.is_some() {
+            let checkbox = Checkbox::new(review_label);
+            checkbox
+                .layout(
+                    inner_width,
+                    checkbox.marker_style(Style::default()),
+                    checkbox.label_style(Style::default()),
+                )
+                .height
+        } else {
+            0
+        };
+        let review_warning_height = review_warning
+            .as_ref()
+            .map_or(0, |lines| u16::try_from(lines.len()).unwrap_or(u16::MAX));
+        let review_gap = u16::from(review_warning.is_some());
         let checkbox_spacing = 1;
         let copy_checkbox_spacing = u16::from(show_copy_checkbox);
         let footer_spacing = 1;
@@ -10826,6 +10854,10 @@ impl App {
                 + randomize_checkbox_height
                 + copy_checkbox_spacing
                 + copy_checkbox_height
+                + review_gap
+                + review_warning_height
+                + review_gap
+                + review_checkbox_height
                 + footer_spacing,
             frame.area(),
         );
@@ -10844,6 +10876,10 @@ impl App {
             _,
             copy_checkbox_area,
             _,
+            review_warning_area,
+            _,
+            review_checkbox_area,
+            _,
             hint_area,
         ] = Layout::default()
             .direction(Direction::Vertical)
@@ -10855,6 +10891,10 @@ impl App {
                 Constraint::Length(randomize_checkbox_height),
                 Constraint::Length(copy_checkbox_spacing),
                 Constraint::Length(copy_checkbox_height),
+                Constraint::Length(review_gap),
+                Constraint::Length(review_warning_height),
+                Constraint::Length(review_gap),
+                Constraint::Length(review_checkbox_height),
                 Constraint::Length(footer_spacing),
                 Constraint::Min(1),
             ])
@@ -10948,6 +10988,26 @@ impl App {
             None
         };
 
+        let review_copy_rect = match (review_warning, review_copy) {
+            (Some(lines), Some(question)) => {
+                Paragraph::new(lines).render(review_warning_area, frame.buffer_mut());
+                let (rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    review_checkbox_area,
+                    review_label,
+                    question.agreed,
+                    if *focus == NameNewAgentFocus::ReviewCopyCheckbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    },
+                    None,
+                );
+                Some(rect)
+            }
+            _ => None,
+        };
+
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         // Same rule as the rename modal: the name field owns the
@@ -10977,6 +11037,10 @@ impl App {
             }),
             copy_checkbox: copy_checkbox_rect.map(|rect| OverlayCheckbox {
                 id: OverlayCheckboxId::NameNewAgentCopyChanges,
+                rect,
+            }),
+            review_copy_checkbox: review_copy_rect.map(|rect| OverlayCheckbox {
+                id: OverlayCheckboxId::NameNewAgentReviewCopy,
                 rect,
             }),
         };
@@ -23448,6 +23512,7 @@ mod tests {
                 randomize_name,
                 randomized_name,
                 copy_changes,
+                review_copy: None,
                 focus,
             },
             other => panic!("expected NameNewAgent, got {other:?}"),
@@ -23867,8 +23932,93 @@ mod tests {
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         }
+    }
+
+    #[test]
+    fn the_name_prompt_shows_the_review_copy_warning_over_an_unticked_box_that_a_click_can_reach() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let PromptState::NameNewAgent {
+            input,
+            randomize_name,
+            randomized_name,
+            copy_changes,
+            ..
+        } = name_new_agent_prompt(&app)
+        else {
+            unreachable!()
+        };
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::PullRequest {
+                project: app.engine.projects[0].clone(),
+                host: "github.com".to_string(),
+                owner_repo: "octo/hello".to_string(),
+                number: 42,
+                title: "Fix".to_string(),
+                state: "OPEN".to_string(),
+                head_branch: "pr-head".to_string(),
+                custom_name: Some("pr-head".to_string()),
+                use_existing_branch: false,
+                review_copy: Default::default(),
+                agents: Vec::new(),
+            },
+            input,
+            randomize_name,
+            randomized_name,
+            copy_changes,
+            review_copy: Some(ReviewCopyQuestion {
+                warned: "diverged:pr-head-review".to_string(),
+                warning: dux_core::prose::Prose::new()
+                    .text("Pushes from this agent would land on ")
+                    .name("pr-head-review")
+                    .text(", not on the pull request."),
+                agreed: false,
+            }),
+            focus: NameNewAgentFocus::ReviewCopyCheckbox,
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let screen: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let warning_row = screen
+            .iter()
+            .position(|row| row.contains("Pushes from this agent would land on"))
+            .expect("the warning is on screen");
+        let box_row = screen
+            .iter()
+            .position(|row| row.contains("Create a review copy"))
+            .expect("the box is on screen");
+        assert!(warning_row < box_row, "the box sits under its warning");
+        assert!(
+            screen[box_row].contains("[ ]"),
+            "the box starts unticked: {}",
+            screen[box_row]
+        );
+        let OverlayMouseLayout::NameNewAgent {
+            review_copy_checkbox: Some(clickable),
+            ..
+        } = app.overlay_layout.active
+        else {
+            panic!(
+                "the box publishes its rect: {:?}",
+                app.overlay_layout.active
+            );
+        };
+        assert_eq!(usize::from(clickable.rect.y), box_row);
     }
 
     #[test]
@@ -24212,6 +24362,7 @@ mod tests {
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus,
         }
     }

@@ -1225,6 +1225,7 @@ pub(super) mod tests {
                     randomize_name: false,
                     randomized_name: None,
                     copy_changes: false,
+                    review_copy: None,
                     focus: NameNewAgentFocus::Input,
                 },
             ),

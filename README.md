@@ -369,7 +369,7 @@ terminal is refused, naming them, unless you add `--dangerously-ignore-connected
 dux projects ls                     # Also: show <p>, add <path> [--name] [--checkout-default] [--init], rm <p> [--delete-worktrees]
 dux projects worktrees ls <p>       # The project's worktrees, and which agent holds each
 dux agents ls                       # Also: --project <p>, --worktrees; show <a>, stop <a>, start <a>
-dux agents add --project <p> --name feat   # Also: --existing-branch, --copy-uncommitted, --from-pr <pr>, --from-worktree <path>, --fork <a>, --standalone <folder> [--provider]
+dux agents add --project <p> --name feat   # Also: --existing-branch, --copy-uncommitted, --from-pr <pr> [--review-copy], --from-worktree <path>, --fork <a>, --standalone <folder> [--provider]
 dux agents rm <a> --delete-worktree --keep-branch   # Neither branch flag: the branch goes only if dux created it
 dux agents tabs ls <a>              # Also: add <a> [--provider], rm|start|stop <a> <tab>
 dux terminals ls                    # Also: add [--agent <a> | --project <p>], rm <t>

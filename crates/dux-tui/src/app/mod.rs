@@ -412,6 +412,11 @@ pub struct App {
     /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
     /// and it is spent by the create's own outcome, success or failure.
     pub(crate) create_agent_started_here: bool,
+    /// The pull-request create this surface dispatched, until it succeeds or
+    /// fails for a reason other than a question. A refusal that asks for the
+    /// user's agreement to a review copy reopens the name prompt on this
+    /// request, so the typed name and the pull request stay filled in.
+    pub(crate) pull_request_create: Option<CreateAgentRequest>,
     /// What the clone form held when it last started a clone, until that
     /// clone succeeds or another submit replaces it.
     pub(crate) clone_draft: Option<CloneDraft>,
@@ -2586,6 +2591,22 @@ pub(crate) enum NameNewAgentFocus {
     /// Only reachable for `CreateAgentRequest::NewProject`: forks always
     /// copy and the other flows never do, so only fresh agents show the box.
     CopyChangesCheckbox,
+    /// Only reachable while the prompt carries a [`ReviewCopyQuestion`].
+    ReviewCopyCheckbox,
+}
+
+/// The question a refused pull-request create puts to the user: the server
+/// would have to make a separate review copy of the pull request, and pushes
+/// from the agent would land on the copy. The name prompt reopens with the
+/// warning and an unticked box, and creating stays blocked until it is ticked.
+#[derive(Clone, Debug)]
+pub(crate) struct ReviewCopyQuestion {
+    /// Identifies the warning shown, sent back with the agreement so a copy
+    /// made necessary for a different reason or under a different name since
+    /// is asked about again.
+    pub(crate) warned: String,
+    pub(crate) warning: dux_core::prose::Prose,
+    pub(crate) agreed: bool,
 }
 
 /// Which control has focus in the Clone modal, in Tab order: the three
@@ -3068,6 +3089,9 @@ pub(crate) enum PromptState {
         /// changes. Only surfaced (and only written into the request) for
         /// `CreateAgentRequest::NewProject`.
         copy_changes: bool,
+        /// Set when a pull-request create was refused for want of agreement to
+        /// a review copy; see [`ReviewCopyQuestion`].
+        review_copy: Option<ReviewCopyQuestion>,
         focus: NameNewAgentFocus,
     },
     PickEditor {
@@ -3708,6 +3732,7 @@ pub(crate) enum OverlayCheckboxId {
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
     NameNewAgentCopyChanges,
+    NameNewAgentReviewCopy,
     CloneProjectRandomizedPetName,
     ConfigReloadRecoverOldConfig,
     /// The recreate-working-copy dialog's "restart the tabs" box.
@@ -3966,6 +3991,9 @@ pub(crate) enum OverlayMouseLayout {
         /// The "copy uncommitted changes" checkbox; present only for
         /// `CreateAgentRequest::NewProject` prompts.
         copy_checkbox: Option<OverlayCheckbox>,
+        /// The "create a review copy" checkbox; present only while the prompt
+        /// is asking for that agreement.
+        review_copy_checkbox: Option<OverlayCheckbox>,
     },
     /// The macro list: a Picker, so it publishes its rows and nothing else. The
     /// editor that opens on top of it publishes
@@ -4625,6 +4653,7 @@ impl App {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,

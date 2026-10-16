@@ -39,7 +39,16 @@ export type CreateSessionBody =
     }
   | { kind: "fork"; session_id: string; name?: string }
   | { kind: "from_worktree"; project_id: string; worktree_path: string; name?: string }
-  | { kind: "from_pr"; project_id: string; pr: string; name?: string }
+  | {
+      kind: "from_pr"
+      project_id: string
+      pr: string
+      name?: string
+      // The user's agreement to a review copy of the pull request, and the
+      // identifier of the warning it answers (from the server's refusal).
+      review_copy?: boolean
+      review_copy_warned?: string
+    }
   // A STANDALONE agent: it carries no project (it belongs to none), and it is
   // the only kind that carries a provider, because the others take their
   // project's default and this one has no project to take one from.

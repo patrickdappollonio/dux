@@ -432,6 +432,10 @@ export interface EventsServerMessage {
    *  Absent reads as `false`, never as "unknown, better keep it on screen". What
    *  earns it is documented on `NotifyOptions.sticky` in `lib/notify.ts`. */
   sticky?: boolean
+  /** The question a status puts to the user (`status`), when it is one. Typed
+   *  `unknown` because it is checked at the one reader, `readReviewCopyAsk` in
+   *  `lib/store.ts`. */
+  ask?: unknown
   /** Status scope (`status`): the literal `"all"` for a workspace broadcast, or
    *  `{connection: "<id>"}` for one addressed to a single connection (the
    *  serialized shape, so this is not a plain string). Read in

@@ -54,6 +54,47 @@ pub struct ResolvedPullRequest {
     /// name UPFRONT (no post-resolution prompt), so its lookup carries
     /// `Some(name)` here and the web follow-up dispatches the create directly.
     pub custom_name: Option<String>,
+    /// Whether the user agreed to a review copy, carried to the create the
+    /// lookup hands off to. The TUI asks after resolving, so it passes the
+    /// default; the web and the command line decide before the lookup.
+    pub review_copy: ReviewCopyConsent,
+}
+
+/// Whether the user agreed that an agent from a pull request may be made on a
+/// review copy of it. A copy is a branch of dux's own, so a push from the agent
+/// lands there and not on the pull request, and dux makes one only when asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ReviewCopyConsent {
+    /// Nobody agreed: a create that needs a copy is refused and asks.
+    #[default]
+    Withheld,
+    /// Agreed without having been shown a warning, as the command line's flag
+    /// does. Covers whatever copy turns out to be needed.
+    Blanket,
+    /// Agreed after being shown the warning identified by this text, which
+    /// covers a copy for that reason under that name and nothing else.
+    Warned(String),
+}
+
+impl ReviewCopyConsent {
+    /// Read the two fields every surface sends: whether the box was ticked or
+    /// the flag given, and the identifier of the warning the user was shown.
+    pub fn from_request(agreed: bool, warned: Option<String>) -> Self {
+        match (agreed, warned) {
+            (false, _) => Self::Withheld,
+            (true, None) => Self::Blanket,
+            (true, Some(warned)) => Self::Warned(warned),
+        }
+    }
+
+    /// Whether this agreement covers the copy described by `warned`.
+    pub fn covers(&self, warned: &str) -> bool {
+        match self {
+            Self::Withheld => false,
+            Self::Blanket => true,
+            Self::Warned(seen) => seen == warned,
+        }
+    }
 }
 
 /// Why a PR lookup ran: to create a new agent from the PR, or to manually
@@ -384,6 +425,9 @@ pub enum CreateAgentRequest {
         head_branch: String,
         custom_name: Option<String>,
         use_existing_branch: bool,
+        /// Whether the user agreed to a review copy. Without it a create that
+        /// needs one creates nothing and asks.
+        review_copy: ReviewCopyConsent,
         /// Every managed agent of the project, as the engine knows them when
         /// the create is dispatched, so the job can tell a branch held by an
         /// agent from one held by anything else. Empty from every constructor;

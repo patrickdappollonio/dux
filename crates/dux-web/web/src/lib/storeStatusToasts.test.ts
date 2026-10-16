@@ -652,3 +652,77 @@ describe("a refusal the browser raises itself", () => {
     expect(html).toContain("is not configured. Pick one of the configured providers.")
   })
 })
+
+describe("a create that asks for a review copy", () => {
+  const ask = {
+    kind: "review_copy",
+    warned: "diverged:pr-head-review",
+    warning: [
+      "Branch ",
+      { name: "pr-head", quoted: true },
+      " has diverged. Pushes would land on ",
+      { name: "pr-head-review", quoted: true },
+      ".",
+    ],
+  }
+  const refusal = {
+    event: "status",
+    key: "op-3",
+    tone: "error",
+    message: 'Branch "pr-head" has diverged. Pushes would land on "pr-head-review". Pass --review-copy.',
+    ask,
+  }
+
+  function createBodies() {
+    return fetchMock.mock.calls
+      .filter(([url]) => String(url).endsWith("/api/v1/sessions"))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+  }
+
+  it("reopens the dialog with the typed values and asks again with the agreement", async () => {
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    mod.openCreateAgentFromPr("p1")
+    mod.setCreateAgentPrInput("#42")
+    mod.setCreateAgentDraft("my-review")
+    mod.submitNameDialog("my-review")
+    expect(mod.getSnapshot().createAgentTarget).toBeNull()
+
+    mod.eventsSocket.onEvent(refusal)
+    const reopened = mod.getSnapshot()
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(reopened.createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
+    expect(reopened.createAgentPrInput).toBe("#42")
+    expect(reopened.createAgentDraft).toBe("my-review")
+    expect(reopened.createAgentReviewCopy).toEqual({
+      warned: "diverged:pr-head-review",
+      warning: ask.warning,
+      agreed: false,
+    })
+
+    // Unticked, submitting sends nothing more.
+    mod.submitNameDialog("my-review")
+    expect(createBodies()).toHaveLength(1)
+
+    mod.setCreateAgentReviewCopyAgreed(true)
+    mod.submitNameDialog("my-review")
+    expect(createBodies()[1]).toMatchObject({
+      kind: "from_pr",
+      project_id: "p1",
+      pr: "#42",
+      name: "my-review",
+      review_copy: true,
+      review_copy_warned: "diverged:pr-head-review",
+    })
+  })
+
+  it("is an ordinary error toast when this tab asked for no pull request create", async () => {
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    mod.eventsSocket.onEvent(refusal)
+    expect(toast.error).toHaveBeenCalledTimes(1)
+    expect(mod.getSnapshot().createAgentTarget).toBeNull()
+  })
+})

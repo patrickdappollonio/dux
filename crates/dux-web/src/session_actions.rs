@@ -141,6 +141,16 @@ enum CreateSessionBody {
         pr: String,
         #[serde(default)]
         name: String,
+        /// The client's AGREEMENT to a review copy of the pull request, for a
+        /// branch that cannot be used as it is. Absent/false makes a create
+        /// that needs a copy refuse and ask, so the client can show the
+        /// warning and re-POST with this set.
+        #[serde(default)]
+        review_copy: bool,
+        /// The identifier of the warning the agreement answers, as the refusal
+        /// carried it. Absent from a client that was never shown one.
+        #[serde(default)]
+        review_copy_warned: Option<String>,
     },
     /// A STANDALONE agent: run a provider in a folder the user already has. It
     /// carries no `project_id`, belonging to no project, and it is the only kind
@@ -187,10 +197,14 @@ impl CreateSessionBody {
                 project_id,
                 pr,
                 name,
+                review_copy,
+                review_copy_warned,
             } => WireCommand::CreateAgentFromPr {
                 project_id,
                 pr,
                 name,
+                review_copy,
+                review_copy_warned,
             },
             CreateSessionBody::Standalone {
                 folder,

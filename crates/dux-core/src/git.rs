@@ -1918,6 +1918,104 @@ pub fn branch_contains_commit(repo_path: &Path, commit: &str, branch: &str) -> R
     }
 }
 
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The tip of local branch `branch` when it is strictly BEHIND `commit`: the
+/// tip is an ancestor of the commit and not the commit itself, so the branch
+/// holds nothing of its own and moving it to `commit` loses no work. `None`
+/// for a branch at the commit, one ahead of it, and one that has diverged.
+///
+/// Errors when git cannot answer (`commit` not a full object id, a commit this
+/// clone lacks, a branch that does not exist), so a caller can tell "not
+/// behind" from "could not check". It shells out to git, so callers run it in
+/// a background worker. The branch is passed fully qualified as
+/// `refs/heads/<name>`, which cannot begin with a dash.
+pub fn branch_behind_commit(
+    repo_path: &Path,
+    branch: &str,
+    commit: &str,
+) -> Result<Option<String>> {
+    if !is_object_id(commit) {
+        return Err(anyhow!("\"{commit}\" is not a full commit id"));
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let tip = run_git_capture(
+        repo_path,
+        &["rev-parse", "--verify", "--end-of-options", &branch_ref],
+        &format!("read the tip of branch \"{branch}\""),
+    )?;
+    if tip == commit {
+        return Ok(None);
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", &tip, commit, "--"])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to ask whether \"{branch}\" is behind {commit} for {}",
+                repo_path.display()
+            )
+        })?;
+    match out.status.code() {
+        Some(0) => Ok(Some(tip)),
+        Some(1) => Ok(None),
+        _ => Err(anyhow!(
+            "git could not tell whether \"{branch}\" is behind {commit}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Move local branch `branch` from `old_tip` to `commit` without touching any
+/// checkout. `update-ref` is given the old value, so a branch that moved since
+/// `old_tip` was read is refused and keeps wherever it went, instead of being
+/// overwritten. The caller has established that `old_tip` is behind `commit`
+/// ([`branch_behind_commit`]) and that no worktree has the branch checked out,
+/// because a checkout would not follow the ref. The ref is fully qualified, so
+/// a dash-leading name is a ref and not an option.
+pub fn fast_forward_branch(
+    repo_path: &Path,
+    branch: &str,
+    old_tip: &str,
+    commit: &str,
+) -> Result<()> {
+    if !is_object_id(old_tip) || !is_object_id(commit) {
+        return Err(anyhow!("a branch moves between full commit ids only"));
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "update-ref",
+            "-m",
+            "dux: move forward to the pull request's latest commit",
+            &branch_ref,
+            commit,
+            old_tip,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to move branch \"{branch}\" forward in {}",
+                repo_path.display()
+            )
+        })?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git did not move branch \"{branch}\" forward: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether any local or `origin` remote-tracking branch lives BELOW `name`,
 /// such as `<name>/x`. Git stores refs as paths, so a branch `<name>` cannot
 /// be created while one of those exists, even though no branch is called
@@ -10757,6 +10855,78 @@ mod tests {
         commit_on_branch(repo.path(), "--all", "one");
         assert!(branch_is_ancestor(repo.path(), "base", "--all").unwrap());
         assert!(!branch_is_ancestor(repo.path(), "--all", "base").unwrap());
+    }
+
+    // ── moving a branch forward to a commit ──────────────────
+
+    /// A repository with `behind` one commit behind `ahead`, plus `elsewhere`
+    /// on a line of its own; returns the three tips and the commit that
+    /// `behind` could be moved to.
+    fn behind_ahead_and_elsewhere(repo: &Path) -> (String, String, String) {
+        commit_on_branch(repo, "behind", "base");
+        let base = rev_parse(repo, "refs/heads/behind");
+        commit_on_branch(repo, "ahead", "pull request work");
+        let ahead = rev_parse(repo, "refs/heads/ahead");
+        run_git(repo, &["reset", "--hard", &base]);
+        commit_on_branch(repo, "elsewhere", "other work");
+        let elsewhere = rev_parse(repo, "refs/heads/elsewhere");
+        (base, ahead, elsewhere)
+    }
+
+    #[test]
+    fn a_branch_is_behind_a_commit_only_when_its_tip_is_strictly_older_on_the_same_line() {
+        let repo = init_test_repo();
+        let (base, ahead, elsewhere) = behind_ahead_and_elsewhere(repo.path());
+        assert_eq!(
+            branch_behind_commit(repo.path(), "behind", &ahead).unwrap(),
+            Some(base.clone())
+        );
+        assert_eq!(
+            branch_behind_commit(repo.path(), "ahead", &ahead).unwrap(),
+            None,
+            "a branch at the commit has nothing to move forward over"
+        );
+        assert_eq!(
+            branch_behind_commit(repo.path(), "ahead", &base).unwrap(),
+            None,
+            "a branch with commits of its own is ahead, not behind"
+        );
+        assert_eq!(
+            branch_behind_commit(repo.path(), "elsewhere", &ahead).unwrap(),
+            None,
+            "a diverged branch ({elsewhere}) is never moved"
+        );
+    }
+
+    #[test]
+    fn fast_forward_branch_moves_the_branch_and_refuses_when_it_changed_meanwhile() {
+        let repo = init_test_repo();
+        let (base, ahead, elsewhere) = behind_ahead_and_elsewhere(repo.path());
+
+        // Someone moved the branch after the tip was read: the move is refused
+        // and the branch stays where they put it.
+        let refused = fast_forward_branch(repo.path(), "behind", &elsewhere, &ahead);
+        assert!(refused.is_err(), "a stale tip must be refused: {refused:?}");
+        assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), base);
+
+        fast_forward_branch(repo.path(), "behind", &base, &ahead).unwrap();
+        assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), ahead);
+    }
+
+    /// A dash-leading name is a ref, never an option, in both calls.
+    #[test]
+    fn moving_a_branch_forward_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "--all", "base");
+        let base = rev_parse(repo.path(), "refs/heads/--all");
+        commit_on_branch(repo.path(), "work", "pull request work");
+        let ahead = rev_parse(repo.path(), "refs/heads/work");
+        assert_eq!(
+            branch_behind_commit(repo.path(), "--all", &ahead).unwrap(),
+            Some(base.clone())
+        );
+        fast_forward_branch(repo.path(), "--all", &base, &ahead).unwrap();
+        assert_eq!(rev_parse(repo.path(), "refs/heads/--all"), ahead);
     }
 
     // ── commit_is_in_branch_history ──────────────────────────

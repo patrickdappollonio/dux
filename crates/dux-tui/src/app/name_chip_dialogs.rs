@@ -1143,6 +1143,7 @@ fn the_new_agent_dialog_chips_the_worktree_it_starts_in() {
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         },
     );

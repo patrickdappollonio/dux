@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::StatusUpdate;
 use crate::prose::ProseSegment;
-use crate::status_text::StatusText;
+use crate::status_text::{StatusAsk, StatusText};
 use crate::statusline::{QuietSurfaces, StatusScope, StatusTone};
 
 /// Process-global source of opaque status ids. Monotonic only so each op gets a
@@ -48,6 +48,8 @@ pub enum Final {
         /// The parts `text` was built from, for the web's name chips; see
         /// [`crate::status_text`].
         segments: Option<Vec<ProseSegment>>,
+        /// The question the sentence puts to the user, when it is one.
+        ask: Option<StatusAsk>,
         sticky: bool,
         /// Which surfaces withhold this outcome. A quieted keyed final still
         /// retires its spinner; only the sentence is withheld.
@@ -60,31 +62,40 @@ pub enum Final {
 
 impl Final {
     pub fn info(text: impl Into<StatusText>) -> Self {
-        let (text, segments) = text.into().into_parts();
+        let text = text.into();
+        let ask = text.ask().cloned();
+        let (text, segments) = text.into_parts();
         Final::Message {
             tone: StatusTone::Info,
             text,
             segments,
+            ask,
             sticky: false,
             quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn warning(text: impl Into<StatusText>) -> Self {
-        let (text, segments) = text.into().into_parts();
+        let text = text.into();
+        let ask = text.ask().cloned();
+        let (text, segments) = text.into_parts();
         Final::Message {
             tone: StatusTone::Warning,
             text,
             segments,
+            ask,
             sticky: false,
             quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn error(text: impl Into<StatusText>) -> Self {
-        let (text, segments) = text.into().into_parts();
+        let text = text.into();
+        let ask = text.ask().cloned();
+        let (text, segments) = text.into_parts();
         Final::Message {
             tone: StatusTone::Error,
             text,
             segments,
+            ask,
             sticky: false,
             quiet_on: QuietSurfaces::LOUD,
         }
@@ -103,12 +114,14 @@ impl Final {
                 tone,
                 text,
                 segments,
+                ask,
                 quiet_on,
                 ..
             } => Final::Message {
                 tone,
                 text,
                 segments,
+                ask,
                 sticky: true,
                 quiet_on,
             },
@@ -124,12 +137,14 @@ impl Final {
                 tone,
                 text,
                 segments,
+                ask,
                 sticky,
                 ..
             } => Final::Message {
                 tone,
                 text,
                 segments,
+                ask,
                 sticky,
                 quiet_on,
             },
@@ -187,12 +202,14 @@ impl ResolvedFinal {
                 tone,
                 text,
                 segments,
+                ask,
                 sticky,
                 quiet_on,
             } => EventReaction::Status(StatusUpdate {
                 tone,
                 message: text,
                 segments,
+                ask,
                 key: Some(self.key),
                 scope: self.scope,
                 sticky,
@@ -443,6 +460,7 @@ mod tests {
                 tone: StatusTone::Info,
                 text: "ok".into(),
                 segments: None,
+                ask: None,
                 sticky: false,
                 quiet_on: QuietSurfaces::LOUD,
             }
@@ -453,6 +471,7 @@ mod tests {
                 tone: StatusTone::Error,
                 text: "bad".into(),
                 segments: None,
+                ask: None,
                 sticky: false,
                 quiet_on: QuietSurfaces::LOUD,
             }
@@ -463,6 +482,7 @@ mod tests {
                 tone: StatusTone::Warning,
                 text: "hmm".into(),
                 segments: None,
+                ask: None,
                 sticky: false,
                 quiet_on: QuietSurfaces::LOUD,
             }

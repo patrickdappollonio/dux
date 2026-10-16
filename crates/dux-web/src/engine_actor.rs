@@ -3805,6 +3805,8 @@ impl StatusEmitter {
                 tone: up.tone,
                 message: up.message,
                 segments: up.segments,
+                // An upgraded busy and a refreshed one are never a question.
+                ask: None,
                 scope: up.scope,
                 sticky: up.sticky,
                 // A quiet status never reaches the controller, so nothing it

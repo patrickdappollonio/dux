@@ -143,6 +143,7 @@ export function createAgentFormView(
   draft: string,
   prInput: string,
   resolvingPr: boolean,
+  awaitingReviewCopyAgreement = false,
 ): CreateAgentFormView {
   const emptyName = draft.trim() === ""
   const invalidName = !emptyName && !isValidAgentName(draft)
@@ -153,6 +154,7 @@ export function createAgentFormView(
       invalidName ||
       (kind === "fork" && emptyName) ||
       (kind === "pr" && emptyPr) ||
-      resolvingPr,
+      resolvingPr ||
+      awaitingReviewCopyAgreement,
   }
 }

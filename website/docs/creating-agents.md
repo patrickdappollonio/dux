@@ -421,8 +421,11 @@ creates a worktree on it.
 If the branch already exists locally, from a previous fetch say, dux first fetches the
 pull request's head and checks that your branch contains it. When it does, dux attaches
 to it, and the delete dialog later offers that branch unticked, the way it does for any
-branch you had first. When it does not, dux leaves your branch alone and makes a fresh
-copy instead, as below, and says so. With no local branch of that name, dux fetches the
+branch you had first. When your branch is simply behind the pull request, with no commits
+of its own and not checked out anywhere, dux moves it forward to the pull request's latest
+commit and attaches to it, and the confirmation says it did. When it does not contain the
+pull request's code and cannot just be moved, dux leaves your branch alone and offers a
+review copy instead, as below. With no local branch of that name, dux fetches the
 pull request head into a new local branch, even when your project already has a branch of
 that name on the remote, because a pull request from a fork often shares its branch name
 with an unrelated branch there. That local branch is dux's own, and the box is ticked by
@@ -438,7 +441,8 @@ fresh copy below.
 
 If the pull request's branch is already checked out somewhere, say by your project
 folder, or by a worktree in the middle of a rebase or a bisect, git will not check it out
-a second time. dux makes a fresh copy instead: it
+a second time, and a branch that has gone its own way from the pull request is not the
+pull request's code. In both cases dux can make a review copy instead: it
 fetches the pull request into a new branch named after it, `feat-x-review` for a branch
 called `feat-x` (then `feat-x-review-2` and so on, up to `-review-20`), in a clean
 worktree, which is handy when you want a second agent to review the work with none of the
@@ -447,6 +451,21 @@ that confirms it says where the original branch is checked out. The new agent is
 to the pull request, so its status pill follows it, and a push from it goes to its own
 branch, never to the pull request's. If the link cannot be made, the confirmation says so
 as a warning, and you can attach the pull request to the agent yourself.
+
+dux never makes the copy on its own. It stops first, creates nothing, and tells you why
+the branch cannot be used and what name the copy would get. A push from the new agent lands
+on that copy's branch and not on the pull request, so you have to agree to that. In the
+browser the New agent dialog reopens with your reference and name still filled in, a
+warning, and an unticked **Create a review copy** box, and **Create** stays disabled until
+you tick it. The terminal UI reopens the name prompt the same way. On the command line the
+same refusal is printed, and running the command again with `--review-copy` agrees to it.
+If the branch changes between the warning and your answer so that the copy would be needed
+for a different reason or under a different name, dux asks again instead of going ahead.
+
+> [!IMPORTANT]
+> A review copy is a branch of its own. Pushing from the agent never updates the pull
+> request, so if you meant to add commits to the pull request, free its branch and create
+> the agent again instead.
 
 > [!WARNING]
 > Commits you have not pushed yet are not in the copy. When the copy is simply behind the

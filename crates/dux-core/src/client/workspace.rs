@@ -779,8 +779,13 @@ pub enum NewAgent {
         existing_branch: bool,
         copy_uncommitted: bool,
     },
-    /// From a pull request of a project.
-    PullRequest { project: String, reference: String },
+    /// From a pull request of a project. `review_copy` agrees to a review copy
+    /// of it when the pull request's own branch cannot be used as it is.
+    PullRequest {
+        project: String,
+        reference: String,
+        review_copy: bool,
+    },
     /// From a worktree a project already has.
     Worktree { project: String, path: String },
     /// A copy of another agent's worktree.
@@ -828,11 +833,21 @@ pub fn agents_add(
                 }),
             )
         }
-        NewAgent::PullRequest { project, reference } => {
+        NewAgent::PullRequest {
+            project,
+            reference,
+            review_copy,
+        } => {
             let (id, project) = project_id(&project)?;
             (
                 format!("Create {called} from pull request {reference} in project {project}"),
-                json!({ "kind": "from_pr", "project_id": id, "pr": reference, "name": name }),
+                json!({
+                    "kind": "from_pr",
+                    "project_id": id,
+                    "pr": reference,
+                    "name": name,
+                    "review_copy": review_copy,
+                }),
             )
         }
         NewAgent::Worktree { project, path } => {
@@ -1170,6 +1185,9 @@ mod create_wait_tests {
             if seen.path.starts_with("/api/v1/operations/op-2") {
                 return Reply::json(200, MINE_RUNNING);
             }
+            if seen.path == "/api/v1/projects" {
+                return Reply::json(200, r#"[{"id":"p1","name":"app","path":"/src/app"}]"#);
+            }
             if seen.path == "/api/v1/sessions?operation=1" {
                 let n = posts.fetch_add(1, Ordering::SeqCst);
                 return match script.refusals.get(n) {
@@ -1212,6 +1230,29 @@ mod create_wait_tests {
             .iter()
             .filter(|seen| seen.path == "/api/v1/sessions?operation=1")
             .count()
+    }
+
+    #[test]
+    fn a_pull_request_create_carries_the_agreement_to_a_review_copy() {
+        let dir = private_dir();
+        let (_fake, _lock, client) = dux_running(dir.path(), Script::new(vec![]));
+        let body_for = |review_copy| {
+            agents_add(
+                &client,
+                NewAgent::PullRequest {
+                    project: "app".to_string(),
+                    reference: "42".to_string(),
+                    review_copy,
+                },
+                None,
+                Path::new("/"),
+            )
+            .unwrap()
+            .body
+            .unwrap()
+        };
+        assert_eq!(body_for(true)["review_copy"], true);
+        assert_eq!(body_for(false)["review_copy"], false);
     }
 
     #[test]

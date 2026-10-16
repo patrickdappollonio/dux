@@ -3020,6 +3020,10 @@ struct WireStatusEvent {
     /// chip; left out for a plain sentence. See [`dux_core::status_text`].
     #[serde(skip_serializing_if = "Option::is_none")]
     segments: Option<Vec<dux_core::prose::ProseSegment>>,
+    /// The question the status puts to the user, when it is one. A replayed
+    /// snapshot carries none: the sentence still says it all in words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ask: Option<dux_core::status_text::StatusAsk>,
     scope: StatusScope,
     sticky: bool,
 }
@@ -3449,6 +3453,7 @@ impl EventsSocketLoop {
                         tone: status.tone,
                         message: status.message,
                         segments: status.segments,
+                        ask: status.ask,
                         scope: status.scope,
                         sticky: status.sticky,
                     },
@@ -3908,6 +3913,7 @@ fn status_events(
             tone: e.tone.clone(),
             message: e.message.clone(),
             segments: e.segments.clone(),
+            ask: None,
             scope: e.scope.clone(),
             sticky: e.sticky,
         })
@@ -5887,6 +5893,33 @@ mod tests {
         assert_eq!(
             json,
             r#"{"event":"status","key":"push","tone":"info","message":"Pushed \"main\".","segments":["Pushed ",{"name":"main","quoted":true},"."],"scope":"all","sticky":false}"#
+        );
+    }
+
+    /// The question a status puts rides the frame in the shape the browser
+    /// reads: the kind, what the warning was, and the warning in parts.
+    #[test]
+    fn a_status_event_carries_the_question_it_puts() {
+        let event = WireStatusEvent {
+            event: "status",
+            key: Some("op-1".into()),
+            tone: "error".into(),
+            message: "Pushes would land on the copy.".into(),
+            segments: None,
+            ask: Some(dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
+                dux_core::status_text::ReviewCopyAsk {
+                    warned: "diverged:pr-head-review".into(),
+                    warning: vec![dux_core::prose::ProseSegment::Text(
+                        "Pushes would land on the copy.".into(),
+                    )],
+                },
+            ))),
+            scope: StatusScope::All,
+            sticky: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"event":"status","key":"op-1","tone":"error","message":"Pushes would land on the copy.","ask":{"kind":"review_copy","warned":"diverged:pr-head-review","warning":["Pushes would land on the copy."]},"scope":"all","sticky":false}"#
         );
     }
 

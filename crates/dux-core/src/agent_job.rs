@@ -233,6 +233,18 @@ enum FreshCopyReason {
 }
 
 impl FreshCopy {
+    /// What the user is agreeing to by agreeing to this copy: why the branch
+    /// was left alone and the name the copy gets. Consent given for one such
+    /// answer does not cover another.
+    fn warned(&self) -> String {
+        let why = match self.reason {
+            FreshCopyReason::Busy(_) => "busy",
+            FreshCopyReason::Diverged => "diverged",
+            FreshCopyReason::Unknown(_) => "unknown",
+        };
+        format!("{why}:{}", self.new_branch)
+    }
+
     /// Where the busy branch is held, finishing a sentence that has just named
     /// it: a listed worktree whose folder is gone still reserves the branch
     /// until git prunes it, and the project folder is named as such.
@@ -274,6 +286,9 @@ enum BusyBranchCheck {
     Free,
     /// The pull request's own branch is held elsewhere: make a fresh copy.
     FreshCopy(FreshCopy),
+    /// The branch is free and has no commits of its own, only fewer than the
+    /// pull request: move it to the pull request's head and reuse it.
+    FastForward { old_tip: String, commit: String },
     /// The create was refused and the failure already sent.
     Refused,
 }
@@ -338,6 +353,7 @@ impl CreatePlanContext<'_> {
                 head_branch,
                 custom_name,
                 use_existing_branch,
+                review_copy,
                 agents,
             } => self.plan_pull_request(
                 project,
@@ -349,6 +365,7 @@ impl CreatePlanContext<'_> {
                 head_branch,
                 custom_name,
                 use_existing_branch,
+                review_copy,
                 agents,
             ),
             CreateAgentRequest::ForkSession {
@@ -658,6 +675,16 @@ impl CreatePlanContext<'_> {
     /// with the pull request's code would be wrong, so a held name or one
     /// without the head commit is refused.
     ///
+    /// A free branch the pull request has only moved past (its tip is an
+    /// ancestor of the head commit, so it has no commits of its own) is moved
+    /// forward to the head commit and reused, with no copy.
+    ///
+    /// A copy is made only for a user who agreed to it. Without that agreement
+    /// the create makes nothing and refuses with the question, and an
+    /// agreement given for a different reason or copy name than the one now
+    /// needed is refused the same way, so a branch that changed since the
+    /// warning cannot be answered by a yes to something else.
+    ///
     /// A holder check that cannot run is logged and treated as "free": the
     /// check is an improvement on a path that works, never a new way to fail.
     #[allow(clippy::too_many_arguments)]
@@ -671,6 +698,7 @@ impl CreatePlanContext<'_> {
         agents: &[crate::worker::AgentAtWorktree],
         head_commit: Option<&str>,
         containment: &HeadContainment,
+        consent: &crate::worker::ReviewCopyConsent,
     ) -> BusyBranchCheck {
         let holder = match git::worktree_holding_branch(repo_path, resolved_name) {
             Ok(holder) => holder,
@@ -755,11 +783,35 @@ impl CreatePlanContext<'_> {
         if !needs_copy {
             return BusyBranchCheck::Free;
         }
-        let reason = match (holder, containment) {
-            (Some(holder), _) => FreshCopyReason::Busy(holder),
-            (None, HeadContainment::Unknown(reason)) => FreshCopyReason::Unknown(reason.clone()),
-            (None, _) => FreshCopyReason::Diverged,
+        // A free branch with nothing of its own on it is the pull request a
+        // few commits ago: move it up and use it, no copy.
+        let mut reason = match (holder, containment) {
+            (Some(holder), _) => Some(FreshCopyReason::Busy(holder)),
+            (None, HeadContainment::Unknown(reason)) => {
+                Some(FreshCopyReason::Unknown(reason.clone()))
+            }
+            (None, _) => None,
         };
+        if reason.is_none()
+            && let Some(commit) = head_commit
+        {
+            match git::branch_behind_commit(repo_path, resolved_name, commit) {
+                Ok(Some(old_tip)) => {
+                    return BusyBranchCheck::FastForward {
+                        old_tip,
+                        commit: commit.to_string(),
+                    };
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    logger::error(&format!(
+                        "could not tell whether \"{resolved_name}\" is behind the head commit of PR #{number}: {err:#}"
+                    ));
+                    reason = Some(FreshCopyReason::Unknown(format!("{err:#}")));
+                }
+            }
+        }
+        let reason = reason.unwrap_or(FreshCopyReason::Diverged);
         let free = (1..=REVIEW_NAME_LIMIT)
             .map(|n| review_name(resolved_name, n))
             .find(|candidate| self.review_name_is_free(project, repo_path, candidate));
@@ -788,14 +840,73 @@ impl CreatePlanContext<'_> {
             ]);
             return BusyBranchCheck::Refused;
         };
-        logger::info(&format!(
-            "branch \"{resolved_name}\" of PR #{number} cannot be used as it is; making a fresh copy on \"{new_branch}\""
-        ));
-        BusyBranchCheck::FreshCopy(FreshCopy {
+        let copy = FreshCopy {
             busy_branch: resolved_name.to_string(),
             reason,
             new_branch,
-        })
+        };
+        // A copy is a branch of dux's own, and a push from the agent lands on
+        // it and not on the pull request, so it is made only for a user who
+        // agreed to this one.
+        if !consent.covers(&copy.warned()) {
+            self.ask_for_review_copy(&copy, number);
+            return BusyBranchCheck::Refused;
+        }
+        logger::info(&format!(
+            "branch \"{resolved_name}\" of PR #{number} cannot be used as it is; making a fresh copy on \"{}\"",
+            copy.new_branch
+        ));
+        BusyBranchCheck::FreshCopy(copy)
+    }
+
+    /// Refuse the create because it needs a review copy nobody agreed to,
+    /// saying what the copy costs and putting the question to the surface.
+    ///
+    /// The status carries the warning in parts for a dialog to show beside its
+    /// checkbox, and its own sentence adds how to agree from the command line,
+    /// which is all a reader of the operation record or the log has.
+    fn ask_for_review_copy(&self, copy: &FreshCopy, number: u64) {
+        let why = match &copy.reason {
+            FreshCopyReason::Busy(holder) => {
+                crate::status_text!["Branch ", q(copy.busy_branch), copy.busy_clause(holder)]
+            }
+            FreshCopyReason::Diverged => crate::status_text![
+                "Branch ",
+                q(copy.busy_branch),
+                " has diverged from the pull request: each has commits the other lacks."
+            ],
+            FreshCopyReason::Unknown(reason) => crate::status_text![
+                "dux could not check whether branch ",
+                q(copy.busy_branch),
+                format!(
+                    " holds the pull request's latest commit ({}).",
+                    reason.trim_end_matches('.')
+                )
+            ],
+        };
+        let warning = crate::status_text![
+            why,
+            " Creating this agent from PR ",
+            n(format!("#{}", number)),
+            " needs a separate review copy on ",
+            q(copy.new_branch),
+            ", and pushes from this agent would land on ",
+            q(copy.new_branch),
+            ", not on the pull request."
+        ];
+        let ask = crate::status_text::StatusAsk::ReviewCopy(Box::new(
+            crate::status_text::ReviewCopyAsk {
+                warned: copy.warned(),
+                warning: warning.segments().map(<[_]>::to_vec).unwrap_or_default(),
+            },
+        ));
+        self.send_failure(
+            crate::status_text![
+                warning,
+                " To go ahead anyway, tick Create a review copy where the dialog offers it, or pass --review-copy to dux agents add."
+            ]
+            .with_ask(ask),
+        );
     }
 
     /// The first agent of the request's project whose working copy has a
@@ -990,6 +1101,7 @@ impl CreatePlanContext<'_> {
         head_branch: String,
         custom_name: Option<String>,
         use_existing_branch: bool,
+        review_copy: crate::worker::ReviewCopyConsent,
         agents: Vec<crate::worker::AgentAtWorktree>,
     ) -> Option<ManagedCreatePlan> {
         Some({
@@ -1043,6 +1155,7 @@ impl CreatePlanContext<'_> {
             } else {
                 HeadContainment::NotLocal
             };
+            let mut fast_forward: Option<(String, String)> = None;
             let fresh_copy = match self.check_busy_pr_branch(
                 &project,
                 &repo_path,
@@ -1052,9 +1165,14 @@ impl CreatePlanContext<'_> {
                 &agents,
                 head_commit.as_deref(),
                 &containment,
+                &review_copy,
             ) {
                 BusyBranchCheck::Refused => return None,
                 BusyBranchCheck::Free => None,
+                BusyBranchCheck::FastForward { old_tip, commit } => {
+                    fast_forward = Some((old_tip, commit));
+                    None
+                }
                 BusyBranchCheck::FreshCopy(copy) => {
                     // The copy is named after the branch it actually got, so
                     // the sidebar does not show two rows with the busy name.
@@ -1124,6 +1242,24 @@ impl CreatePlanContext<'_> {
                 }
             }
 
+            if let Some((old_tip, commit)) = &fast_forward
+                && let Err(err) =
+                    git::fast_forward_branch(&repo_path, &resolved_name, old_tip, commit)
+            {
+                logger::error(&format!(
+                    "could not move \"{resolved_name}\" forward to the head of PR #{number}: {err:#}"
+                ));
+                self.send_failure(crate::status_text![
+                    "Could not move branch ",
+                    q(resolved_name),
+                    " forward to the latest commit of PR ",
+                    n(format!("#{}", number)),
+                    format!(
+                        ": {err:#}. Nothing was created. Try again, and if the branch keeps changing, choose another name for the agent."
+                    )
+                ]);
+                return None;
+            }
             let claim = |path: &Path| self.claim_worktree_path(path);
             let (branch_name, worktree_path) = match git::create_worktree_existing_branch_claimed(
                 &repo_path,
@@ -1138,6 +1274,17 @@ impl CreatePlanContext<'_> {
                         "PR worktree creation failed for {} #{}: {err}",
                         owner_repo, number
                     ));
+                    // The branch was moved for this agent, so a failed create
+                    // puts it back where the user had it. The move is guarded
+                    // by the value it set, so a branch moved since stays put.
+                    if let Some((old_tip, commit)) = &fast_forward
+                        && let Err(undo) =
+                            git::fast_forward_branch(&repo_path, &resolved_name, commit, old_tip)
+                    {
+                        logger::error(&format!(
+                            "could not put \"{resolved_name}\" back after the failed create: {undo:#}"
+                        ));
+                    }
                     // The responsibility boundary: no worktree exists, so the
                     // provenance-driven rollback will not run and nothing else
                     // would remove the ref the fetch minted. Past this point the
@@ -1161,6 +1308,15 @@ impl CreatePlanContext<'_> {
                     return None;
                 }
             };
+            if fast_forward.is_some() {
+                self.creation_notes.push(crate::status_text![
+                    "Moved your local branch ",
+                    q(resolved_name),
+                    " forward to the latest commit of PR ",
+                    n(format!("#{}", number)),
+                    ", because it had no commits of its own."
+                ]);
+            }
             let created = crate::status_text![
                 "Created ",
                 n(project.default_provider.as_str()),
@@ -2363,6 +2519,8 @@ mod tests {
         /// Whether the create's final is a warning rather than an info.
         status_warns: bool,
         failure: Option<String>,
+        /// The question the failure puts to the user, when it is one.
+        failure_ask: Option<crate::status_text::StatusAsk>,
         progress: Vec<String>,
         /// Keeps the temporary worktrees root alive so tests can inspect the
         /// created worktree's contents.
@@ -2423,6 +2581,7 @@ mod tests {
             status_quiet: crate::statusline::QuietSurfaces::LOUD,
             status_warns: false,
             failure: None,
+            failure_ask: None,
             progress: Vec::new(),
             _paths_root: paths_root,
         };
@@ -2442,6 +2601,7 @@ mod tests {
                     }
                 }
                 WorkerEvent::CreateAgentFailed { message, .. } => {
+                    run.failure_ask = message.ask().cloned();
                     run.failure = Some(message.to_string());
                 }
                 WorkerEvent::CreateAgentProgress { message, .. } => {
@@ -2726,6 +2886,7 @@ mod tests {
             head_branch: "pr-head".to_string(),
             custom_name: Some("pr-agent".to_string()),
             use_existing_branch: true,
+            review_copy: Default::default(),
             agents: Vec::new(),
         };
         let session = drive_create_job(repo.path(), request);
@@ -2880,6 +3041,7 @@ mod tests {
             head_branch: "pr-head".to_string(),
             custom_name: Some("pr-agent".to_string()),
             use_existing_branch: true,
+            review_copy: Default::default(),
             agents: Vec::new(),
         };
         let session = drive_create_job(repo.path(), request);
@@ -3032,7 +3194,9 @@ mod tests {
         // A local branch of the same name on an unrelated commit is not the
         // pull request: it stays where it was and the pull request gets a copy.
         let (origin, repo) = pr_repo_with_fake_origin();
-        git_in(repo.path(), &["branch", "--", "pr-head", "main"]);
+        git_in(repo.path(), &["checkout", "-b", "pr-head"]);
+        commit_local_work(repo.path(), 1);
+        git_in(repo.path(), &["checkout", "main"]);
         let unrelated = git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]);
         let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
         let session = run.session.expect("a session");
@@ -3078,6 +3242,146 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains("does not contain"), "{message}");
+    }
+
+    #[test]
+    fn a_free_local_branch_behind_the_pull_request_is_moved_forward_and_reused() {
+        let (origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(
+            repo.path(),
+            &["branch", "--", "pr-head", "origin/pr-head~1"],
+        );
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        assert!(run.failure.is_none(), "{:?}", run.failure);
+        let session = run.session.expect("a session");
+        assert_eq!(session.branch_name().unwrap(), "pr-head");
+        assert_eq!(
+            git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]),
+            pr_commit(origin.path()),
+            "the branch had no commits of its own, so it now is the pull request"
+        );
+        assert_eq!(
+            git_stdout(Path::new(session.directory()), &["rev-parse", "HEAD"]),
+            pr_commit(origin.path())
+        );
+        assert_eq!(
+            session.branch_provenance().unwrap(),
+            crate::model::BranchProvenance::AttachedExisting,
+            "the branch was the user's, so deleting the agent keeps it"
+        );
+        assert_eq!(
+            git_stdout(repo.path(), &["branch", "--list", "pr-head-review"]),
+            "",
+            "no copy is made"
+        );
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.ends_with(
+                "Moved your local branch \"pr-head\" forward to the latest commit of PR #42, because it had no commits of its own."
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_create_that_needs_a_review_copy_asks_first_and_makes_it_only_for_what_was_agreed_to() {
+        let how = " To go ahead anyway, tick Create a review copy where the dialog offers it, or pass --review-copy to dux agents add.";
+        let consequence = " Creating this agent from PR #42 needs a separate review copy on \"pr-head-review\", and pushes from this agent would land on \"pr-head-review\", not on the pull request.";
+
+        // A branch with commits of its own, and one the pull request has moved
+        // past while another working copy has it checked out.
+        let (_origin, diverged) = pr_repo_with_fake_origin();
+        git_in(diverged.path(), &["checkout", "-b", "pr-head"]);
+        commit_local_work(diverged.path(), 1);
+        git_in(diverged.path(), &["checkout", "main"]);
+
+        let (_origin, busy) = pr_repo_with_fake_origin();
+        git_in(busy.path(), &["fetch", "origin"]);
+        let holder_root = tempfile::tempdir().unwrap();
+        let holder = holder_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("first-agent");
+        git_in(
+            busy.path(),
+            &[
+                "worktree",
+                "add",
+                holder.to_string_lossy().as_ref(),
+                "-b",
+                "pr-head",
+                "origin/pr-head~1",
+            ],
+        );
+
+        let cases = [
+            (
+                diverged.path(),
+                "diverged:pr-head-review",
+                format!(
+                    "Branch \"pr-head\" has diverged from the pull request: each has commits the other lacks.{consequence}"
+                ),
+            ),
+            (
+                busy.path(),
+                "busy:pr-head-review",
+                format!(
+                    "Branch \"pr-head\" is checked out at \"{}\".{consequence}",
+                    crate::home_path::shorten_home(&holder)
+                ),
+            ),
+        ];
+        for (repo, warned, warning) in cases {
+            let worktrees_before = worktree_paths(repo);
+            let mut asking = pull_request_request(repo, None, false);
+            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut asking {
+                *review_copy = crate::worker::ReviewCopyConsent::Withheld;
+            }
+            let refused = drive_create_job_run(repo, asking);
+            assert_eq!(
+                refused.failure.as_deref(),
+                Some(format!("{warning}{how}").as_str())
+            );
+            let Some(crate::status_text::StatusAsk::ReviewCopy(asked)) = &refused.failure_ask
+            else {
+                panic!("the refusal must ask: {:?}", refused.failure_ask);
+            };
+            assert_eq!(asked.warned, warned);
+            assert_eq!(
+                crate::prose::Prose::from_segments(asked.warning.clone()).plain(),
+                warning
+            );
+            assert!(refused.session.is_none());
+            assert_eq!(
+                worktree_paths(repo),
+                worktrees_before,
+                "nothing was created"
+            );
+            assert!(!crate::git::local_branch_exists(repo, "pr-head-review"));
+
+            // Agreeing to a different copy than the one warned about asks again.
+            let mut other = pull_request_request(repo, None, false);
+            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut other {
+                *review_copy =
+                    crate::worker::ReviewCopyConsent::Warned("unknown:pr-head-review".to_string());
+            }
+            let again = drive_create_job_run(repo, other);
+            assert!(again.session.is_none());
+            assert!(again.failure_ask.is_some(), "{:?}", again.failure);
+
+            // Agreeing to this one makes it.
+            let mut agreed = pull_request_request(repo, None, false);
+            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut agreed {
+                *review_copy = crate::worker::ReviewCopyConsent::Warned(warned.to_string());
+            }
+            let made = drive_create_job_run(repo, agreed);
+            assert_eq!(
+                made.session.expect("a session").branch_name().unwrap(),
+                "pr-head-review"
+            );
+        }
     }
 
     #[test]
@@ -3173,6 +3477,9 @@ mod tests {
             head_branch: "pr-head".to_string(),
             custom_name: custom_name.map(str::to_string),
             use_existing_branch: use_existing,
+            // The tests of a copy are about the copy; the ones about asking
+            // first take this away.
+            review_copy: crate::worker::ReviewCopyConsent::Blanket,
             agents: Vec::new(),
         }
     }

@@ -597,6 +597,16 @@ pub enum WireCommand {
         project_id: String,
         pr: String,
         name: String,
+        /// The user agreed to a review copy of the pull request, in case the
+        /// branch cannot be used as it is. Without it such a create is refused
+        /// and nothing is made.
+        #[serde(default)]
+        review_copy: bool,
+        /// Which warning the agreement answers, as the refusal sent it. Absent
+        /// from a caller that never saw one (the command line), whose
+        /// agreement then covers any copy.
+        #[serde(default)]
+        review_copy_warned: Option<String>,
     },
     /// Run a configured text macro against a live PTY target, mirroring the TUI's
     /// macro bar. `target_id` names EITHER an agent session (surface `Agent`) OR
@@ -942,6 +952,11 @@ pub struct WireStatus {
     /// sends it reads as plain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segments: Option<Vec<ProseSegment>>,
+    /// The question this status puts to the user, when it is one, so the
+    /// browser can offer the answer where the user is instead of toasting a
+    /// sentence. Absent for every other status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<crate::status_text::StatusAsk>,
     /// `None` = an unkeyed transient (anonymous slot). `Some` = a keyed op whose
     /// later success/error/clear carries the same key so the surfaces correlate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1024,11 +1039,14 @@ fn quiet_web_when(status: WireStatus, quiet: bool) -> WireStatus {
 impl WireStatus {
     /// Construct a wire status directly (for non-reaction sources like PTY-exit notices).
     pub fn new(tone: impl Into<String>, message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: tone.into(),
             message,
             segments,
+            ask,
             key: None,
             scope: StatusScope::All,
             sticky: false,
@@ -1042,11 +1060,14 @@ impl WireStatus {
         tone: impl Into<String>,
         message: impl Into<StatusText>,
     ) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: tone.into(),
             message,
             segments,
+            ask,
             key: Some(key.into()),
             scope: StatusScope::All,
             sticky: false,
@@ -1091,6 +1112,7 @@ impl WireStatus {
             tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
             segments: update.segments.clone(),
+            ask: update.ask.clone(),
             key: update.key.clone(),
             scope: update.scope.clone(),
             sticky: update.sticky,
@@ -1960,8 +1982,12 @@ impl Engine {
                 project_id,
                 pr,
                 name,
+                review_copy,
+                review_copy_warned,
             } => {
-                let status = self.create_agent_from_pr(&project_id, &pr, name)?;
+                let consent =
+                    crate::worker::ReviewCopyConsent::from_request(review_copy, review_copy_warned);
+                let status = self.create_agent_from_pr(&project_id, &pr, name, consent)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -3654,6 +3680,7 @@ impl Engine {
         project_id: &str,
         pr: &str,
         name: String,
+        review_copy: crate::worker::ReviewCopyConsent,
     ) -> anyhow::Result<WireStatus> {
         // Mirror the TUI's `open_new_agent_from_pr_prompt` gating: the PR flow is
         // unavailable unless GitHub integration is on AND `gh` is installed and
@@ -3738,6 +3765,7 @@ impl Engine {
                     project,
                     raw_input,
                     custom_name,
+                    review_copy,
                     worker_tx,
                     Some(op_id),
                     policy,
@@ -3838,6 +3866,7 @@ impl Engine {
                     head_branch: pr.head_ref_name.clone(),
                     custom_name,
                     use_existing_branch: false,
+                    review_copy: pr.review_copy.clone(),
                     agents: Vec::new(),
                 };
                 // The nested create dispatch mints its own busy from
@@ -4611,12 +4640,14 @@ impl Engine {
                     tone,
                     text,
                     segments,
+                    ask,
                     sticky,
                     quiet_on,
                 } => WebFollowupStatuses {
                     statuses: vec![{
                         let s =
                             WireStatus::new(tone.as_wire(), StatusText::from_parts(text, segments));
+                        let s = WireStatus { ask, ..s };
                         let s = if sticky { s.sticky() } else { s };
                         // The outcome decided its own per-surface answer; this
                         // path carries the web half rather than re-deciding it.
@@ -9518,6 +9549,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feat".to_string(),
                 custom_name: None,
+                review_copy: Default::default(),
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "s1".to_string(),
@@ -9610,6 +9642,7 @@ mod tests {
             state: "OPEN".to_string(),
             head_ref_name: "feat".to_string(),
             custom_name: None,
+            review_copy: Default::default(),
         };
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
@@ -9680,6 +9713,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: "my-agent".to_string(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -9715,6 +9750,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: "my-agent".to_string(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect("dispatch")
             .status
@@ -13357,6 +13394,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: "fix".to_string(),
+                review_copy: false,
+                review_copy_warned: None,
             }
         );
     }
@@ -13373,6 +13412,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: String::new(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect_err("gh unavailable");
         assert!(
@@ -13390,6 +13431,8 @@ mod tests {
                 project_id: "missing".to_string(),
                 pr: "#42".to_string(),
                 name: String::new(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect_err("unknown project");
         assert!(err.to_string().contains("unknown project"), "msg: {err}");
@@ -13405,6 +13448,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "   ".to_string(),
                 name: String::new(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect_err("empty pr");
         assert!(
@@ -13424,6 +13469,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: "/bad//name".to_string(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect_err("invalid name");
         assert!(err.to_string().contains("Invalid agent name"), "msg: {err}");
@@ -13460,6 +13507,8 @@ mod tests {
                 project_id: "p1".to_string(),
                 pr: "#42".to_string(),
                 name: "my-agent".to_string(),
+                review_copy: false,
+                review_copy_warned: None,
             })
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
@@ -13545,6 +13594,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
+                review_copy: Default::default(),
             }),
             // An id with no registered lookup op, so the followup returns no
             // clear key and resolves nothing: the create busy flows through the
@@ -13642,6 +13692,95 @@ mod tests {
         assert_eq!(record.created, vec![created]);
     }
 
+    /// A pull request whose own branch has gone its own way is not turned into
+    /// a review copy nobody asked for: the create ends in a status that carries
+    /// the question, which is what lets a browser put it to the user.
+    #[test]
+    fn a_from_pr_create_that_needs_a_review_copy_ends_in_a_status_that_asks() {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = crate::git::test_support::git_command()
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        let origin = init_repo_with_commit();
+        git(origin.path(), &["commit", "--allow-empty", "-m", "pr work"]);
+        git(origin.path(), &["update-ref", "refs/pull/42/head", "HEAD"]);
+        let repo = init_repo_with_commit();
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
+        let own_branch = "feature/pr-42";
+        git(repo.path(), &["checkout", "-b", own_branch]);
+        git(repo.path(), &["commit", "--allow-empty", "-m", "mine"]);
+        git(repo.path(), &["checkout", "-"]);
+
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project.clone());
+        let reaction = EventReaction::OpenNewAgentPromptForPr {
+            pr: Box::new(crate::worker::ResolvedPullRequest {
+                project,
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 42,
+                title: "Fix bug".to_string(),
+                state: "OPEN".to_string(),
+                head_ref_name: own_branch.to_string(),
+                custom_name: Some(own_branch.to_string()),
+                review_copy: Default::default(),
+            }),
+            status_op_id: None,
+        };
+        engine.drive_pr_lookup_followup(&reaction);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let asked = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the create never finished"
+            );
+            let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+            else {
+                continue;
+            };
+            let reaction = engine.process_worker_event(event);
+            if let Some(status) = wire_statuses_from_reaction(&reaction)
+                .into_iter()
+                .find(|status| status.tone == "error")
+            {
+                break status;
+            }
+        };
+        let Some(crate::status_text::StatusAsk::ReviewCopy(ask)) = &asked.ask else {
+            panic!("the refusal carries the question: {asked:?}");
+        };
+        assert_eq!(ask.warned, "diverged:feature/pr-42-review");
+        assert!(
+            asked
+                .message
+                .contains("pushes from this agent would land on \"feature/pr-42-review\""),
+            "{}",
+            asked.message
+        );
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "feature/pr-42-review"),
+            "nothing was made"
+        );
+    }
+
     /// When the resolved PR carries no custom name (the TUI path), the follow-up
     /// seeds the head branch as the name, matching the TUI prompt default.
     ///
@@ -13669,6 +13808,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/head".to_string(),
                 custom_name: None,
+                review_copy: Default::default(),
             }),
             status_op_id: None,
         };
@@ -13706,6 +13846,7 @@ mod tests {
                 // Legal on the remote, not a legal agent name here.
                 head_ref_name: "feature/add colons: & spaces".to_string(),
                 custom_name: None,
+                review_copy: Default::default(),
             }),
             status_op_id: Some("op-lookup".to_string()),
         };
@@ -13767,6 +13908,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feat\u{202E}txt.exe".to_string(),
                 custom_name: None,
+                review_copy: Default::default(),
             }),
             status_op_id: None,
         };

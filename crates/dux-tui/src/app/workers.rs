@@ -454,10 +454,15 @@ impl App {
                 self.tui_launched_ptys.remove(data.request.tab_id.as_str());
                 if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
                     self.create_agent_started_here = false;
+                    self.pull_request_create = None;
                 }
             }
-            WorkerEvent::CreateAgentFailed { .. } => {
+            WorkerEvent::CreateAgentFailed { message, .. } => {
                 self.create_agent_started_here = false;
+                // A question keeps the request: the reply reopens the prompt on it.
+                if message.ask().is_none() {
+                    self.pull_request_create = None;
+                }
             }
             _ => {}
         }
@@ -586,8 +591,23 @@ impl App {
                 message,
                 key,
                 quiet_on,
+                ask,
                 ..
             }) => {
+                // A refused create that asks for agreement to a review copy
+                // is answered in the name prompt, not on the status line. One
+                // this surface did not dispatch has no request to reopen, and
+                // shows its sentence like any other refusal.
+                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
+                    && let Some(request) = self.pull_request_create.take()
+                {
+                    self.reopen_name_prompt_for_review_copy(
+                        request,
+                        question.warned,
+                        question.warning,
+                    );
+                    return;
+                }
                 // A final ends whatever a change of this surface's still holds
                 // under its key, shown or not.
                 if tone != StatusTone::Busy
@@ -1389,6 +1409,7 @@ impl App {
             head_branch: pr.head_ref_name.clone(),
             custom_name: Some(dux_core::bidi::strip_bidi_controls(&pr.head_ref_name)),
             use_existing_branch: false,
+            review_copy: Default::default(),
             agents: Vec::new(),
         };
         if let Err(err) = self.open_name_new_agent_prompt(request) {
@@ -1672,6 +1693,9 @@ impl App {
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
         ) && std::mem::take(&mut self.create_agent_started_here);
+        if created_here {
+            self.pull_request_create = None;
+        }
         // A fallback is the engine relaunching a tab whose resume failed, so it
         // was started here only when the launch it falls back from was.
         let fell_back_from_here =

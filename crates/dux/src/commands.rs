@@ -315,6 +315,13 @@ pub struct AddAgentArgs {
         conflicts_with = "from_worktree"
     )]
     pub from_pr: Option<String>,
+    /// Agree to a separate review copy of the pull request when its own branch
+    /// cannot be used as it is (it has diverged, is checked out elsewhere, or
+    /// could not be compared). Without this such a create is refused and
+    /// nothing is made, because pushes from a copy land on the copy's branch
+    /// and not on the pull request.
+    #[arg(long, requires = "from_pr")]
+    pub review_copy: bool,
     /// Create the agent on this worktree the project already has.
     #[arg(long, value_name = "PATH", requires = "project")]
     pub from_worktree: Option<String>,
@@ -905,6 +912,15 @@ mod tests {
                 "add",
                 "--project",
                 "app",
+                "--from-pr",
+                "42",
+                "--review-copy",
+            ][..],
+            &[
+                "agents",
+                "add",
+                "--project",
+                "app",
                 "--from-worktree",
                 "/w/x",
             ][..],
@@ -938,6 +954,7 @@ mod tests {
             &["agents", "add", "--fork", "a", "--copy-uncommitted"][..],
             &["agents", "add", "--project", "app", "--fork", "a"][..],
             &["agents", "add", "--from-pr", "42"][..],
+            &["agents", "add", "--project", "app", "--review-copy"][..],
             &["agents", "add", "--project", "app", "--provider", "codex"][..],
             &[
                 "agents",

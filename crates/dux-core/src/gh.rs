@@ -2048,6 +2048,7 @@ pub fn run_pull_request_lookup_job(
     project: Project,
     raw_input: String,
     custom_name: Option<String>,
+    review_copy: crate::worker::ReviewCopyConsent,
     worker_tx: Sender<WorkerEvent>,
     status_op_id: Option<String>,
     policy: GithubHostPolicy,
@@ -2073,8 +2074,9 @@ pub fn run_pull_request_lookup_job(
         }
     };
 
-    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
-        .map(|metadata| resolved_pull_request(metadata, project, &lookup, custom_name));
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
+        resolved_pull_request(metadata, project, &lookup, custom_name, review_copy)
+    });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
         purpose: PrLookupPurpose::CreateAgent,
@@ -2202,8 +2204,9 @@ pub fn run_attach_pull_request_lookup_job(
             }
         };
 
-    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
-        .map(|metadata| resolved_pull_request(metadata, project, &lookup, None));
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
+        resolved_pull_request(metadata, project, &lookup, None, Default::default())
+    });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
         purpose,
@@ -2256,6 +2259,7 @@ fn resolved_pull_request(
     project: Project,
     lookup: &PullRequestLookup,
     custom_name: Option<String>,
+    review_copy: crate::worker::ReviewCopyConsent,
 ) -> ResolvedPullRequest {
     ResolvedPullRequest {
         project,
@@ -2266,6 +2270,7 @@ fn resolved_pull_request(
         state: metadata.state,
         head_ref_name: metadata.head_ref_name,
         custom_name,
+        review_copy,
     }
 }
 

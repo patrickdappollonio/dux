@@ -900,6 +900,7 @@ impl App {
                     project,
                     raw_input,
                     None,
+                    Default::default(),
                     worker_tx,
                     Some(op_id),
                     policy,
@@ -969,9 +970,40 @@ impl App {
                 .config
                 .defaults
                 .copy_uncommitted_changes_by_default,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
         Ok(())
+    }
+
+    /// Reopen the name prompt on a pull-request create the engine refused for
+    /// want of agreement to a review copy: the same request and typed name,
+    /// the warning above an unticked box, and the box focused. The agreement
+    /// it held before is dropped, because the situation it answered is not the
+    /// one being asked about now.
+    pub(crate) fn reopen_name_prompt_for_review_copy(
+        &mut self,
+        mut request: CreateAgentRequest,
+        warned: String,
+        warning: Vec<dux_core::prose::ProseSegment>,
+    ) {
+        if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut request {
+            *review_copy = dux_core::worker::ReviewCopyConsent::Withheld;
+        }
+        if self.open_name_new_agent_prompt(request).is_err() {
+            return;
+        }
+        if let PromptState::NameNewAgent {
+            review_copy, focus, ..
+        } = &mut self.prompt
+        {
+            *review_copy = Some(ReviewCopyQuestion {
+                warned,
+                warning: dux_core::prose::Prose::from_segments(warning),
+                agreed: false,
+            });
+            *focus = NameNewAgentFocus::ReviewCopyCheckbox;
+        }
     }
 
     /// Open the clone form: the destination starts at the add-project browser's
@@ -1442,6 +1474,8 @@ impl App {
         busy_message: String,
     ) -> Result<()> {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        self.pull_request_create =
+            matches!(request, CreateAgentRequest::PullRequest { .. }).then(|| request.clone());
         // Armed only once the dispatch is known accepted, and taking the
         // in-flight key is what says so. The engine allows one create at a time
         // and refuses a second with an ordinary status rather than an error, so
@@ -5125,6 +5159,7 @@ mod tests {
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
             create_agent_started_here: false,
+            pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,

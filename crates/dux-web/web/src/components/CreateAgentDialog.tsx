@@ -14,6 +14,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"
+import { TriangleAlert } from "lucide-react"
 import type { KeyboardEvent } from "react"
 import {
   createAgentDialogView,
@@ -25,12 +26,14 @@ import {
   openNewAgentPicker,
   setCreateAgentDraft,
   setCreateAgentPrInput,
+  setCreateAgentReviewCopyAgreed,
   setPendingPrReference,
   submitNameDialog,
   toggleCreateAgentCopyChanges,
   toggleCreateAgentRandomize,
   useDux,
 } from "@/lib/store"
+import type { ReviewCopyAsk } from "@/lib/store"
 
 export function CreateAgentDialog() {
   const {
@@ -42,6 +45,7 @@ export function CreateAgentDialog() {
     createAgentPrInput,
     createAgentPrResolving,
     createAgentPrError,
+    createAgentReviewCopy,
     spine,
   } = useDux()
   const dialog = createAgentDialogView(createAgentTarget, spine)
@@ -50,6 +54,7 @@ export function CreateAgentDialog() {
     createAgentDraft,
     createAgentPrInput,
     createAgentPrResolving,
+    createAgentReviewCopy !== null && !createAgentReviewCopy.agreed,
   )
 
   function handleSubmit() {
@@ -58,7 +63,13 @@ export function CreateAgentDialog() {
   }
 
   return (
-    <Dialog open={dialog.open} onOpenChange={handleOpenChange}>
+    // Reopened by the server's answer rather than by a click, in which case it
+    // takes no history entry for the browser's Back.
+    <Dialog
+      open={dialog.open}
+      onOpenChange={handleOpenChange}
+      historyEntry={createAgentReviewCopy === null}
+    >
       <DialogContent showCloseButton={false}>
         <DialogHeader>
           <DialogTitle>{renderProse(dialog.title)}</DialogTitle>
@@ -88,6 +99,9 @@ export function CreateAgentDialog() {
           randomize={createAgentRandomize}
           copyChanges={createAgentCopyChanges}
         />
+        {createAgentReviewCopy && (
+          <ReviewCopyQuestion ask={createAgentReviewCopy} />
+        )}
         <div className="h-2" />
         <AgentDialogFooter
           submitLabel={
@@ -166,6 +180,33 @@ function PrReferenceFields({
           </Button>
         </div>
       )}
+    </>
+  )
+}
+
+// The server will not make a review copy nobody agreed to. A push from the
+// agent would land on the copy, not on the pull request, so the warning stays
+// in view and the box starts unticked.
+function ReviewCopyQuestion({ ask }: { ask: ReviewCopyAsk }) {
+  return (
+    <>
+      <p
+        role="alert"
+        className="flex items-start gap-2 rounded-md border border-dux-warning px-3 py-2 text-sm"
+      >
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-dux-warning" />
+        <span>{renderProse(ask.warning)}</span>
+      </p>
+      <div className="flex items-center gap-2 max-md:min-h-10">
+        <Checkbox
+          id="create-review-copy"
+          checked={ask.agreed}
+          onCheckedChange={setCreateAgentReviewCopyAgreed}
+        />
+        <label htmlFor="create-review-copy" className="text-sm">
+          Create a review copy
+        </label>
+      </div>
     </>
   )
 }

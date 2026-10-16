@@ -403,6 +403,7 @@ fn the_new_agent_dialog_cuts_a_wide_worktree_path_and_keeps_the_full_stop() {
         randomize_name: false,
         randomized_name: None,
         copy_changes: false,
+        review_copy: None,
         focus: NameNewAgentFocus::Input,
     };
     for (w, h) in [(120, 40), (80, 24)] {

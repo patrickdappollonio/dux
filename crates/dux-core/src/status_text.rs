@@ -27,6 +27,35 @@ pub struct StatusText {
     /// `None` for a sentence that arrived as a finished string. When `Some`,
     /// `prose.plain() == message`, by construction.
     prose: Option<Prose>,
+    /// The question this sentence puts to whoever reads it, when it is one.
+    ask: Option<StatusAsk>,
+}
+
+/// A question a refusal puts to the surface that shows it, so that surface can
+/// offer the answer where the user is instead of leaving a sentence to retype
+/// the request from. The sentence still says everything in words; this is the
+/// part a surface cannot get by reading them.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StatusAsk {
+    /// Creating an agent from a pull request needs a review copy the user has
+    /// not agreed to. `warned` identifies what the warning said (why the
+    /// branch could not be used, and the copy's name), and goes back with the
+    /// agreement so the server can tell the user agreed to this copy and not
+    /// to a different one made necessary since. `warning` is the warning alone,
+    /// in parts: the sentence of the status adds how to agree on the command
+    /// line, which a dialog with a checkbox under it has no use for.
+    ///
+    /// Boxed so the question costs a pointer on every status that never asks.
+    ReviewCopy(Box<ReviewCopyAsk>),
+}
+
+/// What a refusal for want of agreement to a review copy asks; see
+/// [`StatusAsk::ReviewCopy`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReviewCopyAsk {
+    pub warned: String,
+    pub warning: Vec<ProseSegment>,
 }
 
 impl StatusText {
@@ -40,6 +69,7 @@ impl StatusText {
         Self {
             message: message.into(),
             prose: None,
+            ask: None,
         }
     }
 
@@ -60,7 +90,22 @@ impl StatusText {
             }
             agrees
         });
-        Self { message, prose }
+        Self {
+            message,
+            prose,
+            ask: None,
+        }
+    }
+
+    /// This sentence, marked as a question to put to the user.
+    pub fn with_ask(mut self, ask: StatusAsk) -> Self {
+        self.ask = Some(ask);
+        self
+    }
+
+    /// The question this sentence puts, if it is one.
+    pub fn ask(&self) -> Option<&StatusAsk> {
+        self.ask.as_ref()
     }
 
     /// The plain spelling: what the terminal UI prints, word for word.
@@ -161,6 +206,7 @@ impl From<Prose> for StatusText {
         Self {
             message: prose.plain(),
             prose: Some(prose),
+            ask: None,
         }
     }
 }

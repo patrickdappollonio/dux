@@ -593,6 +593,7 @@ fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
         return workspace::NewAgent::PullRequest {
             project,
             reference: reference.clone(),
+            review_copy: args.review_copy,
         };
     }
     if let Some(path) = &args.from_worktree {

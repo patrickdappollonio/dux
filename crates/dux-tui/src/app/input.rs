@@ -5533,10 +5533,27 @@ impl App {
             return Ok(());
         }
 
+        // The question stays up, with what was typed, until the box is ticked:
+        // making the copy is the thing the user has to say yes to.
+        if let PromptState::NameNewAgent {
+            review_copy: Some(question),
+            focus,
+            ..
+        } = &mut self.prompt
+            && !question.agreed
+        {
+            *focus = NameNewAgentFocus::ReviewCopyCheckbox;
+            self.set_error(
+                "This agent needs a separate review copy of the pull request. Tick Create a review copy to go ahead, or cancel.",
+            );
+            return Ok(());
+        }
+
         let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
         let PromptState::NameNewAgent {
             mut request,
             copy_changes,
+            review_copy,
             ..
         } = old_prompt
         else {
@@ -5548,6 +5565,16 @@ impl App {
         } = &mut request
         {
             *copy_uncommitted_changes = copy_changes;
+        }
+        if let (
+            CreateAgentRequest::PullRequest {
+                review_copy: consent,
+                ..
+            },
+            Some(question),
+        ) = (&mut request, review_copy)
+        {
+            *consent = dux_core::worker::ReviewCopyConsent::Warned(question.warned);
         }
 
         if let CreateAgentRequest::NewProject { project, .. } = &request {
@@ -5577,7 +5604,9 @@ impl App {
         };
         let checkbox_focused = matches!(
             focus,
-            NameNewAgentFocus::RandomizedNameCheckbox | NameNewAgentFocus::CopyChangesCheckbox
+            NameNewAgentFocus::RandomizedNameCheckbox
+                | NameNewAgentFocus::CopyChangesCheckbox
+                | NameNewAgentFocus::ReviewCopyCheckbox
         );
         let action = if !checkbox_focused && text_field_owns_key(key) {
             None
@@ -6717,12 +6746,11 @@ impl App {
 
     fn name_new_agent_target(
         input: Rect,
-        checkbox: Option<OverlayCheckbox>,
-        copy_checkbox: Option<OverlayCheckbox>,
+        checkboxes: [Option<OverlayCheckbox>; 3],
         column: u16,
         row: u16,
     ) -> Option<PromptMouseTarget> {
-        for checkbox in [checkbox, copy_checkbox].into_iter().flatten() {
+        for checkbox in checkboxes.into_iter().flatten() {
             if contains_point(checkbox.rect, column, row) {
                 return Some(PromptMouseTarget::Checkbox(checkbox.id));
             }
@@ -7276,7 +7304,13 @@ impl App {
                 input,
                 checkbox,
                 copy_checkbox,
-            } => Self::name_new_agent_target(input, checkbox, copy_checkbox, column, row),
+                review_copy_checkbox,
+            } => Self::name_new_agent_target(
+                input,
+                [checkbox, copy_checkbox, review_copy_checkbox],
+                column,
+                row,
+            ),
             OverlayMouseLayout::CloneProject {
                 address,
                 destination,
@@ -9238,29 +9272,31 @@ impl App {
     }
 
     fn focus_next_name_new_agent_control(&mut self, forward: bool) {
-        if let PromptState::NameNewAgent { request, focus, .. } = &mut self.prompt {
-            // Only fresh project agents expose the copy checkbox: forks always
-            // copy, and the other flows never do.
-            let has_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
-            *focus = if has_copy_checkbox {
-                match (*focus, forward) {
-                    (NameNewAgentFocus::Input, true) => NameNewAgentFocus::RandomizedNameCheckbox,
-                    (NameNewAgentFocus::RandomizedNameCheckbox, true) => {
-                        NameNewAgentFocus::CopyChangesCheckbox
-                    }
-                    (NameNewAgentFocus::CopyChangesCheckbox, true) => NameNewAgentFocus::Input,
-                    (NameNewAgentFocus::Input, false) => NameNewAgentFocus::CopyChangesCheckbox,
-                    (NameNewAgentFocus::CopyChangesCheckbox, false) => {
-                        NameNewAgentFocus::RandomizedNameCheckbox
-                    }
-                    (NameNewAgentFocus::RandomizedNameCheckbox, false) => NameNewAgentFocus::Input,
-                }
+        if let PromptState::NameNewAgent {
+            request,
+            review_copy,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            // The stops in Tab order. Only fresh project agents expose the
+            // copy checkbox (forks always copy, and the other flows never do),
+            // and the review-copy box exists only while it is being asked.
+            let mut ring = vec![
+                NameNewAgentFocus::Input,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ];
+            if matches!(request, CreateAgentRequest::NewProject { .. }) {
+                ring.push(NameNewAgentFocus::CopyChangesCheckbox);
+            }
+            if review_copy.is_some() {
+                ring.push(NameNewAgentFocus::ReviewCopyCheckbox);
+            }
+            let at = ring.iter().position(|stop| stop == focus).unwrap_or(0);
+            *focus = if forward {
+                ring[(at + 1) % ring.len()]
             } else {
-                match *focus {
-                    NameNewAgentFocus::Input => NameNewAgentFocus::RandomizedNameCheckbox,
-                    NameNewAgentFocus::RandomizedNameCheckbox
-                    | NameNewAgentFocus::CopyChangesCheckbox => NameNewAgentFocus::Input,
-                }
+                ring[(at + ring.len() - 1) % ring.len()]
             };
         }
     }
@@ -9275,6 +9311,7 @@ impl App {
                 self.toggle_name_new_agent_randomized_name()
             }
             NameNewAgentFocus::CopyChangesCheckbox => self.toggle_name_new_agent_copy_changes(),
+            NameNewAgentFocus::ReviewCopyCheckbox => self.toggle_name_new_agent_review_copy(),
             NameNewAgentFocus::Input => {}
         }
     }
@@ -9290,6 +9327,18 @@ impl App {
         {
             *focus = NameNewAgentFocus::CopyChangesCheckbox;
             *copy_changes = !*copy_changes;
+        }
+    }
+
+    fn toggle_name_new_agent_review_copy(&mut self) {
+        if let PromptState::NameNewAgent {
+            review_copy: Some(question),
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            *focus = NameNewAgentFocus::ReviewCopyCheckbox;
+            question.agreed = !question.agreed;
         }
     }
 
@@ -9388,6 +9437,9 @@ impl App {
             }
             OverlayCheckboxId::NameNewAgentCopyChanges => {
                 self.toggle_name_new_agent_copy_changes();
+            }
+            OverlayCheckboxId::NameNewAgentReviewCopy => {
+                self.toggle_name_new_agent_review_copy();
             }
             OverlayCheckboxId::CloneProjectRandomizedPetName => {
                 self.toggle_clone_randomized_name();
@@ -14080,6 +14132,7 @@ not_a_real_action = ["x"]
                 rect: Rect::new(24, 12, 34, 2),
             }),
             copy_checkbox: None,
+            review_copy_checkbox: None,
         };
     }
 
@@ -16853,6 +16906,7 @@ not_a_real_action = ["x"]
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -16894,6 +16948,7 @@ not_a_real_action = ["x"]
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -16944,6 +16999,7 @@ not_a_real_action = ["x"]
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -16990,6 +17046,7 @@ not_a_real_action = ["x"]
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -17026,11 +17083,13 @@ not_a_real_action = ["x"]
                 custom_name: Some("feature/pr-42".to_string()),
                 use_existing_branch: false,
                 agents: Vec::new(),
+                review_copy: Default::default(),
             },
             input: TextInput::with_text("feature/pr-42".to_string()),
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -18077,6 +18136,7 @@ not_a_real_action = ["x"]
             randomize_name: false,
             randomized_name: None,
             copy_changes: true,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -24158,6 +24218,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
+                    review_copy: Default::default(),
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: None,
@@ -24208,6 +24269,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: crafted.to_string(),
                     custom_name: None,
+                    review_copy: Default::default(),
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: None,
@@ -24274,6 +24336,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
+                    review_copy: Default::default(),
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(op_id.clone()),
@@ -36540,6 +36603,7 @@ cyan = "#00ffff"
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus,
         }
     }
@@ -36584,6 +36648,78 @@ cyan = "#00ffff"
             PromptState::NameNewAgent { input, .. } => assert_eq!(input.text, "agenty"),
             other => panic!("expected NameNewAgent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pull_request_create_refused_for_a_review_copy_waits_for_the_box_before_it_is_sent_again() {
+        let mut app = test_app(default_bindings());
+        app.pull_request_create = Some(CreateAgentRequest::PullRequest {
+            project: app.engine.projects[0].clone(),
+            host: "github.com".to_string(),
+            owner_repo: "octo/hello".to_string(),
+            number: 42,
+            title: "Fix".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: "pr-head".to_string(),
+            custom_name: Some("pr-head".to_string()),
+            use_existing_branch: false,
+            review_copy: Default::default(),
+            agents: Vec::new(),
+        });
+        let ask = dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
+            dux_core::status_text::ReviewCopyAsk {
+                warned: "diverged:pr-head-review".to_string(),
+                warning: vec![dux_core::prose::ProseSegment::Text(
+                    "Pushes would land on the copy.".to_string(),
+                )],
+            },
+        ));
+        app.apply_reaction(dux_core::engine::EventReaction::Status(
+            dux_core::engine::StatusUpdate::error(
+                dux_core::status_text::StatusText::plain(
+                    "Pushes would land on the copy. Pass a flag.",
+                )
+                .with_ask(ask),
+            ),
+        ));
+
+        // The prompt is back with the typed name, and the status line did not
+        // take the sentence.
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                review_copy: Some(question),
+                focus,
+                ..
+            } => {
+                assert_eq!(input.text, "pr-head");
+                assert!(!question.agreed, "the box starts unticked");
+                assert_eq!(*focus, NameNewAgentFocus::ReviewCopyCheckbox);
+            }
+            other => panic!("expected the name prompt with the question, got {other:?}"),
+        }
+        assert!(app.status.most_recent_tui().is_none());
+
+        // Confirming with the box unticked sends nothing.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+        assert!(app.pull_request_create.is_none(), "nothing was sent");
+
+        // Ticking it and confirming sends the agreement the warning was for.
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        let Some(CreateAgentRequest::PullRequest { review_copy, .. }) = &app.pull_request_create
+        else {
+            panic!("the create was sent: {:?}", app.pull_request_create);
+        };
+        assert_eq!(
+            *review_copy,
+            dux_core::worker::ReviewCopyConsent::Warned("diverged:pr-head-review".to_string())
+        );
     }
 
     #[test]
@@ -37279,6 +37415,7 @@ cyan = "#00ffff"
             randomize_name: false,
             randomized_name: None,
             copy_changes: false,
+            review_copy: None,
             focus: NameNewAgentFocus::Input,
         };
         let backend = TestBackend::new(120, 40);
@@ -38702,6 +38839,7 @@ cyan = "#00ffff"
                     randomize_name: false,
                     randomized_name: None,
                     copy_changes: false,
+                    review_copy: None,
                     focus: NameNewAgentFocus::Input,
                 };
                 tap(&mut app, KeyCode::Enter);

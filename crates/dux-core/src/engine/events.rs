@@ -74,6 +74,10 @@ pub struct StatusUpdate {
     /// [`crate::status_text!`], so the web can draw its names as chips. `None`
     /// for a sentence handed over as a finished string. The TUI never reads it.
     pub segments: Option<Vec<ProseSegment>>,
+    /// The question this status puts to the user, when it is one. The TUI
+    /// answers it with a prompt and the web with a dialog; every other reader
+    /// shows the sentence, which says it all in words.
+    pub ask: Option<crate::status_text::StatusAsk>,
     /// Optional correlation key. `None` = an unkeyed transient. `Some` = a
     /// keyed op whose later success/error/clear carries the same key so both
     /// surfaces can correlate the pair. Ignored by the TUI today; copied into
@@ -100,11 +104,14 @@ pub struct StatusUpdate {
 
 impl StatusUpdate {
     pub fn info(message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: StatusTone::Info,
             message,
             segments,
+            ask,
             key: None,
             scope: StatusScope::All,
             sticky: false,
@@ -118,11 +125,14 @@ impl StatusUpdate {
     ///
     /// [`StatusOp`]: crate::engine::StatusOp
     pub(crate) fn busy(message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: StatusTone::Busy,
             message,
             segments,
+            ask,
             key: None,
             scope: StatusScope::All,
             sticky: false,
@@ -130,11 +140,14 @@ impl StatusUpdate {
         }
     }
     pub fn warning(message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: StatusTone::Warning,
             message,
             segments,
+            ask,
             key: None,
             scope: StatusScope::All,
             sticky: false,
@@ -142,11 +155,14 @@ impl StatusUpdate {
         }
     }
     pub fn error(message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone: StatusTone::Error,
             message,
             segments,
+            ask,
             key: None,
             scope: StatusScope::All,
             sticky: false,
@@ -159,11 +175,14 @@ impl StatusUpdate {
     /// `WireStatus::from_update` can propagate it and the web layer can
     /// dismiss the correct toast.
     pub fn keyed(key: impl Into<String>, tone: StatusTone, message: impl Into<StatusText>) -> Self {
-        let (message, segments) = message.into().into_parts();
+        let message = message.into();
+        let ask = message.ask().cloned();
+        let (message, segments) = message.into_parts();
         Self {
             tone,
             message,
             segments,
+            ask,
             key: Some(key.into()),
             scope: StatusScope::All,
             sticky: false,
@@ -7446,6 +7465,7 @@ mod tests {
                 state: "OPEN".into(),
                 head_ref_name: "feat".into(),
                 custom_name: None,
+                review_copy: Default::default(),
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "deleted".into(),

@@ -80,7 +80,7 @@ import {
   notifyWarning,
   setStatusClearSeconds,
 } from "./notify"
-import { chip, type Prose, prose, wireProse } from "./prose"
+import { chip, type Prose, type ProseName, prose, wireProse } from "./prose"
 import { publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
@@ -259,6 +259,15 @@ export type CreateAgentTarget =
   // project the reference belongs to on submit. `Some` is the project-first
   // shape, opened from a project's own menu, which behaves exactly as before.
   | { kind: "pr"; projectId: string | null }
+
+// A from-PR create the server will only make on a review copy, with the
+// warning it showed (in parts, so names are chips) and whether the user has
+// agreed to exactly that.
+export interface ReviewCopyAsk {
+  warned: string
+  warning: Prose
+  agreed: boolean
+}
 
 // The file pending discard-confirmation, or null. `untracked` drives the
 // dialog's warning copy (a tracked file is restored from HEAD; an untracked
@@ -650,6 +659,11 @@ export interface DuxState {
   //     inferred from an empty draft, so manually clearing the input doesn't
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
+  //   - `createAgentReviewCopy`: set when the server refused a from-PR create
+  //     because it would need a review copy nobody agreed to. The reopened
+  //     dialog shows `warning` beside an unticked box; `warned` goes back with
+  //     the agreement so the server can tell this copy from a different one.
+  createAgentReviewCopy: ReviewCopyAsk | null
   // The Task Manager (the app menu's "Task Manager…"). Lists every running agent
   // tab and companion terminal with its CPU/memory/process count, and stops each
   // on demand (agents detach and can be reconnected; terminals are destroyed).
@@ -1153,6 +1167,7 @@ let state: DuxState = {
   pendingPrReference: null,
   createAgentPrResolving: false,
   createAgentPrError: null,
+  createAgentReviewCopy: null,
   createAgentPrRequestId: null,
   sidebarOpen: loadSidebarOpen(),
   sidebarWidth: SIDEBAR_INITIAL_WIDTH,
@@ -1255,6 +1270,11 @@ registerPageLifecycle(eventsSocket)
 function handleStatusEvent(event: EventsServerMessage): void {
   if (event.tone === "error") setState({ ...clearPendingClientIntent() })
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
+  if (event.tone === "error") {
+    if (askReviewCopy(event)) return
+    // Any other failure ends the create this tab was waiting on.
+    pendingPrSubmission = null
+  }
   showStatusToast(
     event.key,
     event.tone ?? "info",
@@ -6517,6 +6537,7 @@ export function closeCreateAgent(): void {
     createAgentPrInput: "",
     createAgentPrResolving: false,
     createAgentPrError: null,
+    createAgentReviewCopy: null,
     // Closing retires the resolve. The reply cannot be recalled, so it has to
     // land on nothing when it arrives.
     createAgentPrRequestId: null,
@@ -6747,10 +6768,90 @@ export function forkAgent(sessionId: string, name: string): void {
 // `gh pr view`. An empty `name` falls back to the PR head branch, matching the
 // TUI prompt default. The lookup+create runs asynchronously: the command returns
 // a busy status synchronously and the outcome arrives on the status stream.
-export function createAgentFromPr(projectId: string, pr: string, name: string): void {
+export function createAgentFromPr(
+  projectId: string,
+  pr: string,
+  name: string,
+  reviewCopyWarned: string | null = null,
+): void {
+  // Remembered so a refusal that asks about a review copy can reopen the
+  // dialog on what was typed. Without this tab having asked for a create, the
+  // same refusal is an ordinary error toast.
+  pendingPrSubmission = { projectId, pr, name, at: Date.now() }
   sessionsApi
-    .create({ kind: "from_pr", project_id: projectId, pr, name })
+    .create({
+      kind: "from_pr",
+      project_id: projectId,
+      pr,
+      name,
+      ...(reviewCopyWarned === null
+        ? {}
+        : { review_copy: true, review_copy_warned: reviewCopyWarned }),
+    })
     .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
+}
+
+// The from-PR create this tab last sent, kept for as long as an answer to it
+// can still arrive. The refusal comes later over the events socket, not in the
+// reply to the request, which only says the create is under way.
+let pendingPrSubmission:
+  | { projectId: string; pr: string; name: string; at: number }
+  | null = null
+const PENDING_PR_SUBMISSION_MS = 120_000
+
+function readReviewCopyAsk(ask: unknown): Omit<ReviewCopyAsk, "agreed"> | null {
+  if (typeof ask !== "object" || ask === null) return null
+  const { kind, warned, warning } = ask as Record<string, unknown>
+  if (kind !== "review_copy" || typeof warned !== "string") return null
+  // The warning has no plain spelling beside it to check the parts against,
+  // so they are checked for shape alone and a malformed one is no question.
+  const wellFormed =
+    Array.isArray(warning) &&
+    warning.length > 0 &&
+    warning.every(
+      (part) =>
+        typeof part === "string" ||
+        (typeof part === "object" &&
+          part !== null &&
+          typeof (part as ProseName).name === "string" &&
+          typeof (part as ProseName).quoted === "boolean"),
+    )
+  if (!wellFormed) return null
+  return { warned, warning: warning as Prose }
+}
+
+// Reopen the dialog on the refused create, showing why. Returns whether this
+// tab took the question: only the tab that sent the create has the typed
+// values to put back.
+function askReviewCopy(event: EventsServerMessage): boolean {
+  const asked = readReviewCopyAsk(event.ask)
+  const pending = pendingPrSubmission
+  if (!asked || !pending) return false
+  if (Date.now() - pending.at > PENDING_PR_SUBMISSION_MS) {
+    pendingPrSubmission = null
+    return false
+  }
+  pendingPrSubmission = null
+  // The create's spinner would otherwise outlive the answer that replaces it.
+  dismissNotification(event.key ?? ANON_TOAST_ID)
+  setState({
+    createAgentTarget: { kind: "pr", projectId: pending.projectId },
+    createAgentDraft: pending.name,
+    createAgentRandomize: false,
+    createAgentGeneratedName: null,
+    createAgentNamePending: false,
+    createAgentPrInput: pending.pr,
+    createAgentPrResolving: false,
+    createAgentPrError: null,
+    createAgentPrRequestId: null,
+    createAgentReviewCopy: { ...asked, agreed: false },
+  })
+  return true
+}
+
+export function setCreateAgentReviewCopyAgreed(agreed: boolean): void {
+  const ask = state.createAgentReviewCopy
+  if (ask) setState({ createAgentReviewCopy: { ...ask, agreed } })
 }
 
 // Text that names a pull request number and nothing else, with or without the
@@ -6879,8 +6980,17 @@ export function submitNameDialog(name: string): void {
     submitPrReferenceFirst(state.createAgentPrInput.trim(), name)
     return
   } else {
+    // A refusal asked about a review copy: nothing goes out until the box is
+    // ticked, and what goes out names the warning it answers.
+    const ask = state.createAgentReviewCopy
+    if (ask && !ask.agreed) return
     armCreateFocus({ kind: "project", projectId: target.projectId })
-    createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)
+    createAgentFromPr(
+      target.projectId,
+      state.createAgentPrInput.trim(),
+      name,
+      ask ? ask.warned : null,
+    )
   }
   closeCreateAgent()
 }
