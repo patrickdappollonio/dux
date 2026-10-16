@@ -237,7 +237,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
           // left a touch swipe on the text unable to dismiss the toast. The
           // cost is that a finger cannot scroll an overflowing text, so the
           // phone's cap is tall enough that a long toast rarely needs to.
-          title: `${toastTextCap(isMobile)} overflow-y-auto overscroll-contain touch-none`,
+          // `overflow-x-hidden` keeps the text from scrolling sideways: once
+          // one axis scrolls the other computes to auto, and a wrapped chip's
+          // end padding pokes a few pixels past the column.
+          title: `${toastTextCap(isMobile)} overflow-x-hidden overflow-y-auto overscroll-contain touch-none`,
           // The description slot carries only `ToastCountdown`, whose parts are
           // absolutely placed against the toast: `contents` keeps the slot from
           // adding a box, and the content column's gap with it, under the text.
