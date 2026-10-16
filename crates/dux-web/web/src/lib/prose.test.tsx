@@ -27,6 +27,9 @@ import {
   joinProse,
   prose,
   wireProse,
+  addExistingOfferProse,
+  cloneOfferIncompleteProse,
+  cloneOfferProse,
 } from "./prose"
 import {
   recreateConfirmProse,
@@ -184,6 +187,20 @@ describe("the sentences both surfaces print", () => {
           targetLabel: args.target_label as string,
           agentLabel: args.agent_label as string | null,
         })
+      case "pr_clone_offer":
+        return cloneOfferProse(args.repository as string, args.number as string)
+      case "pr_clone_offer_incomplete":
+        return cloneOfferIncompleteProse(
+          args.repository as string,
+          args.number as string,
+          args.summary as string,
+        )
+      case "pr_add_existing_offer":
+        return addExistingOfferProse(
+          args.folder as string,
+          args.repository as string,
+          args.number as string,
+        )
       default:
         throw new Error(`the fixture names a sentence this test cannot build: ${sentence}`)
     }
@@ -293,5 +310,45 @@ describe("a status sentence read off the wire", () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe("the sentences that offer a pull request's repository", () => {
+  it("offers the clone, naming the repository and the number", () => {
+    expect(cloneOfferProse("github.com/acme/widget", "3")).toEqual([
+      { name: "github.com/acme/widget", quoted: false },
+      " isn't a dux project yet. dux will clone it, add it as a project, and create the agent from pull request ",
+      { name: "#3", quoted: false },
+      ".",
+    ])
+  })
+
+  it("says when some projects could not be checked", () => {
+    expect(
+      cloneOfferIncompleteProse(
+        "github.com/acme/widget",
+        "3",
+        "1 has an address dux could not read",
+      ),
+    ).toEqual([
+      "dux could not find a checked project for ",
+      { name: "github.com/acme/widget", quoted: false },
+      ". dux could not check every project (1 has an address dux could not read), so one of them may already be a checkout of it. dux will clone it, add it as a project, and create the agent from pull request ",
+      { name: "#3", quoted: false },
+      ".",
+    ])
+  })
+
+  it("offers to add a folder that already holds a checkout", () => {
+    expect(
+      addExistingOfferProse("/home/ada/src/widget", "github.com/acme/widget", "3"),
+    ).toEqual([
+      { name: "/home/ada/src/widget", quoted: false },
+      " is already a checkout of ",
+      { name: "github.com/acme/widget", quoted: false },
+      ". dux will add it as a project and create the agent from pull request ",
+      { name: "#3", quoted: false },
+      ".",
+    ])
   })
 })

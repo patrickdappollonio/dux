@@ -4,6 +4,7 @@
 
 import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
+import type { Prose } from "./prose"
 import type {
   AcceptedOperation,
   SessionView,
@@ -151,6 +152,31 @@ export interface PullRequestCloneOffer {
   title: string
   state: string
   head_branch: string
+  // The pull request's head commit, when `gh` reported it.
+  head_oid?: string
+  review_copy: ReviewCopyOutlook
+}
+
+// Whether the agent will need a review copy, told before anything is cloned or
+// added. `reason` and `copy_branch` travel back with the user's agreement.
+export type ReviewCopyOutlook =
+  | { state: "not_needed" }
+  | { state: "unknown" }
+  | {
+      state: "needed"
+      reason: string
+      branch: string
+      copy_branch: string
+      warning: Prose
+    }
+  | { state: "no_free_name"; reason: string; branch: string; message: Prose }
+
+// What a folder holds for the pull request's repository. For a checkout,
+// `review_copy` replaces the offer's: it is computed against that folder.
+export interface PullRequestCloneDestination {
+  state: "free" | "checkout"
+  path: string
+  review_copy?: ReviewCopyOutlook
 }
 
 // The answer to `GET /api/v1/sessions/:id/branch-unpushed`. `branches` is every
@@ -179,6 +205,21 @@ export const sessionsApi = {
       "POST",
       "/api/v1/pull-requests/resolve",
       { reference },
+    ),
+  // Say what a folder holds for the pull request's repository. A read: it
+  // creates nothing, and a refusal is a 400 with the sentence to show.
+  checkCloneDestination: (body: {
+    path: string
+    host: string
+    owner_repo: string
+    number: number
+    head_branch: string
+    head_oid?: string
+  }) =>
+    request<PullRequestCloneDestination>(
+      "POST",
+      "/api/v1/pull-requests/clone-destination",
+      body,
     ),
   // `deleteBranch` is the delete dialog's "also delete the branch" answer.
   // `null` means nobody was asked (a standalone agent, whose dialog has no

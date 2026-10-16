@@ -353,12 +353,17 @@ every project you have.
 - **One project is a checkout of that repository.** dux goes straight on to resolve the
   pull request and name the agent.
 - **Two or more are.** dux shows you just those and asks which one this agent belongs in.
-- **None is.** dux names the repository it could not place and offers the project picker.
+- **None is.** When the reference names a repository and a pull request number on a host
+  `gh` is signed in to, dux looks the pull request up and offers to clone the repository,
+  add it as a project and start the agent on the pull request in one go, or to add the
+  folder when it already holds a checkout. When the agent would need a review copy, the
+  offer says so and asks before cloning or adding. Otherwise it names the repository it
+  could not place and offers the project picker.
 
 > [!IMPORTANT]
-> **This path never clones a repository dux does not have.** If no project is a checkout
-> of it, get one first with [Cloning a repository](#cloning-a-repository), then paste the
-> reference again.
+> **The browser offers the clone; the terminal UI does not yet.** There, and for a
+> reference without a number, get a project first with
+> [Cloning a repository](#cloning-a-repository), then paste the reference again.
 
 Some projects cannot be compared at all: the directory is gone, git cannot read an
 `origin`, or the address is on a host `gh` is not signed in to. dux reports those as

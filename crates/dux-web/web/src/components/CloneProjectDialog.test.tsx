@@ -18,6 +18,9 @@ let projectReplies: (Response | Promise<Response>)[] = []
 let nameReplies: (Response | Promise<Response>)[] = []
 let browseReplies: (Response | Promise<Response>)[] = []
 let posted: unknown[] = []
+// What the folder check answers, in order, and what it was asked.
+let destinationReplies: (Response | Promise<Response>)[] = []
+let checked: unknown[] = []
 
 function held() {
   let release: (r: Response) => void = () => {}
@@ -49,6 +52,13 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   // dialog, so it is one the server no longer knows.
   if (u.includes("/api/v1/operations/")) {
     return reply(404, JSON.stringify({ error: "unknown_operation" }))
+  }
+  if (u.endsWith("/api/v1/pull-requests/clone-destination")) {
+    checked.push(JSON.parse(String(init?.body)))
+    return (
+      destinationReplies.shift() ??
+      reply(200, JSON.stringify({ state: "free", path: "/home/u/widget" }))
+    )
   }
   if (u.endsWith("/api/v1/projects") && init?.method === "POST") {
     posted.push(JSON.parse(String(init.body)))
@@ -89,6 +99,8 @@ beforeEach(() => {
   projectReplies = []
   nameReplies = []
   browseReplies = []
+  destinationReplies = []
+  checked = []
 })
 
 afterEach(() => {
@@ -248,5 +260,184 @@ describe("CloneProjectDialog", () => {
   it("cannot be submitted without an address", async () => {
     await open()
     expect((screen.getByRole("button", { name: "Clone" }) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe("CloneProjectDialog for a pull request", () => {
+  const offer = {
+    address: "https://github.com/acme/widget.git",
+    host: "github.com",
+    owner_repo: "acme/widget",
+    number: 3,
+    title: "Fix the thing",
+    state: "OPEN",
+    head_branch: "fix-thing",
+    head_oid: "abc123",
+    review_copy: { state: "not_needed" as const },
+  }
+  const needed = {
+    state: "needed" as const,
+    reason: "busy",
+    branch: "fix-thing",
+    copy_branch: "fix-thing-review",
+    warning: ["Pushes would land on ", { name: "fix-thing-review", quoted: true }, "."],
+  }
+  const noFreeName = {
+    state: "no_free_name" as const,
+    reason: "busy",
+    branch: "fix-thing",
+    message: ["Every review name for ", { name: "fix-thing", quoted: true }, " is taken."],
+  }
+
+  async function openPr(
+    extra: Partial<Parameters<typeof store.openCloneProject>[0] & object> = {},
+    reviewCopy: unknown = offer.review_copy,
+  ) {
+    store.openCloneProject({
+      reference: "acme/widget#3",
+      repository: "github.com/acme/widget",
+      incompleteSummary: null,
+      hasProjects: false,
+      name: "fix-thing",
+      offer: { ...offer, review_copy: reviewCopy } as never,
+      ...extra,
+    })
+    render(<CloneProjectDialog />)
+    await waitFor(() => expect(checked).toHaveLength(1))
+  }
+
+  const primary = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement
+
+  it("shows the pull request, the address and the folder, with no random-name box", async () => {
+    await openPr()
+    expect(screen.getByText("New agent from PR")).toBeTruthy()
+    const chips = [...document.querySelectorAll("code")].map((c) => c.textContent)
+    expect(chips).toEqual(["github.com/acme/widget", "#3", "Fix the thing", "fix-thing"])
+    expect(screen.getByText(/Fix the thing/)).toBeTruthy()
+    expect((screen.getByLabelText("Repository address") as HTMLInputElement).value).toBe(
+      "https://github.com/acme/widget.git",
+    )
+    expect(destination().value).toBe("/home/u/widget")
+    expect(screen.queryByRole("checkbox")).toBeNull()
+    expect(screen.queryByText("Choose an existing project")).toBeNull()
+  })
+
+  it("says which projects it could not check, and offers the existing projects", async () => {
+    await openPr({ incompleteSummary: "1 has an address dux could not read", hasProjects: true })
+    expect(document.body.textContent).toContain(
+      "dux could not check every project (1 has an address dux could not read)",
+    )
+    expect(screen.getByText("Choose an existing project")).toBeTruthy()
+  })
+
+  it("posts the folder, the name and the pull request, with no address", async () => {
+    await openPr()
+    fireEvent.click(primary("Clone and create"))
+    await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+    expect(checked).toEqual([
+      {
+        path: "/home/u/widget",
+        host: "github.com",
+        owner_repo: "acme/widget",
+        number: 3,
+        head_branch: "fix-thing",
+        head_oid: "abc123",
+      },
+      expect.anything(),
+    ])
+    expect(posted).toEqual([
+      {
+        path: "/home/u/widget",
+        agent_name: "fix-thing",
+        pull_request: { host: "github.com", owner_repo: "acme/widget", number: 3 },
+        add_existing: false,
+      },
+    ])
+  })
+
+  it("switches to the add when the folder turns out to be a checkout, and posts nothing until pressed again", async () => {
+    await openPr()
+    const checkout = () =>
+      reply(200, JSON.stringify({ state: "checkout", path: "/home/u/widget" }))
+    destinationReplies = [checkout(), checkout()]
+    fireEvent.click(primary("Clone and create"))
+    await screen.findByRole("button", { name: "Add this folder as a project" })
+    expect(posted).toEqual([])
+    expect(document.body.textContent).toContain("is already a checkout of")
+
+    fireEvent.click(primary("Add this folder as a project"))
+    await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+    expect(posted).toMatchObject([{ add_existing: true }])
+  })
+
+  it("shows a refused folder in the dialog and posts nothing", async () => {
+    await openPr()
+    destinationReplies = [reply(400, "/home/u/widget already holds something that isn't a checkout of github.com/acme/widget. Pick another folder.")]
+    fireEvent.click(primary("Clone and create"))
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Pick another folder.")
+    expect(posted).toEqual([])
+    expect(primary("Clone and create").disabled).toBe(false)
+  })
+
+  it("cannot be submitted without a name", async () => {
+    await openPr({ name: "" })
+    expect(primary("Clone and create").disabled).toBe(true)
+  })
+
+  it("keeps the reference when choosing an existing project", async () => {
+    await openPr({ hasProjects: true })
+    fireEvent.click(screen.getByText("Choose an existing project"))
+    expect(store.getSnapshot().cloneProject).toBeNull()
+    expect(store.getSnapshot().pendingPrReference).toBe("acme/widget#3")
+    expect(store.getSnapshot().newAgentPickerOpen).toBe(true)
+  })
+
+  describe("when the agent would need a review copy", () => {
+    it("blocks the clone until the box is ticked, then posts the agreement it showed", async () => {
+      await openPr({}, needed)
+      expect(document.body.textContent).toContain('Pushes would land on')
+      const box = screen.getByRole("checkbox", { name: "Create a review copy" })
+      expect(box.getAttribute("aria-checked")).toBe("false")
+      expect(primary("Clone and create").disabled).toBe(true)
+
+      fireEvent.click(box)
+      expect(primary("Clone and create").disabled).toBe(false)
+      fireEvent.click(primary("Clone and create"))
+      await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+      expect(posted).toMatchObject([
+        { review_copy: true, review_copy_reason: "busy", review_copy_branch: "fix-thing-review" },
+      ])
+    })
+
+    it("asks nothing once the name is not the pull request's branch", async () => {
+      await openPr({}, needed)
+      type(agentName(), "my-own-name")
+      expect(screen.queryByRole("checkbox")).toBeNull()
+      expect(primary("Clone and create").disabled).toBe(false)
+      fireEvent.click(primary("Clone and create"))
+      await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+      expect(posted[0]).not.toHaveProperty("review_copy")
+    })
+
+    it("takes back the tick and waits when the folder check answers differently", async () => {
+      await openPr({}, needed)
+      fireEvent.click(screen.getByRole("checkbox", { name: "Create a review copy" }))
+      destinationReplies = [
+        reply(200, JSON.stringify({ state: "checkout", path: "/home/u/widget", review_copy: { state: "not_needed" } })),
+      ]
+      fireEvent.click(primary("Clone and create"))
+      await screen.findByRole("button", { name: "Add this folder as a project" })
+      expect(posted).toEqual([])
+      expect(screen.queryByRole("checkbox")).toBeNull()
+    })
+
+    it("blocks the clone for good while no review name is free and the name is the branch", async () => {
+      await openPr({}, noFreeName)
+      expect(document.body.textContent).toContain("Every review name for")
+      expect(primary("Clone and create").disabled).toBe(true)
+      type(agentName(), "my-own-name")
+      expect(primary("Clone and create").disabled).toBe(false)
+    })
   })
 })

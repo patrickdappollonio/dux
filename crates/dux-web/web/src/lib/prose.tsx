@@ -168,3 +168,30 @@ export function renderProse(prose: Prose): ReactNode[] {
     ),
   )
 }
+
+// The three bodies of the dialog that offers a pull request's repository. The
+// terminal UI builds the same segments (`dux_core::prose`), and the shared
+// fixture pins the words.
+
+/** No project is a checkout of the repository, and every project was checked. */
+export function cloneOfferProse(repository: string, number: string | number): Prose {
+  return prose`${chip(repository)} isn't a dux project yet. dux will clone it, add it as a project, and create the agent from pull request ${chip(`#${number}`)}.`
+}
+
+/** The same offer when some projects could not be checked. */
+export function cloneOfferIncompleteProse(
+  repository: string,
+  number: string | number,
+  summary: string,
+): Prose {
+  return prose`dux could not find a checked project for ${chip(repository)}. dux could not check every project (${summary}), so one of them may already be a checkout of it. dux will clone it, add it as a project, and create the agent from pull request ${chip(`#${number}`)}.`
+}
+
+/** The folder already holds a checkout of the repository. */
+export function addExistingOfferProse(
+  folder: string,
+  repository: string,
+  number: string | number,
+): Prose {
+  return prose`${chip(folder)} is already a checkout of ${chip(repository)}. dux will add it as a project and create the agent from pull request ${chip(`#${number}`)}.`
+}

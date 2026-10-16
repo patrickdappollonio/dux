@@ -12,6 +12,7 @@ import {
 import {
   draftAfterRandomizeOff,
   generatedNameAfterEdit,
+  isValidAgentName,
   sanitizeAgentName,
 } from "./agentName"
 import { cloneDirName } from "./cloneDirName"
@@ -22,7 +23,12 @@ import {
   type PatchProjectBody,
 } from "./projectsApi"
 import { type AttachedBlocker, AttachedError } from "./attached"
-import { existingBranchConflict, sessionsApi, SessionsApiError } from "./sessionsApi"
+import {
+  existingBranchConflict,
+  type PullRequestCloneOffer,
+  sessionsApi,
+  SessionsApiError,
+} from "./sessionsApi"
 
 import { ordersMatch, reorderById } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
@@ -81,6 +87,12 @@ import {
   setStatusClearSeconds,
 } from "./notify"
 import { chip, type Prose, type ProseName, prose, wireProse } from "./prose"
+import {
+  type CloneProjectPr,
+  foldFolderAnswer,
+  reviewCopyAgreement,
+  reviewCopyBlocksSubmit,
+} from "./cloneProjectPr"
 import { publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
@@ -329,6 +341,9 @@ export interface CloneProjectForm {
   submitting: boolean
   /** The sentence a refused submit came back with. */
   error: string | null
+  /** Set when the dialog is offering a pull request's repository; the address
+   * is then the server's to build and is shown, not edited. */
+  pr: CloneProjectPr | null
 }
 
 // The changed-files request state machine for the selected session, and the one
@@ -1276,6 +1291,8 @@ function handleStatusEvent(event: EventsServerMessage): void {
     // must not take a newer submission's place either.
     if (event.key && askedKeys.has(event.key)) return
     if (askReviewCopy(event)) return
+    // The final still reaches the toast; the dialog opens beside it.
+    askReviewCopyAfterClone(event)
   }
   showStatusToast(
     event.key,
@@ -5858,6 +5875,15 @@ function defaultCloneDestination(url: string, startFolder: string | null): strin
 let cloneOpenSeq = 0
 let cloneNameRequestSeq = 0
 let cloneSubmitSeq = 0
+// Each look at the folder in pull-request mode gets the next number, so a
+// reply about a folder the user has since changed (or about a closed dialog)
+// acts on nothing.
+let cloneCheckSeq = 0
+
+// The clone operations this tab started for a pull request, by operation id,
+// so a question found only after the clone can reopen New agent from PR on
+// what was typed. Bounded the way the pending creates are.
+const pendingPrClones = new Map<string, { reference: string; name: string; at: number }>()
 
 // Write the form, refreshing the destination the address chooses. A change the
 // user made is the answer to a refusal, so it retires the refusal's sentence; a
@@ -5880,22 +5906,48 @@ function cloneFormFor(openId: number): CloneProjectForm | null {
   return form?.openId === openId ? form : null
 }
 
-export function openCloneProject(): void {
-  const randomize = state.bootstrap?.randomize_agent_names_by_default ?? false
+/** What the reference dialog hands the clone dialog when it offers a pull
+ * request's repository. */
+export interface ClonePullRequestInit {
+  reference: string
+  repository: string
+  incompleteSummary: string | null
+  hasProjects: boolean
+  name: string
+  offer: PullRequestCloneOffer
+}
+
+export function openCloneProject(pull?: ClonePullRequestInit): void {
+  // A pull request's agent is named after its branch, never a pet name: the
+  // branch is what the pull request's head is fetched into.
+  const randomize = pull ? false : (state.bootstrap?.randomize_agent_names_by_default ?? false)
   const openId = ++cloneOpenSeq
+  cloneCheckSeq++
   setState({
     cloneProject: {
       openId,
-      url: "",
+      url: pull?.offer.address ?? "",
       path: "",
       pathEdited: false,
       startFolder: null,
-      name: "",
+      name: pull?.name ?? "",
       randomize,
       generatedName: null,
       namePending: randomize,
       submitting: false,
       error: null,
+      pr: pull
+        ? {
+            reference: pull.reference,
+            repository: pull.repository,
+            incompleteSummary: pull.incompleteSummary,
+            hasProjects: pull.hasProjects,
+            offer: pull.offer,
+            folder: "free",
+            reviewCopy: pull.offer.review_copy,
+            reviewCopyAgreed: false,
+          }
+        : null,
     },
   })
   if (randomize) requestCloneAgentName()
@@ -5907,6 +5959,7 @@ export function openCloneProject(): void {
     .then((res) => {
       if (cloneFormFor(openId)?.startFolder === null) {
         patchCloneProject({ startFolder: res.path }, false)
+        checkCloneFolderOnOpen(openId)
       }
     })
     .catch(() => {})
@@ -5921,17 +5974,55 @@ export function setCloneProjectUrl(raw: string): void {
 }
 
 export function setCloneProjectPath(raw: string): void {
-  patchCloneProject({ path: raw, pathEdited: true }, true)
+  const pr = state.cloneProject?.pr
+  if (!pr) {
+    patchCloneProject({ path: raw, pathEdited: true }, true)
+    return
+  }
+  // A check already out was about the old folder, and so is a tick: the
+  // review-copy answer is the folder's. The next press checks this one.
+  cloneCheckSeq++
+  patchCloneProject(
+    {
+      path: raw,
+      pathEdited: true,
+      submitting: false,
+      pr: { ...pr, reviewCopyAgreed: false },
+    },
+    true,
+  )
+}
+
+export function setCloneProjectReviewCopyAgreed(agreed: boolean): void {
+  const pr = state.cloneProject?.pr
+  if (pr) patchCloneProject({ pr: { ...pr, reviewCopyAgreed: agreed } }, true)
+}
+
+// Keep the dialog's reference and open the picker over every project, the way
+// the reference dialog's own link does.
+export function chooseExistingProjectForClone(): void {
+  const pr = state.cloneProject?.pr
+  if (!pr) return
+  setState({ pendingPrReference: pr.reference })
+  closeCloneProject()
+  openNewAgentPicker("from_pr")
 }
 
 export function setCloneProjectName(raw: string): void {
   const form = state.cloneProject
   if (!form) return
   const name = sanitizeAgentName(raw)
+  // The tick answers the question for the pull request's own branch; another
+  // name hides it, and coming back to the branch asks again.
+  const pr =
+    form.pr && name.trim() !== form.pr.offer.head_branch
+      ? { ...form.pr, reviewCopyAgreed: false }
+      : form.pr
   patchCloneProject(
     {
       name,
       generatedName: generatedNameAfterEdit(name, form.generatedName),
+      pr,
     },
     true,
   )
@@ -5994,21 +6085,117 @@ export function toggleCloneProjectRandomize(): void {
 export function submitCloneProject(): void {
   const form = state.cloneProject
   if (!form || form.submitting) return
+  if (form.pr) {
+    submitCloneProjectForPullRequest(form, form.pr)
+    return
+  }
   const url = form.url.trim()
   const path = form.path.trim()
   const name = form.name.trim()
   if (url === "" || path === "") return
-  const openId = form.openId
-  const request = ++cloneSubmitSeq
   patchCloneProject({ submitting: true }, true)
+  postCloneProject(form.openId, {
+    path,
+    clone_url: url,
+    agent_name: name,
+    random_name: form.randomize,
+  })
+}
+
+// Look at the folder the way the dialog opened looking at it, once the start
+// folder has given it a default. A refusal shows as the dialog's own error.
+function checkCloneFolderOnOpen(openId: number): void {
+  const form = cloneFormFor(openId)
+  if (!form?.pr || form.path.trim() === "") return
+  const seq = ++cloneCheckSeq
+  checkCloneFolder(form, form.pr)
+    .then((answer) => {
+      const current = cloneFormFor(openId)
+      if (seq !== cloneCheckSeq || !current?.pr) return
+      const next = foldFolderAnswer(current.pr, answer)
+      if (next) patchCloneProject({ pr: next }, false)
+    })
+    .catch((e) => {
+      if (seq !== cloneCheckSeq || !cloneFormFor(openId)) return
+      patchCloneProject({ error: errorText(e, "Could not check the folder.") }, false)
+    })
+}
+
+function checkCloneFolder(form: CloneProjectForm, pr: CloneProjectPr) {
+  return sessionsApi.checkCloneDestination({
+    path: form.path.trim(),
+    host: pr.offer.host,
+    owner_repo: pr.offer.owner_repo,
+    number: pr.offer.number,
+    head_branch: pr.offer.head_branch,
+    ...(pr.offer.head_oid ? { head_oid: pr.offer.head_oid } : {}),
+  })
+}
+
+function errorText(e: unknown, fallback: string): string {
+  return e instanceof Error ? e.message : fallback
+}
+
+// The button press in pull-request mode: look at the folder again, and send
+// only when it holds what the dialog said it did. A different answer (a folder
+// that became a checkout, a review-copy question that changed) is shown and
+// waits for another press, so the user agrees to what will actually happen.
+function submitCloneProjectForPullRequest(form: CloneProjectForm, pr: CloneProjectPr): void {
+  const name = form.name.trim()
+  if (name === "" || form.path.trim() === "" || reviewCopyBlocksSubmit(pr, name)) return
+  const openId = form.openId
+  const seq = ++cloneCheckSeq
+  patchCloneProject({ submitting: true }, true)
+  checkCloneFolder(form, pr)
+    .then((answer) => {
+      const current = cloneFormFor(openId)
+      if (seq !== cloneCheckSeq || !current?.pr) return
+      const next = foldFolderAnswer(current.pr, answer)
+      if (next) {
+        patchCloneProject({ pr: next, submitting: false }, false)
+        return
+      }
+      const agreement = reviewCopyAgreement(current.pr, name)
+      postCloneProject(
+        openId,
+        {
+          path: current.path.trim(),
+          agent_name: name,
+          pull_request: {
+            host: current.pr.offer.host,
+            owner_repo: current.pr.offer.owner_repo,
+            number: current.pr.offer.number,
+          },
+          add_existing: current.pr.folder === "checkout",
+          ...(agreement ?? {}),
+        },
+        { reference: current.pr.reference, name },
+      )
+    })
+    .catch((e) => {
+      const current = cloneFormFor(openId)
+      if (seq !== cloneCheckSeq || !current) return
+      patchCloneProject(
+        { submitting: false, error: errorText(e, "Could not check the folder.") },
+        false,
+      )
+    })
+}
+
+// Send the clone. The token is armed before the request; a refusal disarms it
+// and keeps the dialog open with the sentence, and the 202 closes the dialog
+// and hands the token the operation whose record names the agent. Each reply
+// acts only on the dialog opening and the token this submit made: the dialog
+// may have been closed, reopened and submitted again while it was on the way.
+function postCloneProject(
+  openId: number,
+  body: Parameters<typeof projectsApi.create>[0],
+  pull?: { reference: string; name: string },
+): void {
+  const request = ++cloneSubmitSeq
   armCreateFocus({ kind: "clone", request, opId: null, created: [], finished: false })
   projectsApi
-    .create({
-      path,
-      clone_url: url,
-      agent_name: name,
-      random_name: form.randomize,
-    })
+    .create(body)
     .then((accepted) => {
       const opId = (accepted as AcceptedOperation | undefined)?.op_id ?? null
       const pending = state.pendingCreateFocus
@@ -6021,6 +6208,7 @@ export function submitCloneProject(): void {
           setState({ pendingCreateFocus: null })
         }
       }
+      if (opId && pull) rememberPrClone(opId, pull)
       if (cloneFormFor(openId)) closeCloneProject()
     })
     .catch((e) => {
@@ -6035,6 +6223,14 @@ export function submitCloneProject(): void {
         },
       })
     })
+}
+
+function rememberPrClone(opId: string, pull: { reference: string; name: string }): void {
+  const now = Date.now()
+  for (const [id, old] of pendingPrClones) {
+    if (now - old.at > PENDING_PR_SUBMISSION_MS) pendingPrClones.delete(id)
+  }
+  pendingPrClones.set(opId, { ...pull, at: now })
 }
 
 export function browseDir(path: string | null): void {
@@ -6836,9 +7032,19 @@ const askedKeys = new Set<string>()
 function readReviewCopyAsk(
   ask: unknown,
 ): (Omit<ReviewCopyAsk, "agreed"> & { request: string }) | null {
+  const parts = readReviewCopyParts(ask)
+  const request = (ask as Record<string, unknown> | null)?.request
+  if (!parts || typeof request !== "string") return null
+  return { ...parts, request }
+}
+
+// The warned word and the warning, checked for shape alone: a malformed one is
+// no question.
+function readReviewCopyParts(
+  ask: unknown,
+): Omit<ReviewCopyAsk, "agreed"> | null {
   if (typeof ask !== "object" || ask === null) return null
-  const { kind, warned, warning, request } = ask as Record<string, unknown>
-  if (typeof request !== "string") return null
+  const { kind, warned, warning } = ask as Record<string, unknown>
   if (kind !== "review_copy" || typeof warned !== "string") return null
   // The warning has no plain spelling beside it to check the parts against,
   // so they are checked for shape alone and a malformed one is no question.
@@ -6854,7 +7060,31 @@ function readReviewCopyAsk(
           typeof (part as ProseName).quoted === "boolean"),
     )
   if (!wellFormed) return null
-  return { warned, warning: warning as Prose, request }
+  return { warned, warning: warning as Prose }
+}
+
+// A clone or an add this tab started made the project and stopped short of the
+// agent for want of an answer on a review copy: reopen New agent from PR in
+// that project with the reference and the name the user gave, showing the
+// question the way a refused create in an existing project shows it.
+function askReviewCopyAfterClone(event: EventsServerMessage): void {
+  const pending = event.key ? pendingPrClones.get(event.key) : undefined
+  const parts = readReviewCopyParts(event.ask)
+  const projectId = (event.ask as Record<string, unknown> | undefined)?.project_id
+  if (!event.key || !pending || !parts || typeof projectId !== "string") return
+  pendingPrClones.delete(event.key)
+  setState({
+    createAgentTarget: { kind: "pr", projectId },
+    createAgentDraft: pending.name,
+    createAgentRandomize: false,
+    createAgentGeneratedName: null,
+    createAgentNamePending: false,
+    createAgentPrInput: pending.reference,
+    createAgentPrResolving: false,
+    createAgentPrError: null,
+    createAgentPrRequestId: null,
+    createAgentReviewCopy: { ...parts, agreed: false },
+  })
 }
 
 // Reopen the dialog on the refused create, showing why. Returns whether this
@@ -6957,15 +7187,34 @@ function submitPrReferenceFirst(reference: string, name: string): void {
         return
       }
       if (resolved.projects.length === 0) {
+        if (resolved.clone) {
+          // The repository can be fetched: offer that, and keep the picker one
+          // click away. Nothing here is a failure, so there is no toast.
+          const typed = name.trim()
+          const branch = resolved.clone.head_branch
+          closeCreateAgent()
+          openCloneProject({
+            reference,
+            repository,
+            incompleteSummary: resolved.uninspected_summary,
+            hasProjects: (state.spine?.projects.length ?? 0) > 0,
+            name: typed !== "" ? typed : isValidAgentName(branch) ? branch : "",
+            offer: resolved.clone,
+          })
+          return
+        }
         // What dux may claim depends on whether the server managed to look at
         // everything. With a project it could not inspect, "no project is a
         // checkout of this" is a certainty dux does not have, and the one
-        // project that mattered may be exactly the unreadable one. dux does not
-        // clone, and neither wording may imply it might.
+        // project that mattered may be exactly the unreadable one. A lookup
+        // that failed is why there is no offer, and is said beside it.
+        const why = resolved.clone_unavailable
+          ? prose` dux could not look the pull request up to offer a clone: ${resolved.clone_unavailable}`
+          : []
         notifyError(
           resolved.uninspected_summary
-            ? prose`No project dux could check is a checkout of ${chip(repository)}, and dux could not check every project (${resolved.uninspected_summary}). Choose a project that already has it, or add one from a directory on disk.`
-            : prose`No project in dux is a checkout of ${chip(repository)}. Choose a project that already has it, or add one from a directory on disk.`,
+            ? prose`No project dux could check is a checkout of ${chip(repository)}, and dux could not check every project (${resolved.uninspected_summary}). Choose a project that already has it, or add one from a directory on disk.${why}`
+            : prose`No project in dux is a checkout of ${chip(repository)}. Choose a project that already has it, or add one from a directory on disk.${why}`,
         )
       } else {
         notifyInfo(

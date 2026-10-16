@@ -12,9 +12,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"
-import { TriangleAlert } from "lucide-react"
 import type { KeyboardEvent } from "react"
 import {
   createAgentDialogView,
@@ -33,7 +33,6 @@ import {
   toggleCreateAgentRandomize,
   useDux,
 } from "@/lib/store"
-import type { ReviewCopyAsk } from "@/lib/store"
 
 export function CreateAgentDialog() {
   const {
@@ -100,7 +99,11 @@ export function CreateAgentDialog() {
           copyChanges={createAgentCopyChanges}
         />
         {createAgentReviewCopy && (
-          <ReviewCopyQuestion ask={createAgentReviewCopy} />
+          <ReviewCopyQuestion
+            warning={createAgentReviewCopy.warning}
+            agreed={createAgentReviewCopy.agreed}
+            onAgreedChange={setCreateAgentReviewCopyAgreed}
+          />
         )}
         <div className="h-2" />
         <AgentDialogFooter
@@ -180,30 +183,6 @@ function PrReferenceFields({
           </Button>
         </div>
       )}
-    </>
-  )
-}
-
-// The server will not make a review copy nobody agreed to. A push from the
-// agent would land on the copy, not on the pull request, so the warning stays
-// in view and the box starts unticked.
-function ReviewCopyQuestion({ ask }: { ask: ReviewCopyAsk }) {
-  return (
-    <>
-      <p
-        role="alert"
-        className="flex items-start gap-2 rounded-md border border-dux-warning px-3 py-2 text-sm"
-      >
-        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-        <span>{renderProse(ask.warning)}</span>
-      </p>
-      <CheckboxRow
-        id="create-review-copy"
-        checked={ask.agreed}
-        onCheckedChange={setCreateAgentReviewCopyAgreed}
-      >
-        Create a review copy
-      </CheckboxRow>
     </>
   )
 }

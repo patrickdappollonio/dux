@@ -81,14 +81,22 @@ every project you have:
 - **One project is a checkout of that repository** and dux goes straight on to resolve the
   pull request.
 - **Two or more are** and dux shows you just those and asks which.
-- **None is** and dux names the repository it could not place, then offers the project
-  picker.
+- **None is** and the reference names a repository and a pull request number on a host
+  `gh` is signed in to: dux looks the pull request up and shows it, with its title and
+  branch, offering to clone the repository, add it as a project and start the agent on the
+  pull request in one go. When the folder it would clone into already holds a checkout of
+  that repository, it offers to add that folder as a project instead, with no second
+  download. The folder and the agent name are editable, and **Choose an existing project**
+  keeps the old path. When the agent would need a review copy, the offer says so, with the
+  same warning and unticked **Create a review copy** box as in a project, and asks before
+  cloning or adding. A reference without a number, or one `gh` cannot look up, gets the
+  project picker with the repository named.
 
 > [!IMPORTANT]
-> **This dialog never clones a repository dux does not have.** If no project is a checkout
-> of it, get one first with **Clone a repository…** (see
-> [Starting from a remote instead](#starting-from-a-remote-instead)), then paste the
-> reference again.
+> **The clone is the same one as Clone a repository…** (see
+> [Starting from a remote instead](#starting-from-a-remote-instead)). It uses the git
+> protocol `gh` is set to for that host and never prompts for a password. Over SSH, connect
+> to the host once in a terminal first (`ssh -T git@<host>`), or the clone cannot trust it.
 
 A number on its own (`#123` or `123`) is the one form this door cannot take, since it does
 not say which repository it belongs to. dux refuses it and points you at "choose an existing

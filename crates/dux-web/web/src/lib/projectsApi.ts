@@ -65,6 +65,14 @@ export const projectsApi = {
     // request. The server builds the address from it and ignores `clone_url`;
     // it outranks every other flag.
     pull_request?: { host: string; owner_repo: string; number: number }
+    // The folder already holds a checkout of the repository: add it instead of
+    // cloning. Valid only with `pull_request`.
+    add_existing?: boolean
+    // The agreement to a review copy the dialog showed, with the reason and the
+    // copy's branch exactly as shown. Valid only with `pull_request`.
+    review_copy?: boolean
+    review_copy_reason?: string
+    review_copy_branch?: string
   }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
   // The record of the operation a 202 named. The server holds the reply until
   // the record has an outcome or `waitSeconds` pass (it caps the wait at 25).
