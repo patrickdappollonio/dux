@@ -30085,10 +30085,12 @@ cyan = "#00ffff"
                         path,
                         agent_name,
                         repository_key: None,
+                        mode: dux_core::clone_project::CloneMode::Clone,
                         result: Ok(dux_core::clone_project::ClonedRepository {
                             address: "/srv/remote.git".to_string(),
                             branch: "main".to_string(),
                             leading_branch: "main".to_string(),
+                            leading_branch_guessed: false,
                             name_taken: false,
                             pull_request: None,
                         }),

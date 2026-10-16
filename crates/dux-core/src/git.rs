@@ -16,8 +16,8 @@ use crate::worker::BranchWarningKind;
 
 mod clone;
 mod folding;
-pub(crate) use clone::clone_repository_with_env;
 pub use clone::{CloneError, CloneProcesses, clone_repository};
+pub(crate) use clone::{clone_repository_with_env, remote_default_branch_from_remote};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
     rows_answering, untracked_directory_kind,

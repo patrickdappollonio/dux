@@ -381,6 +381,10 @@ pub enum WireCommand {
         /// the engine builds the clone address itself and `url` is ignored.
         #[serde(default)]
         pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+        /// With `pull_request`: `path` already holds a checkout of the
+        /// repository, so add that folder as the project instead of cloning.
+        #[serde(default)]
+        add_existing: bool,
     },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
@@ -1926,6 +1930,7 @@ impl Engine {
                 agent_name,
                 random_name,
                 pull_request,
+                add_existing,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
@@ -1933,6 +1938,7 @@ impl Engine {
                     agent_name,
                     random_name,
                     pull_request,
+                    add_existing,
                 };
                 let busy = self
                     .begin_clone_project(&request, true)
@@ -3525,10 +3531,8 @@ impl Engine {
         // Serialize per repo path: reject a second concurrent request rather than
         // let two workers both bootstrap. Cleared on completion in
         // `process_worker_event` (and on a worker panic, below).
-        if self.clone_running_into(std::path::Path::new(&path_str)) {
-            anyhow::bail!(
-                "dux is cloning a repository into \"{path_str}\". Please wait for it to finish."
-            );
+        if let Some(refused) = self.clone_running_refusal(std::path::Path::new(&path_str)) {
+            anyhow::bail!(refused);
         }
         if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
             anyhow::bail!(
@@ -3612,10 +3616,8 @@ impl Engine {
         // Serialize per path: reject a second concurrent bootstrap (init or
         // commit-only) rather than let two workers race. Cleared on completion
         // in `process_worker_event` (and on a worker panic, below).
-        if self.clone_running_into(std::path::Path::new(&path_str)) {
-            anyhow::bail!(
-                "dux is cloning a repository into \"{path_str}\". Please wait for it to finish."
-            );
+        if let Some(refused) = self.clone_running_refusal(std::path::Path::new(&path_str)) {
+            anyhow::bail!(refused);
         }
         if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
             anyhow::bail!(
@@ -9872,6 +9874,7 @@ mod tests {
             agent_name: Some(agent_name.to_string()),
             random_name: false,
             pull_request: None,
+            add_existing: false,
         }
     }
 
@@ -9949,7 +9952,70 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
                 number: 7,
             }),
+            add_existing: false,
         }
+    }
+
+    /// [`pull_request_clone_command`] for a folder that already holds a
+    /// checkout of the repository, which becomes the project.
+    fn pull_request_add_command(owner_repo: &str, path: &Path, name: Option<&str>) -> WireCommand {
+        match pull_request_clone_command(owner_repo, path, name) {
+            WireCommand::CloneProject {
+                url,
+                path,
+                agent_name,
+                random_name,
+                pull_request,
+                ..
+            } => WireCommand::CloneProject {
+                url,
+                path,
+                agent_name,
+                random_name,
+                pull_request,
+                add_existing: true,
+            },
+            other => other,
+        }
+    }
+
+    /// A working copy of acme/widget at `root/name`, made from `remote` and
+    /// told its origin is the GitHub address, left on a branch of its own with
+    /// an untracked file, the way a user's hand-made checkout is. `drop_head`
+    /// removes the record of the remote's default branch.
+    fn checkout_of_widget(root: &Path, name: &str, remote: &Path, drop_head: bool) -> PathBuf {
+        let dir = root.join(name);
+        let git = |args: &[&str]| {
+            let out = crate::git::test_support::git_command()
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&[
+            "clone",
+            "-q",
+            &remote.to_string_lossy(),
+            &dir.to_string_lossy(),
+        ]);
+        let in_dir = |args: &[&str]| {
+            let dir = dir.to_string_lossy();
+            let mut all = vec!["-C", dir.as_ref()];
+            all.extend_from_slice(args);
+            git(&all);
+        };
+        in_dir(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ]);
+        in_dir(&["switch", "-q", "-c", "feature"]);
+        if drop_head {
+            in_dir(&["remote", "set-head", "origin", "-d"]);
+        }
+        std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+        dir
     }
 
     /// Let `engine` clone pull requests of acme/widget: `gh` is signed in to
@@ -10266,6 +10332,7 @@ mod tests {
                 agent_name: Some("  ".to_string()),
                 random_name: false,
                 pull_request: None,
+                add_existing: false,
             })
             .expect("a blank name is not refused");
         drive_clone_chain(&mut engine);
@@ -10324,6 +10391,141 @@ mod tests {
         assert_eq!(chain.clear_keys, vec![busy.key.unwrap()]);
         assert!(engine.clones.pending.is_empty());
         assert!(engine.pending_create_ops.is_empty());
+
+        // A folder that already holds a checkout, on a branch of its own,
+        // becomes the project with no download: the project leads with the
+        // remote's default branch, found in the folder, else asked of the
+        // remote, and the agent runs on the pull request's commit while the
+        // folder keeps its branch and its files. When neither can say, the
+        // folder's branch leads and a warning says it was a guess.
+        let gh_dir = tools.path().join("add-gh");
+        std::fs::create_dir(&gh_dir).unwrap();
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &gh_dir,
+            &gh_prints(&pull_request_json("pr-branch")),
+        );
+        let nowhere = tools.path().join("nowhere.git");
+        for (name, drop_head, reaches_remote, leads_with) in [
+            ("added-with-head", false, true, "main"),
+            ("added-asking-the-remote", true, true, "main"),
+            ("added-guessing", true, false, "feature"),
+        ] {
+            let (mut engine, _engine_dir) = test_engine();
+            let folder = checkout_of_widget(
+                &std::fs::canonicalize(tmp.path()).unwrap(),
+                name,
+                &pr_remote,
+                drop_head,
+            );
+            serve_pull_requests(
+                &mut engine,
+                &gh,
+                if reaches_remote { &pr_remote } else { &nowhere },
+            );
+            let busy = engine
+                .apply_wire(pull_request_add_command("acme/widget", &folder, None))
+                .unwrap_or_else(|refused| panic!("{name}: {refused}"))
+                .status
+                .expect("a keyed busy");
+            assert_eq!(
+                busy.message,
+                format!(
+                    "Adding {} as a project for pull request #7...",
+                    folder.display()
+                ),
+                "{name}"
+            );
+            let chain = drive_clone_chain(&mut engine);
+            let project = engine
+                .projects
+                .iter()
+                .find(|p| Path::new(&p.path) == folder)
+                .unwrap_or_else(|| panic!("{name}: the folder is not a project"))
+                .clone();
+            assert_eq!(project.current_branch, "feature", "{name}");
+            assert_eq!(
+                project.leading_branch.as_deref(),
+                Some(leads_with),
+                "{name}"
+            );
+            let said: Vec<&str> = chain.statuses.iter().map(|s| s.message.as_str()).collect();
+            assert!(
+                said.iter().all(|message| !message.starts_with("Cloned")),
+                "{name}: an add said it cloned: {said:?}"
+            );
+            let guessed: Vec<_> = chain
+                .statuses
+                .iter()
+                .filter(|s| s.tone == "warning")
+                .collect();
+            let agents: Vec<_> = engine
+                .sessions
+                .iter()
+                .filter(|s| s.project_id() == Some(project.id.as_str()))
+                .collect();
+            if reaches_remote {
+                assert!(guessed.is_empty(), "{name}: {guessed:?}");
+                assert_eq!(agents.len(), 1, "{name}");
+                assert_eq!(agents[0].branch_name(), Some("pr-branch"), "{name}");
+                let head = crate::git::test_support::git_command()
+                    .arg("-C")
+                    .arg(agents[0].directory())
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&head.stdout).trim(),
+                    pr_commit,
+                    "{name}"
+                );
+                assert_eq!(chain.clear_keys, vec![busy.key.clone().unwrap()], "{name}");
+            } else {
+                assert_eq!(guessed.len(), 1, "{name}: {guessed:?}");
+                assert_eq!(
+                    guessed[0].message,
+                    "dux could not learn the default branch of github.com/acme/widget from \
+                     its remote, so project \"added-guessing\" leads with \"feature\", the \
+                     branch the folder has checked out."
+                );
+                // The remote that could not answer cannot serve the pull
+                // request either: the project stays and says what was done.
+                assert!(agents.is_empty(), "{name}");
+                let ended = self::finals(&chain);
+                let missing = ended.iter().find(|s| s.tone == "error").expect(name);
+                assert!(
+                    missing.message.starts_with(&format!(
+                        "Added {} as project \"added-guessing\", but didn't create agent \
+                         \"pr-branch\":",
+                        folder.display()
+                    )),
+                    "{name}: {}",
+                    missing.message
+                );
+            }
+            let branch = crate::git::test_support::git_command()
+                .arg("-C")
+                .arg(&folder)
+                .args(["symbolic-ref", "--short", "HEAD"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&branch.stdout).trim(),
+                "feature",
+                "{name}: the folder's branch moved"
+            );
+            assert_eq!(
+                std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+                "mine",
+                "{name}"
+            );
+            assert!(engine.clones.pending.is_empty(), "{name}");
+            assert!(
+                !engine.is_in_flight(&InFlightKey::CloneRepository(
+                    "github.com/acme/widget".to_string()
+                )),
+                "{name}: the repository stayed held"
+            );
+        }
 
         // An agent that cannot start after the clone and the add: the one
         // final says the clone is on disk, the project was added, and why the
@@ -10741,6 +10943,7 @@ mod tests {
             agent_name: name.map(str::to_string),
             random_name: false,
             pull_request: None,
+            add_existing: false,
         };
         let url = remote.to_string_lossy().into_owned();
         // A project that is already a checkout of acme/matched, and a `gh`
@@ -10857,6 +11060,44 @@ mod tests {
                     "is already a checkout of",
                     "github.com/acme/matched",
                     "did not clone it again",
+                ],
+            ),
+            (
+                "an add with no pull request",
+                WireCommand::CloneProject {
+                    url: url.clone(),
+                    path: dest.to_string_lossy().into_owned(),
+                    agent_name: Some("a".to_string()),
+                    random_name: false,
+                    pull_request: None,
+                    add_existing: true,
+                },
+                &dest,
+                &["add_existing needs a pull request."],
+            ),
+            (
+                "an add of a pull request gh cannot find",
+                pull_request_add_command("acme/gone", &full, None),
+                &full,
+                &["no pull requests found", "Nothing was added"],
+            ),
+            (
+                "an add of a project that became a checkout of the repository",
+                pull_request_add_command("acme/matched", &full, None),
+                &full,
+                &[
+                    "p3-name",
+                    "is already a checkout of",
+                    "did not add it again",
+                ],
+            ),
+            (
+                "an add of a folder that holds something else",
+                pull_request_add_command("acme/widget", &full, None),
+                &full,
+                &[
+                    "already holds something that isn't a checkout of github.com/acme/widget",
+                    "Nothing was added",
                 ],
             ),
         ];
@@ -11037,6 +11278,7 @@ mod tests {
             path: dest.clone(),
             agent_name: "agent".to_string(),
             repository_key: None,
+            mode: crate::clone_project::CloneMode::Clone,
             result: Err(crate::clone_project::CloneOutcome::Failed(
                 "the worker stopped".into(),
             )),
@@ -11188,6 +11430,47 @@ mod tests {
         );
         assert!(engine.sessions.is_empty());
 
+        // A folder that cannot be registered as a project stays exactly as it
+        // was, and the final says so without claiming a clone.
+        let (mut engine, _engine_dir) = test_engine();
+        let gh_dir = root.join("add-gh");
+        std::fs::create_dir(&gh_dir).unwrap();
+        let gh_add = crate::gh::probe_test_support::stand_in_gh(
+            &gh_dir,
+            &gh_prints(&pull_request_json("pr-branch")),
+        );
+        serve_pull_requests(&mut engine, &gh_add, &remote);
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+            engine.paths.config_path.clone(),
+        );
+        let folder = checkout_of_widget(&root, "dest-add-fails", &remote, false);
+        engine
+            .apply_wire(pull_request_add_command("acme/widget", &folder, None))
+            .expect("dispatch the add");
+        let chain = drive_clone_chain(&mut engine);
+        let ended = self::finals(&chain);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert_eq!(ended[0].tone, "warning", "{}", ended[0].message);
+        assert!(ended[0].sticky, "{}", ended[0].message);
+        assert!(
+            ended[0]
+                .message
+                .starts_with(&format!("Couldn't add {} as a project: ", folder.display()))
+                && ended[0]
+                    .message
+                    .ends_with(" The folder is untouched, and no agent was created."),
+            "{}",
+            ended[0].message
+        );
+        assert!(engine.projects.is_empty() && engine.sessions.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+            "mine"
+        );
+        assert!(!engine.is_in_flight(&InFlightKey::CloneRepository(
+            "github.com/acme/widget".to_string()
+        )));
+
         // A plain clone of the same repository is refused while a pull request
         // clone of it runs, and the other way round.
         let (mut engine, _engine_dir) = test_engine();
@@ -11198,6 +11481,7 @@ mod tests {
             agent_name: Some("agent".to_string()),
             random_name: false,
             pull_request: None,
+            add_existing: false,
         };
         let (one, two) = (root.join("race-one"), root.join("race-two"));
         engine
@@ -11220,6 +11504,55 @@ mod tests {
             .expect_err("a pull request clone is refused while a plain one runs")
             .to_string();
         assert!(refused.contains("already cloning"), "{refused}");
+        drive_clone_chain(&mut engine);
+
+        // While an add runs, what refuses a second request says it is an add
+        // that holds the folder or the repository, never a clone.
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &gh_add, &remote);
+        let one = checkout_of_widget(&root, "race-add-one", &remote, false);
+        let two = checkout_of_widget(&root, "race-add-two", &remote, false);
+        engine
+            .apply_wire(pull_request_add_command("acme/widget", &one, None))
+            .expect("the add is accepted");
+        let again = |engine: &mut Engine, command: WireCommand| {
+            engine
+                .apply_wire(command)
+                .expect_err("refused while the add runs")
+                .to_string()
+        };
+        assert_eq!(
+            again(
+                &mut engine,
+                pull_request_add_command("acme/widget", &two, None)
+            ),
+            "dux is already adding a checkout of github.com/acme/widget for a new agent. Wait \
+             for it to finish, then use New agent from PR again."
+        );
+        assert_eq!(
+            again(
+                &mut engine,
+                pull_request_add_command("acme/widget", &one, None)
+            ),
+            format!(
+                "dux is already adding {} as a project. Wait for it to finish, or pick \
+                 another folder.",
+                one.display()
+            )
+        );
+        // The routes that would write a repository into the same folder word
+        // their refusal the same way.
+        assert_eq!(
+            engine.clone_running_refusal(&one).as_deref(),
+            Some(
+                format!(
+                    "dux is adding \"{}\" as a project for a pull request. Please wait for it \
+                     to finish.",
+                    one.display()
+                )
+                .as_str()
+            )
+        );
         drive_clone_chain(&mut engine);
     }
 
@@ -11296,6 +11629,7 @@ mod tests {
                         path: first.clone(),
                         agent_name: String::new(),
                         repository_key: Some(key.clone()),
+                        mode: crate::clone_project::CloneMode::Clone,
                         result: Err(crate::clone_project::CloneOutcome::Failed(
                             "The clone worker stopped unexpectedly.".into(),
                         )),
@@ -11316,6 +11650,7 @@ mod tests {
                         path: first.clone(),
                         agent_name: String::new(),
                         repository_key: Some(key.clone()),
+                        mode: crate::clone_project::CloneMode::Clone,
                         result: Err(crate::clone_project::CloneOutcome::Failed(
                             "The clone worker stopped unexpectedly.".into(),
                         )),
@@ -11368,6 +11703,7 @@ mod tests {
                     processes: Default::default(),
                     pull_request: None,
                     repository_key: None,
+                    mode: crate::clone_project::CloneMode::Clone,
                     git_env: Vec::new(),
                 },
                 &worker_tx,

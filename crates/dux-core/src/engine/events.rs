@@ -4731,12 +4731,14 @@ impl Engine {
                 path,
                 agent_name,
                 repository_key,
+                mode,
                 result,
             } => self.process_repository_cloned(
                 status_op_id,
                 path,
                 agent_name,
                 repository_key,
+                mode,
                 result,
             ),
             WorkerEvent::CreateAgentBranchInspected {

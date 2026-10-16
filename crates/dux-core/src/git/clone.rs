@@ -91,6 +91,79 @@ fn kill_group(group: i32) {
     }
 }
 
+/// A `git` command that can never ask for an answer, whatever the inherited
+/// environment says: no terminal prompt, an askpass for git and for ssh that
+/// fails at once, and no interactive credential helper. A helper that answers
+/// without asking (a stored token, a keychain) still works. It runs in a
+/// session of its own: with no controlling terminal ssh cannot open `/dev/tty`
+/// to ask for a passphrase or a host key, and it is a process group of its
+/// own, so a clone can be stopped at once. Null stdin; the caller sets the rest.
+///
+/// `env` is extra variables for git's environment, set first so that none of
+/// them can undo the above (a test hands git a stand-in transport this way).
+pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Command {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = std::process::Command::new("git");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
+        .args(["-c", "credential.interactive=false"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "false")
+        .env("SSH_ASKPASS", "false")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(std::process::Stdio::null());
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    command
+}
+
+/// The branch the remote `origin` of the repository at `path` calls its
+/// default, asked of the remote itself, for a folder that does not record it.
+/// `None` when the remote cannot say: unreachable, slow past the bound, or an
+/// answer that names no branch. Never prompts. `env` is extra variables for
+/// git's environment, so a test can hand git a stand-in transport.
+pub(crate) fn remote_default_branch_from_remote(
+    path: &Path,
+    env: &[(&str, &str)],
+) -> Option<String> {
+    let mut command = no_prompt_git_command(env);
+    command
+        .arg("-C")
+        .arg(path)
+        .args(["ls-remote", "--symref", "origin", "HEAD"]);
+    let crate::bounded_command::CommandOutcome::Completed(output) =
+        crate::bounded_command::run_command_with_timeout(
+            command,
+            crate::gh::GH_CALL_TIMEOUT,
+            crate::bounded_command::DEFAULT_READER_DRAIN,
+            "git ls-remote",
+        )
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    // The first line is `ref: refs/heads/<branch>`, a tab, then `HEAD`.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .strip_prefix("ref: refs/heads/")?
+        .split('\t')
+        .next()
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
 /// Clone `url` into `dest` with the user's own git configuration and
 /// credentials, never asking for anything: git runs in a session of its own
 /// with no terminal, so neither git nor ssh has anywhere to prompt, and one
@@ -117,43 +190,18 @@ pub(crate) fn clone_repository_with_env(
     env: &[(&str, &str)],
 ) -> Result<(), CloneError> {
     use std::io::Read as _;
-    use std::os::unix::process::CommandExt as _;
     use std::sync::mpsc::RecvTimeoutError;
 
-    let mut command = std::process::Command::new("git");
+    let mut command = no_prompt_git_command(env);
     // `--origin origin` pins the remote's name against a user's
     // `clone.defaultRemoteName`, and `--progress` keeps stderr moving while
     // the clone works, which is what the stall clock watches.
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    // Nothing may ask for an answer, whatever the inherited environment says:
-    // no terminal prompt, an askpass for git and for ssh that fails at once,
-    // and no interactive credential helper. A helper that answers without
-    // asking (a stored token, a keychain) still works.
     command
-        .args(["-c", "credential.interactive=false"])
         .args(["clone", "--progress", "--origin", "origin", "--"])
         .arg(url)
         .arg(dest)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "false")
-        .env("SSH_ASKPASS", "false")
-        .env("SSH_ASKPASS_REQUIRE", "never")
-        .env("GCM_INTERACTIVE", "never")
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // SAFETY: `setsid` is async-signal-safe and touches no Rust state. A new
-    // session has no controlling terminal, so ssh cannot open `/dev/tty` to
-    // ask for a passphrase or a host key, and it is a process group of its
-    // own, so the whole clone can be stopped at once.
-    unsafe {
-        command.pre_exec(|| {
-            rustix::process::setsid().map_err(std::io::Error::from)?;
-            Ok(())
-        });
-    }
     let (mut child, token) =
         processes
             .spawn(|| command.spawn())

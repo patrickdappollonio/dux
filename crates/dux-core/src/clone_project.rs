@@ -30,7 +30,9 @@ use crate::worker::WorkerEvent;
 ///
 /// With `pull_request` the clone is for a new agent from that pull request:
 /// the engine builds the address itself and ignores `url`, and a blank name
-/// stays blank until the worker has looked the pull request up.
+/// stays blank until the worker has looked the pull request up. With
+/// `add_existing` as well, `path` is a folder that already holds a checkout of
+/// the repository: nothing is cloned, the folder becomes the project.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneRequest {
     pub url: String,
@@ -38,6 +40,26 @@ pub struct CloneRequest {
     pub agent_name: Option<String>,
     pub random_name: bool,
     pub pull_request: Option<PullRequestCloneTarget>,
+    pub add_existing: bool,
+}
+
+/// What the operation does to its folder, which every sentence it can print
+/// is worded by: a clone never says it added, and an add never says it cloned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloneMode {
+    #[default]
+    Clone,
+    AddExisting,
+}
+
+/// What a folder offered for a pull request's repository holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrDestination {
+    /// Missing or an empty folder: a clone can go there.
+    Free,
+    /// The top of a working copy whose `origin` is the repository: it can
+    /// become the project as it is.
+    Checkout,
 }
 
 /// How a clone's operation ended. The worker answers one of the first three
@@ -76,6 +98,10 @@ pub struct PendingClone {
     /// project is registered or the clone ends without one; `None` for an
     /// ordinary clone.
     pub repository_key: Option<String>,
+    pub mode: CloneMode,
+    /// The folder the operation clones into or adds, to word a refusal by what
+    /// the holder of that folder is doing.
+    pub destination: PathBuf,
 }
 
 /// The engine's clones: the operations waiting for their worker, and the git
@@ -130,8 +156,18 @@ pub fn prepare_clone(
         crate::git::docker_style_name()
     };
     let destination = destination_identity(&request.path, home)?;
-    // Both sides canonicalized, so a project saved under another spelling of
-    // the folder (through a symbolic link, say) still matches.
+    refuse_project_destination(&destination, projects)?;
+    Ok(PreparedClone {
+        url: url.to_string(),
+        destination,
+        agent_name,
+    })
+}
+
+/// Refuse a destination that is already a project. Both sides are
+/// canonicalized, so a project saved under another spelling of the folder
+/// (through a symbolic link, say) still matches.
+fn refuse_project_destination(destination: &Path, projects: &[&str]) -> Result<(), StatusText> {
     let destination_text = destination.to_string_lossy();
     if projects
         .iter()
@@ -142,11 +178,43 @@ pub fn prepare_clone(
             " is already a project in the workspace. Pick another destination for the clone."
         ]);
     }
-    Ok(PreparedClone {
-        url: url.to_string(),
-        destination,
-        agent_name,
-    })
+    Ok(())
+}
+
+/// What `raw` holds, judged for the repository of `target`, for a pull request
+/// that would clone there or add what is there. Runs git, so only on a worker.
+/// The folder is never changed.
+pub fn inspect_pr_destination(
+    raw: &str,
+    target: &PullRequestCloneTarget,
+    policy: &crate::gh::GithubHostPolicy,
+    home: Option<&Path>,
+    projects: &[&str],
+) -> Result<PrDestination, StatusText> {
+    let destination = destination_identity(raw, home)?;
+    refuse_project_destination(&destination, projects)?;
+    if destination_occupancy(&destination)? == Occupancy::Empty {
+        return Ok(PrDestination::Free);
+    }
+    let strip = |name: &str| name.strip_suffix(".git").unwrap_or(name).to_lowercase();
+    let is_checkout = matches!(
+        crate::git::repo_path_kind(&destination),
+        crate::git::RepoPathKind::WorkTreeRoot
+    ) && matches!(
+        crate::git::resolve_remote_github_repo(&destination, policy),
+        crate::git::RemoteResolution::Allowed(remote)
+            if remote.host.eq_ignore_ascii_case(&target.host)
+                && strip(&remote.owner_repo) == strip(&target.owner_repo)
+    );
+    if is_checkout {
+        return Ok(PrDestination::Checkout);
+    }
+    Err(crate::status_text![
+        n(destination.display()),
+        " already holds something that isn't a checkout of ",
+        n(format!("{}/{}", target.host, target.owner_repo)),
+        ". Pick another folder."
+    ])
 }
 
 /// The destination `raw` names, after expanding a leading `~`: its parent
@@ -191,10 +259,14 @@ pub fn destination_identity(raw: &str, home: Option<&Path>) -> Result<PathBuf, S
 pub struct ClonedRepository {
     /// The address, with any user and token removed, for the messages.
     pub address: String,
-    /// The branch the clone checked out: the remote's default.
+    /// The branch the clone checked out: the remote's default. For a folder
+    /// that was added, the branch it has checked out.
     pub branch: String,
     /// The base new worktrees branch from.
     pub leading_branch: String,
+    /// The folder added could not say the remote's default branch and neither
+    /// could the remote, so `leading_branch` is the folder's own guess.
+    pub leading_branch_guessed: bool,
     /// A branch named like the agent already exists in the clone. Never set
     /// for a pull request, whose create decides for itself what to do with a
     /// branch of that name.
@@ -224,12 +296,34 @@ pub struct ClonedFor {
     pub path: PathBuf,
     pub project_name: String,
     pub agent_name: String,
+    pub mode: CloneMode,
 }
 
 impl ClonedFor {
     /// `reason` the agent is missing, after what the clone did.
     pub fn agent_missing(&self, reason: StatusText) -> StatusText {
         self.agent_missing_named(None, reason)
+    }
+
+    /// What was done to the folder and the project, worded by the mode, up to
+    /// where the sentence goes on about the agent.
+    fn done_so_far(&self) -> StatusText {
+        match self.mode {
+            CloneMode::Clone => crate::status_text![
+                "Cloned ",
+                n(&self.address),
+                " into ",
+                n(self.path.display()),
+                " and added project ",
+                q(&self.project_name)
+            ],
+            CloneMode::AddExisting => crate::status_text![
+                "Added ",
+                n(self.path.display()),
+                " as project ",
+                q(&self.project_name)
+            ],
+        }
     }
 
     /// [`Self::agent_missing`] naming the agent the create actually tried to
@@ -239,12 +333,7 @@ impl ClonedFor {
         // Wrapping the reason copies its words, not the question it may put.
         let ask = reason.ask().cloned();
         let wrapped = crate::status_text![
-            "Cloned ",
-            n(self.address),
-            " into ",
-            n(self.path.display()),
-            " and added project ",
-            q(self.project_name),
+            self.done_so_far(),
             ", but didn't create agent ",
             q(attempted.unwrap_or(&self.agent_name)),
             ": ",
@@ -260,12 +349,7 @@ impl ClonedFor {
     /// did.
     pub fn startup_failed(&self, agent: &str, error: &str) -> StatusText {
         crate::status_text![
-            "Cloned ",
-            n(self.address),
-            " into ",
-            n(self.path.display()),
-            " and added project ",
-            q(self.project_name),
+            self.done_so_far(),
             ". Agent ",
             q(agent),
             format!(
@@ -287,6 +371,7 @@ pub struct ClonedProject {
     /// The repository key the clone held, to release when the pending clone
     /// is gone.
     pub repository_key: Option<String>,
+    pub mode: CloneMode,
 }
 
 /// What a pull request clone's worker checks and looks up before it claims the
@@ -312,6 +397,7 @@ pub struct CloneJob {
     pub pull_request: Option<PullRequestJob>,
     /// Held by a pull request clone; carried so the answer can release it.
     pub repository_key: Option<String>,
+    pub mode: CloneMode,
     /// Extra variables for git's environment. Empty outside tests, which use
     /// it to point an address at a local remote.
     pub git_env: Vec<(String, String)>,
@@ -335,6 +421,7 @@ pub fn run_clone_job(job: CloneJob, worker_tx: &Sender<WorkerEvent>) {
         path: job.destination,
         agent_name,
         repository_key: job.repository_key,
+        mode: job.mode,
         result,
     });
 }
@@ -355,6 +442,10 @@ fn settle_pull_request(
         number: Some(target.number),
     };
     let repository = format!("{}/{}", target.host, target.owner_repo);
+    let (did_not, nothing_was) = match job.mode {
+        CloneMode::Clone => ("clone", " Nothing was cloned."),
+        CloneMode::AddExisting => ("add", " Nothing was added."),
+    };
     let resolution = crate::pr_reference::resolve_reference_projects(
         &reference,
         &pull_request.projects,
@@ -365,8 +456,10 @@ fn settle_pull_request(
             q(project.name),
             " is already a checkout of ",
             n(repository),
-            ", so dux did not clone it again. Use New agent from PR again; it will find that \
-             project now."
+            format!(
+                ", so dux did not {did_not} it again. Use New agent from PR again; it will \
+                 find that project now."
+            )
         ]));
     }
     let lookup = crate::worker::PullRequestLookup {
@@ -382,10 +475,7 @@ fn settle_pull_request(
             } else {
                 "."
             };
-            CloneOutcome::Refused(crate::status_text![
-                format!("{said}{stop}"),
-                " Nothing was cloned."
-            ])
+            CloneOutcome::Refused(crate::status_text![format!("{said}{stop}"), nothing_was])
         })?;
     let typed = job.agent_name.trim();
     let agent_name = if typed.is_empty() {
@@ -398,8 +488,10 @@ fn settle_pull_request(
                 n(format!("#{}", target.number)),
                 " has head branch ",
                 q(branch),
-                ", which is not a usable agent name. Type a name using only letters, digits, \
-                 dashes, underscores and slashes. Nothing was cloned."
+                format!(
+                    ", which is not a usable agent name. Type a name using only letters, \
+                     digits, dashes, underscores and slashes.{nothing_was}"
+                )
             ]));
         }
         branch.to_string()
@@ -459,6 +551,9 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
             q(agent_name),
             " as a branch name, so it can't name the agent. Pick another name."
         ]));
+    }
+    if job.mode == CloneMode::AddExisting {
+        return add_existing_checkout(job, address, pull_request);
     }
     let claim = claim_destination(dest).map_err(CloneOutcome::Refused)?;
     crate::logger::info(&format!("cloning {address} into {}", dest.display()));
@@ -534,8 +629,79 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         address,
         branch,
         leading_branch,
+        leading_branch_guessed: false,
         name_taken,
         pull_request,
+    })
+}
+
+/// The add half of the worker, in place of the claim and the clone: the folder
+/// must still be a checkout of the repository, and the project leads with the
+/// remote's default branch, whichever branch the folder has out. Nothing in the
+/// folder is created, moved or removed.
+fn add_existing_checkout(
+    job: &CloneJob,
+    address: String,
+    pull_request: Option<ClonedPullRequest>,
+) -> Result<ClonedRepository, CloneOutcome> {
+    let (Some(request), Some(pull_request)) = (&job.pull_request, pull_request) else {
+        return Err(CloneOutcome::Refused(
+            "add_existing needs a pull request.".into(),
+        ));
+    };
+    let dest = &job.destination;
+    let refuse =
+        |why: StatusText| CloneOutcome::Refused(crate::status_text![why, " Nothing was added."]);
+    let projects: Vec<&str> = request.projects.iter().map(|p| p.path.as_str()).collect();
+    match inspect_pr_destination(
+        &dest.to_string_lossy(),
+        &request.target,
+        &request.policy,
+        None,
+        &projects,
+    ) {
+        Ok(PrDestination::Checkout) => {}
+        Ok(PrDestination::Free) => {
+            return Err(refuse(crate::status_text![
+                n(dest.display()),
+                " no longer holds a checkout of ",
+                n(format!(
+                    "{}/{}",
+                    request.target.host, request.target.owner_repo
+                )),
+                "."
+            ]));
+        }
+        Err(refused) => return Err(refuse(refused)),
+    }
+    crate::logger::info(&format!("adding {} as a project", dest.display()));
+    let branch = crate::git::current_branch_opt(dest)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let env: Vec<(&str, &str)> = job
+        .git_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let remote_default = crate::git::remote_default_branch(dest)
+        .or_else(|| crate::git::remote_default_branch_from_remote(dest, &env));
+    let leading_branch_guessed = remote_default.is_none();
+    let leading_branch = remote_default.unwrap_or_else(|| {
+        if branch.is_empty() {
+            "main".to_string()
+        } else {
+            branch.clone()
+        }
+    });
+    keep_env_config(dest, &job.git_env);
+    Ok(ClonedRepository {
+        address,
+        branch,
+        leading_branch,
+        leading_branch_guessed,
+        name_taken: false,
+        pull_request: Some(pull_request),
     })
 }
 
@@ -589,19 +755,20 @@ pub fn claim_destination(dest: &Path) -> Result<DestinationClaim, StatusText> {
     })
 }
 
-/// Refuse a destination that exists and is not an empty folder, or is a
-/// symbolic link: a clone goes only into a new or an empty folder.
-fn check_destination(dest: &Path) -> Result<(), StatusText> {
-    let not_empty = || {
-        crate::status_text![
-            n(dest.display()),
-            " already exists and isn't an empty folder. An earlier clone may have been \
-             interrupted there; dux leaves that folder for you to remove. Remove it, or pick \
-             another destination."
-        ]
-    };
+/// Whether a destination that is not a symbolic link holds anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Occupancy {
+    /// Missing, or an empty folder.
+    Empty,
+    /// A file, or a folder with something in it (or one dux cannot read).
+    Occupied,
+}
+
+/// What `dest` holds, refusing a symbolic link (a clone goes only into a new or
+/// an empty folder, and a link is neither) and a path that cannot be looked at.
+fn destination_occupancy(dest: &Path) -> Result<Occupancy, StatusText> {
     match std::fs::symlink_metadata(dest) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Occupancy::Empty),
         Err(error) => Err(crate::status_text![
             "Couldn't look at ",
             n(dest.display()),
@@ -612,13 +779,28 @@ fn check_destination(dest: &Path) -> Result<(), StatusText> {
             " is a symbolic link. dux clones only into a new or an empty folder."
         ]),
         Ok(meta) if meta.is_dir() => match std::fs::read_dir(dest) {
-            Ok(mut entries) => match entries.next() {
-                None => Ok(()),
-                Some(_) => Err(not_empty()),
-            },
-            Err(_) => Err(not_empty()),
+            Ok(mut entries) => Ok(if entries.next().is_none() {
+                Occupancy::Empty
+            } else {
+                Occupancy::Occupied
+            }),
+            Err(_) => Ok(Occupancy::Occupied),
         },
-        Ok(_) => Err(not_empty()),
+        Ok(_) => Ok(Occupancy::Occupied),
+    }
+}
+
+/// Refuse a destination that exists and is not an empty folder, or is a
+/// symbolic link: a clone goes only into a new or an empty folder.
+fn check_destination(dest: &Path) -> Result<(), StatusText> {
+    match destination_occupancy(dest)? {
+        Occupancy::Empty => Ok(()),
+        Occupancy::Occupied => Err(crate::status_text![
+            n(dest.display()),
+            " already exists and isn't an empty folder. An earlier clone may have been \
+             interrupted there; dux leaves that folder for you to remove. Remove it, or pick \
+             another destination."
+        ]),
     }
 }
 
@@ -760,6 +942,88 @@ mod tests {
         let claim = claim_destination(&users).expect("an empty folder is used as is");
         claim.release_unused();
         assert!(users.is_dir(), "a folder dux did not make was removed");
+    }
+
+    #[test]
+    fn a_folder_is_judged_by_what_it_holds_against_the_repository_asked_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let working_copy = |name: &str, origin: &str, branch: &str| {
+            let dir = root.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            for args in [
+                vec!["init", "-q", "-b", branch],
+                vec!["remote", "add", "origin", origin],
+            ] {
+                let out = crate::git::test_support::git_command()
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}: {out:?}");
+            }
+            dir
+        };
+        let ours = working_copy("ours", "https://github.com/Acme/Widget.git", "feature");
+        let other = working_copy("other", "https://github.com/acme/other.git", "main");
+        let full = root.join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("notes"), "x").unwrap();
+        let empty = root.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&empty, &linked).unwrap();
+        let target = PullRequestCloneTarget {
+            host: "github.com".to_string(),
+            owner_repo: "acme/widget".to_string(),
+            number: 3,
+        };
+        let policy = crate::gh::GithubHostPolicy::Hosts(["github.com".to_string()].into());
+        let project = ours.to_string_lossy().into_owned();
+        let inspect = |path: &Path, projects: &[&str]| {
+            inspect_pr_destination(&path.to_string_lossy(), &target, &policy, None, projects)
+        };
+
+        assert_eq!(inspect(&root.join("missing"), &[]), Ok(PrDestination::Free));
+        assert_eq!(inspect(&empty, &[]), Ok(PrDestination::Free));
+        // A checkout is a checkout whichever branch it has out.
+        assert_eq!(inspect(&ours, &[]), Ok(PrDestination::Checkout));
+        for (what, path, words) in [
+            (
+                "a working copy of another repository",
+                &other,
+                "already holds something that isn't a checkout of github.com/acme/widget. \
+                 Pick another folder.",
+            ),
+            (
+                "a folder with files",
+                &full,
+                "already holds something that isn't a checkout of github.com/acme/widget. \
+                 Pick another folder.",
+            ),
+            (
+                "a symbolic link",
+                &linked,
+                "is a symbolic link. dux clones only into a new or an empty folder.",
+            ),
+        ] {
+            let refused = inspect(path, &[]).expect_err(what).to_string();
+            assert!(refused.contains(words), "{what}: {refused}");
+            assert!(
+                refused.starts_with(&path.display().to_string()),
+                "{what}: {refused}"
+            );
+        }
+        let refused = inspect(&ours, &[project.as_str()])
+            .expect_err("a folder that is already a project")
+            .to_string();
+        assert!(
+            refused.ends_with(
+                "is already a project in the workspace. Pick another destination for the clone."
+            ),
+            "{refused}"
+        );
     }
 
     #[test]

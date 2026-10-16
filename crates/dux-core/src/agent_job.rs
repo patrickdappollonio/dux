@@ -5053,6 +5053,7 @@ mod tests {
                 path: repo.path().to_path_buf(),
                 project_name: "repo".to_string(),
                 agent_name: "pr-head".to_string(),
+                mode: crate::clone_project::CloneMode::Clone,
             });
         }
         let reactions = drive_create_through_engine(&mut engine, request);

@@ -1408,6 +1408,8 @@ pub(crate) mod tests {
                 op,
                 from_web,
                 repository_key: None,
+                mode: dux_core::clone_project::CloneMode::Clone,
+                destination: std::path::PathBuf::new(),
             },
         );
         id
@@ -1423,11 +1425,13 @@ pub(crate) mod tests {
             status_op_id: Some(id),
             path,
             agent_name: agent.to_string(),
+            mode: dux_core::clone_project::CloneMode::Clone,
             repository_key: None,
             result: Ok(dux_core::clone_project::ClonedRepository {
                 address: "/srv/remote.git".to_string(),
                 branch: "main".to_string(),
                 leading_branch: "main".to_string(),
+                leading_branch_guessed: false,
                 name_taken: false,
                 pull_request: None,
             }),

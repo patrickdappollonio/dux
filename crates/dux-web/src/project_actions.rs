@@ -99,6 +99,11 @@ struct AddProjectBody {
     /// is ignored; outranks every other flag.
     #[serde(default)]
     pull_request: Option<dux_core::pr_reference::PullRequestCloneTarget>,
+    /// With `pull_request`: `path` already holds a checkout of the
+    /// repository, so add that folder as the project instead of cloning into
+    /// it. Refused without a `pull_request`.
+    #[serde(default)]
+    add_existing: bool,
 }
 
 /// Pick the add command the body's flags ask for.
@@ -121,14 +126,18 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
         agent_name,
         random_name,
         pull_request,
+        add_existing,
     } = body;
-    if pull_request.is_some() {
+    // `add_existing` without a pull request goes the same way, so the engine
+    // refuses it by name rather than the body quietly meaning an ordinary add.
+    if pull_request.is_some() || add_existing {
         WireCommand::CloneProject {
             url: clone_url.unwrap_or_default(),
             path,
             agent_name,
             random_name,
             pull_request,
+            add_existing,
         }
     } else if let Some(url) = clone_url.filter(|url| !url.trim().is_empty()) {
         WireCommand::CloneProject {
@@ -137,6 +146,7 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
             agent_name,
             random_name,
             pull_request: None,
+            add_existing: false,
         }
     } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
@@ -787,6 +797,7 @@ mod tests {
             agent_name: None,
             random_name: false,
             pull_request: None,
+            add_existing: false,
         }
     }
 
@@ -917,8 +928,38 @@ mod tests {
                 agent_name: Some("first".to_string()),
                 random_name: true,
                 pull_request: None,
+                add_existing: false,
             }
         );
+        // A pull request, or the add of a checkout for one, outranks a clone
+        // address and every other flag; an add with no pull request is still
+        // sent to the engine, which refuses it by name.
+        let target = dux_core::pr_reference::PullRequestCloneTarget {
+            host: "github.com".to_string(),
+            owner_repo: "acme/widget".to_string(),
+            number: 7,
+        };
+        for (add_existing, pull_request) in [
+            (false, Some(target.clone())),
+            (true, Some(target.clone())),
+            (true, None),
+        ] {
+            assert_eq!(
+                super::add_project_command(super::AddProjectBody {
+                    pull_request: pull_request.clone(),
+                    add_existing,
+                    ..clone("https://example.com/r.git")
+                }),
+                WireCommand::CloneProject {
+                    url: "https://example.com/r.git".to_string(),
+                    path: "/repo".to_string(),
+                    agent_name: Some("first".to_string()),
+                    random_name: true,
+                    pull_request,
+                    add_existing,
+                }
+            );
+        }
         assert!(matches!(
             super::add_project_command(clone("  ")),
             WireCommand::AddProjectInitRepo { .. }

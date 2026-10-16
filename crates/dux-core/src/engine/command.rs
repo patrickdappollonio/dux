@@ -65,13 +65,16 @@ pub enum Command {
     /// blank; `random_name` is the New agent dialog's checkbox). Returns the clone's busy, or an error
     /// status saying which check refused it; see [`crate::clone_project`].
     /// With `pull_request` the agent is created from that pull request, the
-    /// address is built by the engine and `url` is ignored.
+    /// address is built by the engine and `url` is ignored. With
+    /// `add_existing` too, `path` is a folder that already holds a checkout of
+    /// the repository, which becomes the project instead of a clone.
     CloneProject {
         url: String,
         path: String,
         agent_name: Option<String>,
         random_name: bool,
         pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+        add_existing: bool,
     },
 
     /// Remove a project and cascade-delete its agents' records and runtime,
@@ -571,6 +574,7 @@ impl Engine {
                 agent_name,
                 random_name,
                 pull_request,
+                add_existing,
             } => {
                 let request = crate::clone_project::CloneRequest {
                     url,
@@ -578,6 +582,7 @@ impl Engine {
                     agent_name,
                     random_name,
                     pull_request,
+                    add_existing,
                 };
                 Ok(EventReaction::Status(
                     match self.begin_clone_project(&request, false) {

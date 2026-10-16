@@ -743,6 +743,7 @@ pub enum WorkerEvent {
         /// The repository key a pull request clone holds, released when the
         /// pending clone is gone.
         repository_key: Option<String>,
+        mode: crate::clone_project::CloneMode,
         result: Result<crate::clone_project::ClonedRepository, crate::clone_project::CloneOutcome>,
     },
     /// Background inspection of the selected project checkout before opening

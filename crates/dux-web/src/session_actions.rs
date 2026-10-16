@@ -69,6 +69,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/pull-requests/resolve",
             post(resolve_pull_request_reference),
         )
+        .route(
+            "/api/v1/pull-requests/clone-destination",
+            post(check_pull_request_clone_destination),
+        )
         .route("/api/v1/sessions/reorder", post(reorder_sessions))
         .route("/api/v1/sessions/reorder-global", post(reorder_agents))
         .route(
@@ -2425,6 +2429,78 @@ async fn resolve_pull_request_reference(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("resolving the pull request reference failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// The folder a pull request's repository would be cloned into or added from,
+/// and the repository it should hold.
+#[derive(Deserialize)]
+struct PullRequestCloneDestinationBody {
+    path: String,
+    host: String,
+    owner_repo: String,
+}
+
+/// What the folder holds: `free` for a clone, `checkout` for an add. `path` is
+/// the folder as dux will use it.
+#[derive(Serialize)]
+struct PullRequestCloneDestinationReply {
+    state: &'static str,
+    path: String,
+}
+
+/// Say what a folder holds for a pull request's repository, so the client can
+/// offer the clone or the add that will actually run. A read: nothing is
+/// created. Git runs, so it does so off the async reactor.
+async fn check_pull_request_clone_destination(
+    State(state): State<AppState>,
+    Json(body): Json<PullRequestCloneDestinationBody>,
+) -> Response {
+    let Some(inputs) = state.engine.pull_request_resolution_inputs().await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "engine unavailable").into_response();
+    };
+    if !inputs.gh_available {
+        return (
+            StatusCode::BAD_REQUEST,
+            "GitHub PR agent creation requires GitHub integration and an authenticated gh CLI.",
+        )
+            .into_response();
+    }
+    let target = dux_core::pr_reference::PullRequestCloneTarget {
+        host: body.host,
+        owner_repo: body.owner_repo,
+        number: 0,
+    };
+    match tokio::task::spawn_blocking(move || {
+        let home = std::env::home_dir();
+        let projects: Vec<&str> = inputs.projects.iter().map(|p| p.path.as_str()).collect();
+        let state = dux_core::clone_project::inspect_pr_destination(
+            &body.path,
+            &target,
+            &inputs.policy,
+            home.as_deref(),
+            &projects,
+        )?;
+        // The path again, in the form the operation will use.
+        let path = dux_core::clone_project::destination_identity(&body.path, home.as_deref())?;
+        Ok::<_, dux_core::status_text::StatusText>((state, path))
+    })
+    .await
+    {
+        Ok(Ok((state, path))) => Json(PullRequestCloneDestinationReply {
+            state: match state {
+                dux_core::clone_project::PrDestination::Free => "free",
+                dux_core::clone_project::PrDestination::Checkout => "checkout",
+            },
+            path: path.to_string_lossy().into_owned(),
+        })
+        .into_response(),
+        Ok(Err(refused)) => (StatusCode::BAD_REQUEST, refused.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("checking the folder failed: {e}"),
         )
             .into_response(),
     }

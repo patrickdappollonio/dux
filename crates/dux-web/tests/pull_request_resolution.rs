@@ -146,6 +146,27 @@ async fn resolve(addr: SocketAddr, reference: &str) -> (reqwest::StatusCode, Str
     (status, res.text().await.expect("body"))
 }
 
+async fn check_destination(
+    addr: SocketAddr,
+    path: &Path,
+    owner_repo: &str,
+) -> (reqwest::StatusCode, String) {
+    let res = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/api/v1/pull-requests/clone-destination"
+        ))
+        .json(&serde_json::json!({
+            "path": path,
+            "host": "github.com",
+            "owner_repo": owner_repo,
+        }))
+        .send()
+        .await
+        .expect("check the folder");
+    let status = res.status();
+    (status, res.text().await.expect("body"))
+}
+
 fn matched_names(body: &str) -> Vec<String> {
     let value: serde_json::Value = serde_json::from_str(body).expect("json");
     value["projects"]
@@ -199,7 +220,7 @@ async fn a_browser_url_with_issues_on_the_end_still_resolves() {
 
 #[tokio::test]
 async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() {
-    let (addr, _tmp) = boot(
+    let (addr, tmp) = boot(
         &[("p1", "widget", "git@github.com:acme/widget.git")],
         &["github.com"],
     )
@@ -227,6 +248,45 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(value.get("clone").is_none(), "{body}");
     assert!(value.get("clone_unavailable").is_none(), "{body}");
+
+    // The folder the clone would go into: a checkout somebody made by hand is
+    // a checkout, another repository's working copy is refused, and a folder
+    // that does not exist yet is free. Nothing is created.
+    let hand_made = tmp.path().join("hand-made");
+    std::fs::create_dir(&hand_made).unwrap();
+    git_isolated(&hand_made, &["init", "-b", "feature"]);
+    git_isolated(
+        &hand_made,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/unknown.git",
+        ],
+    );
+    let (status, body) = check_destination(addr, &hand_made, "acme/unknown").await;
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["state"], "checkout");
+    assert_eq!(value["path"], hand_made.to_string_lossy().as_ref());
+    let (status, body) = check_destination(addr, &hand_made, "acme/other").await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body,
+        format!(
+            "{} already holds something that isn't a checkout of github.com/acme/other. \
+             Pick another folder.",
+            hand_made.display()
+        )
+    );
+    let not_yet = tmp.path().join("not-yet");
+    let (status, body) = check_destination(addr, &not_yet, "acme/unknown").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"],
+        "free"
+    );
+    assert!(!not_yet.exists(), "the check created the folder");
 
     // With a pull request gh can find, the reply carries the offer: the
     // address follows the host's ssh setting.

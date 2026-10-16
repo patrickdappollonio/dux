@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{Command, Engine, EventReaction, InFlightKey, StatusUpdate};
 use crate::clone_project::{
-    CloneJob, CloneOutcome, CloneRequest, ClonedProject, ClonedRepository, PendingClone,
+    CloneJob, CloneMode, CloneOutcome, CloneRequest, ClonedProject, ClonedRepository, PendingClone,
     PullRequestJob,
 };
 use crate::pr_reference::PullRequestCloneTarget;
@@ -24,6 +24,14 @@ impl Engine {
         request: &CloneRequest,
         from_web: bool,
     ) -> Result<StatusUpdate, StatusText> {
+        let mode = if request.add_existing {
+            CloneMode::AddExisting
+        } else {
+            CloneMode::Clone
+        };
+        if mode == CloneMode::AddExisting && request.pull_request.is_none() {
+            return Err("add_existing needs a pull request.".into());
+        }
         // For a pull request the address is built here from the policy and the
         // protocols as they are now, whatever the request carries.
         let offer = match &request.pull_request {
@@ -43,11 +51,21 @@ impl Engine {
         let destination = prepared.destination;
         let key = InFlightKey::Clone(destination.clone());
         if !self.mark_in_flight(key.clone()) {
-            return Err(crate::status_text![
-                "dux is already cloning a repository into ",
-                n(destination.display()),
-                " or setting one up there. Wait for it to finish, or pick another destination."
-            ]);
+            // The refusal says what the folder's holder is doing, whatever
+            // this request would have done.
+            return Err(match self.clone_running_into(&destination) {
+                Some(CloneMode::AddExisting) => crate::status_text![
+                    "dux is already adding ",
+                    n(destination.display()),
+                    " as a project. Wait for it to finish, or pick another folder."
+                ],
+                _ => crate::status_text![
+                    "dux is already cloning a repository into ",
+                    n(destination.display()),
+                    " or setting one up there. Wait for it to finish, or pick another \
+                     destination."
+                ],
+            });
         }
         // One clone per repository at a time, held until the project exists,
         // so two quick requests into different folders (a plain clone and a
@@ -65,11 +83,24 @@ impl Engine {
             && !self.mark_in_flight(InFlightKey::CloneRepository(repository.clone()))
         {
             self.clear_in_flight(&key);
-            return Err(crate::status_text![
-                "dux is already cloning ",
-                n(repository),
-                " for a new agent. Wait for it to finish, then use New agent from PR again."
-            ]);
+            let holder = self
+                .clones
+                .pending
+                .values()
+                .find(|held| held.repository_key.as_deref() == Some(repository.as_str()))
+                .map(|held| held.mode);
+            return Err(match holder {
+                Some(CloneMode::AddExisting) => crate::status_text![
+                    "dux is already adding a checkout of ",
+                    n(repository),
+                    " for a new agent. Wait for it to finish, then use New agent from PR again."
+                ],
+                _ => crate::status_text![
+                    "dux is already cloning ",
+                    n(repository),
+                    " for a new agent. Wait for it to finish, then use New agent from PR again."
+                ],
+            });
         }
         if let Err(refused) = self.hold_path_for_in_flight(
             &key,
@@ -81,13 +112,22 @@ impl Engine {
             return Err(refused.sentence("clone a repository there"));
         }
         let address = crate::clone_project::redact_remote_userinfo(&prepared.url);
-        let busy = crate::status_text![
-            "Cloning ",
-            n(address),
-            " into ",
-            n(destination.display()),
-            "..."
-        ];
+        let busy = match (&offer, mode) {
+            (Some(offer), CloneMode::AddExisting) => crate::status_text![
+                "Adding ",
+                n(destination.display()),
+                " as a project for pull request ",
+                n(format!("#{}", offer.number)),
+                "..."
+            ],
+            _ => crate::status_text![
+                "Cloning ",
+                n(address),
+                " into ",
+                n(destination.display()),
+                "..."
+            ],
+        };
         let op = crate::engine::status_op(busy)
             .resolve_in_handler(|outcome: &CloneOutcome| outcome.final_status())
             .with_scope(self.current_origin.clone());
@@ -99,6 +139,8 @@ impl Engine {
                 op,
                 from_web,
                 repository_key: repository_key.clone(),
+                mode,
+                destination: destination.clone(),
             },
         );
         let job = CloneJob {
@@ -115,6 +157,7 @@ impl Engine {
                 gh_program: self.gh_probe.program.clone(),
             }),
             repository_key: repository_key.clone(),
+            mode,
             git_env: self.clones.git_env.clone(),
         };
         let worker_tx = self.worker_tx.clone();
@@ -126,16 +169,25 @@ impl Engine {
             }))
             .is_err();
             if panicked {
+                let said = match mode {
+                    CloneMode::Clone => StatusText::from(
+                        "The clone worker stopped unexpectedly, so the clone may not have \
+                         finished. Nothing was added to the workspace.",
+                    ),
+                    CloneMode::AddExisting => crate::status_text![
+                        "The worker adding ",
+                        n(destination.display()),
+                        " as a project stopped unexpectedly. Nothing was added to the \
+                         workspace, and the folder was not changed."
+                    ],
+                };
                 let _ = worker_tx.send(crate::worker::WorkerEvent::RepositoryCloned {
                     status_op_id: Some(op_id),
                     path: destination,
                     agent_name,
                     repository_key,
-                    result: Err(CloneOutcome::Failed(
-                        "The clone worker stopped unexpectedly, so the clone may not have \
-                         finished. Nothing was added to the workspace."
-                            .into(),
-                    )),
+                    mode,
+                    result: Err(CloneOutcome::Failed(said)),
                 });
             }
         });
@@ -184,10 +236,35 @@ impl Engine {
         }
     }
 
-    /// Whether a clone is running into `path`, so a request to set a
-    /// repository up there can say what it waits for.
-    pub fn clone_running_into(&self, path: &std::path::Path) -> bool {
+    /// What is being done to `path` by a clone or an add that holds it, so a
+    /// request to set a repository up there can say what it waits for: the
+    /// mode of the pending operation for that folder, or a clone when the key
+    /// is held and no operation names it.
+    pub fn clone_running_into(&self, path: &std::path::Path) -> Option<CloneMode> {
         self.is_in_flight(&InFlightKey::Clone(path.to_path_buf()))
+            .then(|| {
+                self.clones
+                    .pending
+                    .values()
+                    .find(|held| held.destination == path)
+                    .map_or(CloneMode::Clone, |held| held.mode)
+            })
+    }
+
+    /// The refusal for a request to set a repository up at `path` while a clone
+    /// or an add holds it, worded by what the holder is doing.
+    pub fn clone_running_refusal(&self, path: &std::path::Path) -> Option<String> {
+        Some(match self.clone_running_into(path)? {
+            CloneMode::Clone => format!(
+                "dux is cloning a repository into \"{}\". Please wait for it to finish.",
+                path.display()
+            ),
+            CloneMode::AddExisting => format!(
+                "dux is adding \"{}\" as a project for a pull request. Please wait for it to \
+                 finish.",
+                path.display()
+            ),
+        })
     }
 
     /// A clone's worker finished: free the destination, and end the operation
@@ -199,6 +276,7 @@ impl Engine {
         path: PathBuf,
         agent_name: String,
         repository_key: Option<String>,
+        mode: CloneMode,
         result: Result<ClonedRepository, CloneOutcome>,
     ) -> EventReaction {
         self.clear_in_flight(&InFlightKey::Clone(path.clone()));
@@ -210,6 +288,7 @@ impl Engine {
                 agent_name,
                 cloned,
                 repository_key,
+                mode,
             })),
             Err(outcome) => {
                 // No project follows this answer, so the repository is free.
@@ -289,9 +368,8 @@ impl Engine {
             .and_then(|(id, _)| self.projects.iter().find(|p| &p.id == id).cloned())
         else {
             let reason = added.failure(&"the add did not say why.".into());
-            return pending
-                .op
-                .resolve(&CloneOutcome::Kept(crate::status_text![
+            let kept = match done.mode {
+                CloneMode::Clone => crate::status_text![
                     "Cloned ",
                     n(address),
                     " into ",
@@ -299,7 +377,18 @@ impl Engine {
                     ", but couldn't add it as a project: ",
                     reason,
                     " The clone is still there, and no agent was created."
-                ]))
+                ],
+                CloneMode::AddExisting => crate::status_text![
+                    "Couldn't add ",
+                    n(path),
+                    " as a project: ",
+                    reason,
+                    " The folder is untouched, and no agent was created."
+                ],
+            };
+            return pending
+                .op
+                .resolve(&CloneOutcome::Kept(kept))
                 .into_reaction();
         };
         let agent = &done.agent_name;
@@ -308,6 +397,7 @@ impl Engine {
             path: done.path.clone(),
             project_name: project.name.clone(),
             agent_name: agent.clone(),
+            mode: done.mode,
         };
         let not_created = |reason: StatusText| CloneOutcome::Kept(cloned.agent_missing(reason));
         if done.cloned.name_taken {
@@ -372,7 +462,8 @@ impl Engine {
         };
         // The create mints its busy from `current_origin`, so it reaches the
         // connection that asked for the clone.
-        self.current_origin = pending.op.scope().clone();
+        let scope = pending.op.scope().clone();
+        self.current_origin = scope.clone();
         self.last_created_op_id = None;
         let dispatched = self.apply(Command::DispatchCreateAgentRequest {
             request: Box::new(request),
@@ -408,6 +499,29 @@ impl Engine {
                 .resolve(&not_created(format!("{error:#}").into()))
                 .into_reaction(),
         };
-        EventReaction::Multi(vec![EventReaction::RebuildLeftItems, ending])
+        let mut reactions = vec![EventReaction::RebuildLeftItems, ending];
+        // Only after the project exists: a guess about a project that was not
+        // added is no use to anyone.
+        if let (true, Some(pull_request)) = (
+            done.cloned.leading_branch_guessed,
+            &done.cloned.pull_request,
+        ) {
+            reactions.push(EventReaction::Status(
+                StatusUpdate::warning(crate::status_text![
+                    "dux could not learn the default branch of ",
+                    n(format!(
+                        "{}/{}",
+                        pull_request.target.host, pull_request.target.owner_repo
+                    )),
+                    " from its remote, so project ",
+                    q(&project.name),
+                    " leads with ",
+                    q(&done.cloned.leading_branch),
+                    ", the branch the folder has checked out."
+                ])
+                .with_scope(scope),
+            ));
+        }
+        EventReaction::Multi(reactions)
     }
 }
