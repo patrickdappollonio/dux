@@ -430,6 +430,50 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
         serde_json::json!({ "state": "unknown" }),
         "a head commit the folder does not have cannot be compared"
     );
+    // A typed name is answered for itself, whatever the folder holds: one
+    // spelled like a review copy of the branch needs one, another needs none,
+    // and the branch's own name is the branch's answer.
+    let named = |path: std::path::PathBuf, name: &'static str| async move {
+        let res = reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/api/v1/pull-requests/clone-destination"
+            ))
+            .json(&serde_json::json!({
+                "path": path,
+                "host": "github.com",
+                "owner_repo": "acme/unknown",
+                "number": 3,
+                "head_branch": "feature",
+                "head_oid": "f".repeat(40),
+                "agent_name": name,
+            }))
+            .send()
+            .await
+            .expect("check the folder");
+        assert_eq!(res.status(), 200);
+        res.json::<serde_json::Value>().await.unwrap()
+    };
+    let in_checkout = named(hand_made.clone(), " feature-review-2 ").await["review_copy"].clone();
+    assert_eq!(in_checkout["state"], "needed");
+    assert_eq!(in_checkout["reason"], "typed");
+    assert_eq!(in_checkout["copy_branch"], "feature-review-2");
+    let free = named(tmp.path().join("not-made-yet"), "feature-review").await;
+    assert_eq!(free["state"], "free");
+    assert_eq!(free["review_copy"]["copy_branch"], "feature-review");
+    assert_eq!(
+        named(hand_made.clone(), "something-else").await["review_copy"],
+        serde_json::json!({ "state": "not_needed" })
+    );
+    assert_eq!(
+        named(hand_made.clone(), "side").await["review_copy"],
+        serde_json::json!({ "state": "not_needed" }),
+        "a branch of that name already in the folder is reused as it is"
+    );
+    assert_eq!(
+        named(hand_made.clone(), "feature").await["review_copy"]["reason"],
+        "busy",
+        "the branch's own name is the branch's answer"
+    );
     // A caller that sends no pull request facts gets the answer it always did.
     let (_, body) = check_destination(addr, &hand_made, "acme/unknown").await;
     assert!(

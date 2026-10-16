@@ -734,6 +734,23 @@ pub fn typed_copy_review_outlook(
     ))
 }
 
+/// [`typed_copy_review_outlook`] as the create decides it for a typed name that
+/// is not the pull request's own branch: a branch of that name already in the
+/// checkout at `folder` (when there is one) is reused as it is, and a name
+/// spelled like no review copy needs nothing.
+pub fn typed_name_review_copy_outlook(
+    folder: Option<&Path>,
+    head_branch: &str,
+    typed: &str,
+    number: u64,
+) -> crate::status_text::ReviewCopyOutlook {
+    if folder.is_some_and(|folder| git::local_branch_exists(folder, typed)) {
+        return crate::status_text::ReviewCopyOutlook::NotNeeded;
+    }
+    typed_copy_review_outlook(head_branch, typed, number)
+        .unwrap_or(crate::status_text::ReviewCopyOutlook::NotNeeded)
+}
+
 /// Whether adding the checkout at `repo_path` as a project will need a review
 /// copy for pull request `number`, whose head branch is `head_branch` and head
 /// commit `head_commit`, told before anything is added. The same rule the

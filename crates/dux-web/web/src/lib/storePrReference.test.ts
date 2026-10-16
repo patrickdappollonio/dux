@@ -696,38 +696,73 @@ describe("the offer to clone a repository dux has no project for", () => {
     expect(mod.getSnapshot().pendingPrReference).toBe(reference)
   })
 
-  it("reopens New agent from PR in the project when the review copy is only found after the clone", async () => {
-    const mod = await resolveTo({ ...noMatch, clone: offer }, "fix-thing")
+  // A clone this tab started, up to the point its dialog has closed.
+  async function startedClone(name = "fix-thing") {
+    const mod = await resolveTo({ ...noMatch, clone: offer }, name)
     await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).not.toBeNull())
     await vi.waitFor(() => expect(mod.getSnapshot().cloneProject!.startFolder).toBe("/home/u"))
     mod.submitCloneProject()
     await vi.waitFor(() => expect(mod.getSnapshot().cloneProject).toBeNull())
+    return mod
+  }
+  const pullRequest = { host: "github.com", owner_repo: "acme/widget", number: 3 }
+  const finalWith = (key: string, ask: Record<string, unknown>) => ({
+    event: "status",
+    key,
+    tone: "error",
+    message: "Pushes would land on \"fix-thing-review\".",
+    ask: {
+      kind: "review_copy",
+      warned: "busy:fix-thing-review",
+      warning: ["Pushes would land on ", { name: "fix-thing-review", quoted: true }, "."],
+      ...ask,
+    },
+    scope: "all",
+  })
 
-    mod.eventsSocket.onEvent({
-      event: "status",
-      key: "op-clone",
-      tone: "error",
-      message:
-        'Cloned https://github.com/acme/widget.git into /home/u/widget and added project "widget". Agent "fix-thing" still needs your answer on a review copy: Pushes would land on "fix-thing-review". To go ahead anyway, use New agent from PR in project "widget" and tick Create a review copy.',
-      ask: {
-        kind: "review_copy",
-        warned: "busy:fix-thing-review",
-        warning: ["Pushes would land on ", { name: "fix-thing-review", quoted: true }, "."],
-        project_id: "p9",
-        pull_request: { host: "github.com", owner_repo: "acme/widget", number: 3 },
-      },
-      scope: "all",
-    })
-
+  it("reopens New agent from PR in the project when the review copy is only found after the clone", async () => {
+    const mod = await startedClone()
+    // The create the clone hands off to has a status of its own, not the clone's.
+    mod.eventsSocket.onEvent(
+      finalWith("op-create-9", { warned: "busy:#3:fix-thing-review:x", project_id: "p9", pull_request: pullRequest }),
+    )
     const snap = mod.getSnapshot()
     expect(snap.createAgentTarget).toEqual({ kind: "pr", projectId: "p9" })
     expect(snap.createAgentPrInput).toBe(reference)
     expect(snap.createAgentDraft).toBe("fix-thing")
     expect(snap.createAgentReviewCopy).toMatchObject({
-      warned: "busy:fix-thing-review",
+      warned: "busy:#3:fix-thing-review:x",
       agreed: false,
     })
     // The final still reaches the toast.
+    expect(toasts.map((t) => t.tone)).toContain("error")
+  })
+
+  it("leaves a create dialog the user has open alone", async () => {
+    const mod = await startedClone()
+    mod.openCreateAgentFromPr("p1")
+    mod.setCreateAgentPrInput("#7")
+    mod.eventsSocket.onEvent(
+      finalWith("op-create-9", { project_id: "p9", pull_request: pullRequest }),
+    )
+    expect(mod.getSnapshot().createAgentTarget).toEqual({ kind: "pr", projectId: "p1" })
+    expect(mod.getSnapshot().createAgentPrInput).toBe("#7")
+    expect(mod.getSnapshot().createAgentReviewCopy).toBeNull()
+  })
+
+  it("reopens the clone form with its values and the question when the clone is refused for want of an answer", async () => {
+    const mod = await startedClone()
+    mod.eventsSocket.onEvent(finalWith("op-clone", { warned: "busy:fix-thing-review", pull_request: pullRequest }))
+    const form = mod.getSnapshot().cloneProject!
+    expect(form.path).toBe("/home/u/widget")
+    expect(form.name).toBe("fix-thing")
+    expect(form.submitting).toBe(false)
+    expect(form.pr?.reviewCopy).toMatchObject({
+      state: "needed",
+      reason: "busy",
+      copy_branch: "fix-thing-review",
+    })
+    expect(form.pr?.reviewCopyAgreed).toBe(false)
     expect(toasts.map((t) => t.tone)).toContain("error")
   })
 })

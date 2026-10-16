@@ -2476,6 +2476,11 @@ struct PullRequestCloneDestinationBody {
     head_branch: Option<String>,
     #[serde(default)]
     head_oid: Option<String>,
+    /// The name the agent would get. A name other than the branch's own is
+    /// answered for itself, free folder or checkout: only one spelled like a
+    /// review copy of the branch needs one. Absent, the answer is the branch's.
+    #[serde(default)]
+    agent_name: Option<String>,
 }
 
 /// What the folder holds: `free` for a clone, `checkout` for an add. `path` is
@@ -2514,6 +2519,12 @@ async fn check_pull_request_clone_destination(
         number: 0,
     };
     let (number, head_branch, head_oid) = (body.number, body.head_branch, body.head_oid);
+    let typed_name = body
+        .agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && Some(*name) != head_branch.as_deref())
+        .map(str::to_string);
     let worktrees_root = inputs.worktrees_root.clone();
     match tokio::task::spawn_blocking(move || {
         let home = std::env::home_dir();
@@ -2536,8 +2547,31 @@ async fn check_pull_request_clone_destination(
             // runs several git commands, so it has the same bound a `gh` call
             // has, and a folder that does not answer in time leaves the
             // question open for the create to ask.
-            let review_copy = match (state, number, head_branch) {
-                (dux_core::clone_project::PrDestination::Checkout, Some(number), Some(branch)) => {
+            let review_copy = match (state, number, head_branch, typed_name) {
+                (state, Some(number), Some(branch), Some(typed)) => {
+                    let folder = path.clone();
+                    let checkout = state == dux_core::clone_project::PrDestination::Checkout;
+                    let outlook = tokio::task::spawn_blocking(move || {
+                        dux_core::agent_job::typed_name_review_copy_outlook(
+                            checkout.then_some(folder.as_path()),
+                            &branch,
+                            &typed,
+                            number,
+                        )
+                    });
+                    Some(
+                        match tokio::time::timeout(REVIEW_COPY_CHECK_TIMEOUT, outlook).await {
+                            Ok(Ok(outlook)) => outlook,
+                            _ => dux_core::status_text::ReviewCopyOutlook::Unknown,
+                        },
+                    )
+                }
+                (
+                    dux_core::clone_project::PrDestination::Checkout,
+                    Some(number),
+                    Some(branch),
+                    None,
+                ) => {
                     let folder = path.clone();
                     let outlook = tokio::task::spawn_blocking(move || {
                         dux_core::agent_job::folder_review_copy_outlook(

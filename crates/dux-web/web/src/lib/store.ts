@@ -26,6 +26,7 @@ import { type AttachedBlocker, AttachedError } from "./attached"
 import {
   existingBranchConflict,
   type PullRequestCloneOffer,
+  type ReviewCopyOutlook,
   sessionsApi,
   SessionsApiError,
 } from "./sessionsApi"
@@ -90,6 +91,7 @@ import { chip, type Prose, type ProseName, prose, wireProse } from "./prose"
 import {
   type CloneProjectPr,
   foldFolderAnswer,
+  looksLikeReviewCopy,
   reviewCopyAgreement,
   reviewCopyBlocksSubmit,
 } from "./cloneProjectPr"
@@ -1292,8 +1294,9 @@ function handleStatusEvent(event: EventsServerMessage): void {
     if (event.key && askedKeys.has(event.key)) return
     if (askReviewCopy(event)) return
     // The final still reaches the toast; the dialog opens beside it.
-    askReviewCopyAfterClone(event)
+    askReviewCopyForPrClone(event)
   }
+  forgetFinishedPrClone(event)
   showStatusToast(
     event.key,
     event.tone ?? "info",
@@ -5879,11 +5882,40 @@ let cloneSubmitSeq = 0
 // reply about a folder the user has since changed (or about a closed dialog)
 // acts on nothing.
 let cloneCheckSeq = 0
+// The check a button press is waiting on, or null when none is: while it is
+// out, an edit cancels the press; once the request is sent, nothing does.
+let submitCheckSeq: number | null = null
 
-// The clone operations this tab started for a pull request, by operation id,
-// so a question found only after the clone can reopen New agent from PR on
-// what was typed. Bounded the way the pending creates are.
-const pendingPrClones = new Map<string, { reference: string; name: string; at: number }>()
+// What a press that did not go ahead leaves on the form: the press is over,
+// so the button is free again.
+function cancelSubmitCheck(): Partial<CloneProjectForm> {
+  if (submitCheckSeq === null) return {}
+  cloneCheckSeq++
+  submitCheckSeq = null
+  return { submitting: false }
+}
+
+// What the form held when a pull request clone was sent.
+interface PrCloneSnapshot {
+  reference: string
+  repository: string
+  incompleteSummary: string | null
+  hasProjects: boolean
+  offer: PullRequestCloneOffer
+  folder: "free" | "checkout"
+  path: string
+  name: string
+}
+
+// The pull request clones this tab started and has not yet heard the end of.
+// A question found after the clone (or before it, by the worker) arrives on a
+// status of its own, so it is matched on the pull request it names. An entry
+// is registered before the request goes out, so an answer that beats the reply
+// is not lost, and it goes when its answer arrives; the age bound is only for
+// the ones that never get one.
+const pendingPrClones = new Map<number, { snapshot: PrCloneSnapshot; opId: string | null; at: number }>()
+let pendingPrCloneSeq = 0
+const PENDING_PR_CLONE_MS = 2 * 60 * 60 * 1000
 
 // Write the form, refreshing the destination the address chooses. A change the
 // user made is the answer to a refusal, so it retires the refusal's sentence; a
@@ -5915,6 +5947,13 @@ export interface ClonePullRequestInit {
   hasProjects: boolean
   name: string
   offer: PullRequestCloneOffer
+  /** Reopening a clone the server refused for want of an answer: the folder
+   * as it was, what it held, and the question to put. */
+  reopened?: {
+    path: string
+    folder: "free" | "checkout"
+    asked: ReviewCopyOutlook
+  }
 }
 
 export function openCloneProject(pull?: ClonePullRequestInit): void {
@@ -5923,12 +5962,14 @@ export function openCloneProject(pull?: ClonePullRequestInit): void {
   const randomize = pull ? false : (state.bootstrap?.randomize_agent_names_by_default ?? false)
   const openId = ++cloneOpenSeq
   cloneCheckSeq++
+  submitCheckSeq = null
+  const reopened = pull?.reopened
   setState({
     cloneProject: {
       openId,
       url: pull?.offer.address ?? "",
-      path: "",
-      pathEdited: false,
+      path: reopened?.path ?? "",
+      pathEdited: reopened !== undefined,
       startFolder: null,
       name: pull?.name ?? "",
       randomize,
@@ -5943,14 +5984,24 @@ export function openCloneProject(pull?: ClonePullRequestInit): void {
             incompleteSummary: pull.incompleteSummary,
             hasProjects: pull.hasProjects,
             offer: pull.offer,
-            folder: "free",
-            reviewCopy: pull.offer.review_copy,
+            folder: reopened?.folder ?? "free",
+            // The question the server put, for the name it was put for.
+            reviewCopy:
+              reopened && pull.name.trim() === pull.offer.head_branch
+                ? reopened.asked
+                : pull.offer.review_copy,
+            typed:
+              reopened && pull.name.trim() !== pull.offer.head_branch
+                ? { name: pull.name.trim(), outlook: reopened.asked }
+                : null,
             reviewCopyAgreed: false,
           }
         : null,
     },
   })
   if (randomize) requestCloneAgentName()
+  // A reopened form has its folder already, and its question is the server's.
+  if (reopened) return
   // The destination defaults into the server's configured start folder. A
   // failed read leaves it unknown and the destination to be typed, which the
   // server checks like any other, so there is nothing to toast.
@@ -5959,7 +6010,10 @@ export function openCloneProject(pull?: ClonePullRequestInit): void {
     .then((res) => {
       if (cloneFormFor(openId)?.startFolder === null) {
         patchCloneProject({ startFolder: res.path }, false)
-        checkCloneFolderOnOpen(openId)
+        // Late news about the default must not disturb a folder the user has
+        // chosen or a press already out.
+        const form = cloneFormFor(openId)
+        if (form && !form.pathEdited && !form.submitting) lookAtCloneFolder(openId)
       }
     })
     .catch(() => {})
@@ -5979,15 +6033,21 @@ export function setCloneProjectPath(raw: string): void {
     patchCloneProject({ path: raw, pathEdited: true }, true)
     return
   }
-  // A check already out was about the old folder, and so is a tick: the
-  // review-copy answer is the folder's. The next press checks this one.
+  // A check already out was about the old folder, and so is a tick and any
+  // answer the old folder gave: the review-copy answer is the folder's, so it
+  // goes back to the offer's. The next press checks this one.
   cloneCheckSeq++
   patchCloneProject(
     {
       path: raw,
       pathEdited: true,
-      submitting: false,
-      pr: { ...pr, reviewCopyAgreed: false },
+      ...cancelSubmitCheck(),
+      pr: {
+        ...pr,
+        reviewCopy: pr.offer.review_copy,
+        typed: null,
+        reviewCopyAgreed: false,
+      },
     },
     true,
   )
@@ -5995,7 +6055,9 @@ export function setCloneProjectPath(raw: string): void {
 
 export function setCloneProjectReviewCopyAgreed(agreed: boolean): void {
   const pr = state.cloneProject?.pr
-  if (pr) patchCloneProject({ pr: { ...pr, reviewCopyAgreed: agreed } }, true)
+  if (pr) {
+    patchCloneProject({ pr: { ...pr, reviewCopyAgreed: agreed }, ...cancelSubmitCheck() }, true)
+  }
 }
 
 // Keep the dialog's reference and open the picker over every project, the way
@@ -6012,10 +6074,10 @@ export function setCloneProjectName(raw: string): void {
   const form = state.cloneProject
   if (!form) return
   const name = sanitizeAgentName(raw)
-  // The tick answers the question for the pull request's own branch; another
-  // name hides it, and coming back to the branch asks again.
+  // The tick answers the question for the name it was given beside; another
+  // name asks again.
   const pr =
-    form.pr && name.trim() !== form.pr.offer.head_branch
+    form.pr && name.trim() !== form.name.trim()
       ? { ...form.pr, reviewCopyAgreed: false }
       : form.pr
   patchCloneProject(
@@ -6023,9 +6085,12 @@ export function setCloneProjectName(raw: string): void {
       name,
       generatedName: generatedNameAfterEdit(name, form.generatedName),
       pr,
+      ...cancelSubmitCheck(),
     },
     true,
   )
+  // Whether such a name needs a review copy is the server's to say.
+  if (pr && looksLikeReviewCopy(pr, name) && !form.submitting) lookAtCloneFolder(form.openId)
 }
 
 // The pet-name preview for the clone dialog. Only the latest request's reply
@@ -6102,9 +6167,10 @@ export function submitCloneProject(): void {
   })
 }
 
-// Look at the folder the way the dialog opened looking at it, once the start
-// folder has given it a default. A refusal shows as the dialog's own error.
-function checkCloneFolderOnOpen(openId: number): void {
+// Look at the folder for the name as it stands, without a press behind it: when
+// the dialog opens, and when the name becomes one that may need a review copy.
+// A refusal shows as the dialog's own error.
+function lookAtCloneFolder(openId: number): void {
   const form = cloneFormFor(openId)
   if (!form?.pr || form.path.trim() === "") return
   const seq = ++cloneCheckSeq
@@ -6112,7 +6178,7 @@ function checkCloneFolderOnOpen(openId: number): void {
     .then((answer) => {
       const current = cloneFormFor(openId)
       if (seq !== cloneCheckSeq || !current?.pr) return
-      const next = foldFolderAnswer(current.pr, answer)
+      const next = foldFolderAnswer(current.pr, answer, current.name)
       if (next) patchCloneProject({ pr: next }, false)
     })
     .catch((e) => {
@@ -6122,6 +6188,7 @@ function checkCloneFolderOnOpen(openId: number): void {
 }
 
 function checkCloneFolder(form: CloneProjectForm, pr: CloneProjectPr) {
+  const name = form.name.trim()
   return sessionsApi.checkCloneDestination({
     path: form.path.trim(),
     host: pr.offer.host,
@@ -6129,6 +6196,7 @@ function checkCloneFolder(form: CloneProjectForm, pr: CloneProjectPr) {
     number: pr.offer.number,
     head_branch: pr.offer.head_branch,
     ...(pr.offer.head_oid ? { head_oid: pr.offer.head_oid } : {}),
+    ...(name !== "" && name !== pr.offer.head_branch ? { agent_name: name } : {}),
   })
 }
 
@@ -6141,25 +6209,43 @@ function errorText(e: unknown, fallback: string): string {
 // that became a checkout, a review-copy question that changed) is shown and
 // waits for another press, so the user agrees to what will actually happen.
 function submitCloneProjectForPullRequest(form: CloneProjectForm, pr: CloneProjectPr): void {
-  const name = form.name.trim()
-  if (name === "" || form.path.trim() === "" || reviewCopyBlocksSubmit(pr, name)) return
+  if (!pressCanGoAhead(form, pr)) return
   const openId = form.openId
   const seq = ++cloneCheckSeq
+  submitCheckSeq = seq
   patchCloneProject({ submitting: true }, true)
   checkCloneFolder(form, pr)
     .then((answer) => {
       const current = cloneFormFor(openId)
       if (seq !== cloneCheckSeq || !current?.pr) return
-      const next = foldFolderAnswer(current.pr, answer)
+      submitCheckSeq = null
+      const next = foldFolderAnswer(current.pr, answer, current.name)
       if (next) {
         patchCloneProject({ pr: next, submitting: false }, false)
         return
       }
+      // Whatever the form says now is what goes, under the same rules the
+      // press was held to.
+      if (!pressCanGoAhead(current, current.pr)) {
+        patchCloneProject({ submitting: false }, false)
+        return
+      }
+      const name = current.name.trim()
       const agreement = reviewCopyAgreement(current.pr, name)
+      const snapshot: PrCloneSnapshot = {
+        reference: current.pr.reference,
+        repository: current.pr.repository,
+        incompleteSummary: current.pr.incompleteSummary,
+        hasProjects: current.pr.hasProjects,
+        offer: current.pr.offer,
+        folder: current.pr.folder,
+        path: current.path.trim(),
+        name,
+      }
       postCloneProject(
         openId,
         {
-          path: current.path.trim(),
+          path: snapshot.path,
           agent_name: name,
           pull_request: {
             host: current.pr.offer.host,
@@ -6169,17 +6255,30 @@ function submitCloneProjectForPullRequest(form: CloneProjectForm, pr: CloneProje
           add_existing: current.pr.folder === "checkout",
           ...(agreement ?? {}),
         },
-        { reference: current.pr.reference, name },
+        snapshot,
       )
     })
     .catch((e) => {
       const current = cloneFormFor(openId)
       if (seq !== cloneCheckSeq || !current) return
+      submitCheckSeq = null
       patchCloneProject(
         { submitting: false, error: errorText(e, "Could not check the folder.") },
         false,
       )
     })
+}
+
+// A press may go ahead only with a usable name, a folder, and no review-copy
+// question still unanswered.
+function pressCanGoAhead(form: CloneProjectForm, pr: CloneProjectPr): boolean {
+  const name = form.name.trim()
+  return (
+    name !== "" &&
+    isValidAgentName(name) &&
+    form.path.trim() !== "" &&
+    !reviewCopyBlocksSubmit(pr, name)
+  )
 }
 
 // Send the clone. The token is armed before the request; a refusal disarms it
@@ -6190,10 +6289,11 @@ function submitCloneProjectForPullRequest(form: CloneProjectForm, pr: CloneProje
 function postCloneProject(
   openId: number,
   body: Parameters<typeof projectsApi.create>[0],
-  pull?: { reference: string; name: string },
+  pull?: PrCloneSnapshot,
 ): void {
   const request = ++cloneSubmitSeq
   armCreateFocus({ kind: "clone", request, opId: null, created: [], finished: false })
+  const registered = pull ? rememberPrClone(pull) : null
   projectsApi
     .create(body)
     .then((accepted) => {
@@ -6208,10 +6308,12 @@ function postCloneProject(
           setState({ pendingCreateFocus: null })
         }
       }
-      if (opId && pull) rememberPrClone(opId, pull)
+      const entry = registered === null ? undefined : pendingPrClones.get(registered)
+      if (entry) entry.opId = opId
       if (cloneFormFor(openId)) closeCloneProject()
     })
     .catch((e) => {
+      if (registered !== null) pendingPrClones.delete(registered)
       if (cloneFocusFor(request)) setState({ pendingCreateFocus: null })
       const current = cloneFormFor(openId)
       if (!current) return
@@ -6225,12 +6327,14 @@ function postCloneProject(
     })
 }
 
-function rememberPrClone(opId: string, pull: { reference: string; name: string }): void {
+function rememberPrClone(snapshot: PrCloneSnapshot): number {
   const now = Date.now()
   for (const [id, old] of pendingPrClones) {
-    if (now - old.at > PENDING_PR_SUBMISSION_MS) pendingPrClones.delete(id)
+    if (now - old.at > PENDING_PR_CLONE_MS) pendingPrClones.delete(id)
   }
-  pendingPrClones.set(opId, { ...pull, at: now })
+  const id = ++pendingPrCloneSeq
+  pendingPrClones.set(id, { snapshot, opId: null, at: now })
+  return id
 }
 
 export function browseDir(path: string | null): void {
@@ -7063,28 +7167,76 @@ function readReviewCopyParts(
   return { warned, warning: warning as Prose }
 }
 
-// A clone or an add this tab started made the project and stopped short of the
-// agent for want of an answer on a review copy: reopen New agent from PR in
-// that project with the reference and the name the user gave, showing the
-// question the way a refused create in an existing project shows it.
-function askReviewCopyAfterClone(event: EventsServerMessage): void {
-  const pending = event.key ? pendingPrClones.get(event.key) : undefined
+// A pull request clone this tab started ended short of an agent for want of an
+// answer on a review copy. Either the worker refused it before cloning or
+// adding (the question names the pull request and no project), or the project
+// was made and the create refused (it names the project too). The status is the
+// create's own, so it is matched on the pull request, not on the operation. A
+// dialog the user has open is never overwritten: the toast alone says it.
+function askReviewCopyForPrClone(event: EventsServerMessage): void {
   const parts = readReviewCopyParts(event.ask)
-  const projectId = (event.ask as Record<string, unknown> | undefined)?.project_id
-  if (!event.key || !pending || !parts || typeof projectId !== "string") return
-  pendingPrClones.delete(event.key)
-  setState({
-    createAgentTarget: { kind: "pr", projectId },
-    createAgentDraft: pending.name,
-    createAgentRandomize: false,
-    createAgentGeneratedName: null,
-    createAgentNamePending: false,
-    createAgentPrInput: pending.reference,
-    createAgentPrResolving: false,
-    createAgentPrError: null,
-    createAgentPrRequestId: null,
-    createAgentReviewCopy: { ...parts, agreed: false },
+  const ask = event.ask as Record<string, unknown> | undefined
+  const target = ask?.pull_request as
+    | { host?: unknown; owner_repo?: unknown; number?: unknown }
+    | undefined
+  if (!parts || !target) return
+  const found = [...pendingPrClones].find(
+    ([, entry]) =>
+      entry.snapshot.offer.host.toLowerCase() === String(target.host).toLowerCase() &&
+      entry.snapshot.offer.owner_repo.toLowerCase() === String(target.owner_repo).toLowerCase() &&
+      entry.snapshot.offer.number === target.number,
+  )
+  if (!found) return
+  const [id, { snapshot }] = found
+  pendingPrClones.delete(id)
+  if (state.createAgentTarget !== null || state.cloneProject !== null) return
+  if (typeof ask?.project_id === "string") {
+    setState({
+      createAgentTarget: { kind: "pr", projectId: ask.project_id },
+      createAgentDraft: snapshot.name,
+      createAgentRandomize: false,
+      createAgentGeneratedName: null,
+      createAgentNamePending: false,
+      createAgentPrInput: snapshot.reference,
+      createAgentPrResolving: false,
+      createAgentPrError: null,
+      createAgentPrRequestId: null,
+      createAgentReviewCopy: { ...parts, agreed: false },
+    })
+    return
+  }
+  // Nothing exists yet: the question is `reason:copy branch`, and the form
+  // comes back as it was, to be answered and pressed again.
+  const split = parts.warned.indexOf(":")
+  if (split < 0) return
+  openCloneProject({
+    reference: snapshot.reference,
+    repository: snapshot.repository,
+    incompleteSummary: snapshot.incompleteSummary,
+    hasProjects: snapshot.hasProjects,
+    name: snapshot.name,
+    offer: snapshot.offer,
+    reopened: {
+      path: snapshot.path,
+      folder: snapshot.folder,
+      asked: {
+        state: "needed",
+        reason: parts.warned.slice(0, split),
+        branch: snapshot.offer.head_branch,
+        copy_branch: parts.warned.slice(split + 1),
+        warning: parts.warning,
+      },
+    },
   })
+}
+
+// A final for a clone that asked nothing ends its wait; one that asked has
+// already been taken above.
+function forgetFinishedPrClone(event: EventsServerMessage): void {
+  if (!event.key || event.tone === "busy") return
+  for (const [id, entry] of pendingPrClones) {
+    if (entry.opId === event.key && event.tone === "error") pendingPrClones.delete(id)
+  }
 }
 
 // Reopen the dialog on the refused create, showing why. Returns whether this

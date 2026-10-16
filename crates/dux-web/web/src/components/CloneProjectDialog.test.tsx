@@ -439,5 +439,128 @@ describe("CloneProjectDialog for a pull request", () => {
       type(agentName(), "my-own-name")
       expect(primary("Clone and create").disabled).toBe(false)
     })
+
+    it("lets go of a folder's no-free-name answer when the folder changes", async () => {
+      destinationReplies = [
+        reply(
+          200,
+          JSON.stringify({ state: "checkout", path: "/home/u/widget", review_copy: noFreeName }),
+        ),
+      ]
+      await openPr()
+      await waitFor(() => expect(primary("Add this folder as a project").disabled).toBe(true))
+      type(destination(), "/home/u/elsewhere")
+      expect(primary("Add this folder as a project").disabled).toBe(false)
+    })
+
+    it("asks about a name spelled like a review copy, from the answer for that name", async () => {
+      await openPr()
+      destinationReplies = [
+        reply(
+          200,
+          JSON.stringify({
+            state: "free",
+            path: "/home/u/widget",
+            review_copy: {
+              state: "needed",
+              reason: "typed",
+              branch: "fix-thing",
+              copy_branch: "fix-thing-review",
+              warning: ["The name ", { name: "fix-thing-review", quoted: true }, " is a copy."],
+            },
+          }),
+        ),
+      ]
+      type(agentName(), "fix-thing-review")
+      await screen.findByRole("checkbox", { name: "Create a review copy" })
+      expect(checked[1]).toMatchObject({ agent_name: "fix-thing-review" })
+      expect(primary("Clone and create").disabled).toBe(true)
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Create a review copy" }))
+      destinationReplies = [
+        reply(
+          200,
+          JSON.stringify({
+            state: "free",
+            path: "/home/u/widget",
+            review_copy: {
+              state: "needed",
+              reason: "typed",
+              branch: "fix-thing",
+              copy_branch: "fix-thing-review",
+              warning: ["The name ", { name: "fix-thing-review", quoted: true }, " is a copy."],
+            },
+          }),
+        ),
+      ]
+      fireEvent.click(primary("Clone and create"))
+      await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+      expect(posted).toMatchObject([
+        {
+          agent_name: "fix-thing-review",
+          review_copy: true,
+          review_copy_reason: "typed",
+          review_copy_branch: "fix-thing-review",
+        },
+      ])
+    })
+  })
+
+  it("drops a press when the name is edited while the folder is being checked", async () => {
+    await openPr()
+    const check = held()
+    destinationReplies = [check.promise]
+    fireEvent.click(primary("Clone and create"))
+    await waitFor(() => expect(checked).toHaveLength(2))
+    type(agentName(), "other-name")
+    expect(primary("Clone and create").disabled).toBe(false)
+    check.release(reply(200, JSON.stringify({ state: "free", path: "/home/u/widget" })))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(posted).toEqual([])
+    expect(store.getSnapshot().cloneProject?.submitting).toBe(false)
+  })
+
+  it("keeps the button disabled while the clone is being sent, whatever is edited", async () => {
+    await openPr()
+    const sent = held()
+    projectReplies = [sent.promise]
+    fireEvent.click(primary("Clone and create"))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    type(destination(), "/home/u/elsewhere")
+    expect(primary("Clone and create").disabled).toBe(true)
+    sent.release(reply(202, JSON.stringify({ op_id: "op-1" })))
+    await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+    expect(posted).toHaveLength(1)
+  })
+
+  it("is not stranded by a start folder that arrives after the press", async () => {
+    const start = held()
+    browseReplies = [start.promise]
+    store.openCloneProject({
+      reference: "acme/widget#3",
+      repository: "github.com/acme/widget",
+      incompleteSummary: null,
+      hasProjects: false,
+      name: "fix-thing",
+      offer: offer as never,
+    })
+    render(<CloneProjectDialog />)
+    type(destination(), "/srv/mine")
+    const check = held()
+    destinationReplies = [check.promise]
+    fireEvent.click(primary("Clone and create"))
+    await waitFor(() => expect(checked).toHaveLength(1))
+    start.release(reply(200, JSON.stringify({ path: "/home/u", entries: [] })))
+    await waitFor(() => expect(store.getSnapshot().cloneProject?.startFolder).toBe("/home/u"))
+    check.release(reply(200, JSON.stringify({ state: "free", path: "/srv/mine" })))
+    await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
+    expect(posted).toMatchObject([{ path: "/srv/mine" }])
+    expect(checked).toHaveLength(1)
+  })
+
+  it("does not call an empty name an error before anything is typed", async () => {
+    await openPr({ name: "" })
+    expect(agentName().getAttribute("aria-invalid")).toBe("false")
+    expect(primary("Clone and create").disabled).toBe(true)
   })
 })

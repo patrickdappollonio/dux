@@ -58,10 +58,11 @@ export function CloneProjectDialog() {
   if (!form) return null
   const pr = form.pr
   const name = form.name.trim()
-  const invalidName = (name !== "" && !isValidAgentName(name)) || (pr !== null && name === "")
+  const invalidName = name !== "" && !isValidAgentName(name)
   const submitDisabled =
     form.submitting ||
     invalidName ||
+    (pr !== null && name === "") ||
     (pr === null && form.url.trim() === "") ||
     form.path.trim() === "" ||
     (pr !== null && reviewCopyBlocksSubmit(pr, name))

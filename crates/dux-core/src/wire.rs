@@ -11358,6 +11358,7 @@ mod tests {
                     &root.join("alias/spelled").to_string_lossy(),
                 ));
             // Refused at once, or by the worker before it runs git.
+            let mut asked = None;
             let sentence = match engine.apply_wire(command) {
                 Err(refused) => refused.to_string(),
                 Ok(_) => {
@@ -11365,11 +11366,38 @@ mod tests {
                     let finals = finals(&chain);
                     assert_eq!(finals.len(), 1, "{what}: {finals:?}");
                     assert_eq!(finals[0].tone, "error", "{what}");
+                    asked = finals[0].ask.clone();
                     finals[0].message.clone()
                 }
             };
             for needle in needles {
                 assert!(sentence.contains(needle), "{what}: {sentence}");
+            }
+            // A review copy nobody agreed to puts its question to the surface,
+            // which has no project to name yet.
+            let question = match what {
+                "a clone that needs a review copy nobody agreed to"
+                | "a clone that needs a review copy, agreed to for another copy name"
+                | "a clone that needs a review copy, agreed to for another reason" => {
+                    Some("busy:feature-review")
+                }
+                "a clone named like a review copy of the pull request's branch" => {
+                    Some("typed:feature-review-2")
+                }
+                _ => None,
+            };
+            match (question, asked) {
+                (Some(warned), Some(crate::status_text::StatusAsk::ReviewCopy(ask))) => {
+                    assert_eq!(ask.warned, warned, "{what}");
+                    assert_eq!(ask.project_id, None, "{what}");
+                    assert_eq!(
+                        ask.pull_request.map(|t| (t.owner_repo, t.number)),
+                        Some(("acme/widget".to_string(), 7)),
+                        "{what}"
+                    );
+                }
+                (None, None) => {}
+                (question, asked) => panic!("{what}: wanted {question:?}, got {asked:?}"),
             }
             assert!(!untouched.join(".git").exists(), "{what}: git ran");
             assert_eq!(untouched.exists(), existed, "{what}: a folder appeared");

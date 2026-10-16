@@ -621,6 +621,7 @@ fn settle_pull_request(
             &pull_request.review_copy,
             outlook,
             CloneMode::Clone,
+            target,
             nothing_was,
         )?;
     }
@@ -638,10 +639,15 @@ fn settle_pull_request(
 /// will need a review copy that nobody agreed to, or one that no free name can
 /// be given to. An agreement counts only for the reason and the copy branch it
 /// was shown.
+///
+/// The refusal carries the question, so the dialog that was closed when the
+/// request was accepted can reopen with it: `warned` is the reason and the copy
+/// branch, as an outlook gives them, and no project exists yet.
 fn refuse_unagreed_review_copy(
     consent: &crate::worker::ReviewCopyConsent,
     outlook: ReviewCopyOutlook,
     mode: CloneMode,
+    target: &crate::pr_reference::PullRequestCloneTarget,
     nothing_was: &str,
 ) -> Result<(), CloneOutcome> {
     match outlook {
@@ -655,11 +661,25 @@ fn refuse_unagreed_review_copy(
                 return Ok(());
             }
             let by_flag = matches!(consent, crate::worker::ReviewCopyConsent::WithheldByFlag);
-            Err(CloneOutcome::Refused(crate::status_text![
-                crate::prose::Prose::from_segments(warning),
-                crate::agent_job::review_copy_how_before(by_flag, mode == CloneMode::AddExisting),
-                nothing_was
-            ]))
+            let ask = StatusAsk::ReviewCopy(Box::new(crate::status_text::ReviewCopyAsk {
+                warned: format!("{reason}:{copy_branch}"),
+                warning: warning.clone(),
+                request: None,
+                by_flag,
+                project_id: None,
+                pull_request: Some(target.clone()),
+            }));
+            Err(CloneOutcome::Refused(
+                crate::status_text![
+                    crate::prose::Prose::from_segments(warning),
+                    crate::agent_job::review_copy_how_before(
+                        by_flag,
+                        mode == CloneMode::AddExisting
+                    ),
+                    nothing_was
+                ]
+                .with_ask(ask),
+            ))
         }
         ReviewCopyOutlook::NoFreeName { message, .. } => {
             Err(CloneOutcome::Refused(crate::status_text![
@@ -846,20 +866,19 @@ fn add_existing_checkout(
             pull_request.head_oid.as_deref(),
             request.target.number,
         )
-    } else if !crate::git::local_branch_exists(dest, &pull_request.agent_name) {
-        crate::agent_job::typed_copy_review_outlook(
+    } else {
+        crate::agent_job::typed_name_review_copy_outlook(
+            Some(dest),
             &pull_request.head_branch,
             &pull_request.agent_name,
             request.target.number,
         )
-        .unwrap_or(ReviewCopyOutlook::NotNeeded)
-    } else {
-        ReviewCopyOutlook::NotNeeded
     };
     refuse_unagreed_review_copy(
         &request.review_copy,
         outlook,
         CloneMode::AddExisting,
+        &request.target,
         " Nothing was added.",
     )?;
     crate::logger::info(&format!("adding {} as a project", dest.display()));
