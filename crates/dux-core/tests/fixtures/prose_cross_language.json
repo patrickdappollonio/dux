@@ -709,6 +709,74 @@
         },
         " and the pushed branch stay on the old name."
       ]
+    },
+    {
+      "what": "offering to clone a repository no project has, for a pull request",
+      "sentence": "pr_clone_offer",
+      "args": {
+        "repository": "github.com/acme/widget",
+        "number": "3"
+      },
+      "segments": [
+        {
+          "name": "github.com/acme/widget",
+          "quoted": false
+        },
+        " isn't a dux project yet. dux will clone it, add it as a project, and create the agent from pull request ",
+        {
+          "name": "#3",
+          "quoted": false
+        },
+        "."
+      ]
+    },
+    {
+      "what": "offering the clone when some projects could not be checked",
+      "sentence": "pr_clone_offer_incomplete",
+      "args": {
+        "repository": "github.com/acme/widget",
+        "number": "3",
+        "summary": "1 has an address dux could not read"
+      },
+      "segments": [
+        "dux could not find a checked project for ",
+        {
+          "name": "github.com/acme/widget",
+          "quoted": false
+        },
+        ". dux could not check every project (1 has an address dux could not read), so one of them may already be a checkout of it. dux will clone it, add it as a project, and create the agent from pull request ",
+        {
+          "name": "#3",
+          "quoted": false
+        },
+        "."
+      ]
+    },
+    {
+      "what": "offering to add a folder that is already a checkout, for a pull request",
+      "sentence": "pr_add_existing_offer",
+      "args": {
+        "folder": "/home/ada/src/widget",
+        "repository": "github.com/acme/widget",
+        "number": "3"
+      },
+      "segments": [
+        {
+          "name": "/home/ada/src/widget",
+          "quoted": false
+        },
+        " is already a checkout of ",
+        {
+          "name": "github.com/acme/widget",
+          "quoted": false
+        },
+        ". dux will add it as a project and create the agent from pull request ",
+        {
+          "name": "#3",
+          "quoted": false
+        },
+        "."
+      ]
     }
   ]
 }

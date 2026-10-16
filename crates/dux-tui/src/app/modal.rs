@@ -322,12 +322,18 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::NameStandaloneAgent { input, .. }
         | PromptState::NameNewAgent { input, .. } => vec![input],
 
+        // The pull-request form's address is read-only: it takes no caret, so
+        // it is not a field the registry asks to publish a rect for.
         PromptState::CloneProject {
             address,
             destination,
             agent_name,
+            pull_request,
             ..
-        } => vec![address, destination, agent_name],
+        } => match pull_request {
+            Some(_) => vec![destination, agent_name],
+            None => vec![address, destination, agent_name],
+        },
 
         PromptState::StartupCommandLogs(prompt) => vec![&prompt.filter],
         PromptState::PickProject { list, .. } => vec![&list.filter],
@@ -1240,6 +1246,7 @@ pub(super) mod tests {
                     randomize_name: false,
                     randomized_name: None,
                     focus: crate::app::CloneProjectFocus::Address,
+                    pull_request: None,
                 },
             ),
             (

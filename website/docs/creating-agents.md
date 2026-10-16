@@ -354,16 +354,24 @@ every project you have.
   pull request and name the agent.
 - **Two or more are.** dux shows you just those and asks which one this agent belongs in.
 - **None is.** When the reference names a repository and a pull request number on a host
-  `gh` is signed in to, dux looks the pull request up and offers to clone the repository,
-  add it as a project and start the agent on the pull request in one go, or to add the
-  folder when it already holds a checkout. When the agent would need a review copy, the
-  offer says so and asks before cloning or adding. Otherwise it names the repository it
-  could not place and offers the project picker.
+  `gh` is signed in to, dux looks the pull request up and offers to set it up. The terminal
+  UI and the browser show the pull request's title and branch and ask before they clone the
+  repository, or, when the folder it would clone into already holds a checkout of it, before
+  adding that folder as a project. Either way the agent then starts on the pull request's
+  code. The folder and the agent's name are editable, and **Choose an existing project**
+  keeps the project picker one stop away. When dux can tell before cloning or adding that
+  the agent would need a [review copy](#naming-and-fetching), the offer says so and asks
+  first: the same warning and unticked **Create a review copy** box as below, and the
+  button stays disabled until it is ticked. A reference with no number, or a pull request dux
+  could not look up, gets the project picker instead, with the lookup's own sentence when
+  that is what failed.
 
 > [!IMPORTANT]
-> **The browser offers the clone; the terminal UI does not yet.** There, and for a
-> reference without a number, get a project first with
-> [Cloning a repository](#cloning-a-repository), then paste the reference again.
+> The clone is the same one [Cloning a repository](#cloning-a-repository) does. It uses
+> `gh`'s git protocol setting for that host and never prompts for anything. Over SSH,
+> connect once in a terminal first with `ssh -T git@<host>`, so the host is known; over
+> HTTPS, a private repository needs git credentials set up outside dux, for example with
+> `gh auth setup-git`.
 
 Some projects cannot be compared at all: the directory is gone, git cannot read an
 `origin`, or the address is on a host `gh` is not signed in to. dux reports those as

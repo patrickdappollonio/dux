@@ -721,6 +721,12 @@ pub enum WorkerEvent {
         /// The matches AND what could not be inspected, or why the attempt
         /// failed outright.
         result: Result<crate::pr_reference::ReferenceResolution, String>,
+        /// With no match and an offer possible: the pull request as `gh`
+        /// reported it, for the confirmation to show.
+        offer: Option<crate::pr_reference::PullRequestCloneFacts>,
+        /// With no match and an offer possible but the lookup failed: the
+        /// lookup's own sentence.
+        clone_unavailable: Option<String>,
         status_op_id: Option<String>,
     },
     PullRequestResolved {

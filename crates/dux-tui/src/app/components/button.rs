@@ -148,6 +148,7 @@ pub(crate) enum ButtonPressedTarget {
     /// project has been chosen: it hands over to the project selector and comes
     /// back in project-first mode.
     PullRequestChooseProject,
+    CloneChooseExisting,
     AgentInfoClose,
     StartupCommandLogsClose,
     /// The first-load modal's two pill buttons. Not drawn by [`Button`] (they

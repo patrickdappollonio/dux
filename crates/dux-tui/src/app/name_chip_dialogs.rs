@@ -1166,6 +1166,7 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
             randomize_name: false,
             randomized_name: None,
             focus: CloneProjectFocus::Address,
+            pull_request: None,
         },
     );
     let OverlayMouseLayout::CloneProject {
@@ -1182,10 +1183,68 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
         .collect();
     assert_eq!(
         rows,
-        vec![address.y, destination.y],
+        vec![address.expect("the address field").y, destination.y],
         "the name appears outside the fields:\n{}",
         screen(&buf)
     );
+
+    // The pull request's form is prose: the repository, the pull request, its
+    // title and branch, the read-only address and the folder it adds are all
+    // chips, and the review copy warning chips the branch it names.
+    let warning = dux_core::prose::Prose::new()
+        .text("Branch ")
+        .quoted("fix-docs-pr")
+        .text(" will be checked out in the project folder.")
+        .into_segments();
+    let offer = dux_core::pr_reference::PullRequestCloneFacts {
+        address: "https://ghe.example/acme/widget-pr.git".to_string(),
+        host: "github.com".to_string(),
+        owner_repo: "acme/widget-pr".to_string(),
+        number: 3,
+        title: "Fix the docs-pr".to_string(),
+        state: "OPEN".to_string(),
+        head_branch: "fix-docs-pr".to_string(),
+        head_oid: None,
+        review_copy: dux_core::status_text::ReviewCopyOutlook::Needed {
+            reason: "busy".to_string(),
+            branch: "fix-docs-pr".to_string(),
+            copy_branch: "fix-docs-pr-review".to_string(),
+            warning,
+        },
+    };
+    let mut app = test_app(default_bindings());
+    let buf = open(
+        &mut app,
+        PromptState::CloneProject {
+            address: TextInput::with_text(offer.address.clone()),
+            destination: TextInput::with_text("/srv/code/dest-pr".to_string()),
+            destination_edited: false,
+            start_folder: std::path::PathBuf::from("/srv/code"),
+            agent_name: TextInput::with_text("fix-docs-pr".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            focus: CloneProjectFocus::Destination,
+            pull_request: Some(Box::new(crate::app::PullRequestClone {
+                review_copy: offer.review_copy.clone(),
+                offer,
+                reference: "https://github.com/acme/widget-pr/pull/3".to_string(),
+                incomplete_summary: None,
+                has_projects: true,
+                folder: crate::app::PrFolder::Checkout {
+                    path: "/srv/code/checkout-pr".to_string(),
+                },
+                review_copy_agreed: false,
+                checking: false,
+                error: None,
+            })),
+        },
+    );
+    assert_chipped(&app, &buf, "github.com/acme/widget-pr");
+    assert_chipped(&app, &buf, "/srv/code/checkout-pr");
+    assert_chipped(&app, &buf, "Fix the docs-pr");
+    assert_chipped(&app, &buf, "https://ghe.example/acme/widget-pr.git");
+    assert_chipped_on_row(&app, &buf, "on branch", "fix-docs-pr");
+    assert_chipped_on_row(&app, &buf, "will be checked out", "fix-docs-pr");
 }
 
 #[test]

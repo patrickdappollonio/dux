@@ -639,6 +639,7 @@ mod tests {
                     randomize_name: false,
                     randomized_name: None,
                     focus: crate::app::CloneProjectFocus::Address,
+                    pull_request: None,
                 },
             ),
             (

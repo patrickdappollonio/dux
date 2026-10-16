@@ -751,6 +751,8 @@ impl App {
 
         let worker_tx = self.engine.worker_tx.clone();
         let projects = self.engine.projects.clone();
+        let protocols = self.engine.github_git_protocols();
+        let gh_program = self.engine.gh_probe.program.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let tx_panic = worker_tx.clone();
@@ -763,6 +765,8 @@ impl App {
                     raw_input,
                     projects,
                     policy,
+                    protocols,
+                    gh_program,
                     worker_tx,
                     Some(op_id),
                 );
@@ -779,6 +783,8 @@ impl App {
                     raw_input: raw_panic,
                     repository: repository_panic,
                     result: Err(reason),
+                    offer: None,
+                    clone_unavailable: None,
                     status_op_id: Some(op_id_panic),
                 });
             }
@@ -809,6 +815,8 @@ impl App {
         raw_input: String,
         repository: String,
         result: Result<dux_core::pr_reference::ReferenceResolution, String>,
+        offer: Option<dux_core::pr_reference::PullRequestCloneFacts>,
+        clone_unavailable: Option<String>,
     ) -> Result<()> {
         let resolution = match result {
             Ok(resolution) => resolution,
@@ -827,21 +835,37 @@ impl App {
                 self.dispatch_pull_request_lookup(project, raw_input)
             }
             0 => {
+                // The pull request is there and a clone can be offered: the
+                // form says which pull request the user is agreeing to, and
+                // keeps the way to an existing project one stop away.
+                if let Some(offer) = offer {
+                    self.open_pull_request_clone_form(
+                        raw_input,
+                        resolution.uninspected_summary(),
+                        offer,
+                    );
+                    return Ok(());
+                }
                 self.pending_pr_reference = Some(raw_input);
                 // With a project it could not inspect, "no project is a checkout
-                // of this" is a certainty dux does not have. dux does not clone,
-                // and neither wording may imply it might.
-                match resolution.uninspected_summary() {
-                    None => self.set_warning(format!(
+                // of this" is a certainty dux does not have.
+                let mut sentence = match resolution.uninspected_summary() {
+                    None => format!(
                         "No project in dux is a checkout of {repository}. Choose a project that \
                          already has it, or add one from a directory on disk."
-                    )),
-                    Some(summary) => self.set_warning(format!(
+                    ),
+                    Some(summary) => format!(
                         "No project dux could check is a checkout of {repository}, and dux \
                          could not check every project ({summary}). Choose a project that \
                          already has it, or add one from a directory on disk."
-                    )),
+                    ),
+                };
+                if let Some(unavailable) = clone_unavailable {
+                    sentence.push_str(&format!(
+                        " dux could not look the pull request up to offer a clone: {unavailable}"
+                    ));
                 }
+                self.set_warning(sentence);
                 self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None)
             }
             _ => {
@@ -1016,7 +1040,13 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         let mut agent_name = TextInput::new().with_char_map(crate::git::agent_name_char_map);
-        if let Some(draft) = self.clone_draft.as_ref().filter(|draft| draft.restorable) {
+        // A pull request's draft is restored by the pull request's own opener,
+        // and stays in place until then.
+        if let Some(draft) = self
+            .clone_draft
+            .as_ref()
+            .filter(|draft| draft.restorable && draft.pull_request.is_none())
+        {
             agent_name.set_text(draft.agent_name.clone());
             self.prompt = PromptState::CloneProject {
                 address: TextInput::with_text(draft.address.clone()),
@@ -1027,6 +1057,7 @@ impl App {
                 randomize_name: draft.randomize_name,
                 randomized_name: draft.randomized_name.clone(),
                 focus: CloneProjectFocus::Address,
+                pull_request: None,
             };
             return Ok(());
         }
@@ -1051,6 +1082,7 @@ impl App {
             randomize_name,
             randomized_name,
             focus: CloneProjectFocus::Address,
+            pull_request: None,
         };
         Ok(())
     }
@@ -1061,6 +1093,16 @@ impl App {
     /// that starts keeps what was typed as its draft, for the form to restore
     /// should its worker refuse it or git fail.
     pub(crate) fn confirm_clone_project(&mut self) {
+        if matches!(
+            self.prompt,
+            PromptState::CloneProject {
+                pull_request: Some(_),
+                ..
+            }
+        ) {
+            self.confirm_pull_request_clone();
+            return;
+        }
         let PromptState::CloneProject {
             address,
             destination,
@@ -1084,6 +1126,7 @@ impl App {
             agent_name: agent_name.text.clone(),
             randomize_name: *randomize_name,
             randomized_name: randomized_name.clone(),
+            pull_request: None,
         };
         let name = agent_name.text.trim();
         let command = Command::CloneProject {
@@ -5140,6 +5183,7 @@ mod tests {
             pending_first_load: None,
             unpushed_count_rx: None,
             rename_pushed_rx: None,
+            pr_clone_check_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(

@@ -9299,6 +9299,15 @@ impl App {
     }
 
     fn render_clone_project_prompt(&mut self, frame: &mut Frame) {
+        if matches!(
+            self.prompt,
+            PromptState::CloneProject {
+                pull_request: Some(_),
+                ..
+            }
+        ) {
+            return self.render_pull_request_clone_prompt(frame);
+        }
         let PromptState::CloneProject {
             address,
             destination,
@@ -9444,13 +9453,262 @@ impl App {
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::CloneProject {
-            address: field_rects[0],
+            address: Some(field_rects[0]),
             destination: field_rects[1],
             agent_name: field_rects[2],
-            checkbox: OverlayCheckbox {
+            checkbox: Some(OverlayCheckbox {
                 id: OverlayCheckboxId::CloneProjectRandomizedPetName,
                 rect: checkbox_rect,
-            },
+            }),
+            review_copy_checkbox: None,
+            choose_existing: None,
+        };
+    }
+
+    /// The clone form in pull-request mode: which pull request the user is
+    /// agreeing to, the address read-only, the folder, the agent's name, the
+    /// review copy question when there is one, and the way to an existing
+    /// project.
+    fn render_pull_request_clone_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::CloneProject {
+            address,
+            destination,
+            agent_name,
+            focus,
+            pull_request: Some(form),
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let dialog_width = 80.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let hint_style = Style::default().fg(self.theme.hint_desc_fg);
+        let label_style = Style::default().fg(self.theme.input_label_fg);
+
+        let body = self.hanging_prose_lines(&form.body(), text_style, " ", inner_width);
+        let facts = Prose::new()
+            .name(ellipsize_middle(&form.offer.title, 56))
+            .text(" on branch ")
+            .name(form.head_branch());
+        let facts_lines = self.hanging_prose_lines(&facts, hint_style, " ", inner_width);
+
+        // The question for the name now in the field, when there is one: the
+        // warning over an unticked box, or the refusal that no name is free.
+        let review_label = "Create a review copy";
+        let (question_lines, has_box) = match form.question_for(&agent_name.text) {
+            PrReviewQuestion::Needed(warning) => (
+                self.hanging_prose_lines(
+                    &Prose::from_segments(warning.to_vec()),
+                    Style::default().fg(self.theme.warning_fg),
+                    " ",
+                    inner_width,
+                ),
+                true,
+            ),
+            PrReviewQuestion::NoFreeName(message) => (
+                self.hanging_prose_lines(
+                    &Prose::from_segments(message.to_vec()),
+                    Style::default().fg(self.theme.status_error_fg),
+                    " ",
+                    inner_width,
+                ),
+                false,
+            ),
+            PrReviewQuestion::None => (Vec::new(), false),
+        };
+        let review_checkbox_height = if has_box {
+            let checkbox = Checkbox::new(review_label);
+            checkbox
+                .layout(
+                    inner_width,
+                    checkbox.marker_style(Style::default()),
+                    checkbox.label_style(Style::default()),
+                )
+                .height
+        } else {
+            0
+        };
+        let question_height = u16::try_from(question_lines.len()).unwrap_or(u16::MAX);
+        let question_gap = u16::from(question_height > 0);
+        let box_gap = u16::from(has_box);
+        let choose_label = "Choose an existing project\u{2026}";
+        let choose_height = if form.has_projects {
+            1 + BUTTON_HEIGHT
+        } else {
+            0
+        };
+        let body_height = u16::try_from(body.len()).unwrap_or(u16::MAX);
+        let facts_height = u16::try_from(facts_lines.len()).unwrap_or(u16::MAX);
+
+        let rows = [
+            body_height,            // 0 body
+            1,                      // 1 gap
+            facts_height,           // 2 title and branch
+            1,                      // 3 address
+            1,                      // 4 gap
+            1,                      // 5 folder label
+            3,                      // 6 folder field
+            1,                      // 7 name label
+            3,                      // 8 name field
+            question_gap,           // 9 gap
+            question_height,        // 10 question
+            box_gap,                // 11 gap
+            review_checkbox_height, // 12 box
+            choose_height,          // 13 gap and button
+            1,                      // 14 form error or checking
+            1,                      // 15 gap
+            1,                      // 16 hints
+        ];
+        let height = rows.iter().sum::<u16>().saturating_add(2);
+        let area = centered_rect_exact(dialog_width, height, frame.area());
+        let inner = self
+            .open_modal_frame(frame, "New Agent from PR", area)
+            .inner;
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(rows.map(Constraint::Length))
+            .split(inner);
+
+        Paragraph::new(body).render(areas[0], frame.buffer_mut());
+        Paragraph::new(facts_lines).render(areas[2], frame.buffer_mut());
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Clone address: ", label_style),
+            name_chip(&address.text, &self.theme),
+        ]))
+        .render(areas[3], frame.buffer_mut());
+
+        let folder_label = match form.folder {
+            PrFolder::Free => " Clone into:",
+            PrFolder::Checkout { .. } => " Add this folder as a project:",
+        };
+        let mut field_rects = Vec::new();
+        for (label_area, label, field_area, input, field) in [
+            (
+                areas[5],
+                folder_label,
+                areas[6],
+                destination,
+                CloneProjectFocus::Destination,
+            ),
+            (
+                areas[7],
+                " Name for the agent (used as branch name):",
+                areas[8],
+                agent_name,
+                CloneProjectFocus::AgentName,
+            ),
+        ] {
+            Paragraph::new(Line::from(Span::styled(label, label_style)))
+                .render(label_area, frame.buffer_mut());
+            let focused = *focus == field;
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .border_style(self.theme.overlay_field_border_style(focused));
+            let text_rect = block.inner(field_area);
+            field_rects.push(text_rect);
+            Paragraph::new(render_single_line_field(
+                " ",
+                &input.text,
+                input.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                focused,
+                text_rect.width,
+            ))
+            .block(block)
+            .render(field_area, frame.buffer_mut());
+        }
+
+        Paragraph::new(question_lines).render(areas[10], frame.buffer_mut());
+        let review_rect = if has_box {
+            let (rect, _) = self.render_overlay_checkbox(
+                frame,
+                areas[12],
+                review_label,
+                form.review_copy_agreed,
+                if *focus == CloneProjectFocus::ReviewCopyCheckbox {
+                    CheckboxState::Focused
+                } else {
+                    CheckboxState::Normal
+                },
+                None,
+            );
+            Some(rect)
+        } else {
+            None
+        };
+
+        let mut choose_button = None;
+        if form.has_projects {
+            let width = button_width_for(choose_label).min(areas[13].width);
+            let button = Rect {
+                x: areas[13].x + areas[13].width.saturating_sub(width) / 2,
+                y: areas[13].y + 1,
+                width,
+                height: BUTTON_HEIGHT,
+            };
+            Button::new(choose_label)
+                .kind(ButtonKind::Confirm)
+                .state(button_state_for(
+                    ButtonPressedTarget::CloneChooseExisting,
+                    self.pressed_button,
+                    *focus == CloneProjectFocus::ChooseExisting,
+                    true,
+                ))
+                .render(frame, button, &self.theme);
+            choose_button = Some(button);
+        }
+
+        let status = match (&form.error, form.checking) {
+            (Some(error), _) => Some(Span::styled(
+                format!(" {error}"),
+                Style::default().fg(self.theme.status_error_fg),
+            )),
+            (None, true) => Some(Span::styled(" Checking the folder\u{2026}", hint_style)),
+            (None, false) => None,
+        };
+        if let Some(status) = status {
+            Paragraph::new(Line::from(status)).render(areas[14], frame.buffer_mut());
+        }
+
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let focus_key = self
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection);
+        let mut hints = vec![
+            Hint::key(
+                confirm_key,
+                match form.folder {
+                    PrFolder::Free => "clone and create",
+                    PrFolder::Checkout { .. } => "add this folder as a project",
+                },
+            ),
+            Hint::maybe_key(focus_key, "focus"),
+        ];
+        if matches!(
+            *focus,
+            CloneProjectFocus::ReviewCopyCheckbox | CloneProjectFocus::ChooseExisting
+        ) {
+            hints.push(Hint::plain("Space toggle"));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, areas[16].width))
+            .render(areas[16], frame.buffer_mut());
+
+        self.overlay_layout.active = OverlayMouseLayout::CloneProject {
+            address: None,
+            destination: field_rects[0],
+            agent_name: field_rects[1],
+            checkbox: None,
+            review_copy_checkbox: review_rect.map(|rect| OverlayCheckbox {
+                id: OverlayCheckboxId::CloneProjectReviewCopy,
+                rect,
+            }),
+            choose_existing: choose_button,
         };
     }
 

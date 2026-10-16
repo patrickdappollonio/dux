@@ -253,6 +253,75 @@ pub fn inspect_pr_destination(
     ])
 }
 
+/// The pull request a folder check is for, when the answer for a checkout
+/// should also say whether the agent will need a review copy there.
+pub struct FolderReviewCopyQuery<'a> {
+    pub worktrees_root: &'a Path,
+    pub number: u64,
+    pub head_branch: &'a str,
+    pub head_commit: Option<&'a str>,
+}
+
+/// How long a folder check waits for the repository to say whether a review
+/// copy will be needed, the bound a `gh` call has.
+const REVIEW_COPY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the folder holds, the folder as dux will use it, and, for a checkout
+/// and a `review` query, whether the agent will need a review copy there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrDestinationCheck {
+    pub state: PrDestination,
+    pub path: PathBuf,
+    pub review_copy: Option<ReviewCopyOutlook>,
+}
+
+/// [`inspect_pr_destination`] plus the folder's canonical spelling and the
+/// review copy outlook for a checkout: the one answer both the browser's
+/// folder check and the terminal UI's give. Runs git, so only on a worker. The
+/// outlook is told from the folder as it is, never from a write, and a folder
+/// that does not answer in time leaves the question open for the create to ask.
+pub fn check_pr_destination(
+    raw: &str,
+    target: &PullRequestCloneTarget,
+    policy: &crate::gh::GithubHostPolicy,
+    projects: &[&str],
+    review: Option<FolderReviewCopyQuery<'_>>,
+) -> Result<PrDestinationCheck, StatusText> {
+    let home = std::env::home_dir();
+    let state = inspect_pr_destination(raw, target, policy, home.as_deref(), projects)?;
+    let path = destination_identity(raw, home.as_deref())?;
+    let review_copy = match (state, review) {
+        (PrDestination::Checkout, Some(query)) => {
+            let (folder, root) = (path.clone(), query.worktrees_root.to_path_buf());
+            let (branch, commit) = (
+                query.head_branch.to_string(),
+                query.head_commit.map(String::from),
+            );
+            let number = query.number;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::agent_job::folder_review_copy_outlook(
+                    &folder,
+                    &root,
+                    &branch,
+                    commit.as_deref(),
+                    number,
+                ));
+            });
+            Some(
+                rx.recv_timeout(REVIEW_COPY_CHECK_TIMEOUT)
+                    .unwrap_or(ReviewCopyOutlook::Unknown),
+            )
+        }
+        _ => None,
+    };
+    Ok(PrDestinationCheck {
+        state,
+        path,
+        review_copy,
+    })
+}
+
 /// The destination `raw` names, after expanding a leading `~`: its parent
 /// canonicalized plus its own name, so two spellings of one folder (a trailing
 /// slash, a symlinked parent) are one destination.

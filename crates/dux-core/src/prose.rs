@@ -352,6 +352,20 @@ mod tests {
                 args["open_pr"].as_u64(),
                 args["pushed"].as_bool().expect("pushed"),
             ),
+            "pr_clone_offer" => crate::pr_reference::pr_clone_offer_prose(
+                &s("repository"),
+                s("number").parse().expect("number"),
+            ),
+            "pr_clone_offer_incomplete" => crate::pr_reference::pr_clone_offer_incomplete_prose(
+                &s("repository"),
+                s("number").parse().expect("number"),
+                &s("summary"),
+            ),
+            "pr_add_existing_offer" => crate::pr_reference::pr_add_existing_offer_prose(
+                &s("folder"),
+                &s("repository"),
+                s("number").parse().expect("number"),
+            ),
             "attached_lead" => crate::attached_prose::attached_lead_prose(),
             "attached_entry" => {
                 use crate::attachments::{Surface, TargetKind};

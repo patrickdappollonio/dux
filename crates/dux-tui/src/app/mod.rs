@@ -215,6 +215,8 @@ struct PrReferenceResolutionAnswer {
     raw_input: String,
     repository: String,
     result: Result<dux_core::pr_reference::ReferenceResolution, String>,
+    offer: Option<dux_core::pr_reference::PullRequestCloneFacts>,
+    clone_unavailable: Option<String>,
     status_op_id: Option<String>,
 }
 
@@ -298,6 +300,9 @@ pub struct App {
     /// The rename dialog's pending "was this branch pushed?" answer, tagged
     /// with the agent it was asked for. One-shot, like the count above.
     pub(crate) rename_pushed_rx: Option<mpsc::Receiver<(String, bool)>>,
+    /// The pull-request clone form's pending folder check. One-shot: set when
+    /// a check starts, cleared when its answer lands or the form is gone.
+    pub(crate) pr_clone_check_rx: Option<mpsc::Receiver<PrCloneFolderAnswer>>,
     /// Payload channel for the in-flight release-notes worker. The keyed
     /// busy→final status rides the engine's own worker channel; only the notes
     /// themselves come back here. `Some` means a fetch is in flight, which is
@@ -2621,6 +2626,10 @@ pub(crate) enum CloneProjectFocus {
     Destination,
     AgentName,
     RandomizedNameCheckbox,
+    /// Pull-request mode only, and only while the form shows the question.
+    ReviewCopyCheckbox,
+    /// Pull-request mode only, and only when projects exist.
+    ChooseExisting,
 }
 
 /// The clone form's fields as they were submitted, kept for the clone they
@@ -2640,6 +2649,9 @@ pub(crate) struct CloneDraft {
     pub(crate) agent_name: String,
     pub(crate) randomize_name: bool,
     pub(crate) randomized_name: Option<String>,
+    /// The pull request a pull-request form was for. A plain clone's draft
+    /// has none, and the two kinds are never restored into each other.
+    pub(crate) pull_request: Option<dux_core::pr_reference::PullRequestCloneFacts>,
 }
 
 /// What the folder browser is picking a directory for.
@@ -3083,6 +3095,9 @@ pub(crate) enum PromptState {
         randomize_name: bool,
         randomized_name: Option<String>,
         focus: CloneProjectFocus,
+        /// Set when the form was opened for a pull request no project has the
+        /// repository of; see [`PullRequestClone`].
+        pull_request: Option<Box<PullRequestClone>>,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -3738,6 +3753,7 @@ pub(crate) enum OverlayCheckboxId {
     NameNewAgentCopyChanges,
     NameNewAgentReviewCopy,
     CloneProjectRandomizedPetName,
+    CloneProjectReviewCopy,
     ConfigReloadRecoverOldConfig,
     /// The recreate-working-copy dialog's "restart the tabs" box.
     RecreateRestartTabs,
@@ -3984,10 +4000,17 @@ pub(crate) enum OverlayMouseLayout {
     },
     /// The clone form's three single-line fields and its random-name checkbox.
     CloneProject {
-        address: Rect,
+        /// Absent in pull-request mode, where the address is read-only.
+        address: Option<Rect>,
         destination: Rect,
         agent_name: Rect,
-        checkbox: OverlayCheckbox,
+        /// The random-name box; absent in pull-request mode.
+        checkbox: Option<OverlayCheckbox>,
+        /// The "create a review copy" box; present only while the pull-request
+        /// form is asking for that agreement.
+        review_copy_checkbox: Option<OverlayCheckbox>,
+        /// The "choose an existing project" button; pull-request mode only.
+        choose_existing: Option<Rect>,
     },
     NameNewAgent {
         input: Rect,
@@ -4305,6 +4328,8 @@ mod first_load;
 mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
+mod pr_clone;
+pub(crate) use pr_clone::{PrCloneFolderAnswer, PrFolder, PrReviewQuestion, PullRequestClone};
 mod project_actions;
 mod pty_ownership;
 mod redraw;
@@ -4635,6 +4660,7 @@ impl App {
             pending_first_load: None,
             unpushed_count_rx: None,
             rename_pushed_rx: None,
+            pr_clone_check_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),

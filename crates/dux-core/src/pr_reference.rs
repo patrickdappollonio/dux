@@ -171,6 +171,130 @@ pub fn pull_request_clone_offer(
     })
 }
 
+/// The clone offer with the pull request's own facts, as `gh` just reported
+/// them: what a confirmation shows, and what the answer to the folder check
+/// and the submit are built from. Serializes as the resolve answer's `clone`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PullRequestCloneFacts {
+    pub address: String,
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub head_branch: String,
+    /// The pull request's head commit, when `gh` reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    /// Whether the agent will need a review copy, told before the clone: see
+    /// [`crate::status_text::ReviewCopyOutlook`].
+    pub review_copy: crate::status_text::ReviewCopyOutlook,
+}
+
+impl PullRequestCloneFacts {
+    pub fn target(&self) -> PullRequestCloneTarget {
+        PullRequestCloneTarget {
+            host: self.host.clone(),
+            owner_repo: self.owner_repo.clone(),
+            number: self.number,
+        }
+    }
+}
+
+/// Look the pull request up through `gh_program` and pair it with the offer.
+/// The error is the lookup's own sentence, unchanged. Blocking: it runs `gh`.
+pub fn look_up_clone_offer(
+    gh_program: &std::ffi::OsStr,
+    offer: PullRequestCloneOffer,
+) -> Result<PullRequestCloneFacts, String> {
+    let target = offer.target();
+    // The two lookups are independent, so they run together and the worst case
+    // stays one bound rather than two.
+    let (metadata, default_branch) = std::thread::scope(|scope| {
+        let default_branch = scope.spawn(|| {
+            crate::gh::look_up_default_branch(gh_program, &target.host, &target.owner_repo)
+        });
+        let metadata = crate::gh::look_up_pull_request(
+            gh_program,
+            &crate::worker::PullRequestLookup {
+                host: target.host.clone(),
+                owner_repo: target.owner_repo.clone(),
+                number: target.number,
+            },
+        );
+        (metadata, default_branch.join().ok().and_then(Result::ok))
+    });
+    let metadata = metadata?;
+    // A default branch gh cannot name leaves the offer standing with the
+    // question open: it is asked after the project exists instead.
+    let review_copy = crate::agent_job::clone_review_copy_outlook(
+        &metadata.head_ref_name,
+        default_branch.as_deref(),
+        metadata.number,
+        &|_| true,
+    );
+    Ok(PullRequestCloneFacts {
+        address: offer.address,
+        host: offer.host,
+        owner_repo: offer.owner_repo,
+        number: metadata.number,
+        title: metadata.title,
+        state: metadata.state,
+        head_branch: metadata.head_ref_name,
+        head_oid: metadata.head_ref_oid,
+        review_copy,
+    })
+}
+
+/// The confirmation's opening sentence when every project was checked and none
+/// is a checkout of the repository. `repository` is
+/// [`TypedReference::repository_label`] with the host the offer settled on.
+pub fn pr_clone_offer_prose(repository: &str, number: u64) -> crate::prose::Prose {
+    crate::prose::Prose::new()
+        .name(repository)
+        .text(
+            " isn't a dux project yet. dux will clone it, add it as a project, and create the \
+             agent from pull request ",
+        )
+        .name(format!("#{number}"))
+        .text(".")
+}
+
+/// The same opening when some projects could not be checked, so one of them
+/// may already be a checkout. `summary` is
+/// [`ReferenceResolution::uninspected_summary`].
+pub fn pr_clone_offer_incomplete_prose(
+    repository: &str,
+    number: u64,
+    summary: &str,
+) -> crate::prose::Prose {
+    crate::prose::Prose::new()
+        .text("dux could not find a checked project for ")
+        .name(repository)
+        .text(format!(
+            ". dux could not check every project ({summary}), so one of them may already be a \
+             checkout of it. dux will clone it, add it as a project, and create the agent from \
+             pull request "
+        ))
+        .name(format!("#{number}"))
+        .text(".")
+}
+
+/// The opening when the folder already holds a checkout of the repository.
+pub fn pr_add_existing_offer_prose(
+    folder: &str,
+    repository: &str,
+    number: u64,
+) -> crate::prose::Prose {
+    crate::prose::Prose::new()
+        .name(folder)
+        .text(" is already a checkout of ")
+        .name(repository)
+        .text(". dux will add it as a project and create the agent from pull request ")
+        .name(format!("#{number}"))
+        .text(".")
+}
+
 /// The one message every unparseable spelling gets. It names the shapes rather
 /// than describing the failure, because the failure is nearly always "that is
 /// not one of these".
@@ -888,20 +1012,42 @@ pub fn resolve_reference_projects(
 /// Parsing is NOT done here: it is pure and instant, so the surface does it
 /// inline and refuses a bare number or unreadable text without a round trip.
 /// Only a reference that names a repository is worth a git call per project.
+///
+/// When no project has the repository and an offer to clone it is possible, the
+/// pull request is looked up through `gh_program` in the same job, so the
+/// confirmation can show which pull request the user is agreeing to. A lookup
+/// that fails is carried as its own sentence beside the empty match list.
+#[allow(clippy::too_many_arguments)]
 pub fn run_reference_resolution_job(
     reference: TypedReference,
     raw_input: String,
     projects: Vec<crate::model::Project>,
     policy: crate::gh::GithubHostPolicy,
+    protocols: BTreeMap<String, GitProtocol>,
+    gh_program: std::ffi::OsString,
     worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let repository = reference.repository_label().unwrap_or_default();
     let resolution = resolve_reference_projects(&reference, &projects, &policy);
+    let lookup = match pull_request_clone_offer(&reference, &policy, &protocols) {
+        Some(offer) if resolution.matches.is_empty() => {
+            Some(look_up_clone_offer(&gh_program, offer))
+        }
+        _ => None,
+    };
+    let (offer, clone_unavailable) = match lookup {
+        Some(Ok(offer)) => (Some(offer), None),
+        // Relayed `gh` text, so its bidirectional-text controls go.
+        Some(Err(sentence)) => (None, Some(crate::bidi::strip_bidi_controls(&sentence))),
+        None => (None, None),
+    };
     let _ = worker_tx.send(crate::worker::WorkerEvent::PullRequestReferenceResolved {
         raw_input,
         repository,
         result: Ok(resolution),
+        offer,
+        clone_unavailable,
         status_op_id,
     });
 }
@@ -2001,6 +2147,90 @@ mod resolution_tests {
             resolution.is_complete(),
             "a bare number is refused with an explanation; listing every project as \
              unchecked would turn that refusal into a scare"
+        );
+    }
+
+    /// Run the resolution job for `text` over `projects` with `gh_program` as
+    /// `gh`, and return the one event it posts.
+    fn resolution_event(
+        text: &str,
+        projects: Vec<Project>,
+        gh_program: &std::path::Path,
+    ) -> crate::worker::WorkerEvent {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_reference_resolution_job(
+            parse_typed_reference(text).unwrap(),
+            text.to_string(),
+            projects,
+            allowed(&["github.com"]),
+            BTreeMap::new(),
+            gh_program.as_os_str().to_owned(),
+            tx,
+            Some("op".to_string()),
+        );
+        rx.try_recv().expect("the job posts its answer")
+    }
+
+    #[test]
+    fn the_resolution_job_looks_the_pull_request_up_only_when_no_project_has_the_repository() {
+        use crate::gh::probe_test_support::stand_in_gh_with_pull_request;
+        use crate::worker::WorkerEvent;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let found = stand_in_gh_with_pull_request(
+            dir.path(),
+            &[("github.com", "https")],
+            Ok(r#"{"number":3,"title":"Fix docs","state":"OPEN","headRefName":"fix-docs"}"#),
+        );
+        let WorkerEvent::PullRequestReferenceResolved {
+            offer,
+            clone_unavailable,
+            ..
+        } = resolution_event("acme/widget#3", Vec::new(), &found)
+        else {
+            panic!("wrong event");
+        };
+        let offer = offer.expect("a repository no project has is offered");
+        assert_eq!(offer.address, "https://github.com/acme/widget.git");
+        assert_eq!(
+            (offer.title.as_str(), offer.head_branch.as_str()),
+            ("Fix docs", "fix-docs")
+        );
+        assert_eq!(clone_unavailable, None);
+
+        let missing_dir = tempfile::tempdir().expect("tempdir");
+        let missing = stand_in_gh_with_pull_request(
+            missing_dir.path(),
+            &[("github.com", "https")],
+            Err("no such pull request"),
+        );
+        let WorkerEvent::PullRequestReferenceResolved {
+            offer,
+            clone_unavailable,
+            ..
+        } = resolution_event("acme/widget#3", Vec::new(), &missing)
+        else {
+            panic!("wrong event");
+        };
+        assert!(offer.is_none());
+        assert!(
+            clone_unavailable
+                .as_deref()
+                .is_some_and(|sentence| sentence.starts_with("Failed to resolve PR #3")),
+            "the lookup's own sentence is carried: {clone_unavailable:?}"
+        );
+
+        let (_origin, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let WorkerEvent::PullRequestReferenceResolved {
+            offer,
+            clone_unavailable,
+            ..
+        } = resolution_event("acme/widget#3", vec![widget], &missing)
+        else {
+            panic!("wrong event");
+        };
+        assert!(
+            offer.is_none() && clone_unavailable.is_none(),
+            "a project has it, so nothing is looked up"
         );
     }
 }

@@ -90,11 +90,15 @@ impl DrainedEventMetadata {
                     raw_input,
                     repository,
                     result,
+                    offer,
+                    clone_unavailable,
                     status_op_id,
                 } => Some(PrReferenceResolutionAnswer {
                     raw_input: raw_input.clone(),
                     repository: repository.clone(),
                     result: result.clone(),
+                    offer: offer.clone(),
+                    clone_unavailable: clone_unavailable.clone(),
                     status_op_id: status_op_id.clone(),
                 }),
                 _ => None,
@@ -118,6 +122,7 @@ impl App {
         self.drain_notes_fetch();
         self.drain_unpushed_count();
         self.drain_rename_pushed_probe();
+        self.drain_pr_clone_folder_check();
         self.drain_branch_listing();
         self.drain_pending_diff();
         self.drain_changes_tree_work();
@@ -516,6 +521,8 @@ impl App {
                 answer.raw_input,
                 answer.repository,
                 answer.result,
+                answer.offer,
+                answer.clone_unavailable,
             ) {
                 self.set_error(format!("{error:#}"));
             }
@@ -600,6 +607,15 @@ impl App {
                     && let Some(key) = &key
                 {
                     self.engine.attachments.finish_key(key);
+                }
+                // A clone or add this surface started that stopped short of the
+                // agent for want of that agreement leaves its project behind. The
+                // name prompt for it opens with the question, and the sentence
+                // still goes on the status line below.
+                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask
+                    && let Some(key) = &key
+                {
+                    self.reopen_pull_request_after_clone(key, question);
                 }
                 // A refused create that asks for agreement to a review copy is
                 // answered in the name prompt, not on the status line, and the

@@ -282,6 +282,7 @@ enum PromptMouseTarget {
     CloneAgentNameInput,
     PullRequestInput,
     PullRequestChooseProject,
+    CloneChooseExisting,
     AttachPullRequestInput,
     NameStandaloneAgentInput,
     MacroNameInput,
@@ -304,6 +305,9 @@ impl ButtonPressedTarget {
         match target {
             PromptMouseTarget::PullRequestChooseProject => {
                 Some(ButtonPressedTarget::PullRequestChooseProject)
+            }
+            PromptMouseTarget::CloneChooseExisting => {
+                Some(ButtonPressedTarget::CloneChooseExisting)
             }
             PromptMouseTarget::RuntimeKillCancel => Some(ButtonPressedTarget::RuntimeKillCancel),
             PromptMouseTarget::RuntimeKillHovered => Some(ButtonPressedTarget::RuntimeKillHovered),
@@ -5636,18 +5640,37 @@ impl App {
         let PromptState::CloneProject { focus, .. } = &self.prompt else {
             return None;
         };
-        let checkbox_focused = *focus == CloneProjectFocus::RandomizedNameCheckbox;
+        let focus = *focus;
+        // Off a text field, Space and Enter act on what has focus.
+        let checkbox_focused = matches!(
+            focus,
+            CloneProjectFocus::RandomizedNameCheckbox
+                | CloneProjectFocus::ReviewCopyCheckbox
+                | CloneProjectFocus::ChooseExisting
+        );
         let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
         match modal_key_step(action, key, !checkbox_focused) {
-            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Close => {
+                self.prompt = PromptState::None;
+                self.pr_clone_check_rx = None;
+            }
+            ModalKeyStep::Confirm if focus == CloneProjectFocus::ChooseExisting => {
+                self.choose_existing_project_from_clone_form();
+            }
             ModalKeyStep::Confirm => self.confirm_clone_project(),
             ModalKeyStep::MoveFocus(forward) => self.focus_next_clone_project_control(forward),
-            ModalKeyStep::ActivateFocus if checkbox_focused => self.toggle_clone_randomized_name(),
-            ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::ActivateFocus => match focus {
+                CloneProjectFocus::RandomizedNameCheckbox => self.toggle_clone_randomized_name(),
+                CloneProjectFocus::ReviewCopyCheckbox => self.toggle_pr_clone_review_copy(),
+                CloneProjectFocus::ChooseExisting => self.choose_existing_project_from_clone_form(),
+                CloneProjectFocus::Address
+                | CloneProjectFocus::Destination
+                | CloneProjectFocus::AgentName => {}
+            },
             ModalKeyStep::FallThroughToField => {
                 self.edit_clone_field(|input| {
                     input.handle_key(key);
@@ -5669,12 +5692,14 @@ impl App {
             start_folder,
             agent_name,
             focus,
+            pull_request,
             ..
         } = &mut self.prompt
         else {
             return;
         };
         match *focus {
+            CloneProjectFocus::Address if pull_request.is_some() => {}
             CloneProjectFocus::Address => {
                 let before = address.text.clone();
                 edit(address);
@@ -5692,23 +5717,45 @@ impl App {
                     *destination_edited = true;
                 }
             }
-            CloneProjectFocus::AgentName => edit(agent_name),
-            CloneProjectFocus::RandomizedNameCheckbox => {}
+            CloneProjectFocus::AgentName => {
+                edit(agent_name);
+                // The question belongs to the pull request's own branch name:
+                // a name typed away from it, and back, asks again.
+                if let Some(form) = pull_request
+                    && agent_name.text.trim() != form.head_branch()
+                {
+                    form.review_copy_agreed = false;
+                }
+            }
+            CloneProjectFocus::RandomizedNameCheckbox
+            | CloneProjectFocus::ReviewCopyCheckbox
+            | CloneProjectFocus::ChooseExisting => {}
         }
     }
 
     fn focus_next_clone_project_control(&mut self, forward: bool) {
-        if let PromptState::CloneProject { focus, .. } = &mut self.prompt {
-            *focus = next_focus(
-                &[
-                    (CloneProjectFocus::Address, true),
-                    (CloneProjectFocus::Destination, true),
-                    (CloneProjectFocus::AgentName, true),
-                    (CloneProjectFocus::RandomizedNameCheckbox, true),
-                ],
-                *focus,
-                forward,
-            );
+        if let PromptState::CloneProject {
+            focus,
+            agent_name,
+            pull_request,
+            ..
+        } = &mut self.prompt
+        {
+            // The pull-request form has no address stop and no random-name box;
+            // the stops it adds are present only while they mean something.
+            *focus = match pull_request {
+                Some(form) => next_focus(&form.focus_ring(&agent_name.text), *focus, forward),
+                None => next_focus(
+                    &[
+                        (CloneProjectFocus::Address, true),
+                        (CloneProjectFocus::Destination, true),
+                        (CloneProjectFocus::AgentName, true),
+                        (CloneProjectFocus::RandomizedNameCheckbox, true),
+                    ],
+                    *focus,
+                    forward,
+                ),
+            };
         }
     }
 
@@ -5758,10 +5805,15 @@ impl App {
         } = &mut self.prompt
         {
             let (input, area) = match field {
-                CloneProjectFocus::Address => (address_input, address),
+                CloneProjectFocus::Address => match address {
+                    Some(area) => (address_input, area),
+                    None => return,
+                },
                 CloneProjectFocus::Destination => (destination_input, destination),
                 CloneProjectFocus::AgentName => (agent_name_input, agent_name),
-                CloneProjectFocus::RandomizedNameCheckbox => return,
+                CloneProjectFocus::RandomizedNameCheckbox
+                | CloneProjectFocus::ReviewCopyCheckbox
+                | CloneProjectFocus::ChooseExisting => return,
             };
             // The single-line renderer pads by one leading space.
             input.cursor =
@@ -7316,16 +7368,25 @@ impl App {
                 destination,
                 agent_name,
                 checkbox,
-            } => Self::checkbox_before_buttons_target(
-                Some(checkbox),
-                &[
-                    (address, PromptMouseTarget::CloneAddressInput),
-                    (destination, PromptMouseTarget::CloneDestinationInput),
-                    (agent_name, PromptMouseTarget::CloneAgentNameInput),
-                ],
-                column,
-                row,
-            ),
+                review_copy_checkbox,
+                choose_existing,
+            } => {
+                for checkbox in [checkbox, review_copy_checkbox].into_iter().flatten() {
+                    if contains_point(checkbox.rect, column, row) {
+                        return Some(PromptMouseTarget::Checkbox(checkbox.id));
+                    }
+                }
+                let mut targets = Vec::new();
+                if let Some(address) = address {
+                    targets.push((address, PromptMouseTarget::CloneAddressInput));
+                }
+                targets.push((destination, PromptMouseTarget::CloneDestinationInput));
+                targets.push((agent_name, PromptMouseTarget::CloneAgentNameInput));
+                if let Some(button) = choose_existing {
+                    targets.push((button, PromptMouseTarget::CloneChooseExisting));
+                }
+                click_target(&targets, column, row)
+            }
         }
     }
 
@@ -9444,6 +9505,9 @@ impl App {
             OverlayCheckboxId::CloneProjectRandomizedPetName => {
                 self.toggle_clone_randomized_name();
             }
+            OverlayCheckboxId::CloneProjectReviewCopy => {
+                self.toggle_pr_clone_review_copy();
+            }
             OverlayCheckboxId::ConfigReloadRecoverOldConfig => {
                 if let PromptState::ConfigReloadFailed {
                     recover_old_config,
@@ -10016,6 +10080,7 @@ impl App {
             | PromptMouseTarget::MacroSave
             | PromptMouseTarget::ConfigureFieldCancel
             | PromptMouseTarget::ConfigureFieldSave
+            | PromptMouseTarget::CloneChooseExisting
             | PromptMouseTarget::ConfirmQuitCancel
             | PromptMouseTarget::ConfirmQuitConfirm
             | PromptMouseTarget::ConfirmDiscardCancel
@@ -10067,6 +10132,10 @@ impl App {
                 if let Err(e) = self.open_pull_request_project_picker() {
                     self.set_error(format!("{e:#}"));
                 }
+                false
+            }
+            ButtonPressedTarget::CloneChooseExisting => {
+                self.choose_existing_project_from_clone_form();
                 false
             }
             ButtonPressedTarget::RuntimeKillCancel => {
@@ -29863,6 +29932,70 @@ cyan = "#00ffff"
         }
     }
 
+    fn pr_offer(
+        head_branch: &str,
+        review_copy: dux_core::status_text::ReviewCopyOutlook,
+    ) -> dux_core::pr_reference::PullRequestCloneFacts {
+        dux_core::pr_reference::PullRequestCloneFacts {
+            address: "https://github.com/acme/widget.git".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "acme/widget".to_string(),
+            number: 3,
+            title: "Fix the docs".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: head_branch.to_string(),
+            head_oid: None,
+            review_copy,
+        }
+    }
+
+    const PR_REFERENCE: &str = "https://github.com/acme/widget/pull/3";
+
+    /// Resolve `PR_REFERENCE` to no project and the given offer, then let the
+    /// folder check the form starts on open land.
+    fn open_pr_clone_form(app: &mut App, offer: dux_core::pr_reference::PullRequestCloneFacts) {
+        app.apply_pull_request_reference_resolution(
+            PR_REFERENCE.to_string(),
+            "github.com/acme/widget".to_string(),
+            Ok(resolved(Vec::new())),
+            Some(offer),
+            None,
+        )
+        .expect("resolve");
+        settle_pr_clone_check(app);
+    }
+
+    fn settle_pr_clone_check(app: &mut App) {
+        drain_until(app, |app| app.pr_clone_check_rx.is_none());
+        assert!(
+            app.pr_clone_check_rx.is_none(),
+            "the folder check never answered"
+        );
+    }
+
+    fn pr_form(app: &App) -> &crate::app::PullRequestClone {
+        match &app.prompt {
+            PromptState::CloneProject {
+                pull_request: Some(form),
+                ..
+            } => form,
+            other => panic!("expected the pull request form, got {other:?}"),
+        }
+    }
+
+    fn needed_outlook() -> dux_core::status_text::ReviewCopyOutlook {
+        dux_core::status_text::ReviewCopyOutlook::Needed {
+            reason: "busy".to_string(),
+            branch: "fix-docs".to_string(),
+            copy_branch: "fix-docs-review".to_string(),
+            warning: dux_core::prose::Prose::new()
+                .text("Branch ")
+                .quoted("fix-docs")
+                .text(" will be checked out in the project folder.")
+                .into_segments(),
+        }
+    }
+
     fn app_with_start_folder(folder: &std::path::Path) -> App {
         let mut app = test_app(default_bindings());
         app.engine.config.defaults.start_directory = Some(folder.display().to_string());
@@ -29970,6 +30103,47 @@ cyan = "#00ffff"
         tap(&mut app, KeyCode::Tab);
         type_text(&mut app, "a b");
         assert_eq!(clone_prompt_fields(&app).0, "a b");
+
+        // The pull request's form has no address stop and no random-name box;
+        // the review copy box is a stop only while it is shown, and the way to
+        // an existing project only while a project exists.
+        tap(&mut app, KeyCode::Esc);
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            tap(&mut app, KeyCode::Tab);
+            seen.push(clone_prompt_fields(&app).3);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                CloneProjectFocus::AgentName,
+                CloneProjectFocus::ChooseExisting,
+                CloneProjectFocus::Destination,
+            ]
+        );
+        tap(&mut app, KeyCode::Esc);
+        app.engine.projects.clear();
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Tab);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::Destination,
+            "with no project there is nothing to choose"
+        );
     }
 
     #[test]
@@ -30107,6 +30281,362 @@ cyan = "#00ffff"
         assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
         app.execute_command("clone-project".to_string()).unwrap();
         assert_eq!(typed(&app).0, "");
+
+        // The same form for a pull request no project has the repository of.
+        // Enter asks a worker what the folder holds, and an unchanged answer
+        // goes ahead as a request naming the pull request and carrying no
+        // address. GitHub integration is off in this fixture, so the engine
+        // refuses it at once, which keeps the form for a correction.
+        tap(&mut app, KeyCode::Esc);
+        let offer = pr_offer(
+            "fix-docs",
+            dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+        );
+        open_pr_clone_form(&mut app, offer.clone());
+        let (address, destination, name, focus) = clone_prompt_fields(&app);
+        assert_eq!(address, "https://github.com/acme/widget.git");
+        assert_eq!(destination, format!("{}/widget", start.path().display()));
+        assert_eq!(name, "fix-docs");
+        assert_eq!(focus, CloneProjectFocus::Destination);
+        tap(&mut app, KeyCode::Enter);
+        settle_pr_clone_check(&mut app);
+        assert!(matches!(app.prompt, PromptState::CloneProject { .. }));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        let Some(dux_core::engine::Command::CloneProject {
+            url,
+            path,
+            agent_name,
+            random_name,
+            pull_request,
+            add_existing,
+            review_copy,
+        }) = app.pull_request_clone_command()
+        else {
+            panic!("the form builds a clone request");
+        };
+        assert_eq!(url, "", "the server builds the address, never the client");
+        assert_eq!(path, destination);
+        assert_eq!(agent_name.as_deref(), Some("fix-docs"));
+        assert!(!random_name && !add_existing);
+        assert_eq!(
+            pull_request,
+            Some(dux_core::pr_reference::PullRequestCloneTarget {
+                host: "github.com".to_string(),
+                owner_repo: "acme/widget".to_string(),
+                number: 3,
+            })
+        );
+        assert_eq!(
+            review_copy,
+            dux_core::clone_project::UpfrontReviewCopy::default()
+        );
+
+        // A press whose check finds a checkout switches the form to the add
+        // and waits for another press, so the user agrees to what will run.
+        let held = crate::app::PrFolder::Checkout {
+            path: destination.clone(),
+        };
+        let answer = |result| crate::app::PrCloneFolderAnswer {
+            destination: destination.clone(),
+            purpose: crate::app::pr_clone::PrFolderCheck::Submit,
+            result,
+        };
+        app.apply_pr_clone_folder_answer(answer(Ok((
+            held.clone(),
+            Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+        ))));
+        assert_eq!(pr_form(&app).folder, held);
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Info,
+            "the switch is said, and nothing was sent"
+        );
+        assert!(app.status.text().contains("adds it as a project"));
+        assert!(matches!(
+            app.pull_request_clone_command(),
+            Some(dux_core::engine::Command::CloneProject {
+                add_existing: true,
+                ..
+            })
+        ));
+        // The same answer again is what the press agreed to: it goes ahead.
+        app.apply_pr_clone_folder_answer(answer(Ok((
+            held,
+            Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+        ))));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        // A check that refuses the folder says why in the form and sends nothing.
+        app.apply_pr_clone_folder_answer(answer(Err("That folder is taken.".to_string())));
+        assert_eq!(
+            pr_form(&app).error.as_deref(),
+            Some("That folder is taken.")
+        );
+
+        // A refused attempt hands the form back for the same pull request only.
+        tap(&mut app, KeyCode::Esc);
+        app.clone_draft = Some(crate::app::CloneDraft {
+            op_id: "op".to_string(),
+            restorable: true,
+            address: offer.address.clone(),
+            destination: "/srv/mine/widget".to_string(),
+            destination_edited: true,
+            start_folder: start.path().to_path_buf(),
+            agent_name: "mine".to_string(),
+            randomize_name: false,
+            randomized_name: None,
+            pull_request: Some(offer.clone()),
+        });
+        app.execute_command("clone-project".to_string()).unwrap();
+        assert_eq!(
+            clone_prompt_fields(&app).0,
+            "",
+            "the plain form never takes a pull request's draft"
+        );
+        tap(&mut app, KeyCode::Esc);
+        let mut other = offer.clone();
+        other.number = 4;
+        open_pr_clone_form(&mut app, other);
+        let (_, destination, name, _) = clone_prompt_fields(&app);
+        assert_eq!(destination, format!("{}/widget", start.path().display()));
+        assert_eq!(name, "fix-docs", "another pull request opens fresh");
+        tap(&mut app, KeyCode::Esc);
+        open_pr_clone_form(&mut app, offer);
+        let (_, destination, name, _) = clone_prompt_fields(&app);
+        assert_eq!(
+            (destination.as_str(), name.as_str()),
+            ("/srv/mine/widget", "mine")
+        );
+    }
+
+    #[test]
+    fn a_review_copy_the_offer_says_is_needed_blocks_the_button_until_it_is_ticked() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(&mut app, pr_offer("fix-docs", needed_outlook()));
+
+        // The warning and an unticked box are on screen while the name is the
+        // pull request's branch.
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 50)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Create a review copy"), "the box is shown");
+        assert!(screen.contains("will be checked out in the project folder"));
+        let OverlayMouseLayout::CloneProject {
+            review_copy_checkbox: Some(box_),
+            ..
+        } = app.overlay_layout.active
+        else {
+            panic!("the box publishes a click target");
+        };
+
+        // Enter is refused and nothing is asked of the folder.
+        tap(&mut app, KeyCode::Enter);
+        assert!(
+            app.pr_clone_check_rx.is_none(),
+            "no check, so nothing is sent"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ReviewCopyCheckbox
+        );
+
+        // Ticking it, by a click, makes the request carry exactly what was shown.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            box_.rect.x,
+            box_.rect.y,
+        ));
+        assert!(pr_form(&app).review_copy_agreed);
+        let Some(dux_core::engine::Command::CloneProject { review_copy, .. }) =
+            app.pull_request_clone_command()
+        else {
+            panic!("the form builds a clone request");
+        };
+        assert_eq!(
+            review_copy,
+            dux_core::clone_project::UpfrontReviewCopy {
+                agreed: true,
+                reason: Some("busy".to_string()),
+                branch: Some("fix-docs-review".to_string()),
+                by_flag: false,
+            }
+        );
+        tap(&mut app, KeyCode::Enter);
+        assert!(app.pr_clone_check_rx.is_some(), "now the folder is checked");
+        settle_pr_clone_check(&mut app);
+
+        // A name typed away from the branch hides the question and the
+        // agreement; typing the branch back asks again, unticked.
+        tap(&mut app, KeyCode::BackTab);
+        type_text(&mut app, "x");
+        assert!(matches!(
+            pr_form(&app).question_for(&clone_prompt_fields(&app).2),
+            crate::app::PrReviewQuestion::None
+        ));
+        let Some(dux_core::engine::Command::CloneProject { review_copy, .. }) =
+            app.pull_request_clone_command()
+        else {
+            panic!("the form builds a clone request");
+        };
+        assert!(!review_copy.agreed, "a hidden question is not agreed to");
+        tap(&mut app, KeyCode::Backspace);
+        assert!(matches!(
+            pr_form(&app).question_for(&clone_prompt_fields(&app).2),
+            crate::app::PrReviewQuestion::Needed(_)
+        ));
+        assert!(!pr_form(&app).review_copy_agreed);
+
+        // A folder check that finds the copy needed for another reason switches
+        // the question and unticks it.
+        tap(&mut app, KeyCode::Char(' '));
+        assert!(
+            !pr_form(&app).review_copy_agreed,
+            "Space types in the name field"
+        );
+        app.toggle_pr_clone_review_copy();
+        assert!(pr_form(&app).review_copy_agreed);
+        let destination = clone_prompt_fields(&app).1;
+        app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
+            destination: destination.clone(),
+            purpose: crate::app::pr_clone::PrFolderCheck::Open,
+            result: Ok((
+                crate::app::PrFolder::Checkout { path: destination },
+                Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
+            )),
+        });
+        assert!(!pr_form(&app).review_copy_agreed);
+    }
+
+    #[test]
+    fn a_pull_request_with_no_free_review_copy_name_blocks_the_button_until_another_name_is_typed()
+    {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NoFreeName {
+                    reason: "busy".to_string(),
+                    branch: "fix-docs".to_string(),
+                    message: dux_core::prose::Prose::new()
+                        .text("Every review name for ")
+                        .quoted("fix-docs")
+                        .text(" is taken.")
+                        .into_segments(),
+                },
+            ),
+        );
+        tap(&mut app, KeyCode::Enter);
+        assert!(app.pr_clone_check_rx.is_none(), "nothing is sent");
+        assert_eq!(
+            app.status.text(),
+            "Every review name for \"fix-docs\" is taken."
+        );
+
+        tap(&mut app, KeyCode::Tab);
+        type_text(&mut app, "-2");
+        tap(&mut app, KeyCode::Enter);
+        assert!(app.pr_clone_check_rx.is_some(), "another name goes ahead");
+    }
+
+    #[test]
+    fn a_clone_that_kept_its_project_for_want_of_a_review_copy_answer_reopens_the_name_prompt() {
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        let project = app.engine.projects[0].clone();
+        let offer = pr_offer(
+            "fix-docs",
+            dux_core::status_text::ReviewCopyOutlook::Unknown,
+        );
+        app.clone_draft = Some(crate::app::CloneDraft {
+            op_id: "clone-op".to_string(),
+            restorable: false,
+            address: offer.address.clone(),
+            destination: "/srv/widget".to_string(),
+            destination_edited: false,
+            start_folder: start.path().to_path_buf(),
+            agent_name: "fix-docs".to_string(),
+            randomize_name: false,
+            randomized_name: None,
+            pull_request: Some(offer.clone()),
+        });
+        let ask = dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
+            dux_core::status_text::ReviewCopyAsk {
+                warned: "busy:fix-docs-review".to_string(),
+                warning: dux_core::prose::Prose::new()
+                    .text("Branch ")
+                    .quoted("fix-docs")
+                    .text(" is in use.")
+                    .into_segments(),
+                request: None,
+                by_flag: false,
+                project_id: Some(project.id.clone()),
+                pull_request: Some(offer.target()),
+            },
+        ));
+        let mut update = dux_core::engine::StatusUpdate::keyed(
+            "clone-op",
+            crate::statusline::StatusTone::Error,
+            "Cloned and added project widget. Agent still needs your answer on a review copy.",
+        );
+        update.ask = Some(ask);
+        app.apply_reaction(dux_core::engine::EventReaction::Status(update));
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request:
+                    CreateAgentRequest::PullRequest {
+                        project: asked_project,
+                        number,
+                        head_branch,
+                        custom_name,
+                        ..
+                    },
+                review_copy: Some(question),
+                focus,
+                ..
+            } => {
+                assert_eq!(asked_project.id, project.id);
+                assert_eq!((*number, head_branch.as_str()), (3, "fix-docs"));
+                assert_eq!(custom_name.as_deref(), Some("fix-docs"));
+                assert_eq!(question.warned, "busy:fix-docs-review");
+                assert!(!question.agreed);
+                assert_eq!(*focus, NameNewAgentFocus::ReviewCopyCheckbox);
+            }
+            other => panic!("expected the name prompt with the question, got {other:?}"),
+        }
+        assert!(
+            app.status.text().starts_with("Cloned and added project"),
+            "the status line still carries the sentence"
+        );
+
+        // A question that is not this surface's clone is left to the status line.
+        app.prompt = PromptState::None;
+        let mut update = dux_core::engine::StatusUpdate::keyed(
+            "someone-elses-op",
+            crate::statusline::StatusTone::Error,
+            "Cloned elsewhere.",
+        );
+        update.ask = Some(dux_core::status_text::StatusAsk::ReviewCopy(Box::new(
+            dux_core::status_text::ReviewCopyAsk {
+                warned: "busy:x".to_string(),
+                warning: Vec::new(),
+                request: None,
+                by_flag: false,
+                project_id: Some(project.id),
+                pull_request: Some(offer.target()),
+            },
+        )));
+        app.apply_reaction(dux_core::engine::EventReaction::Status(update));
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     #[test]
@@ -30223,8 +30753,8 @@ cyan = "#00ffff"
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            checkbox.rect.x,
-            checkbox.rect.y,
+            checkbox.expect("the random-name box").rect.x,
+            checkbox.expect("the random-name box").rect.y,
         ));
         match &app.prompt {
             PromptState::CloneProject {
@@ -30237,6 +30767,40 @@ cyan = "#00ffff"
             }
             other => panic!("expected the clone form, got {other:?}"),
         }
+
+        // In the pull request's form the address is read-only: it publishes no
+        // field, so a click on it lands no caret and moves no focus.
+        tap(&mut app, KeyCode::Esc);
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render the pull request form");
+        let buf = terminal.backend().buffer().clone();
+        let OverlayMouseLayout::CloneProject {
+            address, checkbox, ..
+        } = app.overlay_layout.active
+        else {
+            panic!("expected the clone form's layout");
+        };
+        assert!(address.is_none() && checkbox.is_none());
+        let chip_row = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width).any(|x| buf[(x, y)].symbol() == "g")
+                    && (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                        .contains("https://github.com/acme/widget.git")
+            })
+            .expect("the address is on screen");
+        let before = clone_prompt_fields(&app);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, chip_row));
+        assert_eq!(clone_prompt_fields(&app), before);
     }
 
     #[test]
@@ -37054,6 +37618,8 @@ cyan = "#00ffff"
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
             Ok(resolved(vec![project.clone()])),
+            None,
+            None,
         )
         .expect("resolve");
         assert!(
@@ -37077,6 +37643,8 @@ cyan = "#00ffff"
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
             Err("worker panicked: boom".to_string()),
+            None,
+            None,
         )
         .expect("resolve");
 
@@ -37105,6 +37673,8 @@ cyan = "#00ffff"
                     reason: dux_core::pr_reference::Uninspectable::HostNotAllowed,
                 }],
             }),
+            None,
+            None,
         )
         .expect("resolve");
 
@@ -37137,6 +37707,8 @@ cyan = "#00ffff"
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
             Ok(resolved(vec![first.clone(), second.clone()])),
+            None,
+            None,
         )
         .expect("resolve");
 
@@ -37158,24 +37730,22 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn no_matching_project_says_which_repository_and_never_offers_to_clone() {
+    fn no_matching_project_offers_the_clone_and_keeps_the_picker_for_when_it_cannot() {
+        // No offer is possible (no number, a host dux may not ask): the
+        // message names the repository and the picker opens.
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
             "github.com/acme/unknown".to_string(),
             Ok(resolved(Vec::new())),
+            None,
+            None,
         )
         .expect("resolve");
-
-        let status = app.status.text();
-        assert!(
-            status.contains("github.com/acme/unknown"),
-            "the message must name the repository: {status}"
-        );
-        let lowered = status.to_ascii_lowercase();
-        assert!(
-            !lowered.contains("clone") && !lowered.contains("download"),
-            "dux does not clone, and the wording must not imply it might: {status}"
+        assert_eq!(
+            app.status.text(),
+            "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
+             already has it, or add one from a directory on disk."
         );
         assert!(
             matches!(
@@ -37188,6 +37758,88 @@ cyan = "#00ffff"
             "the picker is offered so the user can point at a checkout they have, got {:?}",
             app.prompt
         );
+
+        // An offer was possible but the lookup failed: the same message with
+        // the lookup's own sentence, and the picker.
+        let mut app = test_app(default_bindings());
+        app.apply_pull_request_reference_resolution(
+            "https://github.com/acme/unknown/pull/3".to_string(),
+            "github.com/acme/unknown".to_string(),
+            Ok(resolved(Vec::new())),
+            None,
+            Some("Failed to resolve PR #3 from acme/unknown: not found".to_string()),
+        )
+        .expect("resolve");
+        assert_eq!(
+            app.status.text(),
+            "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
+             already has it, or add one from a directory on disk. dux could not look the pull \
+             request up to offer a clone: Failed to resolve PR #3 from acme/unknown: not found"
+        );
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickProject {
+                intent: ProjectChooserIntent::FromPrReference,
+                ..
+            }
+        ));
+
+        // An offer: the form opens in place of the message and the picker,
+        // with projects and with none.
+        let start = tempdir().expect("start folder");
+        let mut app = app_with_start_folder(start.path());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        let form = pr_form(&app);
+        assert_eq!(
+            form.body().plain(),
+            "github.com/acme/widget isn't a dux project yet. dux will clone it, add it as a \
+             project, and create the agent from pull request #3."
+        );
+        assert!(form.has_projects);
+
+        let mut app = app_with_start_folder(start.path());
+        app.engine.projects.clear();
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        assert!(!pr_form(&app).has_projects);
+
+        // Some projects could not be checked: the incomplete wording.
+        let mut app = app_with_start_folder(start.path());
+        app.apply_pull_request_reference_resolution(
+            PR_REFERENCE.to_string(),
+            "github.com/acme/widget".to_string(),
+            Ok(dux_core::pr_reference::ReferenceResolution {
+                matches: Vec::new(),
+                uninspected: vec![dux_core::pr_reference::UninspectedProject {
+                    name: "stale".to_string(),
+                    reason: dux_core::pr_reference::Uninspectable::AddressUnreadable,
+                }],
+            }),
+            Some(pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            )),
+            None,
+        )
+        .expect("resolve");
+        assert_eq!(
+            pr_form(&app).body().plain(),
+            "dux could not find a checked project for github.com/acme/widget. dux could not \
+             check every project (1 has an address dux could not read), so one of them may \
+             already be a checkout of it. dux will clone it, add it as a project, and create \
+             the agent from pull request #3."
+        );
     }
 
     #[test]
@@ -37198,6 +37850,8 @@ cyan = "#00ffff"
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
             Ok(resolved(Vec::new())),
+            None,
+            None,
         )
         .expect("resolve");
         assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
@@ -37213,6 +37867,38 @@ cyan = "#00ffff"
         assert_eq!(
             app.dispatched_pr_lookups,
             vec![(project.id.clone(), "acme/widget#7".to_string())]
+        );
+
+        // From the clone offer's form the picker is one stop away and keeps the
+        // reference the user typed.
+        let start = tempdir().expect("start folder");
+        app.engine.config.defaults.start_directory = Some(start.path().display().to_string());
+        open_pr_clone_form(
+            &mut app,
+            pr_offer(
+                "fix-docs",
+                dux_core::status_text::ReviewCopyOutlook::NotNeeded,
+            ),
+        );
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Tab);
+        assert_eq!(
+            clone_prompt_fields(&app).3,
+            CloneProjectFocus::ChooseExisting
+        );
+        tap(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickProject {
+                intent: ProjectChooserIntent::FromPrReference,
+                ..
+            }
+        ));
+        assert_eq!(app.pending_pr_reference.as_deref(), Some(PR_REFERENCE));
+        app.confirm_project_chooser_selection().expect("pick");
+        assert_eq!(
+            app.dispatched_pr_lookups.last(),
+            Some(&(project.id.clone(), PR_REFERENCE.to_string()))
         );
     }
 
@@ -37285,6 +37971,8 @@ cyan = "#00ffff"
                 raw_input: "acme/widget#1".to_string(),
                 repository: "acme/widget".to_string(),
                 result: Ok(resolved(vec![project])),
+                offer: None,
+                clone_unavailable: None,
                 status_op_id: Some(stale_op),
             })
             .expect("queue the late reply");
@@ -37325,6 +38013,8 @@ cyan = "#00ffff"
                 raw_input: "acme/widget#1".to_string(),
                 repository: "acme/widget".to_string(),
                 result: Ok(resolved(vec![project.clone()])),
+                offer: None,
+                clone_unavailable: None,
                 status_op_id: Some("generation-1".to_string()),
             })
             .expect("queue the reply");
@@ -37352,6 +38042,8 @@ cyan = "#00ffff"
                 raw_input: "acme/widget#1".to_string(),
                 repository: "acme/widget".to_string(),
                 result: Ok(resolved(vec![project])),
+                offer: None,
+                clone_unavailable: None,
                 status_op_id: None,
             })
             .expect("queue the reply");
