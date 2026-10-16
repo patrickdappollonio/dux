@@ -141,15 +141,29 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
     git(&origin, &["init", "-q", "-b", "main"]);
     git(&origin, &["commit", "-q", "--allow-empty", "-m", "first"]);
     git(&origin, &["update-ref", "refs/pull/42/head", "HEAD"]);
+    // A second repository, which no project has, with its own pull request.
+    let other = root.join("other-origin");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(&other, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(&other, &["update-ref", "refs/pull/5/head", "HEAD"]);
     executable(
         &bin.join("ssh"),
-        &format!("#!/bin/sh\nexec git upload-pack '{}'\n", origin.display()),
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *octo/other*) exec git upload-pack '{}' ;;\n  \
+             *) exec git upload-pack '{}' ;;\nesac\n",
+            other.display(),
+            origin.display()
+        ),
     );
     executable(
         &bin.join("gh"),
         "#!/bin/sh\ncase \"$*\" in\n  \
          'auth status --active --json hosts') printf '%s' \
-         '{\"hosts\":{\"github.com\":[{\"state\":\"success\",\"active\":true,\"host\":\"github.com\"}]}}' ;;\n  \
+         '{\"hosts\":{\"github.com\":[{\"state\":\"success\",\"active\":true,\"host\":\"github.com\",\"gitProtocol\":\"ssh\"}]}}' ;;\n  \
+         'pr view 5 '*) printf '%s' \
+         '{\"number\":5,\"title\":\"Other\",\"state\":\"OPEN\",\"headRefName\":\"feature/other-5\"}' ;;\n  \
+         'repo view '*) printf '%s' '{\"defaultBranchRef\":{\"name\":\"main\"}}' ;;\n  \
          'pr view 42 '*) printf '%s' \
          '{\"number\":42,\"title\":\"Fix it\",\"state\":\"OPEN\",\"headRefName\":\"feature/pr-42\"}' ;;\n  \
          *) exit 1 ;;\nesac\n",
@@ -363,6 +377,96 @@ fn projects_agents_tabs_worktrees_and_terminals_through_a_running_dux() {
         run.stdout().contains("branch: feature/pr-42"),
         "{}",
         run.stdout()
+    );
+
+    // A pull request of a repository no project has: refused before anything
+    // is sent when it is a bare number, and without a terminal or --yes
+    // nothing is cloned.
+    let other_pr = "https://github.com/octo/other/pull/5";
+    let run = dux(&root, &["agents", "add", "--from-pr", "42", "--yes"], "");
+    assert_ne!(run.code(), 0);
+    assert!(run.stderr().contains("--project"), "{}", run.stderr());
+    let run = dux(&root, &["agents", "add", "--from-pr", other_pr], "");
+    assert_ne!(run.code(), 0);
+    assert!(
+        run.stderr().contains("There is no terminal to ask on"),
+        "{}",
+        run.stderr()
+    );
+    let start = get(port, "/api/v1/browse")["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cloned = Path::new(&start).join("other");
+    assert!(!cloned.exists());
+
+    // With --yes it is cloned into the start folder, added as a project, and
+    // the agent is on the pull request's branch.
+    let run = ok(dux(
+        &root,
+        &["agents", "add", "--from-pr", other_pr, "--yes"],
+        "",
+    ));
+    let from_other = last_line(&run);
+    assert!(cloned.join(".git").exists());
+    let run = ok(dux(&root, &["agents", "show", &from_other], ""));
+    assert!(
+        run.stdout().contains("branch: feature/other-5"),
+        "{}",
+        run.stdout()
+    );
+
+    // The repository now has a project, so --path has nothing to do.
+    let run = dux(
+        &root,
+        &[
+            "agents",
+            "add",
+            "--from-pr",
+            other_pr,
+            "--path",
+            "/nowhere",
+            "--yes",
+        ],
+        "",
+    );
+    assert_ne!(run.code(), 0);
+    assert!(
+        run.stderr().contains("nothing to clone or add"),
+        "{}",
+        run.stderr()
+    );
+
+    // Two projects on one repository are refused, naming both.
+    let twin = root.join("hello-twin");
+    std::fs::create_dir_all(&twin).unwrap();
+    git(&twin, &["init", "-q", "-b", "main"]);
+    git(&twin, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(
+        &twin,
+        &["remote", "add", "origin", "git@github.com:octo/hello.git"],
+    );
+    ok(dux(
+        &root,
+        &["projects", "add", twin.to_str().unwrap(), "--yes"],
+        "",
+    ));
+    let run = dux(
+        &root,
+        &[
+            "agents",
+            "add",
+            "--from-pr",
+            "https://github.com/octo/hello/pull/42",
+            "--yes",
+        ],
+        "",
+    );
+    assert_ne!(run.code(), 0);
+    assert!(
+        run.stderr().contains("hello") && run.stderr().contains("hello-twin"),
+        "{}",
+        run.stderr()
     );
 
     let _ = std::fs::remove_dir_all(&root);

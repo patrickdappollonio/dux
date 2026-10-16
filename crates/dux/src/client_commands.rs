@@ -473,6 +473,9 @@ fn change_on_dux(
         )
     })?;
     let planned = plan(&client, &cwd)?;
+    if let Some(notice) = &planned.notice {
+        eprintln!("{notice}");
+    }
     ask(&planned.question, client.target(), flags.yes, false)?;
     let wait = if flags.no_wait {
         None
@@ -590,6 +593,13 @@ fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
     }
     let project = args.project.clone().unwrap_or_default();
     if let Some(reference) = &args.from_pr {
+        if args.project.is_none() {
+            return workspace::NewAgent::PullRequestAnywhere {
+                reference: reference.clone(),
+                path: args.path.clone(),
+                review_copy: args.review_copy,
+            };
+        }
         return workspace::NewAgent::PullRequest {
             project,
             reference: reference.clone(),

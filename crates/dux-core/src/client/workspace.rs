@@ -20,6 +20,8 @@ use super::transport::Method;
 use super::wait::{self, OperationRecord, RecordState, segment};
 use super::{CliError, Exit};
 use crate::operations::CREATE_IN_FLIGHT_REFUSAL;
+use crate::prose::Prose;
+use crate::status_text::ReviewCopyOutlook;
 
 // ---------------------------------------------------------------------------
 // What the API answers
@@ -596,6 +598,9 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
 pub struct Planned {
     /// The question asked before it goes ahead, naming what it changes.
     pub question: String,
+    /// A sentence printed before the question, for what the answer is agreeing
+    /// to beyond what the question says.
+    pub notice: Option<String>,
     method: Method,
     path: String,
     body: Option<Value>,
@@ -605,6 +610,7 @@ impl Planned {
     fn new(question: String, method: Method, path: String, body: Option<Value>) -> Self {
         Self {
             question,
+            notice: None,
             method,
             path,
             body,
@@ -786,6 +792,14 @@ pub enum NewAgent {
         reference: String,
         review_copy: bool,
     },
+    /// From a pull request named by its address or `owner/repo#123`, in
+    /// whichever project has its repository, or in a new one cloned (or added
+    /// from the existing checkout at `path`) when none does.
+    PullRequestAnywhere {
+        reference: String,
+        path: Option<String>,
+        review_copy: bool,
+    },
     /// From a worktree a project already has.
     Worktree { project: String, path: String },
     /// A copy of another agent's worktree.
@@ -839,18 +853,22 @@ pub fn agents_add(
             review_copy,
         } => {
             let (id, project) = project_id(&project)?;
-            (
-                format!("Create {called} from pull request {reference} in project {project}"),
-                json!({
-                    "kind": "from_pr",
-                    "project_id": id,
-                    "pr": reference,
-                    "name": name,
-                    "review_copy": review_copy,
-                    // This client agrees with a flag, so a refusal names it.
-                    "review_copy_by_flag": true,
-                }),
-            )
+            pull_request_in_project(&id, &project, &called, &reference, name, review_copy)
+        }
+        NewAgent::PullRequestAnywhere {
+            reference,
+            path,
+            review_copy,
+        } => {
+            return pull_request_anywhere(
+                client,
+                &reference,
+                path.as_deref(),
+                review_copy,
+                name,
+                &called,
+                cwd,
+            );
         }
         NewAgent::Worktree { project, path } => {
             let (id, project) = project_id(&project)?;
@@ -891,6 +909,292 @@ pub fn agents_add(
         "/api/v1/sessions".to_string(),
         Some(body),
     ))
+}
+
+/// The question and request for an agent from a pull request of a project
+/// dux already has.
+fn pull_request_in_project(
+    id: &str,
+    project: &str,
+    called: &str,
+    reference: &str,
+    name: &str,
+    review_copy: bool,
+) -> (String, Value) {
+    (
+        format!("Create {called} from pull request {reference} in project {project}"),
+        json!({
+            "kind": "from_pr",
+            "project_id": id,
+            "pr": reference,
+            "name": name,
+            "review_copy": review_copy,
+            // This client agrees with a flag, so a refusal names it.
+            "review_copy_by_flag": true,
+        }),
+    )
+}
+
+/// A pull request number on its own, which names no repository.
+fn is_bare_number(reference: &str) -> bool {
+    let digits = reference.trim().trim_start_matches('#');
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+#[derive(Deserialize)]
+struct ResolvedReference {
+    repository: Option<String>,
+    #[serde(default)]
+    projects: Vec<ResolvedProject>,
+    #[serde(default)]
+    uninspected_summary: Option<String>,
+    #[serde(default)]
+    clone: Option<CloneOffer>,
+    #[serde(default)]
+    clone_unavailable: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResolvedProject {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct CloneOffer {
+    address: String,
+    host: String,
+    owner_repo: String,
+    number: u64,
+    head_branch: String,
+    #[serde(default)]
+    head_oid: Option<String>,
+    review_copy: ReviewCopyOutlook,
+}
+
+#[derive(Deserialize)]
+struct FolderCheck {
+    state: String,
+    path: String,
+    #[serde(default)]
+    review_copy: Option<ReviewCopyOutlook>,
+}
+
+/// POST `body` to `path` and read the 200 answer. A 400 is the command's
+/// refusal with the server's sentence; anything else is the usual error.
+fn post_for_answer<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    path: &str,
+    body: &Value,
+) -> Result<T, CliError> {
+    let reply = client.send(super::transport::Request {
+        method: Method::Post,
+        path: path.to_string(),
+        body: Some(body.to_string().into_bytes()),
+        bearer: None,
+        timeout: None,
+    })?;
+    match reply.status {
+        200 => client.parse(&reply),
+        400 => Err(CliError::new(
+            Exit::Refused,
+            super::connect::reply_sentence(&reply),
+        )),
+        _ => Err(client.refusal(&reply)),
+    }
+}
+
+/// `dux agents add --from-pr <reference>` with no project: the project that
+/// has the repository, or the clone (or the add of an existing checkout) that
+/// makes one.
+fn pull_request_anywhere(
+    client: &Client,
+    reference: &str,
+    path: Option<&str>,
+    review_copy: bool,
+    name: &str,
+    called: &str,
+    cwd: &Path,
+) -> Result<Planned, CliError> {
+    if is_bare_number(reference) {
+        return Err(CliError::new(
+            Exit::Refused,
+            "A pull request number on its own does not say which repository it is in. Pass a \
+             link or owner/repo#123, or add --project to choose one.",
+        ));
+    }
+    let resolved: ResolvedReference = post_for_answer(
+        client,
+        "/api/v1/pull-requests/resolve",
+        &json!({ "reference": reference }),
+    )?;
+    let repository = resolved
+        .repository
+        .clone()
+        .unwrap_or_else(|| reference.to_string());
+    match resolved.projects.as_slice() {
+        [project] => {
+            if let Some(path) = path {
+                return Err(CliError::new(
+                    Exit::Refused,
+                    format!(
+                        "{repository} is already a checkout in project {}, so there is nothing \
+                         to clone or add at {path}. Drop --path to create the agent in that \
+                         project.",
+                        project.name
+                    ),
+                ));
+            }
+            let (question, body) = pull_request_in_project(
+                &project.id,
+                &project.name,
+                called,
+                reference,
+                name,
+                review_copy,
+            );
+            return Ok(Planned::new(
+                question,
+                Method::Post,
+                "/api/v1/sessions".to_string(),
+                Some(body),
+            ));
+        }
+        [] => {}
+        several => {
+            let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
+            return Err(CliError::new(
+                Exit::Refused,
+                format!(
+                    "{repository} is checked out in more than one project ({}); add --project \
+                     to choose one.",
+                    names.join(", ")
+                ),
+            ));
+        }
+    }
+    let Some(offer) = resolved.clone else {
+        let mut sentence = match &resolved.uninspected_summary {
+            Some(summary) => format!(
+                "No project dux could check is a checkout of {repository}, and dux could not \
+                 check every project ({summary})."
+            ),
+            None => format!("No project in dux is a checkout of {repository}."),
+        };
+        if let Some(why) = &resolved.clone_unavailable {
+            sentence.push_str(&format!(
+                " dux could not look the pull request up to offer a clone: {why}"
+            ));
+        }
+        sentence.push_str(" add --project to choose one.");
+        return Err(CliError::new(Exit::Refused, sentence));
+    };
+
+    let folder = match path {
+        Some(path) => output::path_for_target(path, client.remote_name(), cwd)?,
+        None => {
+            #[derive(Deserialize)]
+            struct Browse {
+                path: String,
+            }
+            let start: Browse = client.get_json("/api/v1/browse")?;
+            let dir = crate::clone_project::clone_dir_name(&offer.address).unwrap_or_else(|| {
+                offer
+                    .owner_repo
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            });
+            format!("{}/{dir}", start.path.trim_end_matches('/'))
+        }
+    };
+    let mut check = json!({
+        "path": folder,
+        "host": offer.host,
+        "owner_repo": offer.owner_repo,
+        "number": offer.number,
+        "head_branch": offer.head_branch,
+    });
+    if let Some(oid) = &offer.head_oid {
+        check["head_oid"] = json!(oid);
+    }
+    let checked: FolderCheck =
+        post_for_answer(client, "/api/v1/pull-requests/clone-destination", &check)?;
+    let adding = checked.state == "checkout";
+
+    // A checkout's answer is worked out against that folder and replaces the
+    // offer's. Both only describe the agent when it takes the branch's name.
+    let outlook = if adding {
+        checked.review_copy.unwrap_or(ReviewCopyOutlook::Unknown)
+    } else {
+        offer.review_copy
+    };
+    let mut notice = None;
+    if name.is_empty() || name == offer.head_branch {
+        match outlook {
+            ReviewCopyOutlook::NoFreeName { message, .. } => {
+                return Err(CliError::new(
+                    Exit::Refused,
+                    Prose::from_segments(message).plain(),
+                ));
+            }
+            ReviewCopyOutlook::Needed { warning, .. } => {
+                let warning = Prose::from_segments(warning).plain();
+                if !review_copy {
+                    return Err(CliError::new(
+                        Exit::Refused,
+                        format!(
+                            "{warning}{} {}",
+                            crate::agent_job::review_copy_how(true),
+                            if adding {
+                                "Nothing was added."
+                            } else {
+                                "Nothing was cloned."
+                            }
+                        ),
+                    ));
+                }
+                notice = Some(warning);
+            }
+            ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => {}
+        }
+    }
+
+    let question = if adding {
+        format!(
+            "Add the folder {} as a project and create {called} from pull request {reference}",
+            checked.path
+        )
+    } else {
+        format!(
+            "Clone {} into {} and create {called} from pull request {reference}",
+            offer.address, checked.path
+        )
+    };
+    let mut body = json!({
+        "path": checked.path,
+        "pull_request": {
+            "host": offer.host,
+            "owner_repo": offer.owner_repo,
+            "number": offer.number,
+        },
+        "add_existing": adding,
+        "review_copy": review_copy,
+        // This client agrees with a flag, so a refusal names it.
+        "review_copy_by_flag": !review_copy,
+    });
+    if !name.is_empty() {
+        body["agent_name"] = json!(name);
+    }
+    let mut planned = Planned::new(
+        question,
+        Method::Post,
+        "/api/v1/projects".to_string(),
+        Some(body),
+    );
+    planned.notice = notice;
+    Ok(planned)
 }
 
 /// A create refused because the branch it would make already exists answers
@@ -1377,5 +1681,264 @@ mod create_wait_tests {
         assert_eq!(error.exit, Exit::Refused);
         assert!(started.elapsed() < Duration::from_millis(1400));
         assert!(posts(&fake) <= 3, "{} creates", posts(&fake));
+    }
+}
+
+#[cfg(test)]
+mod pull_request_anywhere_tests {
+    use super::*;
+    use crate::client::connect::{Target, connect};
+    use crate::client::test_server::{FakeDux, Reply, private_dir};
+
+    const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
+    const NEEDED: &str = r#"{"state":"needed","reason":"busy","branch":"fix","copy_branch":"fix-review","warning":["Branch ",{"name":"fix","quoted":true}," is busy, so the agent would work on a review copy."]}"#;
+    const NO_NAME: &str = r#"{"state":"no_free_name","reason":"busy","branch":"fix","message":["Every review name is taken. Type another name for the agent from PR #5."]}"#;
+    const NOT_NEEDED: &str = r#"{"state":"not_needed"}"#;
+    const FREE_FOLDER: &str = r#"{"state":"free","path":"/srv/src/other"}"#;
+    const CHECKOUT_NEEDED: &str = r#"{"state":"checkout","path":"/work/other","review_copy":{"state":"needed","reason":"diverged","branch":"fix","copy_branch":"fix-review","warning":["Folder copy needed."]}}"#;
+    const CHECKOUT_PLAIN: &str = r#"{"state":"checkout","path":"/work/other"}"#;
+
+    fn resolve_reply(projects: &str, clone: Option<&str>, unavailable: Option<&str>) -> String {
+        let clone = clone
+            .map(|review| {
+                format!(
+                    r#","clone":{{"address":"git@github.com:octo/other.git","host":"github.com","owner_repo":"octo/other","number":5,"title":"T","state":"OPEN","head_branch":"fix","head_oid":"abc","review_copy":{review}}}"#
+                )
+            })
+            .unwrap_or_default();
+        let unavailable = unavailable
+            .map(|why| format!(r#","clone_unavailable":"{why}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"repository":"github.com/octo/other","number":5,"projects":{projects},"uninspected_count":0,"uninspected_summary":null{clone}{unavailable}}}"#
+        )
+    }
+
+    /// A dux whose resolve answers `resolve`, whose folder check answers
+    /// `folder`, and whose start folder is /srv/src.
+    fn dux(resolve: String, folder: &'static str) -> Running {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/pull-requests/resolve" => Reply::json(200, &resolve),
+            "/api/v1/pull-requests/clone-destination" => Reply::json(200, folder),
+            "/api/v1/browse" => Reply::json(200, r#"{"path":"/srv/src","entries":[]}"#),
+            _ => Reply::json(404, "{}"),
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        Running {
+            fake,
+            client,
+            _lock: lock,
+            _dir: dir,
+        }
+    }
+
+    struct Running {
+        fake: FakeDux,
+        client: Client,
+        _lock: crate::lockfile::SingleInstanceLock,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Running {
+        fn plan(
+            &self,
+            path: Option<&str>,
+            review_copy: bool,
+            name: Option<&str>,
+        ) -> Result<Planned, CliError> {
+            self.plan_for("octo/other#5", path, review_copy, name)
+        }
+
+        fn plan_for(
+            &self,
+            reference: &str,
+            path: Option<&str>,
+            review_copy: bool,
+            name: Option<&str>,
+        ) -> Result<Planned, CliError> {
+            agents_add(
+                &self.client,
+                NewAgent::PullRequestAnywhere {
+                    reference: reference.to_string(),
+                    path: path.map(str::to_string),
+                    review_copy,
+                },
+                name,
+                Path::new("/"),
+            )
+        }
+    }
+
+    fn free(review: &str) -> String {
+        resolve_reply("[]", Some(review), None)
+    }
+
+    #[test]
+    fn a_bare_number_is_refused_before_anything_is_sent() {
+        let dux = dux(free(NOT_NEEDED), FREE_FOLDER);
+        let error = dux.plan_for(" #42 ", None, false, None).err().unwrap();
+        assert_eq!(error.exit, Exit::Refused);
+        assert_eq!(
+            error.message,
+            "A pull request number on its own does not say which repository it is in. Pass a link or owner/repo#123, or add --project to choose one."
+        );
+        assert!(
+            dux.fake
+                .seen()
+                .iter()
+                .all(|seen| seen.path == "/api/v1/build")
+        );
+    }
+
+    #[test]
+    fn a_free_folder_is_cloned_into_the_start_folder_and_the_flag_is_not_given() {
+        let dux = dux(free(NOT_NEEDED), FREE_FOLDER);
+        let planned = dux.plan(None, false, Some("mine")).unwrap();
+        assert_eq!(
+            planned.question,
+            "Clone git@github.com:octo/other.git into /srv/src/other and create agent mine from pull request octo/other#5"
+        );
+        assert_eq!(planned.notice, None);
+        let body = planned.body.unwrap();
+        assert_eq!(body["path"], "/srv/src/other");
+        assert_eq!(body["agent_name"], "mine");
+        assert_eq!(body["add_existing"], false);
+        assert_eq!(
+            body["pull_request"],
+            json!({"host":"github.com","owner_repo":"octo/other","number":5})
+        );
+        assert_eq!(body["review_copy_by_flag"], true);
+        assert_eq!(body["review_copy"], false);
+        let check = dux
+            .fake
+            .seen()
+            .into_iter()
+            .find(|seen| seen.path.ends_with("clone-destination"))
+            .unwrap();
+        let sent: Value = serde_json::from_str(&check.body).unwrap();
+        assert_eq!(sent["path"], "/srv/src/other");
+        assert_eq!(sent["head_branch"], "fix");
+        assert_eq!(sent["head_oid"], "abc");
+        assert_eq!(sent["number"], 5);
+    }
+
+    #[test]
+    fn an_unnamed_agent_omits_its_name_and_a_checkout_is_added() {
+        let dux = dux(free(NOT_NEEDED), CHECKOUT_PLAIN);
+        let planned = dux.plan(Some("/work/other"), false, None).unwrap();
+        assert_eq!(
+            planned.question,
+            "Add the folder /work/other as a project and create an agent from pull request octo/other#5"
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["add_existing"], true);
+        assert!(body.get("agent_name").is_none_or(Value::is_null));
+    }
+
+    #[test]
+    fn a_needed_review_copy_is_refused_without_the_flag_and_said_with_it() {
+        let dux = dux(free(NEEDED), FREE_FOLDER);
+        let refused = dux.plan(None, false, None).err().unwrap();
+        assert_eq!(refused.exit, Exit::Refused);
+        assert_eq!(
+            refused.message,
+            "Branch \"fix\" is busy, so the agent would work on a review copy. To go ahead anyway, run the command again with --review-copy. Nothing was cloned."
+        );
+        let agreed = dux.plan(None, true, Some("fix")).unwrap();
+        assert_eq!(
+            agreed.notice.as_deref(),
+            Some("Branch \"fix\" is busy, so the agent would work on a review copy.")
+        );
+        assert_eq!(agreed.body.as_ref().unwrap()["review_copy"], true);
+        assert!(
+            dux.fake
+                .seen()
+                .iter()
+                .all(|seen| seen.path != "/api/v1/projects?operation=1")
+        );
+    }
+
+    #[test]
+    fn a_checkout_answer_replaces_the_offers_and_words_the_add() {
+        // The checkout says nothing about a copy, so the offer's warning no
+        // longer applies.
+        let plain = dux(free(NEEDED), CHECKOUT_PLAIN);
+        assert!(plain.plan(Some("/work/other"), false, None).is_ok());
+        let needed = dux(free(NOT_NEEDED), CHECKOUT_NEEDED);
+        let refused = needed.plan(Some("/work/other"), false, None).err().unwrap();
+        assert_eq!(
+            refused.message,
+            "Folder copy needed. To go ahead anyway, run the command again with --review-copy. Nothing was added."
+        );
+    }
+
+    #[test]
+    fn a_typed_name_skips_the_review_copy_rules_and_no_free_name_refuses() {
+        let needed = dux(free(NEEDED), FREE_FOLDER);
+        assert!(needed.plan(None, false, Some("other-name")).is_ok());
+        let none = dux(free(NO_NAME), FREE_FOLDER);
+        let refused = none.plan(None, true, None).err().unwrap();
+        assert_eq!(
+            refused.message,
+            "Every review name is taken. Type another name for the agent from PR #5."
+        );
+        assert!(none.plan(None, false, Some("elsewhere")).is_ok());
+    }
+
+    #[test]
+    fn matching_projects_and_a_failed_lookup_have_their_own_refusals() {
+        let one = dux(
+            resolve_reply(r#"[{"id":"p1","name":"app"}]"#, None, None),
+            FREE_FOLDER,
+        );
+        let planned = one.plan(None, false, None).unwrap();
+        assert_eq!(
+            planned.question,
+            "Create an agent from pull request octo/other#5 in project app"
+        );
+        assert_eq!(planned.body.unwrap()["project_id"], "p1");
+        let refused = one.plan(Some("/x"), false, None).err().unwrap();
+        assert_eq!(
+            refused.message,
+            "github.com/octo/other is already a checkout in project app, so there is nothing to clone or add at /x. Drop --path to create the agent in that project."
+        );
+
+        let two = dux(
+            resolve_reply(
+                r#"[{"id":"p1","name":"app"},{"id":"p2","name":"app2"}]"#,
+                None,
+                None,
+            ),
+            FREE_FOLDER,
+        );
+        let refused = two.plan(None, false, None).err().unwrap();
+        assert_eq!(
+            refused.message,
+            "github.com/octo/other is checked out in more than one project (app, app2); add --project to choose one."
+        );
+
+        let none = dux(
+            resolve_reply("[]", None, Some("Failed to resolve PR #5.")),
+            FREE_FOLDER,
+        );
+        let refused = none.plan(None, false, None).err().unwrap();
+        assert_eq!(
+            refused.message,
+            "No project in dux is a checkout of github.com/octo/other. dux could not look the pull request up to offer a clone: Failed to resolve PR #5. add --project to choose one."
+        );
     }
 }

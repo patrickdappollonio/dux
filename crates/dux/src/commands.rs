@@ -287,13 +287,15 @@ pub struct GuardedChangeFlags {
     pub dangerously_ignore_connected: bool,
 }
 
-/// `dux agents add`: one of a project, `--fork` or `--standalone` says
-/// where the agent comes from.
+/// `dux agents add`: one of a project, `--fork`, `--standalone` or a pull
+/// request says where the agent comes from. A pull request may also come with
+/// a project, which then names where it goes.
 #[derive(Args, Debug)]
 #[command(group(
     clap::ArgGroup::new("source")
-        .args(["project", "fork", "standalone"])
+        .args(["project", "fork", "standalone", "from_pr"])
         .required(true)
+        .multiple(true)
 ))]
 pub struct AddAgentArgs {
     /// The project to create the agent in, on a new branch unless
@@ -306,15 +308,25 @@ pub struct AddAgentArgs {
     /// Create the agent on the branch of that name that already exists.
     #[arg(long, conflicts_with_all = ["from_pr", "from_worktree", "fork", "standalone"])]
     pub existing_branch: bool,
-    /// Create the agent from this pull request of the project (a number or
-    /// its address).
+    /// Create the agent from this pull request: a number or its address with
+    /// --project, or an address or owner/repo#123 alone, which clones the
+    /// repository (or adds a checkout of it) when no project has it.
     #[arg(
         long,
         value_name = "PR",
-        requires = "project",
-        conflicts_with = "from_worktree"
+        conflicts_with_all = ["from_worktree", "fork", "standalone"]
     )]
     pub from_pr: Option<String>,
+    /// The folder to clone the pull request's repository into, or the existing
+    /// checkout of it to add as a project, when no project has it. By default
+    /// the server's project-browser start folder plus the repository's name.
+    #[arg(
+        long,
+        value_name = "FOLDER",
+        requires = "from_pr",
+        conflicts_with = "project"
+    )]
+    pub path: Option<String>,
     /// Agree to a separate review copy of the pull request when its own branch
     /// cannot be used as it is (it has diverged, is checked out elsewhere, or
     /// could not be compared). Without this such a create is refused and
@@ -329,7 +341,7 @@ pub struct AddAgentArgs {
     #[arg(long, value_name = "FOLDER", conflicts_with = "fork")]
     pub standalone: Option<String>,
     /// The provider a standalone agent runs (the global default otherwise).
-    #[arg(long, value_name = "NAME", conflicts_with_all = ["project", "fork"])]
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["project", "fork", "from_pr"])]
     pub provider: Option<String>,
     /// Fork this agent: a new worktree from its branch.
     #[arg(long, value_name = "AGENT")]
@@ -907,6 +919,16 @@ mod tests {
                 "--existing-branch",
             ][..],
             &["agents", "add", "--project", "app", "--from-pr", "42"][..],
+            &["agents", "add", "--from-pr", "42"][..],
+            &[
+                "agents",
+                "add",
+                "--from-pr",
+                "octo/app#42",
+                "--path",
+                "/src/app",
+            ][..],
+            &["agents", "add", "--from-pr", "octo/app#42", "--review-copy"][..],
             &[
                 "agents",
                 "add",
@@ -953,7 +975,21 @@ mod tests {
             &["agents", "add", "--name", "a"][..],
             &["agents", "add", "--fork", "a", "--copy-uncommitted"][..],
             &["agents", "add", "--project", "app", "--fork", "a"][..],
-            &["agents", "add", "--from-pr", "42"][..],
+            &["agents", "add", "--from-pr", "42", "--fork", "a"][..],
+            &["agents", "add", "--from-pr", "42", "--standalone", "/src/x"][..],
+            &["agents", "add", "--from-pr", "42", "--provider", "codex"][..],
+            &["agents", "add", "--path", "/src/app"][..],
+            &["agents", "add", "--project", "app", "--path", "/src/app"][..],
+            &[
+                "agents",
+                "add",
+                "--project",
+                "app",
+                "--from-pr",
+                "42",
+                "--path",
+                "/src/app",
+            ][..],
             &["agents", "add", "--project", "app", "--review-copy"][..],
             &["agents", "add", "--project", "app", "--provider", "codex"][..],
             &[

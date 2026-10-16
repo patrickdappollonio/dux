@@ -117,6 +117,26 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the sentence a create gets while another create runs",
     ),
     (
+        "dux_core::prose",
+        Vetted::Module("crates/dux-core/src/prose.rs"),
+        "a sentence as parts, and its plain-text spelling",
+    ),
+    (
+        "dux_core::status_text::ReviewCopyOutlook",
+        Vetted::Data,
+        "the data a server answers with about a review copy; it has no code of its own",
+    ),
+    (
+        "dux_core::clone_project::clone_dir_name",
+        Vetted::Function("crates/dux-core/src/clone_project.rs", "clone_dir_name"),
+        "the folder name at the end of a clone address",
+    ),
+    (
+        "dux_core::agent_job::review_copy_how",
+        Vetted::Function("crates/dux-core/src/agent_job.rs", "review_copy_how"),
+        "the sentence that says how to agree to a review copy",
+    ),
+    (
         "dux_core::config_keys::NOT_SHOWN",
         Vetted::Data,
         "the placeholder printed for a hidden value",
