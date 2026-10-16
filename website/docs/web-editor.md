@@ -454,7 +454,7 @@ This one is for agent worktrees; a terminal-rooted editor has no Diff button.
 
 ![A file's diff against its last committed version, added lines in green and a replaced line in red.](/screens/editor-diff-head.png)
 
-Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
+The File/Diff switch only appears on a file that has changes, so an unchanged file never offers an empty diff; a file you are already looking at in Diff keeps it even if the changes disappear (say, you revert them) until you flip back to File. Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
 syntax-highlighted comparison of the file's working copy against its last committed version,
 shown inline. Added files render as all-insert, deleted files as all-delete. If the file
 changes on disk while you are looking, an amber **Reload** button appears so you refresh on

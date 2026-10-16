@@ -560,11 +560,33 @@ describe("drafts survive the editor closing", () => {
 // so a buffer-gated image tab would park on a spinner forever. Instead the
 // pane renders straight from /raw. SVG stays a TEXT tab (Monaco) whose
 // Preview toggle renders the current draft through a Blob URL.
-async function mountWithTab(path: string, mode: "file" | "diff" = "file") {
+function changesSlice(paths: string[]) {
+  return {
+    sessionId: SESSION,
+    phase: "loaded" as const,
+    rev: 1,
+    staged: [],
+    unstaged: paths.map((path) => ({
+      path,
+      status: "M",
+      additions: 1,
+      deletions: 0,
+      staged: false,
+    })),
+    error: null,
+  }
+}
+
+async function mountWithTab(
+  path: string,
+  mode: "file" | "diff" = "file",
+  changed: string[] = [],
+) {
   const { EditorOverlay } = await import("@/components/EditorOverlay")
   const { getSnapshot } = await import("@/lib/store")
   mockState = {
     ...getSnapshot(),
+    changes: changesSlice(changed),
     editorTarget: { root: agentRoot(SESSION), initialPath: path },
     editorTabs: {
       [rootKey(agentRoot(SESSION))]: {
@@ -644,9 +666,78 @@ describe("a terminal-rooted editor has no diff view at all", () => {
   })
 
   it("still keeps the switch for an agent root, so the absence above is the root's", async () => {
-    await mountWithTab("src/a.ts")
+    await mountWithTab("src/a.ts", "file", ["src/a.ts"])
     await screen.findByTestId("code-editor")
     expect(screen.queryByRole("group", { name: "View mode" })).not.toBeNull()
+  })
+})
+
+describe("the File/Diff switch follows the active file's changes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  async function mountWithChanges(
+    path: string,
+    mode: "file" | "diff",
+    changed: string[],
+  ) {
+    const view = await mountWithTab(path, mode, changed)
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    return { view, EditorOverlay }
+  }
+
+  const switchGroup = () => screen.queryByRole("group", { name: "View mode" })
+
+  it("offers no switch on a file the changes slice does not list, on the bar or the phone fold", async () => {
+    await mountWithChanges("src/a.ts", "file", ["src/other.ts"])
+    await screen.findByTestId("code-editor")
+    expect(switchGroup()).toBeNull()
+    fireEvent.click(screen.getByLabelText("More editor actions"))
+    await screen.findByRole("menu")
+    expect(screen.queryByText("Diff view")).toBeNull()
+  })
+
+  it("offers it on a changed file", async () => {
+    await mountWithChanges("src/a.ts", "file", ["src/a.ts"])
+    await screen.findByTestId("code-editor")
+    expect(switchGroup()).not.toBeNull()
+    fireEvent.click(screen.getByLabelText("More editor actions"))
+    await screen.findByRole("menu")
+    expect(screen.queryByText("Diff view")).not.toBeNull()
+  })
+
+  it("keeps it for a file in Diff that stops being changed, until File is chosen", async () => {
+    const { view, EditorOverlay } = await mountWithChanges("src/a.ts", "diff", [
+      "src/a.ts",
+    ])
+    expect(switchGroup()).not.toBeNull()
+    mockState = { ...mockState, changes: changesSlice([]) } as unknown as DuxState
+    view.rerender(<EditorOverlay />)
+    expect(switchGroup()).not.toBeNull()
+    fireEvent.click(
+      within(switchGroup()!).getByRole("button", { name: /file/i }),
+    )
+    // The mocked state is static, so play the store's mode change by hand.
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            { id: TAB_ID, path: "src/a.ts", dirty: false, preview: false, mode: "file" },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as unknown as DuxState
+    view.rerender(<EditorOverlay />)
+    expect(switchGroup()).toBeNull()
   })
 })
 
@@ -1499,7 +1590,7 @@ describe("editor header controls share one outline look", () => {
   // focus by the shared tooltip. jsdom cannot lay out, so the responsive classes
   // are pinned; the pixel truth is the screenshot pass.
   it("drops the labelled controls to icons below xl, each named by the shared tooltip", async () => {
-    await mountWithTab("README.md")
+    await mountWithTab("README.md", "file", ["README.md"])
     await screen.findByTestId("code-editor")
     const controls: [HTMLElement, string][] = [
       [screen.getByRole("button", { name: /^file$/i }), "File"],
@@ -1538,7 +1629,7 @@ describe("editor header controls share one outline look", () => {
   })
 
   it("joins File and Diff as one outline button group, the current mode pressed", async () => {
-    await mountWithTab("README.md")
+    await mountWithTab("README.md", "file", ["README.md"])
     await screen.findByTestId("code-editor")
     const group = screen.getByRole("group", { name: "View mode" })
     expect(group.getAttribute("data-slot")).toBe("button-group")

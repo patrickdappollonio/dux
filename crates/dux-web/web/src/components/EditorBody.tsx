@@ -649,6 +649,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     [slice],
   )
 
+  // The File/Diff switch is for files with something to diff. A file already
+  // in Diff keeps it even once it stops being changed, so a revert never
+  // leaves the user stuck in a diff with no way out. Before the slice arrives
+  // nothing is changed, so the switch is never shown and then taken back.
+  const showViewSwitch =
+    hasDiff &&
+    activeTabPath != null &&
+    (changedMap.get(activeTabPath) !== undefined || activeTabMode === "diff")
+
   // A per-file change-signal for the open file: status plus line counts, which
   // move when the content changes, though an edit keeping identical +/- counts
   // will not move it. Used only to flag a stale diff, never to key the cache,
@@ -1408,7 +1417,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"
     return (
       <>
-        {activeTab && !isImageTab && hasDiff && (
+        {activeTab && !isImageTab && showViewSwitch && (
           // One switch, two outline buttons joined by the shared ButtonGroup;
           // the Button toggle look's primary fill marks the current mode.
           <ButtonGroup className="shrink-0 max-md:hidden" aria-label="View mode">
@@ -1553,7 +1562,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           <Ellipsis />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {!isImageTab && hasDiff && (
+          {!isImageTab && showViewSwitch && (
             <>
               <DropdownMenuItem
                 aria-current={activeTab.mode === "file" ? "true" : undefined}
