@@ -9981,10 +9981,14 @@ mod tests {
 
     /// A working copy of acme/widget at `root/name`, made from `remote` and
     /// told its origin is the GitHub address, left on a branch of its own with
-    /// an untracked file, the way a user's hand-made checkout is. `drop_head`
-    /// removes the record of the remote's default branch.
-    fn checkout_of_widget(root: &Path, name: &str, remote: &Path, drop_head: bool) -> PathBuf {
+    /// an untracked file, the way a user's hand-made checkout is. `shape` is
+    /// space-separated words that change it: `no-head` removes the record of
+    /// the remote's default branch, `single-branch` clones only `feature`,
+    /// `detached` leaves HEAD on no branch, `no-main` deletes the local `main`,
+    /// and `unborn` is a fresh repository with that origin and no commits.
+    fn checkout_of_widget(root: &Path, name: &str, remote: &Path, shape: &str) -> PathBuf {
         let dir = root.join(name);
+        let has = |word: &str| shape.split(' ').any(|w| w == word);
         let git = |args: &[&str]| {
             let out = crate::git::test_support::git_command()
                 .args(args)
@@ -9992,15 +9996,26 @@ mod tests {
                 .unwrap();
             assert!(out.status.success(), "git {args:?}: {out:?}");
         };
-        git(&[
-            "clone",
-            "-q",
-            &remote.to_string_lossy(),
-            &dir.to_string_lossy(),
-        ]);
+        let path = dir.to_string_lossy().into_owned();
+        let source = remote.to_string_lossy().into_owned();
+        if has("unborn") {
+            git(&["init", "-q", "-b", "feature", &path]);
+            git(&["-C", &path, "remote", "add", "origin", "x"]);
+        } else if has("single-branch") {
+            git(&[
+                "clone",
+                "-q",
+                "--single-branch",
+                "-b",
+                "feature",
+                &source,
+                &path,
+            ]);
+        } else {
+            git(&["clone", "-q", &source, &path]);
+        }
         let in_dir = |args: &[&str]| {
-            let dir = dir.to_string_lossy();
-            let mut all = vec!["-C", dir.as_ref()];
+            let mut all = vec!["-C", path.as_str()];
             all.extend_from_slice(args);
             git(&all);
         };
@@ -10010,8 +10025,15 @@ mod tests {
             "origin",
             "https://github.com/acme/widget.git",
         ]);
-        in_dir(&["switch", "-q", "-c", "feature"]);
-        if drop_head {
+        if has("detached") {
+            in_dir(&["switch", "-q", "--detach"]);
+        } else if !has("single-branch") && !has("unborn") {
+            in_dir(&["switch", "-q", "-c", "feature"]);
+        }
+        if has("no-main") {
+            in_dir(&["branch", "-q", "-D", "main"]);
+        }
+        if has("no-head") {
             in_dir(&["remote", "set-head", "origin", "-d"]);
         }
         std::fs::write(dir.join("notes.txt"), "mine").unwrap();
@@ -10405,17 +10427,17 @@ mod tests {
             &gh_prints(&pull_request_json("pr-branch")),
         );
         let nowhere = tools.path().join("nowhere.git");
-        for (name, drop_head, reaches_remote, leads_with) in [
-            ("added-with-head", false, true, "main"),
-            ("added-asking-the-remote", true, true, "main"),
-            ("added-guessing", true, false, "feature"),
+        for (name, shape, reaches_remote, leads_with) in [
+            ("added-with-head", "", true, "main"),
+            ("added-asking-the-remote", "no-head", true, "main"),
+            ("added-guessing", "no-head", false, "feature"),
         ] {
             let (mut engine, _engine_dir) = test_engine();
             let folder = checkout_of_widget(
                 &std::fs::canonicalize(tmp.path()).unwrap(),
                 name,
                 &pr_remote,
-                drop_head,
+                shape,
             );
             serve_pull_requests(
                 &mut engine,
@@ -10524,6 +10546,123 @@ mod tests {
                     "github.com/acme/widget".to_string()
                 )),
                 "{name}: the repository stayed held"
+            );
+        }
+
+        // The project must lead with a branch the folder really has: the
+        // remote's default only when it exists there, else the branch checked
+        // out, else `main` when that exists, else nothing is added. A folder
+        // with no commits has no branch to lead with at all.
+        let widget = "github.com/acme/widget";
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        // (folder name, shape, remote reachable, project's current branch and
+        // leading branch when it is added, the warning when one is raised,
+        // else the end of the refusal)
+        type Outcome<'a> = Result<(&'a str, &'a str, Option<String>), &'a str>;
+        let cases: Vec<(&str, &str, bool, Outcome)> = vec![
+            (
+                "added-single-branch",
+                "single-branch",
+                true,
+                Ok((
+                    "feature",
+                    "feature",
+                    Some(format!(
+                        "dux learned that the default branch of {widget} is \"main\", but the \
+                         folder has no local branch of that name, so project \
+                         \"added-single-branch\" leads with \"feature\", the branch the folder \
+                         has checked out."
+                    )),
+                )),
+            ),
+            ("added-detached", "detached", true, Ok(("", "main", None))),
+            (
+                "added-detached-and-guessing",
+                "detached no-head",
+                false,
+                Ok((
+                    "",
+                    "main",
+                    Some(format!(
+                        "dux could not learn the default branch of {widget} from its remote, \
+                         so project \"added-detached-and-guessing\" leads with \"main\", \
+                         because the folder has no branch checked out."
+                    )),
+                )),
+            ),
+            (
+                "added-detached-with-no-branch-to-lead",
+                "detached no-main",
+                true,
+                Err(
+                    "has no branch to lead a project with: HEAD is detached and the folder has \
+                     no local branch named main, the remote's default. Check a branch out in \
+                     it, then use New agent from PR again. Nothing was added.",
+                ),
+            ),
+            (
+                "added-unborn",
+                "unborn",
+                true,
+                Err(
+                    "has no commits yet, so there is no branch to lead a project with. Make a \
+                     first commit in it, then use New agent from PR again. Nothing was added.",
+                ),
+            ),
+        ];
+        for (name, shape, reaches_remote, outcome) in cases {
+            let (mut engine, _engine_dir) = test_engine();
+            let folder = checkout_of_widget(&root, name, &pr_remote, shape);
+            serve_pull_requests(
+                &mut engine,
+                &gh,
+                if reaches_remote { &pr_remote } else { &nowhere },
+            );
+            engine
+                .apply_wire(pull_request_add_command("acme/widget", &folder, None))
+                .unwrap_or_else(|refused| panic!("{name}: {refused}"));
+            let chain = drive_clone_chain(&mut engine);
+            let warnings: Vec<&str> = chain
+                .statuses
+                .iter()
+                .filter(|s| s.tone == "warning")
+                .map(|s| s.message.as_str())
+                .collect();
+            match outcome {
+                Ok((current, leading, warning)) => {
+                    let project = engine
+                        .projects
+                        .iter()
+                        .find(|p| Path::new(&p.path) == folder)
+                        .unwrap_or_else(|| panic!("{name}: not added: {:?}", chain.statuses));
+                    assert_eq!(project.current_branch, current, "{name}");
+                    assert_eq!(project.leading_branch.as_deref(), Some(leading), "{name}");
+                    assert_eq!(
+                        warnings,
+                        warning.iter().map(String::as_str).collect::<Vec<_>>()
+                    );
+                }
+                Err(ending) => {
+                    let ended = self::finals(&chain);
+                    assert_eq!(ended.len(), 1, "{name}: {ended:?}");
+                    assert_eq!(ended[0].tone, "error", "{name}");
+                    assert!(
+                        ended[0].message.starts_with(&folder.display().to_string())
+                            && ended[0].message.ends_with(ending),
+                        "{name}: {}",
+                        ended[0].message
+                    );
+                    assert!(engine.projects.is_empty(), "{name}");
+                    assert!(
+                        !engine.is_in_flight(&InFlightKey::CloneRepository(widget.to_string())),
+                        "{name}: the repository stayed held"
+                    );
+                }
+            }
+            assert_eq!(
+                std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+                "mine",
+                "{name}"
             );
         }
 
@@ -11443,7 +11582,7 @@ mod tests {
         engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
             engine.paths.config_path.clone(),
         );
-        let folder = checkout_of_widget(&root, "dest-add-fails", &remote, false);
+        let folder = checkout_of_widget(&root, "dest-add-fails", &remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &folder, None))
             .expect("dispatch the add");
@@ -11510,8 +11649,8 @@ mod tests {
         // that holds the folder or the repository, never a clone.
         let (mut engine, _engine_dir) = test_engine();
         serve_pull_requests(&mut engine, &gh_add, &remote);
-        let one = checkout_of_widget(&root, "race-add-one", &remote, false);
-        let two = checkout_of_widget(&root, "race-add-two", &remote, false);
+        let one = checkout_of_widget(&root, "race-add-one", &remote, "");
+        let two = checkout_of_widget(&root, "race-add-two", &remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &one, None))
             .expect("the add is accepted");

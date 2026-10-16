@@ -502,22 +502,39 @@ impl Engine {
         let mut reactions = vec![EventReaction::RebuildLeftItems, ending];
         // Only after the project exists: a guess about a project that was not
         // added is no use to anyone.
-        if let (true, Some(pull_request)) = (
-            done.cloned.leading_branch_guessed,
-            &done.cloned.pull_request,
-        ) {
+        if let (Some(guess), Some(pull_request)) =
+            (&done.cloned.leading_branch_guess, &done.cloned.pull_request)
+        {
+            let repository = format!(
+                "{}/{}",
+                pull_request.target.host, pull_request.target.owner_repo
+            );
+            let why = match &guess.remote_default {
+                None => crate::status_text![
+                    "dux could not learn the default branch of ",
+                    n(repository),
+                    " from its remote, so project "
+                ],
+                Some(default) => crate::status_text![
+                    "dux learned that the default branch of ",
+                    n(repository),
+                    " is ",
+                    q(default),
+                    ", but the folder has no local branch of that name, so project "
+                ],
+            };
+            let tail = if guess.checked_out {
+                ", the branch the folder has checked out."
+            } else {
+                ", because the folder has no branch checked out."
+            };
             reactions.push(EventReaction::Status(
                 StatusUpdate::warning(crate::status_text![
-                    "dux could not learn the default branch of ",
-                    n(format!(
-                        "{}/{}",
-                        pull_request.target.host, pull_request.target.owner_repo
-                    )),
-                    " from its remote, so project ",
+                    why,
                     q(&project.name),
                     " leads with ",
                     q(&done.cloned.leading_branch),
-                    ", the branch the folder has checked out."
+                    tail
                 ])
                 .with_scope(scope),
             ));

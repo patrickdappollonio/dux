@@ -94,7 +94,7 @@ pub fn run_command_with_timeout(
         _ => {
             // Should be unreachable (we just set piped stdio), but never leak the
             // spawned child if a pipe handle is somehow missing.
-            let _ = child.kill();
+            kill_with_group(&mut child);
             let _ = child.wait();
             return CommandOutcome::Failed(format!("{label} stdout/stderr pipe unavailable"));
         }
@@ -123,7 +123,7 @@ pub fn run_command_with_timeout(
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
+                    kill_with_group(&mut child);
                     let _ = child.wait();
                     // Best-effort drain; the readers unblock once the killed
                     // child's pipes close.
@@ -134,7 +134,7 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(err) => {
-                let _ = child.kill();
+                kill_with_group(&mut child);
                 let _ = child.wait();
                 let _ = drain(&out_rx);
                 let _ = drain(&err_rx);
@@ -142,6 +142,19 @@ pub fn run_command_with_timeout(
             }
         }
     }
+}
+
+/// Kill `child`, and its whole process group when it leads one of its own (it
+/// started a session, as the no-prompt git command does), so a program it
+/// started and left running does not outlive the cap holding the pipes. A child
+/// that shares dux's own group is never group-killed.
+fn kill_with_group(child: &mut std::process::Child) {
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32)
+        && rustix::process::getpgid(Some(pid)).is_ok_and(|group| group == pid)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
 }
 
 /// How often the wait loop asks whether the child is gone. Small enough that a
@@ -207,6 +220,41 @@ mod tests {
             "the cap must return promptly, took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn a_command_in_a_session_of_its_own_takes_its_whole_group_down_on_the_cap() {
+        use std::os::unix::process::CommandExt as _;
+        let dir = crate::test_scratch::ScratchDir::new();
+        let pid_file = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 60 & echo $! > '{}'; wait",
+            pid_file.display()
+        ));
+        // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+        unsafe {
+            cmd.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let outcome =
+            run_command_with_timeout(cmd, Duration::from_millis(500), DEFAULT_READER_DRAIN, "sh");
+        assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the grandchild started")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::file_drop::process_can_answer(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the grandchild outlived the command's group"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

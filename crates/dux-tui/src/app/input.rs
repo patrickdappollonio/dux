@@ -30090,7 +30090,7 @@ cyan = "#00ffff"
                             address: "/srv/remote.git".to_string(),
                             branch: "main".to_string(),
                             leading_branch: "main".to_string(),
-                            leading_branch_guessed: false,
+                            leading_branch_guess: None,
                             name_taken: false,
                             pull_request: None,
                         }),

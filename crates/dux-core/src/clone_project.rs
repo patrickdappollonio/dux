@@ -264,9 +264,9 @@ pub struct ClonedRepository {
     pub branch: String,
     /// The base new worktrees branch from.
     pub leading_branch: String,
-    /// The folder added could not say the remote's default branch and neither
-    /// could the remote, so `leading_branch` is the folder's own guess.
-    pub leading_branch_guessed: bool,
+    /// Set when `leading_branch` is the folder's own pick rather than the
+    /// remote's default, so the user is told.
+    pub leading_branch_guess: Option<LeadingBranchGuess>,
     /// A branch named like the agent already exists in the clone. Never set
     /// for a pull request, whose create decides for itself what to do with a
     /// branch of that name.
@@ -274,6 +274,17 @@ pub struct ClonedRepository {
     /// The pull request the worker looked up again, for a clone that ends in
     /// an agent from one.
     pub pull_request: Option<ClonedPullRequest>,
+}
+
+/// Why an added folder leads with a branch other than the remote's default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeadingBranchGuess {
+    /// The remote's default branch when it could be learned, but the folder
+    /// has no branch of that name; `None` when nothing could say.
+    pub remote_default: Option<String>,
+    /// The leading branch is the one the folder has checked out; otherwise
+    /// nothing is checked out and it is `main`.
+    pub checked_out: bool,
 }
 
 /// The pull request a clone's worker looked up, and the agent name it settled.
@@ -629,7 +640,7 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         address,
         branch,
         leading_branch,
-        leading_branch_guessed: false,
+        leading_branch_guess: None,
         name_taken,
         pull_request,
     })
@@ -675,10 +686,28 @@ fn add_existing_checkout(
         Err(refused) => return Err(refuse(refused)),
     }
     crate::logger::info(&format!("adding {} as a project", dest.display()));
-    let branch = crate::git::current_branch_opt(dest)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let unreadable = || {
+        refuse(crate::status_text![
+            "git could not read the history of ",
+            n(dest.display()),
+            ", so dux can't tell which branch could lead a project there."
+        ])
+    };
+    match crate::git::repo_commit_state(dest) {
+        crate::git::CommitState::Born => {}
+        crate::git::CommitState::Unborn => {
+            crate::logger::info(&format!("not adding {}: no commits", dest.display()));
+            return Err(refuse(crate::status_text![
+                n(dest.display()),
+                " has no commits yet, so there is no branch to lead a project with. Make a \
+                 first commit in it, then use New agent from PR again."
+            ]));
+        }
+        crate::git::CommitState::Indeterminate => return Err(unreadable()),
+    }
+    let Ok(checked_out) = crate::git::current_branch_opt(dest) else {
+        return Err(unreadable());
+    };
     let env: Vec<(&str, &str)> = job
         .git_env
         .iter()
@@ -686,20 +715,56 @@ fn add_existing_checkout(
         .collect();
     let remote_default = crate::git::remote_default_branch(dest)
         .or_else(|| crate::git::remote_default_branch_from_remote(dest, &env));
-    let leading_branch_guessed = remote_default.is_none();
-    let leading_branch = remote_default.unwrap_or_else(|| {
-        if branch.is_empty() {
-            "main".to_string()
-        } else {
-            branch.clone()
+    // The remote's default leads only when the folder has a branch of that
+    // name: every later plain agent branches from the leading branch and is
+    // refused when it does not exist locally.
+    let local_default = remote_default
+        .as_deref()
+        .filter(|default| crate::git::local_branch_exists(dest, default));
+    let (leading_branch, leading_branch_guess) = match crate::add_project_plan::project_base_at_add(
+        checked_out.as_deref(),
+        local_default,
+        true,
+    ) {
+        crate::add_project_plan::ProjectBase::RemoteDefault(branch) => (branch, None),
+        crate::add_project_plan::ProjectBase::Other(branch) => {
+            // The branch checked out exists; the detached fallback is
+            // only a name until it is looked for.
+            if checked_out.is_none() && !crate::git::local_branch_exists(dest, &branch) {
+                crate::logger::info(&format!(
+                    "not adding {}: detached HEAD and no local {branch}",
+                    dest.display()
+                ));
+                let tried = remote_default.as_deref().unwrap_or("main");
+                let known = if remote_default.is_some() {
+                    ", the remote's default"
+                } else {
+                    ""
+                };
+                return Err(refuse(crate::status_text![
+                    n(dest.display()),
+                    " has no branch to lead a project with: HEAD is detached and the \
+                         folder has no local branch named ",
+                    n(tried),
+                    format!(
+                        "{known}. Check a branch out in it, then use New agent from PR \
+                             again."
+                    )
+                ]));
+            }
+            let guess = LeadingBranchGuess {
+                remote_default: remote_default.clone(),
+                checked_out: checked_out.is_some(),
+            };
+            (branch, Some(guess))
         }
-    });
+    };
     keep_env_config(dest, &job.git_env);
     Ok(ClonedRepository {
         address,
-        branch,
+        branch: checked_out.unwrap_or_default(),
         leading_branch,
-        leading_branch_guessed,
+        leading_branch_guess,
         name_taken: false,
         pull_request: Some(pull_request),
     })
@@ -954,6 +1019,17 @@ mod tests {
             for args in [
                 vec!["init", "-q", "-b", branch],
                 vec!["remote", "add", "origin", origin],
+                vec![
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ],
             ] {
                 let out = crate::git::test_support::git_command()
                     .arg("-C")

@@ -264,6 +264,20 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             "https://github.com/acme/unknown.git",
         ],
     );
+    git_isolated(
+        &hand_made,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
     let (status, body) = check_destination(addr, &hand_made, "acme/unknown").await;
     assert_eq!(status, 200, "{body}");
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
