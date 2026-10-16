@@ -5570,8 +5570,8 @@ mod tests {
         // browsers still refetch.
         while statuses.try_recv().is_ok() {}
         while reloads.try_recv().is_ok() {}
-        // Swapped in whole, as dux's own writes are: a plain write truncates
-        // first, and a reload that lands in between reads an empty file.
+        // A real file: an empty one is refused rather than reloaded (see the
+        // test below), and swapped in whole as dux's own writes are.
         let staged = paths.config_path.with_extension("staged");
         std::fs::write(&staged, "[ui]\nleft_width_pct = 30\n").unwrap();
         std::fs::rename(&staged, &paths.config_path).unwrap();
@@ -5593,6 +5593,48 @@ mod tests {
         svc.announce_config_reload(&engine, &reaction);
         assert!(statuses.try_recv().is_err(), "nothing is announced");
         assert!(reloads.try_recv().is_ok(), "browsers refetch");
+    }
+
+    /// A reload dux asked for after its own write that finds the file empty
+    /// (an editor truncated it before writing) is refused, not read as the
+    /// defaults: nothing is applied and browsers are not told to refetch.
+    #[test]
+    fn a_reload_after_an_own_write_that_finds_the_file_empty_is_refused() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 30\n").unwrap();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let before = engine.config.ui.left_width_pct;
+
+        std::fs::write(&paths.config_path, "\n").unwrap();
+        engine
+            .reload_after_own_config_write(|engine| {
+                engine.apply(dux_core::engine::Command::ReloadConfig)
+            })
+            .expect("the reload starts");
+        let read = loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the reload ends");
+            if matches!(event, dux_core::worker::WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let reaction = engine.process_worker_event(read);
+        let dux_core::engine::EventReaction::OpenConfigReloadFailedModal(message) = &reaction
+        else {
+            panic!("the refusal is reported as a failed reload");
+        };
+        assert!(message.contains("is empty"), "{message}");
+        svc.announce_config_reload(&engine, &reaction);
+        assert!(
+            reloads.try_recv().is_err(),
+            "browsers are not sent to refetch"
+        );
+        assert_eq!(engine.config.ui.left_width_pct, before);
     }
 
     /// And the post-apply half is what moves them, with the section the drainer

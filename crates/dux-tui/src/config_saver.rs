@@ -37,7 +37,8 @@ impl ConfigSurface for TuiConfigSurface {
             let result = dux_core::config::config_present_for_reload(&paths)
                 .map_err(|err| format!("{err}"))
                 .and_then(|()| {
-                    crate::config::ensure_config(&paths).map_err(|err| format!("{err:#}"))
+                    crate::config::ensure_config_for_reload(&paths)
+                        .map_err(|err| format!("{err:#}"))
                 })
                 .and_then(
                     |mut config| match crate::config::validate_keys(&config.keys) {
@@ -85,6 +86,43 @@ impl ConfigSurface for TuiConfigSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An editor that has emptied config.toml mid-save: the terminal UI's
+    /// reload is refused (the defaults it would read have no password), the
+    /// file is left as it is, and a start with the same empty file still
+    /// reads as the defaults.
+    #[test]
+    fn a_reload_of_an_emptied_config_is_refused_but_a_start_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().unwrap();
+        std::fs::write(&paths.config_path, " \n").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        TuiConfigSurface.reload(paths.clone(), tx);
+        let result = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("reload ends")
+            {
+                WorkerEvent::ConfigReloadReady(result) => break *result,
+                _ => continue,
+            }
+        };
+        let message = result.expect_err("refused");
+        assert!(message.contains("is empty"), "{message}");
+        assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), " \n");
+
+        crate::config::ensure_config(&paths).expect("a start takes an empty file as defaults");
+    }
 
     /// config.toml is a symlink whose target vanished while dux runs: the
     /// terminal UI's reload is refused like a deleted file, the running

@@ -322,7 +322,9 @@ Every one of them applies on a reload, with no restart.
 > included, stay until the file is back; `dux config set` refuses to write a fresh file
 > then too, and points you at Recover config. A reload that finds the file empty (an
 > editor leaves it so for a moment mid-save) is refused and keeps the running settings
-> in the same way; reload again once the save finishes.
+> in the same way; reload again once the save finishes. If you emptied it on purpose,
+> `dux config regenerate --yes` writes a fresh commented config, with no password,
+> and a reload then picks it up.
 
 `dux config regenerate --yes` writes fresh defaults, which have no password; it says so
 when the config it replaces had one.

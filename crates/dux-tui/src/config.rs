@@ -11,9 +11,20 @@ use toml_edit::{DocumentMut, Item};
 use crate::keybindings;
 
 pub use dux_core::config::*;
-
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
+    ensure_config_with(paths, false)
+}
+
+/// [`ensure_config`] for a reload: never creates the file, and refuses one
+/// that is gone or empty (judged on the text that is parsed, so a file
+/// truncated mid-read cannot load as the defaults, which have no password).
+pub fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
+    ensure_config_with(paths, true)
+}
+
+#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
+fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
     // Any core-side write that CREATES config.toml (bootstrap project-sync) must
     // emit the commented template, not a bare one.
     install_canonical_renderer();
@@ -27,7 +38,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         }
         .into());
     }
-    if !paths.config_path.exists() {
+    if !reload && !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -45,10 +56,15 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let migrate =
         |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
             let raw = read.map_err(|error| {
-                load_error(dux_core::config::ConfigLoadProblem::Unreadable(
-                    error.to_string(),
-                ))
+                load_error(if reload && error.kind() == std::io::ErrorKind::NotFound {
+                    dux_core::config::ConfigLoadProblem::Missing
+                } else {
+                    dux_core::config::ConfigLoadProblem::Unreadable(error.to_string())
+                })
             })?;
+            if reload && raw.trim().is_empty() {
+                return Err(load_error(dux_core::config::ConfigLoadProblem::Empty).into());
+            }
             dux_core::config::auth_section_of(&raw).map_err(load_error)?;
             let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
                 anyhow::anyhow!(

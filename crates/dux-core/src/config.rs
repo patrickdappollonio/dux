@@ -3235,7 +3235,9 @@ impl std::fmt::Display for ConfigLoadError {
                 "{path} is empty, so dux cannot tell whether [server.auth] still sets a \
                  password, and it keeps the running settings, password included. This is usual \
                  while an editor is mid-save: reload again once it finishes, or put your \
-                 settings back (or use Recover config to write the running settings to it)."
+                 settings back (or use Recover config to write the running settings to it). If \
+                 you emptied it on purpose, `dux config regenerate --yes` writes a fresh \
+                 commented config (with no password), then reload."
             ),
             ConfigLoadProblem::DanglingLink(target) => write!(
                 f,
@@ -5379,35 +5381,35 @@ pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadEr
 /// is an error ([`ConfigLoadProblem::Missing`]) rather than the defaults,
 /// because the defaults would quietly drop a password the running dux has.
 /// A file that is empty or only whitespace ([`ConfigLoadProblem::Empty`]) is
-/// refused for the same reason: it is what an editor leaves mid-save.
+/// refused for the same reason: it is what an editor leaves mid-save. The
+/// emptiness is judged on the very text that is then parsed, so a file
+/// truncated between two reads cannot slip through as the defaults.
 pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
-    config_present_for_reload(paths)?;
-    load_config(paths)
+    let fail = |problem| ConfigLoadError {
+        path: paths.config_path.clone(),
+        problem,
+    };
+    let Some(raw) = read_config_text(&paths.config_path)? else {
+        return Err(fail(ConfigLoadProblem::Missing));
+    };
+    if raw.trim().is_empty() {
+        return Err(fail(ConfigLoadProblem::Empty));
+    }
+    let config = config_from_read_text(&raw, &paths.config_path)?;
+    Ok(apply_load_corrections(config))
 }
 
-/// The check [`load_config_for_reload`] starts with, for a surface whose
-/// reload reads the file its own way (the terminal UI's `ensure_config`,
-/// which would otherwise create a fresh default file).
+/// The check a surface whose reload reads the file its own way (the terminal
+/// UI's `ensure_config_for_reload`, which would otherwise create a fresh
+/// default file) runs first: the file is there. Emptiness is that reader's to
+/// judge on the text it parses.
 pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
-    if let Some(target) = dangling_link_target(&paths.config_path) {
-        return Err(ConfigLoadError {
-            path: paths.config_path.clone(),
-            problem: ConfigLoadProblem::DanglingLink(target),
-        });
-    }
-    match std::fs::symlink_metadata(&paths.config_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ConfigLoadError {
+    match read_config_text(&paths.config_path)? {
+        Some(_) => Ok(()),
+        None => Err(ConfigLoadError {
             path: paths.config_path.clone(),
             problem: ConfigLoadProblem::Missing,
         }),
-        // An unreadable file is left for the load to report as such.
-        _ => match std::fs::read_to_string(&paths.config_path) {
-            Ok(text) if text.trim().is_empty() => Err(ConfigLoadError {
-                path: paths.config_path.clone(),
-                problem: ConfigLoadProblem::Empty,
-            }),
-            _ => Ok(()),
-        },
     }
 }
 
@@ -5423,25 +5425,30 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
 pub fn load_config_file_as_written(
     config_path: &Path,
 ) -> std::result::Result<Config, ConfigLoadError> {
-    let fail = |problem| ConfigLoadError {
-        path: config_path.to_path_buf(),
-        problem,
-    };
     match read_config_text(config_path)? {
-        Some(raw) => {
-            // One-time migration notice: the single `[server] max_websocket_connections`
-            // cap was split into three per-class caps. The unknown key is ignored on
-            // load (ServerConfig has no deny_unknown_fields), so warn once so the
-            // operator knows their old value is no longer in effect.
-            warn_on_removed_max_websocket_connections(&raw);
-            config_from_text_as_written(&raw).map_err(fail)
-        }
+        Some(raw) => config_from_read_text(&raw, config_path),
         None => {
             let mut config = Config::default();
             config.providers.ensure_defaults();
             Ok(config)
         }
     }
+}
+
+/// Parse text read from `config_path` as every load does.
+fn config_from_read_text(
+    raw: &str,
+    config_path: &Path,
+) -> std::result::Result<Config, ConfigLoadError> {
+    // One-time migration notice: the single `[server] max_websocket_connections`
+    // cap was split into three per-class caps. The unknown key is ignored on
+    // load (ServerConfig has no deny_unknown_fields), so warn once so the
+    // operator knows their old value is no longer in effect.
+    warn_on_removed_max_websocket_connections(raw);
+    config_from_text_as_written(raw).map_err(|problem| ConfigLoadError {
+        path: config_path.to_path_buf(),
+        problem,
+    })
 }
 
 /// The config file's text as every reader takes it (a start, a reload,
@@ -7356,10 +7363,10 @@ mod tests {
             std::fs::write(&paths.config_path, emptied).unwrap();
             let error = load_config_for_reload(&paths).expect_err("refused");
             assert_eq!(error.problem, ConfigLoadProblem::Empty, "{emptied:?}");
-            assert!(config_present_for_reload(&paths).is_err(), "{emptied:?}");
             let message = error.to_string();
             assert!(message.contains("is empty"), "{message}");
             assert!(message.contains("keeps the running settings"), "{message}");
+            assert!(message.contains("dux config regenerate --yes"), "{message}");
         }
 
         std::fs::write(&paths.config_path, &body).unwrap();
