@@ -168,8 +168,8 @@ to get out, in order:
 >   `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`, a few NAS and appliance
 >   locations, and the path in `$TS_SOCKET`.
 > - A socket file left behind by a daemon that is gone does not count.
-> - The process look happens at most once a minute, so a daemon with no interface and no
->   socket there can take up to a minute to be noticed.
+> - Once a process look has found no daemon, dux does not look again for a minute, so a
+>   daemon with no interface and no socket there can take up to a minute to be noticed.
 >
 > Make the `tailscale` command available to dux and able to reach that daemon.
 > `tailscale = "no"` is no way out here: it keeps `localhost` counted as the network for

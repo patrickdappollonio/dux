@@ -353,7 +353,7 @@ An absent key means `bare`, and so does a value dux does not recognise (it says 
 The `web_` prefix marks the scope: this affects the browser and nothing else. In the terminal
 UI, dropping a file onto the window is your terminal emulator's job.
 
-### Which CLI needs which
+### Which CLI needs which, and why
 
 | CLI | Value | Why |
 |---|---|---|
@@ -472,7 +472,7 @@ Two `[server]` settings. See [Server mode overview](/docs/server-mode) for the r
 > [!IMPORTANT]
 > Both are read at startup, so changing either needs a **server restart**.
 
-## Web only
+## Why this is web-only
 
 Dropping a file onto a terminal window is your terminal emulator's job, with the file already
 on the machine the agent runs on. This feature closes the gap that only a browser has.
