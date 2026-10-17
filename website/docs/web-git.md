@@ -222,7 +222,7 @@ Where the branch comes from:
 - If the branch is gone locally but still on the remote, dux creates it again from `origin/<branch>`, holding everything that had been pushed.
 - If it is gone everywhere, dux creates it again from the project's source branch, and the commits that branch held are not coming back.
 
-The confirmation says which of the three applies, and the message afterwards names the one that actually happened.
+The confirmation spells out all three cases, and the message afterwards names the one that actually happened.
 
 **If the agent is still running**, you can recreate anyway; what happens next is the CLI's own answer. dux tells the CLIs apart by the command a provider runs, not by the provider's name, so a provider of your own whose command is `claude` counts as Claude.
 

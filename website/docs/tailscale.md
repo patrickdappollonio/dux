@@ -163,8 +163,10 @@ to get out, in order:
 > can see it, on the same machine or in the same container, dux still spots it and treats
 > `localhost` as the network until it can ask.
 >
-> - dux finds such a daemon by its socket, at the usual locations or the path in
->   `$TS_SOCKET`, or by its process.
+> - dux finds such a daemon by its socket or by its process. The sockets it checks are
+>   `/var/run/tailscale/tailscaled.sock`, `/run/tailscale/tailscaled.sock`,
+>   `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`, a few NAS and appliance
+>   locations, and the path in `$TS_SOCKET`.
 > - A socket file left behind by a daemon that is gone does not count.
 > - The process look happens at most once a minute, so a daemon with no interface and no
 >   socket there can take up to a minute to be noticed.

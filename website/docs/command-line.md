@@ -82,8 +82,8 @@ machine, so it refuses a relative path; give the whole thing.
 ### Creating an agent
 
 `dux agents add` needs to know where the agent comes from. `--name` names it, and
-`--copy-uncommitted` brings the project's uncommitted changes along (new-branch agents
-only).
+`--copy-uncommitted` brings the project's uncommitted changes along (with `--project`,
+alone or with `--existing-branch`).
 
 - `--project <project>` creates it on a **new branch** of that project.
 - `--project <project> --existing-branch` uses a branch that already exists.

@@ -514,11 +514,8 @@
   /* A key or command in the first column stays on one line and the
      description beside it takes the width that is left and wraps; a wide
      first column scrolls inside the table (it is overflow-x: auto) rather
-     than widening the page. Prose first cells keep wrapping, and code in any
-     cell never breaks mid-token, so a value like "network" stays whole. */
-  .prose-docs :where(td:first-child:has(> code:only-child), th:first-child):not(:where(.not-prose *)) {
-    white-space: nowrap;
-  }
+     than widening the page. Code in a cell never breaks mid-token, so a key or
+     a value like "network" stays whole while the prose around it wraps. */
   .prose-docs td > code {
     white-space: nowrap;
     overflow-wrap: normal;
