@@ -1072,8 +1072,8 @@ pub struct ServerConfig {
     /// per-directory browser and is never capped; this bounds only the search
     /// index, where an incomplete result on a very large repo (e.g. a built
     /// `target/`) is an acceptable tradeoff for a bounded response. `0`
-    /// disables the cap. Default 50000. Takes effect on the next search-index
-    /// fetch after a server restart.
+    /// disables the cap. Default 50000. A config reload applies it to the next
+    /// search-index fetch.
     pub search_index_max_files: usize,
     /// Maximum number of `/files/tree` directory listings the web editor may
     /// run concurrently across all sessions. Each listing does one blocking

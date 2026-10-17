@@ -303,7 +303,12 @@ pub fn run_claimed_startup_command(
         command
             .args(&shell_args)
             .arg(&run.command)
-            .current_dir(&run.managed.worktree_path)
+            .current_dir(&run.managed.worktree_path);
+        // The user's variables go first so dux's own `DUX_*` always win.
+        for (name, value) in &run.env {
+            command.env(name, value);
+        }
+        command
             .env("DUX_PROJECT_PATH", &run.project.path)
             .env("DUX_WORKTREE_PATH", &run.managed.worktree_path)
             .env("DUX_AGENT_ID", &run.session.id)
@@ -323,9 +328,6 @@ pub fn run_claimed_startup_command(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        for (name, value) in &run.env {
-            command.env(name, value);
-        }
         // SAFETY: the hook runs in the forked child before exec and calls only
         // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
@@ -1101,6 +1103,43 @@ mod tests {
         assert!(result.status.is_ok());
         let log = read_log(&result.log_path).expect("log");
         assert!(log.contains("--- stdout ---\ntrue:secret"));
+    }
+
+    #[test]
+    fn a_configured_env_entry_never_replaces_the_variables_dux_sets() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let project = test_project(tmp.path());
+        let session = test_session(tmp.path());
+        let worktree = session
+            .workspace
+            .as_managed()
+            .expect("test_session builds a managed agent")
+            .worktree_path
+            .clone();
+        let result = run_startup_command(
+            &paths,
+            StartupCommandRun {
+                project,
+                managed: session
+                    .workspace
+                    .as_managed()
+                    .expect("test_session builds a managed agent")
+                    .clone(),
+                session,
+                command: "printf \"$DUX_WORKTREE_PATH\"".to_string(),
+                terminal: StartupCommandTerminalConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string()],
+                },
+                env: vec![("DUX_WORKTREE_PATH".to_string(), "/elsewhere".to_string())],
+            },
+            &crate::process_sessions::AgentProcessRegistry::default(),
+        );
+
+        assert!(result.status.is_ok());
+        let log = read_log(&result.log_path).expect("log");
+        assert!(log.contains(&format!("--- stdout ---\n{worktree}")));
     }
 
     fn sleeper_run(tmp: &Path, command: &str) -> StartupCommandRun {
