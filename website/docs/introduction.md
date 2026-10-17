@@ -67,9 +67,10 @@ Both front ends lay the workspace out the same way:
   search filter and a project chooser.
 - The **center pane** shows the focused agent's live terminal, and it is a real typing
   surface on both front ends: focus it and your keystrokes go to the agent, while dux's
-  own shortcuts keep working around them. The terminal UI adds a fullscreen toggle that
-  passes input through verbatim, and its center pane doubles as the diff view; in the
-  browser a diff opens in the file-editor overlay instead.
+  own shortcuts keep working around them.
+  - The terminal UI adds a fullscreen toggle that passes input through verbatim, and its
+    center pane doubles as the diff view.
+  - In the browser a diff opens in the file-editor overlay instead.
 - The **right pane** shows the files an agent has changed, with diffs.
 
 This is the terminal UI, with a prompt being typed straight into the center pane while the
@@ -85,12 +86,15 @@ agent streams its work and the sidebar marks the agent as typing.
 > keeps.
 
 > [!TIP]
-> Every dux binding is configurable under `[keys]`, so you can free a specific chord for
-> the agent while windowed; see [Configuration](/docs/configuration#keybindings). Tab has
-> its own switch, `[ui] tab_reaches_agent`, because it moves between panes rather than
-> typing: turn it on and Tab and Shift-Tab go to the agent, with `Ctrl-o` and `Ctrl-y`
-> moving between panes instead. The `input-debugging` palette command shows exactly what
-> dux receives for each keypress, which is what you want open while crafting a binding.
+> Three ways to get a key to the agent while windowed:
+>
+> - **Free the chord.** Every dux binding is configurable under `[keys]`; see
+>   [Configuration](/docs/configuration#keybindings).
+> - **Send Tab to the agent.** Tab has its own switch, `[ui] tab_reaches_agent`, because it
+>   moves between panes rather than typing. Turn it on and Tab and Shift-Tab go to the
+>   agent, with `Ctrl-o` and `Ctrl-y` moving between panes instead.
+> - **See what dux receives.** The `input-debugging` palette command shows exactly what
+>   dux gets for each keypress, which is what you want open while crafting a binding.
 
 In the terminal UI, focus-next and focus-previous keys move between panes, and every
 pane has its own local key combinations; the in-app help overlay is the authoritative
@@ -108,27 +112,41 @@ would normally name the project.
 
 > [!IMPORTANT]
 > The agent's process, if it was still running, keeps running in a directory that no longer
-> exists. Nothing it does from then on reaches your files. The `recreate-working-copy`
-> command checks the agent's branch out again at the same path, which is what lets an agent
-> whose CLI keeps its history per directory resume the same conversation. The code changes
-> that were in the old directory are gone; this puts the directory back, not its contents.
-> The browser has the same action in the agent's menu.
+> exists. Nothing it does from then on reaches your files.
 >
-> You can run it while the agent is running. A running Claude tab never notices the folder
-> going and carries on in the recreated one with its conversation intact. Codex, OpenCode
-> and any other CLI that can pick its conversation back up cannot follow the folder, so the
-> confirmation offers to restart those tabs, ticked by default: once the working copy is
-> back, dux shuts them down politely and starts each again so it continues its
-> conversation there. Only one tab per CLI gets its conversation back; a second tab of the
-> same CLI starts fresh, and the message afterwards says so. A CLI with no way to pick a
-> conversation back up, such as Copilot, is left running, because restarting it would lose
-> the conversation; stop and start it yourself if it cannot follow the folder.
+> The `recreate-working-copy` command checks the agent's branch out again at the same path,
+> which is what lets an agent whose CLI keeps its history per directory resume the same
+> conversation. The browser has the same action in the agent's menu. The code changes that
+> were in the old directory are gone: this puts the directory back, not its contents.
 
-If the branch is gone locally but still on the remote, dux creates it again from
-`origin/<branch>`, holding everything that had been pushed. If it is gone everywhere, dux
-creates it again from the project's source branch, and the commits that branch held are not
-coming back. The confirmation says all three, and the message afterwards names the one that
-actually happened.
+### Recreating it while the agent is running
+
+You can run `recreate-working-copy` under a running agent. What happens to each running tab
+depends on its CLI:
+
+- **Claude** never notices the folder going and carries on in the recreated one with its
+  conversation intact.
+- **Codex, OpenCode and any other CLI that can pick its conversation back up** cannot follow
+  the folder. The confirmation offers to restart those tabs, *ticked by default*: once the
+  working copy is back, dux shuts them down politely and starts each again so it continues
+  its conversation there.
+- **A second tab of the same CLI** starts fresh, because only one tab per CLI gets its
+  conversation back. The message afterwards says so.
+- **A CLI with no way to pick a conversation back up**, such as Copilot, is left running,
+  because restarting it would lose the conversation. Stop and start it yourself if it cannot
+  follow the folder.
+
+### Which branch comes back
+
+The confirmation spells out all three cases, and the message afterwards names the one that
+actually happened:
+
+- **The branch still exists locally.** It is checked out again and its commits are exactly
+  where the agent left them.
+- **It is gone locally but still on the remote.** dux creates it again from
+  `origin/<branch>`, holding everything that had been pushed.
+- **It is gone everywhere.** dux creates it again from the project's source branch, and the
+  commits that branch held are *not* coming back.
 
 ### Very large diffs in the terminal UI
 
@@ -139,15 +157,18 @@ one on disk.
 - Over **1 MiB, or 20,000 lines**, the diff is still drawn, without syntax highlighting.
   Added and removed lines keep their green and red; only the token colors inside them go.
 - Over **16 MiB, or 200,000 lines**, dux does not diff the file itself. It asks git for the
-  diff instead and shows the first **4,000 lines** of it, with the added and removed colors
-  and no syntax highlighting. When there is more than it shows, a line above it says how
-  many lines the whole diff has. A binary file is unaffected: past every ceiling it keeps
-  the same summary it always had, since there is no text diff to cut.
+  diff instead and shows the first **4,000 lines** of it (or the first 2 MiB, whichever
+  comes first), with the added and removed colors and no syntax highlighting. When there is
+  more than it shows, a line above it says how many lines the whole diff has. If git cannot
+  diff the file either, you get a message saying so.
+
+A binary file is unaffected: past every ceiling it keeps the same summary it always had,
+since there is no text diff to cut.
 
 > [!IMPORTANT]
-> Comparing versions that large in dux would take minutes, so it does not try. What you see
-> past that ceiling is the start of the change, not all of it. Open the file in your editor,
-> or run git diff yourself and narrow the comparison to the part you care about.
+> Past that ceiling, what you see is the start of the change, not all of it. Open the file
+> in your editor, or run git diff yourself and narrow the comparison to the part you care
+> about.
 
 The browser's diffs are the editor's, and they have a limit of their own; see
 [Git without leaving the browser](/docs/web-git).
@@ -167,9 +188,10 @@ you write, and `worktrees/`, which holds the checkouts your agents work in.
 > That directory is **yours alone**. dux makes it owner-only on every startup, and sets
 > owner-only permissions on the files it manages. Your config and session database can
 > hold environment variables you set for a project, which is exactly where an API token
-> tends to live, so no other user on the machine gets to read them. If you are upgrading
-> from a world-readable directory, the next start tightens it. That pass only ever
-> removes group and world access, never your own.
+> tends to live, so no other user on the machine gets to read them.
+>
+> If you are upgrading from a world-readable directory, the next start tightens it. That
+> pass only ever removes group and world access, never your own.
 
 > [!WARNING]
 > Making `config.toml` read-only does **not** stop dux saving over it. A save writes a
@@ -178,13 +200,15 @@ you write, and `worktrees/`, which holds the checkouts your agents work in.
 > owner-writable. If you need a config dux cannot touch, keep it somewhere dux does not
 > write to.
 
-A `config.toml` that is a symlink (into a dotfiles repository, say) stays one: saves
-write through it to the file it points at, owner-only like any save. If that file is
-missing, dux will not start and a reload keeps the running settings, password included;
-it never creates the file or replaces the link. The startup pass that tightens modes
-never follows a symlink, so it leaves the linked file's mode alone. A mode dux cannot set
-is a warning, not an error, so a directory on a volume without `chmod` still works and dux
-still starts.
+A `config.toml` that is a symlink (into a dotfiles repository, say) **stays a symlink**:
+
+- Saves write through it to the file it points at, owner-only like any save.
+- If that file is missing, dux will not start, and a reload keeps the running settings,
+  password included. dux never creates the file or replaces the link.
+- The startup pass that tightens modes never follows a symlink, so it leaves the linked
+  file's mode alone.
+- A mode dux cannot set is a warning, not an error, so a directory on a volume without
+  `chmod` still works and dux still starts.
 
 ## Where to go next
 

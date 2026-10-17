@@ -2,7 +2,7 @@
 title: Known issues
 description: Things that look broken until you know why, from agent sign-ins and copies on another device to terminals after a restart, plain HTTP, and shared lockouts.
 group: Reference
-order: 90
+order: 95
 ---
 
 These are the things that look broken unless you know why. Each one says what is going
@@ -19,37 +19,44 @@ sign-in link, and what to do with it depends on the CLI:
 - **Claude Code**: open the printed link on any device, sign in, and paste the code the
   page shows back into the CLI. This works from anywhere.
 - **Codex**: after you sign in, the browser is sent back to an address on the dux machine
-  itself (`127.0.0.1`, port `1455`), so finish the sign-in on that machine. From another
-  computer, forward the port over SSH with `ssh -L 1455:127.0.0.1:1455 <host>` and open
-  the link on your own computer. `codex login --device-auth` works too, if your
-  organisation allows device-code sign-in.
+  itself (`127.0.0.1`, port `1455`).
+  - Finish the sign-in on that machine, or
+  - from another computer, forward the port over SSH with
+    `ssh -L 1455:127.0.0.1:1455 <host>` and open the link on your own computer, or
+  - run `codex login --device-auth`, if your organisation allows device-code sign-in.
 - **OpenCode**: its browser sign-ins also return to the dux machine (ChatGPT accounts use
   port `1455`), so the same advice as Codex applies.
 - **Copilot**: set a GitHub token in the environment as `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`
-  or `GITHUB_TOKEN`. It has to be a fine-grained personal access token with the "Copilot
-  Requests" permission; classic `ghp_` tokens are not accepted. You can put it in dux's
-  `[env]` table so every agent gets it, or use device-code sign-in if your organisation
-  allows it. See
-  [keeping secrets out of `[env]`](/docs/configuration#keeping-secrets-out-of-env) before
-  you paste a token into the file.
+  or `GITHUB_TOKEN`.
+  - It has to be a fine-grained personal access token with the "Copilot Requests"
+    permission; classic `ghp_` tokens are not accepted.
+  - Put it in dux's `[env]` table so every agent gets it, or use device-code sign-in if your
+    organisation allows it.
+  - Read [keeping secrets out of `[env]`](/docs/configuration#keeping-secrets-out-of-env)
+    before you paste a token into the file.
 
 ### Copying inside an agent CLI lands on the wrong clipboard
 
 A copy made inside a CLI (Claude Code's `/copy`, say) reaches your browser only when the
-CLI sends it through the terminal. On macOS, Claude Code, OpenCode and Copilot
-send it through the terminal and also write the Mac's own clipboard, while Codex writes
-only the Mac's clipboard, so its copies never reach a remote browser. On Linux, a CLI that
-can reach a desktop session may write that desktop's clipboard instead.
+CLI sends it through the terminal. What each CLI does depends on the platform:
+
+- **macOS, Claude Code, OpenCode and Copilot:** the copy goes through the terminal *and*
+  into the Mac's own clipboard.
+- **macOS, Codex:** it writes only the Mac's clipboard, so its copies never reach a remote
+  browser.
+- **Linux:** a CLI that can reach a desktop session may write that desktop's clipboard
+  instead.
 
 Even a copy that does arrive has to be accepted by your browser, which only allows it
-within about 5 seconds of your last key press or click. A later copy shows a message with
-the start of the text and a **Copy** button that puts it on your clipboard. The message
-appears only in the tab driving that terminal, never in one that is only watching it. See
-[the clipboard section](/docs/web-workspace#clipboard-the-classic-terminal-model) and
-[what plain HTTP costs](/docs/tailscale#plain-http-costs-you-a-few-browser-features).
+within a few seconds of your last key press or click (about 5 in Chrome). A later copy shows
+a message with the start of the text and a **Copy** button. That message appears only in
+the tab driving the terminal, never in one that is only watching it. See
+[the clipboard section](/docs/web-workspace#clipboard-the-classic-terminal-model) for the
+full story, and [what plain HTTP costs](/docs/tailscale#plain-http-costs-you-a-few-browser-features).
 
-The way around all of it: select the text in the terminal pane yourself. That always
-copies on your own device.
+> [!TIP]
+> The way around all of it: select the text in the terminal pane yourself. That always
+> copies on your own device.
 
 ### A second tab of the same CLI starts with a blank conversation
 
@@ -84,24 +91,36 @@ and its settings. Text an agent prints can also carry those codes by accident. S
 
 A tab that ends within 5 seconds with no input is treated as a CLI that never came up, so
 it waits for you with its last output instead of closing. Any input, a macro included,
-exempts a run. A launcher that starts the real program and exits, or hands off to a
-program in the background, looks exactly the same. Make the launcher stay in the
-foreground, for example by ending it with `exec` and the real program, so the tab lives as
-long as the program does. See
-[what happens on restart](/docs/agent-tabs#what-happens-on-restart) for the card such a
+exempts a run.
+
+A launcher that starts the real program and exits, or hands off to a program in the
+background, looks exactly the same.
+
+**The fix:** make the launcher stay in the foreground, for example by ending it with `exec`
+and the real program, so the tab lives as long as the program does.
+
+See [what happens on restart](/docs/agent-tabs#what-happens-on-restart) for the card such a
 tab shows, and [custom agents](/docs/custom-agents) for setting one up.
 
 ### A dropped file's path doesn't reach the agent intact
 
-dux cleans up the name of a file it saves for an agent, but not the folders above it. When
-one of those folders has an apostrophe or a backslash in its name (a project folder called
-`Bob's app`, say), some agent CLIs misread the pasted path, and the file is not attached.
-Codex also ignores any paste longer than 1000 characters, so a very deep path never reaches
-it as a path. Either way the file is still saved and the toast names where. Rename the
-folder, move the project somewhere with a shorter path, or set `[ui] upload_directory` to a
-shorter folder. If a path arrives with stray quotes or backslashes, the provider's
-`web_dragdrop_paste` setting may help. See
-[what is known to fail](/docs/dropping-files#what-is-known-to-fail).
+Some agent CLIs misread the pasted path, and the file is not attached. Either way **the file
+is still saved** and the toast names where. dux cleans up the name of a file it saves for an
+agent, but not the folders above it, so two things can go wrong:
+
+- **A folder with an apostrophe or a backslash in its name** (a project folder called
+  `Bob's app`, say) is misread by some CLIs.
+- **A very deep path.** Codex ignores any paste longer than 1000 characters, so the path
+  never reaches it as a path.
+
+What to do:
+
+- Rename the folder, or move the project somewhere with a shorter path.
+- Set `[ui] upload_directory` to a shorter folder.
+- If a path arrives with stray quotes or backslashes, the provider's `web_dragdrop_paste`
+  setting may help.
+
+See [what is known to fail](/docs/dropping-files#what-is-known-to-fail).
 
 ## Terminals
 
@@ -130,9 +149,10 @@ When the program in the terminal takes the mouse, a plain drag goes to the progr
 
 Browsers switch off a few features on a plain-HTTP address that is not `localhost`:
 right-click paste (`Ctrl+v` still works), desktop notifications, and installing dux as
-an app. Copies from an agent still work within about 5 seconds of your last key press or
-click, and show a **Copy** button after that. Open dux on `localhost`, or put HTTPS in
-front of it with `tailscale serve`, and all of them come back. See
+an app. Copies from an agent still work, with the **Copy** button described
+[above](#copying-inside-an-agent-cli-lands-on-the-wrong-clipboard). Open dux on
+`localhost`, or put HTTPS in front of it with `tailscale serve`, and all of them come back.
+See
 [what plain HTTP costs](/docs/tailscale#plain-http-costs-you-a-few-browser-features).
 
 ## Editor
@@ -152,14 +172,14 @@ git treats ignored files as disposable, so when the incoming branch tracks a pat
 ignored file or folder stands, git replaces it. dux refuses when that path holds something
 it knows about, such as an agent's worktree, and lets git have its way otherwise. Move
 anything that matters aside first. See
-[changing the base branch](/docs/creating-agents#changing-the-base-branch).
+[switching and pulling safely](/docs/creating-agents#switching-and-pulling-safely).
 
 ### Submodules are not updated by dux's pulls and switches
 
 dux's pulls and branch switches move the submodule pointer but leave the submodule's files
 where they are, even when your git config sets `submodule.recurse`. Run
 `git submodule update` yourself when you want them to follow. See
-[changing the base branch](/docs/creating-agents#changing-the-base-branch).
+[switching and pulling safely](/docs/creating-agents#switching-and-pulling-safely).
 
 ## Server
 
@@ -176,6 +196,5 @@ and, behind a proxy,
 ### Only one dux can run per config folder
 
 A second dux started against the same config folder stops at once with an "already
-running" message. One dux can keep the terminal UI and serve the browser at the same
-time, so you rarely need a second. See
+running" message. You rarely need a second: see
 [running both at once](/docs/faq#can-i-run-the-terminal-ui-and-the-browser-at-the-same-time).

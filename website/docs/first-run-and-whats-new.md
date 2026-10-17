@@ -5,9 +5,9 @@ group: Getting started
 order: 3
 ---
 
-dux shows you a screen exactly twice in its life: once when it is brand new to your
-machine, and once after each update. Both are dismissible with a button, and both can
-be reopened later.
+dux shows a screen on its own in two situations: when it is brand new to your machine,
+and when you start a version you have not seen yet. Both are dismissible with a button,
+and both can be reopened later. The browser shows them too, not just the terminal UI.
 
 ## The welcome screen
 
@@ -20,15 +20,19 @@ an empty sidebar. It is a short orientation:
   other's files.
 - **What a provider is:** whatever AI CLI you point it at. If a tool runs in a
   terminal, it can be a provider.
+- **That dux has two front ends:** a terminal UI and a web UI over the same projects,
+  agents, worktrees and config, and how to start the web one.
 - **Where your config file lives**, as the real path on *this* machine:
   `~/.config/dux/config.toml` on Linux, `~/.dux/config.toml` on macOS. That file is
   written fully commented, and it is the documentation.
 
-Underneath sit the same three steps: add a project, create an agent, launch. Two
-buttons close it out, one opening the project picker so you can add your first project
-right there, the other simply closing the screen. The address of
-[getdux.app](https://getdux.app) sits alongside them so you know where to find the rest,
-and the frame itself tells you which key closes the screen.
+Underneath sit the same three steps: add a project, create an agent, launch. Then:
+
+- **Two buttons** close it out. One opens the project picker so you can add your first
+  project right there; the other simply closes the screen.
+- **The address of [getdux.app](https://getdux.app)** sits alongside them so you know
+  where to find the rest.
+- **The frame itself** tells you which key closes the screen.
 
 Here is the whole thing on a fresh install, rubber duck included:
 
@@ -46,18 +50,27 @@ The screen always describes **the version you actually have**, so upgrading to a
 release while a newer one is already published never shows you features you do not have
 yet.
 
+It appears whenever the running version *differs* from the last one you saw, so going
+back to an older release shows that release's notes too.
+
 > [!NOTE]
 > A development build never shows the what's-new screen on its own, because there is no
 > published release to describe. It still gets the first-run welcome.
+>
+> It also never records itself as the version you saw, so running a development build
+> between two releases cannot swallow the next release's notes. If you open **What's
+> new** yourself on one, dux shows the newest published release.
 
 ## Where the notes come from
 
 dux fetches the matching release from GitHub's public API at launch. No token, nothing
-to configure, and the result is cached next to your config so relaunching a dozen times
-does not mean a dozen requests.
+to configure, and the result is cached next to your config (for six hours) so
+relaunching a dozen times does not mean a dozen requests.
 
-If the fetch cannot get through, dux shows nothing and says nothing. What happens next
-depends on why:
+If the fetch cannot get through and dux has no saved copy of those notes, it shows
+nothing and says nothing. A saved copy of the same version is shown instead, unless GitHub
+answered that there is no such release, in which case nothing is shown. What
+happens next depends on why the fetch failed:
 
 - **Something that might work later** (offline, a timeout, a rate limit, a GitHub
   hiccup): the version is **not** recorded as seen, so the notes are waiting for you on

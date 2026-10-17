@@ -10,10 +10,6 @@ tell what terminal it is really in, and anything it emits (a desktop notificatio
 clipboard write, a clickable link) stops at dux. The `[capabilities]` section opens both
 directions.
 
-That same embedded terminal draws the diff view, which is why a very large file is diffed
-without syntax highlighting and an enormous one shows only the start of git's own diff; see
-[very large diffs in the terminal UI](/docs/introduction#very-large-diffs-in-the-terminal-ui).
-
 ## Terminal identity
 
 Agents decide whether to send desktop notifications by sniffing environment variables to
@@ -85,11 +81,11 @@ decide where those go.
 
 ```toml
 [capabilities]
-passthrough = true
-clipboard_passthrough = "focused"
+passthrough = true                # the default
+clipboard_passthrough = "focused" # the default
 ```
 
-- **`passthrough`** is the master switch for sending an agent's notification, progress,
+- **`passthrough`** (default `true`) is the master switch for sending an agent's notification, progress,
   and clipboard escape sequences **out of dux**. In the terminal UI that is the whole
   host forward: turn it off and your terminal receives nothing the agent emits. In the
   web UI the only thing forwarded outward is the clipboard write, so turning it off seals
@@ -106,10 +102,13 @@ clipboard_passthrough = "focused"
 > below is the only setting for those. Clipboard **read** requests are never forwarded on
 > either surface, because the reply would be typed straight back into dux.
 
-In the terminal UI, notifications and progress reports forward from **every** agent,
-background ones included, because a notification from an agent you are not watching is
-precisely the one you want. In the web UI only the agent whose view is open can raise a
-notification, and progress reports are not bridged at all.
+Which agents' notifications go out depends on the surface:
+
+- **Terminal UI:** notifications and progress reports forward from **every** agent,
+  background ones included, because a notification from an agent you are not watching is
+  precisely the one you want.
+- **Web UI:** only the agent whose view is open can raise a notification, and progress
+  reports are not bridged at all.
 
 > [!WARNING]
 > Under tmux, forwarded notifications reach your terminal only if tmux is told to let
@@ -126,7 +125,7 @@ notification, and progress reports are not bridged at all.
 
 ```toml
 [capabilities]
-web_notifications = true
+web_notifications = true   # the default
 ```
 
 In the web UI there is no host terminal to forward to, so dux bridges an agent's
@@ -143,15 +142,16 @@ them, and it has no effect on the terminal UI. Two things gate them, on purpose:
 
 Clipboard writes work here too, under the same `clipboard_passthrough` switch: at
 `"focused"` or `"always"` with the tab focused, an agent's write lands on **your**
-browser's clipboard, not the server's. The browser accepts a write only within about 5
-seconds of your last key press or click in the page; a later one shows a message with a
-**Copy** button that puts the text on your clipboard.
+browser's clipboard, not the server's. The browser only accepts a write within a few seconds
+(about 5 in Chrome) of your last key press or click; otherwise dux shows a **Copy** button
+instead. The details are in
+[the workspace page](/docs/web-workspace#clipboard-the-classic-terminal-model).
 
 ## Clickable hyperlinks
 
 ```toml
 [capabilities]
-hyperlinks = true
+hyperlinks = true   # the default
 ```
 
 Agents and plenty of CLI tools emit hyperlinks: text carrying a URL under the surface,
@@ -161,15 +161,19 @@ and in the web terminal. The web opens only `http` and `https` links, in a fresh
 no way to reach back into the app.
 
 In the terminal UI a click on a link opens it too, in the browser of the machine running
-dux, and the agent never sees that click. It is the release that opens: press and let go
-on the same link and it opens, and a sweep that ends anywhere else opens nothing. A sweep
-that ends still on the link counts as a click on it, so to SELECT a URL under an agent
-that is tracking the mouse, hold `Shift` and drag, which is the same force-a-selection
-gesture that works anywhere else in the pane. Hold `Ctrl` to send that click to an agent
-that is tracking the mouse; with no such agent there is nothing to send it to, so `Ctrl`
-and a click just opens the link like any other. Your own terminal's link gesture still
-works as it always did: dux holds the mouse, so in kitty that is `Shift` and a click, and
-on dux's side `Shift` is the select-text modifier and never opens anything.
+dux, and the agent never sees that click.
+
+- **Click:** the *release* opens it. Press and let go on the same link and it opens; a sweep
+  that ends anywhere else opens nothing. A sweep that ends still on the link counts as a
+  click on it.
+- **Select a URL** under an agent that is tracking the mouse: hold `Shift` and drag, the same
+  force-a-selection gesture that works anywhere else in the pane. On dux's side `Shift` is the
+  select-text modifier and never opens anything.
+- **Send the click to the agent:** hold `Ctrl` to give that click to an agent that is
+  tracking the mouse. With no such agent there is nothing to send it to, so `Ctrl` and a
+  click just opens the link like any other.
+- **Your own terminal's link gesture** still works as it always did. dux holds the mouse, so
+  in kitty that is `Shift` and a click.
 
 > [!IMPORTANT]
 > In the web terminal, dux is the **only** thing that opens a link. While the agent has
@@ -188,17 +192,15 @@ When you paste into the terminal UI, dux routes the text to whatever currently h
 keys: a text field (a modal, a filter, the commit box, where single-line fields fold line
 breaks into spaces), or the agent when its pane is what you are typing into. If the
 agent's CLI has bracketed paste on, which agent CLIs do, the CLI sees a single paste
-rather than a burst of keystrokes. Otherwise the text arrives as plain typed input,
+rather than a burst of keystrokes.
+
+Otherwise the text arrives as plain typed input,
 exactly as in any other terminal.
 
 ## Getting a file to the agent
 
-Capabilities are about what an agent can reach out and do. The other direction, getting
-something from your machine into the agent, is file drop and image paste in the browser:
-drag a file onto the terminal, or paste a screenshot into it, and dux saves it on the
-server and pastes its path. Web-only, because a real terminal emulator already types a
-dropped file's path in for you. See
-[Dropping and pasting files onto an agent](/docs/dropping-files).
+The other direction, getting something from your machine into the agent, is file drop and
+image paste in the browser. See [Dropping and pasting files onto an agent](/docs/dropping-files).
 
 ## The fine print
 

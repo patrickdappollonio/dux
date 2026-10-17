@@ -23,11 +23,12 @@ looking.
   `(2) dux` when two agents are waiting. A backgrounded tab updates the count without
   you visiting it.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
-  above zero, and the dot blinks with the same double pulse as the sidebar's, so it
-  catches your eye from the tab strip, even while you are in another tab. Each
-  blink takes the dot away entirely rather than fading it. In the rare browser that
-  cannot keep that pace for a background tab, it falls back to a plain, slower
-  on-off blink there. It holds still if you have reduced-motion turned on.
+  above zero, so it catches your eye from the tab strip, even while you are in another tab.
+  - The dot blinks with the same double pulse as the sidebar's, and each blink takes it away
+    entirely rather than fading it.
+  - In the rare browser that cannot keep that pace for a background tab, it falls back to a
+    plain, slower on-off blink there.
+  - It holds still if you have reduced-motion turned on.
 
 Turning `attention_indicator` off (below) takes the tab-title count and the favicon dot
 away at once, in every open browser tab, even for an agent that was already waiting.
@@ -44,12 +45,9 @@ The flag clears the moment you look. Selecting the agent and focusing its termin
 the terminal UI, opening its live view on the web, or typing into it all put the flag
 down. An agent you are already watching never nags you.
 
-> [!NOTE]
-> When you step away entirely, dux stops treating the focused agent as watched, so a
-> fresh request still lights up. Coming back holds the indicators for a few seconds
-> instead of clearing them instantly, so you get a look at who wanted you. That grace
-> window is `ui.attention_grace_seconds`, below, and it only applies right after you
-> return: while you stay put, watching an agent still clears its flag at once.
+When you step away entirely, dux stops treating the focused agent as watched, so a fresh
+request still lights up. Coming back holds the indicators for a short grace window; see
+[the grace window](#the-grace-window) below.
 
 ## How dux detects it
 
@@ -124,32 +122,44 @@ Turn `attention_on_bell` off if a chatty tool inside the session, a test runner 
 completion, rings the bell for reasons that are not about you. Turn
 `attention_indicator` off to silence the whole feature.
 
-> [!WARNING]
-> The grace window needs a terminal that reports focus (DEC focus reporting, which
-> kitty, ghostty, WezTerm, iTerm2, foot, alacritty and xterm all speak). Inside tmux,
-> add `set -g focus-events on` to your `~/.tmux.conf`; note that tmux reports focus per
-> pane, so switching tmux panes away from dux reads as unfocused. On a terminal that
-> never reports focus the grace never applies and the focused agent's flag clears right
-> away.
-
 By default this feature stays inside dux: bells rung inside an agent's session are
 consumed by dux and not passed on to the terminal you run dux in. Forwarding an agent's
 real desktop notifications to your host terminal, or to your browser, is a separate
 feature covered in [Terminal capabilities](/docs/terminal-capabilities). Only the
 browser side needs an explicit permission grant.
 
+### The grace window
+
+`attention_grace_seconds` only applies right after you return to dux (the browser tab on the
+web, the terminal window in the terminal UI). While you stay put, watching an agent still
+clears its flag at once. Through the Preferences dialog it accepts up to 300 seconds, and `0`
+clears immediately.
+
+> [!WARNING]
+> The grace window needs a terminal that reports focus (DEC focus reporting, which kitty,
+> ghostty, WezTerm, iTerm2, foot, alacritty and xterm all speak). On a terminal that never
+> reports focus the grace never applies and the focused agent's flag clears right away.
+>
+> Inside tmux, add this to your `~/.tmux.conf`. tmux reports focus per pane, so switching
+> tmux panes away from dux reads as unfocused.
+>
+> ```tmux
+> set -g focus-events on
+> ```
+
 ## When nothing lights up
 
 Work down this list before concluding it is broken:
 
 1. **Check what terminal the agent thinks it is in.** This is the number one cause of
-   silence. Open a companion terminal, which gets the same identity as the agent, and
-   run `echo $TERM_PROGRAM`. Seeing your real terminal, or `ghostty` on the web, means
-   identity is doing its job. An empty value is not proof of a problem: kitty,
-   alacritty, foot and xterm never set it, and dux's forced `kitty` identity
-   deliberately does not either. Check `[capabilities] terminal_identity` in your
-   config, and under kitty look for `KITTY_WINDOW_ID` and `TERM` instead. Full story in
-   [Terminal capabilities](/docs/terminal-capabilities).
+   silence. Open a companion terminal, which gets the same identity as the agent, and run
+   `echo $TERM_PROGRAM`.
+   - Seeing your real terminal, or `ghostty` on the web, means identity is doing its job.
+   - An empty value is not proof of a problem: kitty, alacritty, foot and xterm never set
+     it, and dux's forced `kitty` identity deliberately does not either. Under kitty look
+     for `KITTY_WINDOW_ID` and `TERM` instead.
+   - Check `[capabilities] terminal_identity` in your config. Full story in
+     [Terminal capabilities](/docs/terminal-capabilities).
 2. **Give it a few seconds.** Some agents wait for a beat of true idleness before
    notifying; Claude Code holds off for about six seconds after a question appears. dux
    also holds fire briefly after you have just been typing at the agent, so a question
@@ -165,10 +175,11 @@ Work down this list before concluding it is broken:
    Copilot's turn-completion bell ships disabled.
 
 > [!CAUTION]
-> These signals are only bytes in the agent's output, so anything the agent displays
-> that contains the same escape codes can forge or mask one. A printed notification code
-> can flash a false "needs you," and a printed progress code can briefly claim "idle"
-> when the opposite is true. This is inherent to terminal escape codes: a normal
-> terminal pops the very same desktop notification for the very same bytes. A forged
-> progress report only holds for a few seconds, and
+> These signals are only bytes in the agent's output, so anything the agent displays that
+> contains the same escape codes can forge or mask one:
+>
+> - a printed notification code can flash a false "needs you";
+> - a printed progress code can briefly claim "idle" when the opposite is true. A forged
+>   progress report only holds for a few seconds.
+>
 > `attention_on_bell = false` or `attention_indicator = false` narrows or closes it.

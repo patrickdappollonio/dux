@@ -33,11 +33,12 @@ Names are arbitrary strings: use whatever is scannable in the picker list. Decla
 order in the file is preserved in the UI.
 
 > [!NOTE]
-> A macro can also be written as its own `[macros.<name>]` section. TOML always reads
-> those after every `name = { ... }` line, whatever order you write them in, so a macro
-> in a section can never come before an inline one. dux never changes how a macro is
-> written: when you reorder macros in dux, inline macros and section macros each take
-> the new order among themselves. Keep all macros in one form to choose any order.
+> A macro can also be written as its own `[macros.<name>]` section. TOML reads those after
+> every inline `name = { ... }` entry, so a section macro never comes before an inline one.
+>
+> dux never changes how a macro is written, so when you reorder macros, inline macros and
+> section macros each take the new order among themselves. Keep all macros in one form to
+> choose any order.
 
 ### Surface values
 
@@ -89,21 +90,28 @@ dux confirms with `Sent macro "<name>".` in the status line.
 > [!IMPORTANT]
 > A macro is a write like any other, so it goes through input ownership. While dux is
 > [serving in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
-> a terminal with a take-over card over it is not yours to type into: either another
-> device is driving it, or nothing is driving it yet. The bar still opens there, but
-> Enter sends nothing. The status line names the device that is driving, or says that
-> nothing is driving yet, and tells you to press **Take over** on the card first. Nothing
-> half-sends, and the macro never takes the terminal over for you.
+> a terminal with a take-over card over it is not yours to type into: either another device
+> is driving it, or nothing is driving it yet.
+>
+> - The bar still opens there, but Enter sends nothing.
+> - The status line names the device that is driving, or says that nothing is driving yet,
+>   and tells you to press **Take over** on the card first.
+> - Nothing half-sends, and the macro never takes the terminal over for you.
 
 ## Sending a macro in the web UI
 
 Every terminal pane, agent or companion terminal, has a **Macros** button: in the pane's
-header on a computer, and in the action flap hanging off the top bar on a phone. Click it
-for a picker of the macros matching that pane's surface. A macro always goes to the pane
-the button belongs to, even when other terminals are open on the page. Type to filter,
-then click a macro or press Enter to send it. The text simply appears at the prompt;
-there is no confirmation toast. If the pane's message box is your typing surface, the
-macro lands in the box instead, ready for you to edit and send.
+header on a computer, and in the action flap hanging off the top bar on a phone. A macro
+always goes to the pane the button belongs to, even when other terminals are open on the
+page.
+
+1. Click **Macros** for a picker of the macros matching that pane's surface.
+2. Type to filter.
+3. Click a macro or press Enter to send it.
+
+The text simply appears at the prompt; there is no confirmation toast. If the pane's message
+box is your typing surface, the macro lands in the box instead, ready for you to edit and
+send.
 
 ![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a search field and an Edit macros link at the bottom.](/screens/macro-popover.png)
 
@@ -111,16 +119,16 @@ If a pane has no macros for its surface, the popover says so and points you at t
 editor. With no macros at all, it links straight to **Edit macros**.
 
 > [!IMPORTANT]
-> The ownership rule applies here too. While the take-over card covers a terminal,
-> because another device is driving it or because nothing is driving it yet, that pane's
-> **Macros** button is greyed out and its hint reads "Take over to send macros". Press
-> **Take over** on the card and the button works again straight away. A macro never takes
-> a terminal over for you.
+> The ownership rule applies here too: a macro never takes a terminal over for you. The
+> **Macros** button tells you why it cannot send:
 >
-> A tab that is not running has nothing to type into, so its **Macros** button is greyed
-> out too, with the hint "Start the tab to send macros". And if you pick a macro while the
-> terminal is reconnecting, nothing is sent and a message says so; pick it again once the
-> terminal is back.
+> - **A take-over card covers the terminal** (another device is driving it, or nothing is
+>   driving it yet): the button is greyed out and its hint reads "Take over to send macros".
+>   Press **Take over** on the card and it works again straight away.
+> - **The tab is not running:** the button is greyed out, with the hint "Start the tab to
+>   send macros".
+> - **The terminal is reconnecting:** if you pick a macro anyway, nothing is sent and a
+>   message says so. Pick it again once the terminal is back.
 
 ## Managing macros in the terminal UI
 
@@ -139,14 +147,17 @@ Inside the list:
 - Rows are clickable: one click highlights, a double click opens.
 
 The macro form is an ordinary modal, not a wizard. The name field, the text field, the
-Agent / Terminal / Both selector, and the Cancel and Save buttons are all on screen at
-once, and each is a focus stop. The movement keys (`toggle_selection` in `[keys]`) move
-focus and never change a value; Space acts on whatever has focus. The name field takes
-typing immediately. The text field is multiline, so it has an explicit edit mode you
-enter deliberately (`confirm` while it has focus, `engage_commit_input`, or a double
-click) and leave with `exit_commit_input`, which keeps your text. Typing on the field
-before you engage it does nothing, and it draws no caret. Everything is clickable.
-Cancelling writes nothing.
+Agent / Terminal / Both selector, and the Cancel and Save buttons are all on screen at once,
+and each is a focus stop. Everything is clickable.
+
+- **Movement keys** (`toggle_selection` in `[keys]`) move focus and never change a value;
+  Space acts on whatever has focus.
+- **The name field** takes typing immediately.
+- **The text field** is multiline, so it has an explicit edit mode. Enter it deliberately
+  (`confirm` while it has focus, `engage_commit_input`, or a double click) and leave it with
+  `exit_commit_input`, which keeps your text. Typing on the field before you engage it does
+  nothing, and it draws no caret.
+- **Cancelling** writes nothing.
 
 > [!NOTE]
 > `clear_text_field` empties the text field only while the text field is the
@@ -155,6 +166,10 @@ Cancelling writes nothing.
 
 Saving requires a name and some text, and refuses a name another macro already uses. dux
 says which in the status line and keeps the form open.
+
+If the macro list changed somewhere else after the editor opened (a browser, or the command
+line), saving is refused and nothing is written. Your text stays in the form: copy what you
+need, then close the editor and open it again to see the change.
 
 Additions, edits, and deletions are written to `config.toml` immediately, and your
 hand-edits survive: dux preserves your formatting and ordering.
@@ -170,6 +185,8 @@ order:
 - The pencil button on a row edits it through the same form. Renaming keeps its position
   in the list.
 - The trash button stages a deletion and asks you to confirm inline.
+- **Drag a row** to reorder the list. A reorder saves right away, when the list is
+  valid; nothing else needs **Save** for it.
 - **Save** writes the whole list at once; **Cancel** discards your changes.
 
 If the list changed somewhere else while the dialog was open (another browser, or a
@@ -186,17 +203,20 @@ dux macros add review "Review this diff" --surface both
 dux macros rm review
 ```
 
-`add` saves a new macro, or replaces the one with that name where it stands in the list;
-`--surface` takes `agent` (the default), `terminal` or `both`. Both changes ask before
-they go ahead, and need `--yes` when there is no terminal to ask on. With dux running,
-the change goes through it and applies at once; with dux stopped, it is written straight
-into `config.toml`, comments kept, and applies the next time dux starts. `--remote
-<name>` lists and changes a remote dux's macros instead.
+- **`add`** saves a new macro, or replaces the one with that name where it stands in the
+  list. `--surface` takes `agent` (the default), `terminal` or `both`.
+- **`add` and `rm`** both ask before they go ahead, and need `--yes` when there is no
+  terminal to ask on.
+- **With dux running**, the change goes through it and applies at once. **With dux stopped**,
+  it is written straight into `config.toml`, comments kept, and applies the next time dux
+  starts.
+- **`--remote <name>`** lists and changes a remote dux's macros instead.
 
-A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
-hidden on the command line, the same rule `dux config get` follows: `ls` lists it under a
-placeholder name, and `show` finds it by its real name but prints only that placeholder and
-its surface. The browser's macro editor shows it in full.
+> [!NOTE]
+> A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
+> hidden on the command line, the same rule `dux config get` follows. `ls` lists it under a
+> placeholder name, and `show` finds it by its real name but prints only that placeholder and
+> its surface. The browser's macro editor shows it in full.
 
 ## Adding macros directly in config
 

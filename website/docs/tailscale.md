@@ -45,16 +45,18 @@ When the mode is not `"no"`, dux runs `tailscale ip` and takes the first IPv4 in
 Tailscale's `100.64.0.0/10` range, falling back to the first IPv6 in Tailscale's own
 `fd7a:115c:a1e0::/48` block. A plain LAN or link-local address is ignored.
 
-That address joins the listen plan as an extra leg at the *same port* as your primary
-address, and never replaces your `host`. So the default is two listeners, loopback and
-tailnet, one URL each, both printed in the startup banner with the tailnet row labelled
-`Tailscale` and a note that other tailnet devices can reach it, which also says whether
-they are asked for a password. dux skips the
-extra leg when your primary is already `0.0.0.0` or already that same address.
+That address becomes an extra listener:
+
+- **Same port as your primary address**, and it never replaces your `host`. So the default
+  is two listeners, loopback and tailnet, one URL each.
+- **Both URLs are printed in the startup banner,** the tailnet row labelled `Tailscale`
+  with a note that other tailnet devices can reach it and whether they are asked for a
+  password.
+- **No extra listener** when your primary is already `0.0.0.0` or already that same address.
 
 > [!IMPORTANT]
-> The two legs are not equal. Your configured address is **required**, and failing to bind
-> it is fatal. The Tailscale leg is **best effort**: if something else already holds that
+> The two listeners are not equal. Your configured address is **required**, and failing to
+> bind it is fatal. The Tailscale one is **best effort**: if something else already holds that
 > port, dux warns and keeps serving the addresses that did bind.
 
 ### It follows the interface
@@ -65,19 +67,24 @@ a roaming laptop is several times a day. On `"auto"`:
 - **The interface appears** and dux binds it mid-run, with no restart. A new URL starts
   answering and everything else is untouched.
 - **The interface goes away** and dux drops that one listener. Your configured address keeps
-  serving throughout. Pages open over the tailnet show the in-app *Reconnecting…* overlay
+  serving throughout. Pages open over the tailnet show the in-app *Reconnecting to dux…* overlay
   and pick up again by themselves when the address comes back, with their terminals still
   scrolled where you left them.
 - **Your Tailscale address changes** and dux moves the listener to the new one.
 
 dux checks roughly every five seconds, which is not configurable. That interval is also the
 only debounce, so an interface that flaps faster than dux looks costs at most one bind or
-unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`, listed in
-the flip's log viewer, and said on screen: the terminal UI's status line and the
-browser's toasts both name the address that arrived or went away, and both tell you when a
-bind keeps failing. On screen the news waits until the interface has stayed one way for a
-few seconds, so an interface that keeps flapping gets one message saying so and one more
-once it settles, rather than a new one every time it moves.
+unbind.
+
+Every bind and unbind is reported:
+
+- in `dux.log`, in what `dux server` prints, and in the flip's log viewer;
+- on screen, in the terminal UI's status line and the browser's toasts, which name the
+  address that arrived or went away and tell you when a bind keeps failing.
+
+On screen the news waits until the interface has stayed one way for a few seconds. An
+interface that keeps flapping gets one message saying so and one more once it settles,
+rather than a new one every time it moves.
 
 > [!TIP]
 > The mode itself is a live switch: change it from the terminal UI's palette, the
@@ -91,34 +98,35 @@ Unless the mode is `"no"`, dux asks Tailscale on every look whether a Funnel, or
 forward, publishes its port. It cares because a connection Tailscale relays onto dux
 arrives on `localhost`, and a request to `localhost` is how dux recognises
 [this machine](/docs/web-login#who-is-asked-for-it), which is asked for a password only
-under `require = "everywhere"`. dux runs the `tailscale` command, looking for it on your
-`PATH`, in `/usr/local/bin`, and inside the macOS app (`/Applications/Tailscale.app`,
-always as the command line tool, never opening the app).
+under `require = "everywhere"`.
 
-dux serves in every case below. What changes is whether it takes a request to `localhost`
-at its word:
+To find out, dux runs the `tailscale` command, looking for it on your `PATH`, in
+`/usr/local/bin`, and inside the macOS app (`/Applications/Tailscale.app`, always as the
+command line tool, never opening the app). dux serves in every case below. What changes is
+whether it takes a request to `localhost` at its word.
 
-**It does, when nothing can publish it.** An ordinary answer from Tailscale that shows no
-Funnel or forward to dux is the usual one. A node that is down (`tailscale down`), logged
-out, or waiting for an administrator's approval publishes nothing either, unless its saved
-settings still Funnel dux's port: `tailscale up` brings those straight back, so dux keeps
-treating that one as published while the node is down. Two more answers count, and both
-only when nothing of Tailscale is on this machine at all: no address on Tailscale's own
-network interface, no Tailscale daemon answering on its socket (a socket file left behind
-by a daemon that is gone does not count), and no running `tailscaled` or Tailscale macOS
-app.
+**It does, when nothing can publish it.**
 
-- The `tailscale` command is not in any of those places.
-- The `tailscale` command says, in its own words, that the daemon is not running.
+- An ordinary answer from Tailscale that shows no Funnel or forward to dux is the usual one.
+- A node that is down (`tailscale down`), logged out, or waiting for an administrator's
+  approval publishes nothing either. The exception is a node whose saved settings still
+  Funnel dux's port: `tailscale up` brings those straight back, so dux keeps treating that
+  one as published while the node is down.
+- Nothing of Tailscale on this machine at all also counts. Two answers qualify, and
+  **both count only when nothing of Tailscale is here**: the `tailscale` command is not in
+  any of those places, or it says in its own words that the daemon is not running.
+  "Nothing at all" means no address on Tailscale's own network interface, no Tailscale
+  daemon answering on its socket (a socket file left behind by a daemon that is gone does
+  not count), and no running `tailscaled` or Tailscale macOS app.
 
 Other VPNs that hand out addresses in the same `100.x` range (Cloudflare WARP, NetBird) are
 not Tailscale and do not count.
 
 **It does not, while it cannot confirm.** A request to `localhost` then counts as the
-network, so with a password set it is asked for the password like any other, and so are
-your tailnet devices, which dux cannot vouch for either; with no password, dux serves them
-anyway and warns. That is the case the whole time on `"no"`, while dux has just started
-and its first look has not answered, and whenever:
+network. With a password set it is asked for the password like any other, and so are your
+tailnet devices, which dux cannot vouch for either. With no password, dux serves them
+anyway and warns. That is the case the whole time on `"no"`, while dux has just started and
+its first look has not answered, and whenever:
 
 - the command failed, could not be run (a permission refused, the system out of
   resources), timed out (dux caps each call at a few seconds and kills it), or could not
@@ -152,28 +160,29 @@ to get out, in order:
 > [!IMPORTANT]
 > **Userspace networking.** A `tailscaled` started with `--tun=userspace-networking` (the
 > default in Tailscale's container image) has no network interface. When it runs where dux
-> can see it, on the same machine or in the same container, dux still spots it by its
-> answering socket (`/var/run/tailscale/tailscaled.sock`, `/run/tailscale/tailscaled.sock`,
-> `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`, or the path in `$TS_SOCKET`) or by
-> its process, and treats `localhost` as the network until it can ask. Make the `tailscale`
-> command available to dux and able to reach that daemon (it looks for the socket at
-> `/var/run/tailscale/tailscaled.sock`). `tailscale = "no"` is no way out here: it keeps
-> `localhost` counted as the network for good.
+> can see it, on the same machine or in the same container, dux still spots it and treats
+> `localhost` as the network until it can ask.
 >
-> Looking through the running processes costs far more than everything else dux checks,
-> so once it has found no daemon that way it looks again at most once a minute. A daemon
-> with no interface and no socket at one of those paths can therefore take up to a minute
-> to be noticed; the socket and the interface are checked on every look.
+> - dux finds such a daemon by its socket, at the usual locations or the path in
+>   `$TS_SOCKET`, or by its process.
+> - A socket file left behind by a daemon that is gone does not count.
+> - The process look happens at most once a minute, so a daemon with no interface and no
+>   socket there can take up to a minute to be noticed.
+>
+> Make the `tailscale` command available to dux and able to reach that daemon.
+> `tailscale = "no"` is no way out here: it keeps `localhost` counted as the network for
+> good.
 
 > [!WARNING]
 > **Inside a container, dux cannot see a Tailscale outside it.** A Tailscale on the host,
 > or in a sidecar container that does not share dux's files and processes, is invisible
-> from inside dux's container, so there dux cannot tell whether something outside publishes
-> its port. When dux runs in a container and sees no Tailscale, it serves as usual and
-> says so once at start, in a warning: a connection relayed onto that port looks like this
-> machine. With no password, anything that can reach the port can drive your terminals.
-> Keep the port private to your own network, or set a password with
-> `require = "everywhere"`.
+> from inside dux's container, so dux cannot tell whether something outside publishes its
+> port.
+>
+> When dux runs in a container and sees no Tailscale, it serves as usual and says so once
+> at start, in a warning: a connection relayed onto that port looks like this machine. With
+> no password, anything that can reach the port can drive your terminals. Keep the port
+> private to your own network, or set a password with `require = "everywhere"`.
 
 On `"auto"` dux keeps looking every few seconds and follows whatever it finds; on `"yes"`
 it looks for the address once but keeps checking for a Funnel the same way.
@@ -243,10 +252,11 @@ addresses, and so do the addresses the terminal UI shows while it serves.
 > only while the name stays on your tailnet, which is why a Funnel turns it off while no
 > password is set (see [Tailscale Funnel](#tailscale-funnel) below).
 
-dux runs a Host-header allowlist in front of everything, and it also accepts `localhost`,
-any loopback address, an IP literal dux actually bound, and, unless the mode is `"no"`,
-any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:3890` works too,
-even while the Tailscale listener is down.
+dux also accepts `localhost`, any loopback address, an IP literal dux actually bound, and,
+unless the mode is `"no"`, any IP literal inside Tailscale's own ranges. So
+`http://100.101.102.103:3890` works too, even while the Tailscale listener is down.
+
+### Other names (`allowed_hosts`)
 
 Any other name, such as a reverse proxy's hostname, goes in `allowed_hosts`:
 
@@ -255,14 +265,15 @@ Any other name, such as a reverse proxy's hostname, goes in `allowed_hosts`:
 allowed_hosts = ["dux.example.com"]
 ```
 
-Hostnames only, no scheme and no port. Entries are matched case-insensitively and the port
-is ignored, so one entry covers every port. A trailing dot is stripped. There is no
-wildcard: `"*"` is a literal hostname and matches nothing. Edit the file and run
-**Reload config**, and the running server answers by the new list with no restart.
+- **Hostnames only,** no scheme and no port.
+- **Case-insensitive,** and the port is ignored, so one entry covers every port.
+- **A trailing dot is stripped.**
+- **No wildcard:** `"*"` is a literal hostname and matches nothing.
+- **Edit the file and run Reload config,** and the running server answers by the new list
+  with no restart.
 
-dux's other browser defense, a same-origin check on socket upgrades and write requests,
-needs nothing from you here: a browser sitting at your tailnet URL sends a matching `Origin`
-and `Host`.
+A browser sitting at your tailnet URL also passes dux's same-origin check without any
+setup from you.
 
 ## HTTPS with `tailscale serve`
 
@@ -296,30 +307,41 @@ line and the browser's toasts say when a route to dux appears or goes away.
 > The first HTTPS visit can take around 30 seconds while Tailscale gets the certificate
 > issued. That happens once; later visits are immediate.
 
-What counts as a route to dux: one at the root (`/`) that forwards to dux's port on this
-machine (`127.0.0.1`, `localhost` or `[::1]`), which is exactly what
+**What counts as a route to dux:** one at the root (`/`) that forwards to dux's port on
+this machine (`127.0.0.1`, `localhost` or `[::1]`), which is exactly what
 `tailscale serve --bg <port>` sets up. A route mounted under a path, such as
 `--set-path /dux`, does not work, because dux's pages load everything from the root.
-`tailscale serve status` lists what is configured, and `tailscale serve --https=443 off`
-removes the route again (`tailscale serve reset` removes every route on the machine).
 
-`tailscale serve` keeps the name and the `https` origin when it forwards a request, and it
-carries WebSockets, so every terminal and the live change feed work through it as they do
-over the plain address.
+Useful commands:
 
-With a [password](/docs/web-login) set, a request through the route counts as your tailnet
-when Tailscale says which tailnet user sent it, and the sign-in cookie is marked Secure
-on its own, so it never travels over plain HTTP. Both hold only while dux can tell what
-reaches its port: while it [cannot](#when-tailscale-isnt-there), route visitors are asked
-for the password, see the plain-HTTP warning, and get a cookie that is not Secure unless
-`cookie_secure = "always"`.
+- `tailscale serve status` lists what is configured.
+- `tailscale serve --https=443 off` removes the route again.
+- `tailscale serve reset` removes every route on the machine.
+
+Every terminal and the live change feed work through the route as they do over the plain
+address.
+
+### With a password set
+
+A request through the route counts as your tailnet when Tailscale says which tailnet user
+sent it, and the sign-in cookie is marked Secure on its own, so it never travels over plain
+HTTP.
+
+Both hold only while dux can tell what reaches its port. While it
+[cannot](#when-tailscale-isnt-there), route visitors are asked for the password, see the
+plain-HTTP warning, and get a cookie that is not Secure unless `cookie_secure = "always"`.
+
+### Making HTTPS the only way in
 
 The plain Tailscale address keeps serving alongside the HTTPS one. To make HTTPS the only
-way in from the tailnet, run with `tailscale = "no"` (or `dux server --no-tailscale`) and
-list the name in `allowed_hosts`: `"no"` also stops dux answering to its name by itself,
-and the explicit entry is what lets the HTTPS route through. On `"no"` dux no longer looks
-the route up, so its requests count as the network: with a password they are asked for
-it, and `cookie_secure = "always"` keeps the cookie Secure.
+way in from the tailnet:
+
+1. Run with `tailscale = "no"` (or `dux server --no-tailscale`), which also stops dux
+   answering to its MagicDNS name by itself.
+2. List the name in `allowed_hosts`, which is what lets the HTTPS route through.
+
+On `"no"` dux no longer looks the route up, so its requests count as the network: with a
+password they are asked for it, and `cookie_secure = "always"` keeps the cookie Secure.
 
 ### QR codes for your phone
 
@@ -327,7 +349,9 @@ it, and `cookie_secure = "always"` keeps the cookie Secure.
 show two QR codes, so a phone on your tailnet opens dux by pointing its camera at the
 screen: the Tailscale IP address on the left, and the MagicDNS name on the right, which is
 the `https://` URL when `tailscale serve` points at dux. Each code has its URL printed
-under it. They sit side by side when the window is wide enough and stack when it is not,
+under it.
+
+They sit side by side when the window is wide enough and stack when it is not,
 and they appear once dux's first look at Tailscale has answered, then again whenever
 those addresses change, so a rename or a new serve route gets a fresh pair.
 
@@ -393,9 +417,9 @@ route is on while no password is set (see [Tailscale Funnel](#tailscale-funnel))
 `localhost` too while it cannot confirm that nothing relays onto its port: always on
 `tailscale = "no"`, for a moment after it starts, while it cannot ask Tailscale, and while
 a Funnel or a TCP forward points at dux. Opening dux from this machine on its own
-Tailscale address, MagicDNS name or LAN address asks too, since a relay on the machine
-arrives from those same addresses; use `localhost`. See [When Tailscale isn't there](#when-tailscale-isnt-there) for every cause and
-the way out, and check `require`, which asks this machine too when it is `"everywhere"`.
+Tailscale address, MagicDNS name or LAN address asks too, so use `localhost`. See
+[When Tailscale isn't there](#when-tailscale-isnt-there) for every cause and the way out,
+and check `require`, which asks this machine too when it is `"everywhere"`.
 
 **The first HTTPS visit hangs.** Give it about 30 seconds: that is the certificate being
 issued, once.
@@ -422,17 +446,17 @@ it, and browsers switch off a handful of APIs there:
   itself when the browser exposes no notification API, and nothing fires. The **Desktop
   notifications** preference stays visible and toggleable regardless, so it can look armed
   while being inert.
-- **Installing dux as an app is unavailable.** The PWA manifest ships, but browsers require a
-  secure origin to offer installation, and dux's service worker stays dormant off one. All
-  that worker ever does is serve a branded "dux is unreachable" page for a navigation made
-  while the server is down; the in-app "Reconnecting…" overlay is plain React and works fine.
+- **Installing dux as an app is unavailable.** Browsers require a secure origin to offer
+  installation. The in-app "Reconnecting to dux…" overlay works fine either way; only the
+  branded "dux is unreachable" page for a reload made while the server is down needs HTTPS.
 - **Everything that matters still works.** The terminal, the live WebSocket streams, the file
-  editor, git, macros, the mobile compose bar. The socket URL is derived from the page, so
-  plain HTTP yields `ws://`.
+  editor, git, macros, the mobile compose bar.
 
 One more that is *not* a TLS problem: the editor's **Open local editor** button, which hands a path
-to the editor on the machine you are sitting at, is disabled on any tailnet address. That is
-a host check, not a certificate one.
+to the editor on the machine you are sitting at, is enabled only for `localhost` and other loopback
+names, `0.0.0.0`, `::1` and private-network IPv4 addresses. It is disabled everywhere else,
+which includes tailnet addresses and names and any other hostname. That is a host check, not
+a certificate one.
 
 > [!TIP]
 > If those tradeoffs bother you, put Tailscale's own HTTPS in front of dux:
@@ -445,6 +469,7 @@ a host check, not a certificate one.
 > port has your whole workspace: every agent, every terminal, every worktree, and the
 > server's filesystem through the project picker. The terminal is read-write for whoever
 > holds input, so that includes typing into a session you are in the middle of using.
+>
 > Treat "on my tailnet" as "holding a terminal on this machine", or set a password with
 > `require = "tailnet"` and make it so nobody on the tailnet gets in without it.
 
@@ -479,30 +504,41 @@ does not pretend that is the same as your tailnet:
 - **With a password set**, Funnel visitors get the sign-in page and nothing more, and
   this machine's MagicDNS name keeps working. See
   [Tailscale serve and Funnel](/docs/web-login#tailscale-serve-and-funnel).
-- **With no password**, dux serves anyway and says so as loudly as it can: a warning in
-  every serving mode (red in `dux server`'s output and the flip's log viewer), a red
-  banner in every browser unless its **Don't show again** turned it off, and this machine's MagicDNS name
-  withdrawn while any Funnel is on, so a browser opening the Funnel's address gets a `403`.
-  That last one is not a lock; a crafted request gets past it. Set a password before you
-  Funnel dux.
+- **With no password**, dux serves anyway and says so as loudly as it can:
+  - a warning in every serving mode (red in `dux server`'s output and the flip's log
+    viewer);
+  - a red banner in every browser, unless its **Don't show again** turned it off;
+  - this machine's MagicDNS name withdrawn while any Funnel is on, so a browser opening the
+    Funnel's address gets a `403`. That is not a lock; a crafted request gets past it.
+
+  Set a password before you Funnel dux.
 
 Turn the Funnel off (`tailscale funnel status` lists it) and dux goes back to normal by
 itself at its next look.
 
 > [!WARNING]
-> Know the limits. dux looks every few seconds, so a Funnel switched on while dux runs is
-> noticed at the next look; with Tailscale 1.72 or later, a request through a web Funnel is
-> recognised at once by its mark. dux only sees **this machine's** Funnels: another machine
-> on your tailnet relaying the internet to this one's Tailscale address arrives looking
-> like your tailnet. It also only sees the Tailscale its `tailscale` command reaches by
-> default: a second `tailscaled` running with a socket of its own, or a program with
-> Tailscale built into it (tools built on Tailscale's `tsnet` library), is invisible to
-> it, and so is anything either one publishes. A Funnel is paired with the port it is
-> for, as Tailscale pairs it: a Funnel for another port does not count against dux. A
-> Funnel to a program on a Unix socket is never dux, which listens only on a TCP port. On
-> `"no"` dux does not consult Tailscale at all, so it counts `localhost` as the network
-> the whole time, and switching to `"no"` says so in a warning. If any of these could apply to you, use
-> `require = "tailnet"` or `"everywhere"`.
+> **Know the limits.** dux only sees what its own `tailscale` command can see, and it looks
+> every few seconds.
+
+What dux does not see:
+
+- **Another machine on your tailnet** relaying the internet to this one's Tailscale
+  address. That arrives looking like your tailnet.
+- **A second `tailscaled`** running with a socket of its own, or **a program with Tailscale
+  built into it** (tools built on Tailscale's `tsnet` library), and anything either one
+  publishes.
+- **A Funnel for another port.** A Funnel is paired with the port it is for, as Tailscale
+  pairs it, so it does not count against dux.
+- **A Funnel to a Unix socket.** That is never dux, which listens only on a TCP port.
+
+Timing and `"no"`:
+
+- A Funnel switched on while dux runs is noticed at the next look. With Tailscale 1.72 or
+  later, a request through a web Funnel is recognised at once by its mark.
+- On `"no"` dux does not consult Tailscale at all, so it counts `localhost` as the network
+  the whole time. Switching to `"no"` says so in a warning.
+
+If any of these could apply to you, use `require = "tailnet"` or `"everywhere"`.
 
 ## Where to go next
 

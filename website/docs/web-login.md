@@ -47,10 +47,13 @@ For scripts, pipe it in instead:
 printf '%s\n' "$DUX_PASSWORD" | dux config set server.auth.password --stdin
 ```
 
-One trailing line break is dropped. A password cannot hold a line break, a tab or any other
-control character, because a browser's password field cannot type one, so a pipe holding a
-second line break is refused. `--stdin` refuses to read from a terminal, where what you
-typed would show, and a run with no terminal to ask on tells you to use `--stdin`.
+The rules for a piped password:
+
+- **One trailing line break is dropped.**
+- **No line break, tab or other control character inside it**, because a browser's password
+  field cannot type one. A pipe holding a second line break is refused.
+- **`--stdin` refuses to read from a terminal**, where what you typed would show.
+- **A run with no terminal to ask on** tells you to use `--stdin`.
 
 > [!NOTE]
 > The password is never accepted as a command-line argument. Shell history and the process
@@ -63,11 +66,15 @@ is running, `dux config set` asks it to reload, waits for the answer, and the pa
 force as soon as it has reloaded.
 
 You can also set the first password from the browser, in **Preferences…** under
-**Signing in**, but only from the machine dux runs on or from your tailnet. A browser
-anywhere else is told to use `dux config set`, so a stranger who reaches an open dux cannot
-set a password and lock you out of your own workspace. While dux
-[cannot tell](#when-dux-cannot-tell-it-asks) whether a connection to `localhost` really is
-this machine, the browser there is told the same, and why.
+**Signing in**, with one restriction:
+
+- **Allowed** from the machine dux runs on, or from your tailnet.
+- **Refused** anywhere else, where the browser is told to use `dux config set`. That way a
+  stranger who reaches an open dux cannot set a password and lock you out of your own
+  workspace.
+- **Also refused** while dux [cannot tell](#when-dux-cannot-tell-it-asks) whether a
+  connection to `localhost` really is this machine. The browser there is told the same,
+  and why.
 
 ![The Password row at the top of Preferences, under Signing in: the current password field, a new password typed into the next field with a five-step strength meter reading Excellent under it, and the field to type it again.](/screens/preferences-password.png)
 
@@ -83,20 +90,27 @@ A new password has to be at least `minimum_password_length` characters (12 by de
 reach `minimum_password_score` (2, "good", by default) on a scale from 0 (weak) to 4
 (excellent). The score is an estimate of how many guesses the password would take, with
 dictionary words, names, dates, keyboard runs, l33t spellings, `dux` and your user name all
-counting against it. That is why there are no rules about symbols or capitals:
-`P@ssw0rd!` rates only fair, below the default minimum, and four uncommon words strung
-together rate excellent.
+counting against it.
+
+That is why there are no rules about symbols or capitals: `P@ssw0rd!` rates only fair,
+below the default minimum, and four uncommon words strung together rate excellent.
 
 `dux config set` and Preferences refuse a password below either minimum and say why. The
 browser's meter is a guide; dux itself makes the call when you save.
 
-A hash pasted into `config.toml` by hand is checked for its format and cost, but dux cannot
-measure a password it has never seen, so it measures it against the minimums each time
-somebody signs in with it. A password below today's minimums still signs you in, and from
-then on every browser using dux shows a banner saying the password is weaker than dux asks
-for, with a way to change it. dux says the same once in its log and on the terminal UI's
-status line. dux remembers this only while it runs: after a restart the banner stays away
-until the next sign-in finds the password short again.
+### A hash you pasted by hand
+
+dux cannot measure a password it has never seen, so a hash pasted into `config.toml` is
+treated differently:
+
+- **Only its format and cost are checked** when dux reads the file.
+- **The password is measured against the minimums at each sign-in.** One below today's
+  minimums still signs you in.
+- **From then on, every browser using dux shows a banner** saying the password is weaker
+  than dux asks for, with a way to change it. dux says the same once in its log and on the
+  terminal UI's status line.
+- **dux remembers this only while it runs.** After a restart the banner stays away until
+  the next sign-in finds the password short again.
 
 ![The banner across the top of the web UI saying the dux password is weaker than the minimum it asks for, with Dismiss and Change it in Preferences… buttons.](/screens/weak-password-banner.png)
 
@@ -136,9 +150,11 @@ What each column means:
 
 dux decides "this machine" from the connection itself, and something else on the machine
 can hand it a connection that only looks local: a raw TCP forward onto dux's port makes
-whoever comes through it look exactly like this machine. So whenever dux cannot rule that
-out, a request to `localhost` counts as everyone else, and with a password set, you sign in
-on this machine too, whatever `require` says. That happens:
+whoever comes through it look exactly like this machine.
+
+So whenever dux cannot rule that out, a request to `localhost` counts as everyone else.
+With a password set, you sign in on this machine too, whatever `require` says. That
+happens:
 
 - **the whole time with `tailscale = "no"`** (or `--no-tailscale`): dux does not consult
   Tailscale at all, so it can never rule a Funnel or a forward out. It says so once at
@@ -151,30 +167,30 @@ on this machine too, whatever `require` says. That happens:
   dux's port.
 
 In all of these but a Funnel, your tailnet devices are asked for the password too, since
-dux cannot vouch for them either. A machine where Tailscale is not installed, or is
-installed but not running (the `tailscale` command says its daemon is stopped, and nothing
-else of Tailscale is running), is an answer rather than a doubt: nothing there can publish
-dux, so `localhost` is this machine again.
+dux cannot vouch for them either.
+
+> [!NOTE]
+> A machine where Tailscale is not installed, or is installed but not running (the
+> `tailscale` command says its daemon is stopped, and nothing else of Tailscale is
+> running), is an answer rather than a doubt. Nothing there can publish dux, so
+> `localhost` is this machine again.
 
 What dux announces, and where:
 
-- **`tailscale = "no"` from the start**: one warning at start, in `dux.log` and in
-  `dux server`'s output or the flip's log viewer. Switching to `"no"` while dux serves
-  raises a warning on the terminal UI's status line and in the browser too. Switching back
-  away from `"no"` says nothing: the next look at Tailscale decides, quietly when it finds
-  nothing.
-- **A Funnel, or a `tailscale` command dux cannot use**: a warning when it starts and a
-  note when dux can vouch for `localhost` again, in its log, in the console, on the
-  terminal UI's status line and in the browser.
-- **A raw TCP forward**: a warning in the same places when it appears. When it goes away
-  the warning is withdrawn from the status line and the browser, with no message of its
-  own.
-- **The moment after start**: nothing.
+| Situation | What dux says |
+| --- | --- |
+| `tailscale = "no"` from the start | One warning at start, in `dux.log` and in `dux server`'s output or the flip's log viewer. |
+| Switching to `"no"` while dux serves | A warning on the terminal UI's status line and in the browser. |
+| Switching back away from `"no"` | Nothing. The next look at Tailscale decides, quietly when it finds nothing. |
+| A Funnel, or a `tailscale` command dux cannot use | A warning when it starts and a note when dux can vouch for `localhost` again, in the log, the console, the status line and the browser. |
+| A raw TCP forward | A warning in the same places. When it goes away the warning is withdrawn from the status line and the browser, with no message of its own. |
+| The moment after start | Nothing. |
 
 > [!WARNING]
-> dux in a container cannot see a Tailscale outside it, so when it sees none it treats
-> `localhost` as this machine and says once at start that it cannot tell. If anything
-> outside could relay connections onto dux's port, set `require = "everywhere"`.
+> dux in a container cannot see a Tailscale outside it. The full story, and what to set, is
+> in [When Tailscale isn't there](/docs/tailscale#when-tailscale-isnt-there); the short
+> version is `require = "everywhere"` if anything outside could relay connections onto
+> dux's port.
 
 ## Signing in, and staying signed in
 
@@ -201,9 +217,10 @@ each other's browsers out. Page scripts cannot read it, and other sites cannot s
 > **Browsers do not keep cookies apart by port.** Any other web app you open under the same
 > host name as dux (another port on `localhost`, on your MagicDNS name or on your own
 > domain) is sent dux's session cookie with every request, and whoever runs that app can
-> use it to act as you in dux for as long as the session lasts. Serve dux under a host name
-> of its own, or only open apps you trust under the one it shares. This is a limit of how
-> browsers handle cookies, and dux accepts it rather than working around it.
+> use it to act as you in dux for as long as the session lasts.
+>
+> Serve dux under a host name of its own, or only open apps you trust under the one it
+> shares.
 
 **Signing out** is **Sign out**, the last item in the cog menu. It appears only when there
 is a session to end. Your place and any unsaved editor drafts stay in the page, so signing
@@ -220,10 +237,13 @@ with `--stdin`. Its wrong guesses count exactly like the sign-in page's, slow-do
 included, and `require` decides whether it is asked at all, the same as for a browser on
 that machine.
 
-A command-line sign-in outlives a browser's: it stays good between commands until it goes
-unused for `cli_token_idle_days` (30 by default), so daily use never asks again. It ends at
-once on `dux remote logout`, or when the password changes. It is kept on the signing-in
-machine in `remotes.toml`, in the config folder, readable only by you.
+A command-line sign-in outlives a browser's:
+
+- **It stays good between commands** until it goes unused for `cli_token_idle_days` (30 by
+  default), so daily use never asks again.
+- **It ends at once** on `dux remote logout`, or when the password changes.
+- **It is kept on the signing-in machine** in `remotes.toml`, in the config folder,
+  readable only by you.
 
 ## Changing the password
 
@@ -238,15 +258,9 @@ same as one on the sign-in page.
 
 The raw config editor in the browser (**Configuration → Edit config file…**) refuses any
 edit that sets, changes or removes the password, and writes nothing. That stops the
-password being swapped from a page that never asked for the current one. For the same
-reason it refuses a change to `[server] host` or `allowed_hosts`, including one made
-through an older setting name that dux turns into one of them; make those in the file from
-a terminal.
-
-If `config.toml` changed on disk since the editor opened it (a `dux config set`, a new
-block, another editor), the save is refused and nothing is written. The editor then offers
-to reload the file, dropping your edits, or to keep editing so you can copy what you need
-first.
+password being swapped from a page that never asked for the current one. Everything else
+the editor refuses is in
+[Editing config from the browser](/docs/server-mode#editing-config-from-the-browser).
 
 ## Warnings you will see
 
@@ -263,8 +277,16 @@ is reachable beyond it: a browser on `localhost` while dux
 loopback listener, say) sees it, while the terminal says nothing, because no listener
 reaches past this machine.
 
+In `dux server`'s output:
+
 ![dux server's startup output while listening on 0.0.0.0:3890 with no password: yellow warnings about the non-loopback address, and a red line saying no password is set and dux is reachable beyond this machine, so anyone who can reach it controls your agents and terminals.](/screens/server-no-password-warning.png)
+
+In the start-web-server flip's log viewer:
+
 ![The start-web-server flip's log viewer serving on loopback and a Tailscale address, with the same red line saying no password is set and dux is reachable beyond this machine.](/screens/tui-flip-no-password-warning.png)
+
+And in every browser:
+
 ![The red banner across the top of the web UI: No password, anyone who can reach this address can use dux, with Dismiss and Don't show again buttons.](/screens/no-password-banner.png)
 
 The banner has two buttons. **Dismiss** hides it for this page load only; it is meant to
@@ -275,15 +297,20 @@ warnings do not go away: they are about the listener, and the listener is still 
 **The connection is not encrypted.** The sign-in page warns in red when you reached dux
 over plain HTTP, because anyone on the network between you and dux can read the password as
 you type it, take the session cookie after you sign in, and change the page before it
-reaches you. dux leaves the warning off only where it knows the path is encrypted or never
-leaves the machine: this machine, a direct tailnet connection (Tailscale encrypts it end to
-end), `tailscale serve`, and Tailscale Funnel, which always serves HTTPS. The first three
-count only while dux can tell who they are: while it
+reaches you.
+
+dux leaves the warning off only where it knows the path is encrypted or never leaves the
+machine:
+
+- **This machine.**
+- **A direct tailnet connection**, which Tailscale encrypts end to end.
+- **`tailscale serve`.**
+- **Tailscale Funnel**, which always serves HTTPS.
+
+The first three count only while dux can tell who they are. While it
 [cannot](#when-dux-cannot-tell-it-asks), `localhost` (on `tailscale = "no"` too), your
 tailnet devices and `tailscale serve` visitors all see the warning, and a `tailscale serve`
-HTTPS visitor's cookie is no longer marked Secure under `cookie_secure = "auto"`. (Under
-`"auto"`, a cookie on `localhost` or a direct tailnet connection is never marked Secure:
-those are plain HTTP, however private.)
+HTTPS visitor's cookie is no longer marked Secure under `cookie_secure = "auto"`.
 
 ![The sign-in page with a red box reading This connection is not encrypted, explaining that anyone on the network can read the password, take the session cookie and change the page.](/screens/login-plain-http.png)
 
@@ -302,20 +329,25 @@ A wrong password costs time, and repeated wrong passwords cost the address:
   to `failed_login_max_delay_seconds` (30). The sign-in page counts the wait down.
 - **A limit for many addresses together.** Past `max_failed_logins_per_minute` failures
   (30) in a minute, every visitor in that group is told to wait until the minute is over,
-  including addresses that never failed, which stops a guesser that keeps changing
-  address. The internet and proxies dux cannot vouch for share one count, and devices on
-  your network have another, so a flood from one never locks out the other. A browser on
-  this machine that opens dux on one of the machine's own non-loopback addresses has a
-  count of its own. Your tailnet devices and this machine on `localhost` are slowed one
-  address at a time while dux can tell who they are. While it
-  [cannot](#when-dux-cannot-tell-it-asks), sign-ins on `localhost` share one count of their
-  own, direct tailnet devices share the network's, and `tailscale serve` visitors share the
-  internet's.
+  including addresses that never failed. That stops a guesser who keeps changing address.
+  Who shares a count is below.
 - **A block.** After `max_failed_logins` failures (5) from one address, each within
   `failed_login_window_seconds` (15 minutes) of the one before, dux adds that address to
   `blocked_addresses` in your `config.toml`. The count starts over only once that long has
-  passed since the address's last failure. Its log, the terminal UI's status line and the browser all name the
-  address and the file it was written to.
+  passed since the address's last failure.
+
+When an address is blocked, dux's log, the terminal UI's status line and the browser all
+name the address and the file it was written to.
+
+**Who shares a count** for the per-minute limit:
+
+| Who | Counted |
+| --- | --- |
+| The internet, and proxies dux cannot vouch for | Together, in one count |
+| Devices on your network | Together, in a count of their own, so a flood from one group never locks out the other |
+| This machine, on one of its own non-loopback addresses | In a count of its own |
+| Your tailnet devices, and this machine on `localhost` | One address at a time, while dux can tell who they are |
+| While dux [cannot tell](#when-dux-cannot-tell-it-asks) | `localhost` shares one count of its own, direct tailnet devices share the network's, `tailscale serve` visitors share the internet's |
 
 A blocked address gets a page saying it is blocked and where the block lives, and nothing
 else: no sign-in page, no app, with or without a password.
@@ -330,10 +362,13 @@ Which address a block lands on depends on what dux can check for itself:
   written, since the client may have chosen it. dux's log names it, so you can add it by
   hand if you trust the proxy.
 - **An IPv6 device is slowed per /64**, because one device can send from any address in
-  its /64. When the addresses of one /64 together reach `max_failed_logins` without any
-  one of them getting there alone, dux writes the whole /64 as one range, such as `"2001:db8:1:2::/64"`, and the single addresses of that
-  /64 already in the list are folded into it, their comments kept. An address that
-  reaches the limit on its own is blocked as itself.
+  its /64.
+  - When the addresses of one /64 together reach `max_failed_logins` without any one of
+    them getting there alone, dux writes the whole /64 as one range, such as
+    `"2001:db8:1:2::/64"`.
+  - The single addresses of that /64 already in the list are folded into it, their
+    comments kept.
+  - An address that reaches the limit on its own is blocked as itself.
 - **Never grouped into a /64**, so slowed and blocked one address at a time: this machine's
   own network (every device on your LAN shares its /64), link-local `fe80::` addresses,
   your tailnet and Tailscale's address ranges, and IPv4. Each tailnet device is counted on
@@ -372,8 +407,10 @@ until dux restarts, and dux says so; entries you add yourself are never refused.
 > **A block is per address, and an address can be many people.** Everyone behind one
 > shared address (an office network, a phone carrier's NAT, a VPN exit) shares the
 > slow-down and the block. Five wrong guesses by anyone there locks out everyone there,
-> you included if you are one of them. Set `max_failed_logins = 0` if that is a worse risk
-> for you than guessing: it turns blocks off, and the slow-down still applies.
+> you included if you are one of them.
+>
+> Set `max_failed_logins = 0` if that is a worse risk for you than guessing: it turns
+> blocks off, and the slow-down still applies.
 
 ## Behind a reverse proxy
 
@@ -387,18 +424,16 @@ only from a proxy on the same machine:
   sign-ins slow down the visitor's address as your proxy reports it, and all proxied
   traffic together, but dux never writes that address to `blocked_addresses`: it cannot
   check it. Add it by hand when its log names one you want gone.
-- **A proxy that adds no forwarding header**, a default nginx included, makes every
-  visitor look exactly like this machine, which needs no password under `"network"` or
-  `"tailnet"`. dux cannot tell the difference.
 
 > [!WARNING]
 > A proxy on this machine that sends no forwarding header (`X-Forwarded-For`, `X-Real-IP`
-> or `Forwarded`) lets every visitor in as this machine, with no password under the
-> default `require`. Set `require = "everywhere"`, or make the proxy send one (for nginx,
-> the line above); better, do both.
+> or `Forwarded`), a default nginx included, makes every visitor look exactly like this
+> machine, and dux cannot tell the difference. Under the default `require` (and under
+> `"tailnet"`) that lets every visitor in with no password. Set `require = "everywhere"`,
+> or make the proxy send one (for nginx, the line above); better, do both.
 
 So behind a reverse proxy, use `"everywhere"`. dux warns once, on the first forwarded
-request it sees while `require` is anything else; a proxy that sends no forwarding header
+request it sees while `require` is anything else. A proxy that sends no forwarding header
 never triggers that warning.
 
 ```toml
@@ -412,10 +447,9 @@ cookie_secure = "always"   # the proxy speaks HTTPS to the browser; dux cannot s
 
 A proxy on another machine or in another container reaches dux over the network, so the
 password applies whatever `require` says (unless it connects to dux's Tailscale address,
-which makes it your tailnet). Every request then comes from the proxy's own
-address, which means the slow-down and the block treat all your visitors as one, as in the
-caution above. [Hosting dux on the public internet](/docs/public-hosting) walks through a
-full setup.
+which makes it your tailnet). Every request then comes from the proxy's own address, so
+the slow-down and the block treat all your visitors as one, as in the caution above.
+[Hosting dux on the public internet](/docs/public-hosting) walks through a full setup.
 
 ## The cookie's Secure flag
 
@@ -423,7 +457,9 @@ A cookie marked Secure is never sent over plain HTTP. `cookie_secure` decides wh
 marks it:
 
 - **`"auto"`** (the default): only when dux knows the browser reached it over HTTPS, which
-  today means a `tailscale serve` HTTPS route or a Tailscale Funnel.
+  today means a `tailscale serve` HTTPS route or a Tailscale Funnel. A cookie on
+  `localhost` or a direct tailnet connection is never marked Secure, because those are
+  plain HTTP, however private.
 - **`"always"`**: always. Use this behind an HTTPS proxy of your own. It also tells dux that
   browsers reach it over HTTPS, so the sign-in page drops its plain-HTTP warning. A browser
   on plain HTTP then cannot keep the cookie, so it cannot stay signed in.
@@ -438,19 +474,26 @@ it [cannot](#when-dux-cannot-tell-it-asks), those requests are everyone else, as
 password, shown the warning, and given a cookie that is not Secure unless
 `cookie_secure = "always"`. See [HTTPS with `tailscale serve`](/docs/tailscale#https-with-tailscale-serve).
 
-**Tailscale Funnel** publishes a port to the whole internet. With a password set, dux serves
-through it: every Funnel visitor gets the sign-in page whatever `require` says, and while
-the Funnel stands, so does a browser on this machine. A visitor who does not know the
-password sees the sign-in page and nothing more. Funnel always serves HTTPS, so its visitors get a Secure cookie and no plain-HTTP
-warning, and their failed sign-ins are slowed down but never written to
-`blocked_addresses`, because dux cannot check the address Tailscale names for them.
+**Tailscale Funnel** publishes a port to the whole internet. What dux does depends on
+whether a password is set.
 
-With no password, dux still serves, because what you publish is your call, and it is as
-loud about it as it can be: the warning in every serving mode, the red banner in every
-browser (unless its **Don't show again** turned it off), and this machine's MagicDNS name
-withdrawn while any Funnel is on, so a browser
-opening the Funnel's address gets a `403`. That last one is not a lock: a request crafted to
-name another host gets through. Set a password before you Funnel dux.
+- **With a password**, dux serves through it.
+  - Every Funnel visitor gets the sign-in page whatever `require` says, and while the
+    Funnel stands, so does a browser on this machine. A visitor who does not know the
+    password sees the sign-in page and nothing more.
+  - Funnel always serves HTTPS, so its visitors get a Secure cookie and no plain-HTTP
+    warning.
+  - Their failed sign-ins are slowed down but never written to `blocked_addresses`,
+    because dux cannot check the address Tailscale names for them.
+- **With no password**, dux still serves, because what you publish is your call, and it is
+  as loud about it as it can be.
+  - The warning appears in every serving mode, and the red banner in every browser (unless
+    its **Don't show again** turned it off).
+  - This machine's MagicDNS name is withdrawn while any Funnel is on, so a browser opening
+    the Funnel's address gets a `403`. That is not a lock: a request crafted to name
+    another host gets through.
+
+*Set a password before you Funnel dux.*
 
 > [!WARNING]
 > dux only sees this machine's own Funnels. Another tailnet machine that relays the public
@@ -481,10 +524,18 @@ name another host gets through. Set a password before you Funnel dux.
 
 Elsewhere in `config.toml`, a bad value can fall back to its default (`dux server` does
 that for a value of the wrong type). This section never does, because its default is "no
-password", and a typo must never quietly open dux to everyone. A misspelled key, a value of the wrong type or out of range,
-an unreadable `password_hash`, a password setting written outside `[server.auth]` (or in a
-table with a near-miss name such as `[server.auht]`), a plaintext `password` anywhere in
-the file, or a `config.toml` that is not valid TOML at all:
+password", and a typo must never quietly open dux to everyone. Any of these counts as
+broken:
+
+- a misspelled key;
+- a value of the wrong type, or out of range;
+- an unreadable `password_hash`;
+- a password setting written outside `[server.auth]`, or in a table with a near-miss name
+  such as `[server.auht]`;
+- a plaintext `password` anywhere in the file;
+- a `config.toml` that is not valid TOML at all.
+
+What happens:
 
 - **stops dux from starting**, with a message naming the file, the line and the problem;
 - **makes a reload change nothing**: the running dux keeps the settings it had, password
@@ -513,8 +564,8 @@ On macOS the lock file is `~/.dux/dux.lock`.
 
 ## When the page cannot reach dux
 
-Before it shows anything, the page asks dux whether this browser needs to sign in. If dux
-does not answer, it says so, with a button to try again, rather than guessing either way.
+If dux does not answer in time, the page cannot tell whether this browser needs to sign
+in. It says so, with a button to try again, rather than guessing either way.
 
 ![The page saying Can't reach dux: dux did not answer in time, so the page cannot tell whether it needs a password yet, with a Retry button.](/screens/cant-reach-dux.png)
 

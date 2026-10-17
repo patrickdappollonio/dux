@@ -29,12 +29,6 @@ There are two gates to choose from, and you can stack them:
 > [Tailscale](/docs/tailscale) puts the same workspace on a private network with
 > nothing to publish and nothing to configure, and it is what the maintainer uses.
 
-> [!IMPORTANT]
-> Nothing about the Host allowlist or the same-origin check is access control. They
-> stop a hostile web page tricking *your* browser into driving your server, which is a
-> real attack and worth defending, and they do nothing at all about a person who simply
-> visits the URL.
-
 ## The simple version: Caddy and the dux password
 
 Two containers, and only Caddy publishes a port:
@@ -84,7 +78,8 @@ cookie_secure = "always"       # the browser speaks HTTPS to Caddy; dux cannot s
 max_failed_logins = 0          # every visitor arrives from Caddy's address; see below
 ```
 
-and the password, set inside the container where nothing echoes it:
+Settings under `[server.auth]` and `allowed_hosts` apply on **Reload config**; no restart.
+Then the password, set inside the container where nothing echoes it:
 
 ```bash
 docker compose exec dux dux config set server.auth.password
@@ -93,29 +88,37 @@ docker compose exec dux dux config set server.auth.password
 > [!WARNING]
 > **Every visitor looks like Caddy to dux.** Caddy reaches dux over the Compose network,
 > so dux sees one address for everybody, and the failed-sign-in slow-down and the block
-> treat all your visitors as one person. Left at its default, five wrong guesses by
-> anyone would block Caddy itself, and with it everyone. `max_failed_logins = 0` turns the
-> automatic block off; the slow-down still applies to everyone together, and a long,
-> generated password is what actually stops guessing. If you would rather have per-person
-> limits and an audit trail, put `oauth2-proxy` in front as below.
+> treat all your visitors as one person.
+>
+> - Left at its default, five wrong guesses by anyone would block Caddy itself, and with
+>   it everyone.
+> - `max_failed_logins = 0` turns the automatic block off. The slow-down still applies to
+>   everyone together, so a long, generated password is what actually stops guessing.
+>
+> If you would rather have per-person limits and an audit trail, put `oauth2-proxy` in
+> front as below.
 
 ## The GitHub version: oauth2-proxy in front
 
 The rest of this page builds the second gate: a TLS terminator, `oauth2-proxy` doing GitHub
 sign-in restricted to your org or to accounts you name, and dux behind it.
 
-A dux password behind the proxy is not free. Everyone signs in twice, once to GitHub and
-once to dux. dux sees every visitor as the proxy's one address, so five wrong guesses by
-anyone block the proxy and with it everybody. And dux cannot see the HTTPS in front, so
-under the default `cookie_secure = "auto"` its cookie is not marked Secure. You can still
-set one as the gate for anyone who reaches dux around the proxy; if you do, use the simple
-version's settings (`require = "everywhere"`, `cookie_secure = "always"`,
+A dux password behind the proxy is not free:
+
+- **Everyone signs in twice**, once to GitHub and once to dux.
+- **dux sees one address for every visitor**, the proxy's, so five wrong guesses by anyone
+  block the proxy and with it everybody.
+- **The cookie is not marked Secure.** dux cannot see the HTTPS in front, so under the
+  default `cookie_secure = "auto"` it leaves the flag off.
+
+You can still set one as the gate for anyone who reaches dux around the proxy. If you do,
+use the simple version's settings (`require = "everywhere"`, `cookie_secure = "always"`,
 `max_failed_logins = 0`).
 
 ## The shape of it
 
-Three containers on one private Compose network, and exactly one of them has a
-published port.
+The GitHub version runs three containers on one private Compose network, and exactly one
+of them has a published port.
 
 ```dot Only Caddy publishes a port. dux publishes none, so the proxy container is the only thing on the machine that can reach it.
 digraph topology {
@@ -288,14 +291,15 @@ dux.example.com {
 }
 ```
 
-That is the whole configuration because Caddy already does the two things dux needs with
-no directives: it passes incoming headers through unchanged, `Host` included, adding only
-`X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`, and it tunnels WebSockets.
+That is the whole configuration, because Caddy already does the two things dux needs with
+no directives: it passes incoming headers through unchanged, `Host` included, and it
+tunnels WebSockets.
 
-One exception if you copy this into a different topology: since Caddy v2.11.0 an upstream
-written as `https://` gets its `Host` overwritten to `{upstream_hostport}`. The upstream
-here is plain `http://`, so it does not apply, but a variant that re-encrypts the hop has
-to put the original back with `header_up Host {host}`.
+> [!TIP]
+> If you copy this into a topology that re-encrypts the hop, note that since Caddy v2.11.0
+> an upstream written as `https://` gets its `Host` overwritten to `{upstream_hostport}`.
+> Put the original back with `header_up Host {host}`. The plain `http://` upstream here is
+> not affected.
 
 And `.env`:
 
@@ -316,13 +320,19 @@ name out loud once:
 allowed_hosts = ["dux.example.com"]
 ```
 
-Hostnames only, no scheme and no port; the port is ignored when matching, matching is
-case-insensitive, and a trailing dot is stripped. There is no wildcard, so `"*"` is a
-literal hostname that matches nothing.
+The rules for each entry:
 
-> [!IMPORTANT]
-> Binding `0.0.0.0` does **not** get you out of this. An unspecified bind relaxes the
-> allowlist for anything that parses as an IP address, and a hostname still is not one.
+- **Hostnames only**, with no scheme and no port.
+- **The port is ignored** when matching, matching is case-insensitive, and a trailing dot
+  is stripped.
+- **No wildcard.** `"*"` is a literal hostname that matches nothing.
+- **Binding `0.0.0.0` does not get you out of this.** An unspecified bind relaxes the
+  allowlist for anything that parses as an IP address, and a hostname still is not one.
+
+> [!WARNING]
+> **The Host allowlist and the same-origin check are *not* access control.** They stop a
+> hostile web page tricking **your** browser into driving your server, which is a real
+> attack worth defending. They do nothing at all about a person who simply visits the URL.
 
 ### Building the dux image
 
@@ -365,20 +375,21 @@ once.
 > survive a restart. This is the part that takes an afternoon, and it has nothing to do
 > with dux.
 
-If containerising your dev environment is not appealing, run `dux server` on the host and
-delete the `dux` service. One gotcha: the proxy container cannot reach a host-loopback
-bind, so dux has to bind an address the container can route to, and the "no published port"
-protection goes with it. Firewall that port, and set a dux password: without one, the
-firewall is the only thing between the internet and your workspace.
+> [!TIP]
+> If containerising your dev environment is not appealing, run `dux server` on the host and
+> delete the `dux` service. There is one catch:
+>
+> - The proxy container cannot reach a host-loopback bind, so dux has to bind an address
+>   the container can route to, and the "no published port" protection goes with it.
+> - **Firewall that port**, and set a dux password. Without one, the firewall is the only
+>   thing between the internet and your workspace.
 
 ## What each piece is doing
 
 **Caddy** terminates TLS. Without it you get the sign-in redirect loop below, and the
-browser refuses dux a few APIs off a secure context: right-click paste, desktop
-notifications, and PWA install. An agent's `OSC 52` clipboard write falls back to the
-legacy copy path, which works within about 5 seconds of your last key press or click and
-otherwise shows a message with a **Copy** button.
-[The Tailscale page lists the exact set](/docs/tailscale#plain-http-costs-you-a-few-browser-features),
+browser switches off a few APIs because the page is not a secure context: right-click
+paste, desktop notifications, PWA install, and an agent's direct clipboard writes outside a
+recent click. [The Tailscale page lists the exact set](/docs/tailscale#plain-http-costs-you-a-few-browser-features),
 and it is the same set here.
 
 **`oauth2-proxy`** is the login. Without it, or reachable around it, you have published a
@@ -397,9 +408,10 @@ shell to the internet, unless a dux password is set behind it.
 > [!CAUTION]
 > **The absent `ports:` entry on the `dux` service** is doing more work than any flag here.
 > It makes "you cannot get to dux without passing the proxy" a property of the network
-> rather than a promise. Add a published port for a quick test and you have removed the
-> GitHub sign-in for as long as it is there, leaving the dux password, if you set one, as
-> the only gate.
+> rather than a promise.
+>
+> Add a published port for a quick test and you have removed the GitHub sign-in for as
+> long as it is there. The dux password, if you set one, is then the only gate.
 
 ## What this does not give you
 
@@ -420,9 +432,9 @@ trail lives in the proxy's logs, not in dux's.
 > [!CAUTION]
 > A tunnel that publishes the port to the anonymous internet (Tailscale Funnel, `ngrok`,
 > `cloudflared` in its no-authentication mode) is only as safe as the gate behind it.
-> With a dux password set and `require = "everywhere"`, visitors get the sign-in page;
-> without one, a tunnel has not made this easier, it has made your shell public. Tailscale
-> Funnel has its own section in [The web password](/docs/web-login#tailscale-serve-and-funnel).
+> Without a dux password, a tunnel has not made this easier, it has made your shell public.
+> What a Funnel does with and without a password is in
+> [The web password](/docs/web-login#tailscale-serve-and-funnel).
 
 ## When it does not work
 
@@ -446,17 +458,17 @@ proxy_read_timeout 1h;      # or an idle agent's socket is closed under you
 ```
 
 > [!WARNING]
-> nginx's `proxy_pass` adds no `X-Forwarded-For` by default. When nginx runs on the same
-> machine as dux and forwards to loopback, that makes every visitor look like this
-> machine, which the default `require` lets in with no password. Add
-> `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, and set
-> `require = "everywhere"` either way. See
+> nginx's `proxy_pass` adds no `X-Forwarded-For` by default, so on the same machine as dux
+> every visitor looks like that machine and the default `require` lets them in with no
+> password. Add `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and set
+> `require = "everywhere"` either way. Why:
 > [Behind a reverse proxy](/docs/web-login#behind-a-reverse-proxy).
 
 ### `403 this dux server does not serve the requested host`
 
 The Host allowlist. The proxy is forwarding a `Host` that dux does not accept, almost
-always your public hostname before you added it to `allowed_hosts`. Add it and run **Reload config**: the running server answers by the new list with no restart.
+always your public hostname before you added it to `allowed_hosts`. Add it and run
+**Reload config**: the running server answers by the new list with no restart.
 
 ### `403 cross-origin WebSocket upgrade rejected`, or `cross-origin request rejected` on a write
 
@@ -486,16 +498,23 @@ digraph headers {
 }
 ```
 
-The symptom is worse than a straight failure: the page loads, reads fine, and every single
-action fails. The fix is to forward the original `Host`; adding the rewritten one to
-`allowed_hosts` only silences the first check. Both hops above forward it unchanged out of
-the box (`oauth2-proxy`'s `--pass-host-header` defaults to `true`); the two known ways to
-lose it are nginx's `proxy_pass`, which rewrites `Host` to the upstream name unless you add
-`proxy_set_header Host $host;`, and Caddy with an `https://` upstream.
+The symptom is worse than a straight failure: **the page loads, reads fine, and every
+single action fails.**
 
-The comparison is authority-only, so `http` versus `https` on the same host is not a
-mismatch. A request with **no** `Origin` header passes deliberately, which keeps `curl` and
-scripts working; `Origin: null` is treated as a mismatch and rejected.
+The fix is to forward the original `Host`. Adding the rewritten one to `allowed_hosts` only
+silences the first check. Both hops above forward it unchanged out of the box
+(`oauth2-proxy`'s `--pass-host-header` defaults to `true`). The two known ways to lose it:
+
+- **nginx's `proxy_pass`** rewrites `Host` to the upstream name unless you add
+  `proxy_set_header Host $host;`.
+- **Caddy with an `https://` upstream** does the same (see the TIP above).
+
+Two more details of the check:
+
+- The comparison is authority-only, so `http` versus `https` on the same host is not a
+  mismatch.
+- A request with **no** `Origin` header passes deliberately, which keeps `curl` and scripts
+  working. `Origin: null` is treated as a mismatch and rejected.
 
 ### An endless redirect loop at sign-in
 

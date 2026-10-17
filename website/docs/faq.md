@@ -24,7 +24,15 @@ whatever accounts they need.
 ### Does dux phone home?
 
 dux itself sends no telemetry. It launches local CLIs in local terminals: no
-analytics, no JSON-RPC, no background uploads.
+analytics, no JSON-RPC, no background uploads of your code.
+
+Two things do reach the network, and both are yours to switch off:
+
+- **Release notes.** After an upgrade, dux fetches the release notes for the new version
+  from GitHub, with no account or token. `[ui] disable_release_notes = true` skips the
+  request.
+- **Pull request tracking.** If you have the `gh` CLI installed and signed in, dux calls it
+  to read pull request status. Without `gh`, those calls never happen.
 
 ## Agents & providers
 
@@ -37,8 +45,10 @@ other CLI that runs an interactive session in a terminal can be added. See
 ### Why was the Gemini provider removed?
 
 [Google deprecated the Gemini CLI](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/),
-so dux does not ship it as a built-in provider. A worktree still pinned to Gemini will
-not launch: switch it to a supported provider and relaunch.
+so dux does not ship it as a built-in provider. An untouched stock `[providers.gemini]`
+block is removed from your config on load, so a worktree still pinned to Gemini will not
+launch: switch it to a supported provider and relaunch. If you wrote your own
+`[providers.gemini]` block, dux keeps it.
 
 ### How do I add my own CLI as an agent?
 
@@ -61,12 +71,15 @@ way.
 ### The mouse wheel or PgUp won't scroll an agent. Why?
 
 Some agents scroll their own content, Claude Code's full-screen renderer and OpenCode
-included. dux forwards the wheel to any agent that asked for the mouse, and
-`PgUp`/`PgDn` to one that took over the whole screen, and keeps its own scrollback for
-agents that do neither. Windowed or fullscreen makes no difference. An explicit
-`forward_scroll = true`/`false` in a `[providers.<name>]` block overrides that
-detection; delete the line to return to auto-detect. See
-[Custom CLI Agents](/docs/custom-agents).
+included. dux detects which kind you have:
+
+- **The agent asked for the mouse:** the wheel is forwarded to it.
+- **The agent took over the whole screen:** `PgUp`/`PgDn` are forwarded to it.
+- **Neither:** dux keeps its own scrollback.
+
+Windowed or fullscreen makes no difference. An explicit `forward_scroll = true`/`false` in
+a `[providers.<name>]` block overrides that detection; delete the line to return to
+auto-detect. See [Custom CLI Agents](/docs/custom-agents).
 
 The mobile web client behaves the same by touch: over a full-screen agent, a one-finger
 drag and the on-screen `PgUp`/`PgDn` buttons forward to the agent. The web always
@@ -126,19 +139,22 @@ runs on and your own tailnet. See [The web password](/docs/web-login).
 
 Neither. There is no dux cloud and no account to make. `dux server` is the same binary
 serving a web UI from your own machine, over your own network, and your repos never
-leave it. Your agents' own CLIs talk to whatever AI providers they always talk to; dux
-adds no traffic of its own.
+leave it. Your agents' own CLIs talk to whatever AI providers they always talk to. dux
+adds no traffic for your code; the only requests it makes itself are the ones listed under
+[Does dux phone home?](#does-dux-phone-home).
 
 ### Can I run the terminal UI and the browser at the same time?
 
-Yes. Set `serve_while_tui = true` under `[server]`, or run the
-`start-background-server` palette command, and one dux process keeps the terminal UI in
-front of you and serves the browser behind it. One device drives a given terminal at a
-time and everybody else watches.
+Yes, two ways:
 
-If you would rather hand the terminal over than keep it, the `start-web-server` palette
-command flips a running terminal UI into serving the browser, and pressing `q` there
-hands it back. Your agents keep running through every one of these transitions. See
+- **Serve behind the terminal UI.** Set `serve_while_tui = true` under `[server]`, or run
+  the `start-background-server` palette command. One dux process keeps the terminal UI in
+  front of you and serves the browser behind it. One device drives a given terminal at a
+  time and everybody else watches.
+- **Hand the terminal over.** The `start-web-server` palette command flips a running
+  terminal UI into serving the browser, and pressing `q` there hands it back.
+
+Your agents keep running through every one of these transitions. See
 [Three ways to serve it](/docs/server-mode#three-ways-to-serve-it).
 
 > [!IMPORTANT]
@@ -148,8 +164,9 @@ hands it back. Your agents keep running through every one of these transitions. 
 ### Can I reach it from my phone?
 
 Yes. dux binds your Tailscale address by default, so any device on your tailnet can
-open it, and you can turn that leg on or off while dux is serving. Read [Reaching dux over Tailscale](/docs/tailscale) first: by default
-your tailnet is not asked for a password, and a shared tailnet is wider than it sounds.
+open it, and you can turn that leg on or off while dux is serving. Read
+[Reaching dux over Tailscale](/docs/tailscale) first: by default your tailnet is not
+asked for a password, and a shared tailnet is wider than it sounds.
 
 ## Configuration
 

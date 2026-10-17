@@ -49,19 +49,13 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 web_dragdrop_paste = "bare"
 ```
 
-A file at `/home/you/Bob's Project/.dux/uploads/shot.png` goes out as:
-
-| Value | What is written into the prompt |
-|---|---|
-| `bare` | `/home/you/Bob's Project/.dux/uploads/shot.png` |
-| `single_quoted` | `'/home/you/Bob'\''s Project/.dux/uploads/shot.png'` |
-| `double_quoted` | `"/home/you/Bob's Project/.dux/uploads/shot.png"` |
-| `backslash_escaped` | `/home/you/Bob\'s\ Project/.dux/uploads/shot.png` |
+`web_dragdrop_paste` takes `bare`, `single_quoted`, `double_quoted` or `backslash_escaped`.
+An unrecognized value falls back to `bare`, and dux logs a warning.
 
 > [!TIP]
-> Which value your CLI wants is covered in
-> [Dropping and pasting files onto an agent](/docs/dropping-files). If a dropped path
-> arrives as plain text instead of attaching, try `single_quoted`. If it arrives
+> What each value writes into the prompt, and which one your CLI wants, is covered in
+> [Dropping and pasting files onto an agent](/docs/dropping-files). In short: if a dropped
+> path arrives as plain text instead of attaching, try `single_quoted`; if it arrives
 > mangled with stray quotes or backslashes, the CLI wants it `bare`.
 
 ## A worked example
@@ -77,9 +71,11 @@ resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
 ```
 
-Save the config, and `myagent` is a provider you can pick when creating an agent.
-`forward_scroll` and `web_dragdrop_paste` are left absent here, which means auto-detect
-scrolling and a bare path.
+Save the config and apply it (run **Reload config** from the browser's cog menu or
+`reload-config` in the terminal UI's palette, or restart dux), and `myagent` is a provider
+you can use as a default or switch an agent or tab to. `forward_scroll` and
+`web_dragdrop_paste` are left absent here, which means auto-detect scrolling and a bare
+path.
 
 ## Choosing a provider per project
 
@@ -94,7 +90,9 @@ default_provider = "myagent"
 ```
 
 > [!NOTE]
-> There is no provider picker in the create-agent prompt. To move an existing agent to
-> a different CLI, run the `change-agent-provider` palette command in the terminal UI,
-> or pick **Change agent provider…** on the agent's `⋯` menu in the browser. It takes
-> effect the next time that tab launches.
+> There is no provider picker in the create-agent prompt: a new agent uses its project's
+> default provider.
+>
+> To move an existing agent to a different CLI, run the `change-agent-provider` palette
+> command in the terminal UI, or pick **Change agent provider…** on the agent's `⋯` menu
+> in the browser. It takes effect the next time that tab launches.

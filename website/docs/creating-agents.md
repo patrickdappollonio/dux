@@ -42,8 +42,12 @@ local config behave exactly as they do in the main checkout.
 ## Naming an agent
 
 Every creation path that makes a branch ends at a naming prompt, and there the name IS
-the branch name. It becomes a git ref, so only ASCII letters, digits, `-`, `_`, and `/`
-are accepted, and spaces become dashes.
+the branch name. It becomes a git ref, so the rules are strict:
+
+- **Allowed characters:** ASCII letters, digits, `-`, `_`, and `/`. Spaces become dashes
+  as you type.
+- **Shape:** it must start with a letter or digit, must not contain `//`, and must not end
+  with `/`.
 
 Tick the pet-name checkbox in the naming prompt and dux generates a two-word pet name
 such as `brave-morse`, for both the agent and the branch. The checkbox starts unticked;
@@ -54,11 +58,9 @@ to make pet names the default for every new agent, turn it on permanently:
 enable_randomized_pet_name_by_default = true
 ```
 
-A standalone agent has no branch, but its name follows the same rules anyway: the same
-characters, and spaces still become dashes. Leave it empty (at creation, or when renaming
-later) and dux names it after the folder rather than inventing a pet name, turning the
-folder's name into a valid one along the way: `My Notes! (2026)` becomes `My-Notes-2026`,
-and a folder with nothing usable in its name gives `standalone-agent`.
+A standalone agent has no branch, but its name follows these same rules, and an empty
+name falls back to the folder's name
+([details below](#naming-a-standalone-agent)).
 
 This is the naming prompt in the terminal UI, with the pet-name checkbox ticked and the
 generated name filled in:
@@ -71,17 +73,16 @@ Rename an agent from its `⋯` menu in the browser, or with `rename-agent` in th
 UI. Both open the same dialog and follow the same rules.
 
 - **The name is what the agent shows.** The field holds the custom name you gave it, empty
-  when there is none, with the name it falls back to shown faintly behind it. The name
-  follows the same rules as a branch name whether or not you also rename the branch, and
-  so does a standalone agent's, which has no branch at all.
+  when there is none, with the name it falls back to shown faintly behind it. It follows
+  the same rules as a branch name, a standalone agent's included.
 - **Leave it empty to go back.** An agent with a branch shows its branch name again; a
-  standalone agent shows its folder's name, turned into a valid name the same way as at
-  creation.
+  standalone agent shows its folder's name.
 - **Also rename the git branch** is a checkbox under the field, unticked by default, for
   agents that have a branch. Tick it and dux renames the branch to the new name as well.
-  The name can't be empty then, because a branch can't be renamed to nothing. Once the
-  branch carries the new name the agent simply shows its branch name, so a later branch
-  rename carries the label along too.
+
+  - The name can't be empty then, because a branch can't be renamed to nothing.
+  - Once the branch carries the new name the agent simply shows its branch name, so a
+    later branch rename carries the label along too.
 
 > [!WARNING]
 > Renaming the branch only renames it on this machine. When the branch has an open pull
@@ -94,11 +95,11 @@ A standalone agent has no branch, so its dialog has no checkbox.
 
 In the browser, open a project's `⋯` menu and pick **New agent…**. In the terminal UI,
 run `new-agent` and pick a project from the chooser (every project is listed, including
-ones with no agents yet). Either way dux checks that project's
-current branch, then opens the naming prompt.
+ones with no agents yet). Either way dux checks that project's current branch, then opens
+the naming prompt.
 
 On both surfaces the project list is ordered by what you touched most recently, so a
-project you just added, or one that just received an agent, sits at the top, and in the
+project you just added, or one that just received an agent, sits at the top. In the
 terminal UI every project chooser shares that order, the ones for
 [managing projects](#managing-a-project), browsing worktrees and opening a project
 terminal included.
@@ -110,13 +111,16 @@ standalone agent:
 ![The terminal UI project chooser for a new agent, listing two projects with their agent counts and paths, and a footer key for creating a standalone agent instead.](/screens/tui-new-agent-chooser.png)
 
 On confirmation dux creates a worktree on a new branch, branched from the project's
-leading branch. That is settled when you add the project: if the repository was on some
-other branch than its default, the add dialog asks whether to check the default out first.
-Say yes and the default branch leads; say no and the branch it was on leads instead.
-Checking out the project's default branch later makes the default lead from then on. If
-dux cannot save that change, the checkout still happens but the old leading branch stays
-in charge, and dux tells you so in an error that stays up until you close it; run the
-checkout again once the problem is fixed.
+**leading branch**. Where that comes from:
+
+- **When you add the project:** if the repository was on some other branch than its
+  default, the add dialog asks whether to check the default out first. Say yes and the
+  default branch leads; say no and the branch it was on leads instead.
+- **Later:** checking out the project's default branch makes the default lead from then
+  on.
+- **If dux cannot save that change,** the checkout still happens but the old leading
+  branch stays in charge, and dux tells you so in an error that stays up until you close
+  it. Run the checkout again once the problem is fixed.
 
 If the name matches an existing local branch, dux asks whether to attach to that branch
 instead, which is what you want when continuing work that already started.
@@ -126,7 +130,7 @@ instead, which is what you want when continuing work that already started.
 > existed first, so the delete dialog's "also delete the branch" box starts **unticked**
 > for it, with a line saying the branch predates the agent and how many of its commits
 > are pushed nowhere. Tick it and the branch goes anyway; leave it and the worktree goes
-> alone.
+> alone. The [delete section of Web agents](/docs/web-agents#kill-versus-delete) has the full rules.
 
 ### Changing the base branch
 
@@ -136,24 +140,36 @@ branch…** in the project's `⋯` menu; in the terminal UI it is the
 `change-project-base-branch` palette command, or the same row in a project's action list
 (see [Managing a project](#managing-a-project)).
 
-dux fetches `origin` first (trying once more if the fetch fails and there is time left,
-and giving up after 15 seconds in all, in which case the list shows origin's branches as
-last fetched and says why), then lists every local branch and every branch that only
-exists on `origin`. The current base is marked, and the list is searchable. A branch
-another worktree has checked out, usually an agent's own branch, is listed but cannot be
-picked, and the row names who holds it: git will not check out one branch in two places.
+#### How the list works
 
-To free a branch an agent holds, delete that agent with its worktree, and untick the box
-that also deletes the branch. A worktree no agent holds any more is removed from the
-project's worktree manager, again with that box unticked. A worktree whose folder is gone
-still holds its branch as far as git is concerned; `git worktree remove` with its path,
-run in the project folder, makes git forget it and leaves the branch alone. The error dux
-shows names the way out that applies.
+dux fetches `origin` first, then lists every local branch and every branch that only
+exists on `origin`.
+
+- **The fetch** is tried once more if it fails and there is time left, and dux gives up
+  after 15 seconds in all. When it does, the list shows origin's branches as last fetched
+  and says why.
+- **The current base** is marked, and the list is searchable.
+- **A branch another worktree has checked out,** usually an agent's own branch, is listed
+  but cannot be picked, and the row names who holds it: git will not check out one branch
+  in two places.
+
+#### Freeing a branch an agent holds
+
+1. Delete that agent with its worktree, and untick the box that also deletes the branch.
+2. For a worktree no agent holds any more, remove it from the project's worktree manager,
+   again with that box unticked.
+3. For a worktree whose folder is gone, run `git worktree remove` with its path in the
+   project folder. It makes git forget the worktree and leaves the branch alone. (Git
+   still counts such a worktree as holding its branch until then.)
+
+The error dux shows names the way out that applies.
 
 > [!CAUTION]
 > The agent delete dialog ticks "also delete the branch" by default for a branch dux
 > created, and the worktree manager ticks it by default for every branch. Leave it ticked
 > and the branch you wanted as the base is deleted along with the worktree.
+
+#### What happens when you pick one
 
 Pick a branch and dux asks first, because the project folder switches to that branch.
 Confirm and dux checks it out in the project folder (creating the local branch from
@@ -161,28 +177,41 @@ Confirm and dux checks it out in the project folder (creating the local branch f
 switch, for example because uncommitted changes in the folder would be overwritten, dux
 says so in an error that stays up, and the base stays where it was.
 
-Whenever dux switches the project folder to a branch that only exists on a remote (here,
-when checking out the default branch, or before creating an agent), it creates the local
-branch from `origin` when `origin` has it, otherwise from the one remote that has it. Your
-`checkout.defaultRemote` setting is not consulted. When several remotes have the branch and
-none of them is `origin`, dux refuses the switch and asks you to create the local branch
-from the remote you want first.
-
 > [!NOTE]
 > Uncommitted changes that do not conflict with the new branch travel with the switch and
 > stay in the project folder, the same as with a checkout in your own terminal.
 
+### Switching and pulling safely
+
+These rules apply to every time dux switches the project folder to a branch or pulls into
+it: changing the base branch, checking out the default branch, creating an agent, an
+agent's **Pull** and **Pull project**.
+
+**A branch that only exists on a remote.** dux creates the local branch from `origin`
+when `origin` has it, otherwise from the one remote that has it. Your
+`checkout.defaultRemote` setting is not consulted. When several remotes have the branch
+and none of them is `origin`, dux refuses the switch and asks you to create the local
+branch from the remote you want first.
+
 > [!CAUTION]
 > When the branch you switch to (or pull in) tracks a path where an ignored folder or file
-> stands, git deletes or overwrites it to make room: it treats ignored files as disposable.
-> dux refuses the switch or pull, and changes nothing, when that folder holds, or that file
-> sits inside, something it knows about: an agent's worktree, a standalone agent's folder,
-> a project's repository, or a terminal working there. Any other ignored folder or file git
-> still replaces, as it would in your own terminal, so move it aside first if it matters.
-> Likewise, when the incoming commit deletes every file in a folder, git removes the folder
-> too, and when it deletes or replaces a link, even one the branch tracks, git removes the
-> link; dux refuses when one of those lives or works there. The same goes for an agent's
-> **Pull** and for **Pull project**.
+> stands, git deletes or overwrites it to make room: it treats ignored files as
+> disposable.
+>
+> dux refuses the switch or pull, and changes nothing, when that folder holds, or that
+> file sits inside, something it knows about:
+>
+> - an agent's worktree,
+> - a standalone agent's folder,
+> - a project's repository, or
+> - a terminal working there.
+>
+> Any other ignored folder or file git still replaces, as it would in your own terminal,
+> so move it aside first if it matters.
+>
+> The same goes when the incoming commit deletes every file in a folder (git removes the
+> folder too) or deletes or replaces a link, even one the branch tracks: dux refuses when
+> one of those lives or works there.
 
 > [!NOTE]
 > dux's own pulls and branch switches never update submodules, even when your git config
@@ -202,7 +231,7 @@ pull_before_creating_agent_by_default = true
 The pull is best-effort. It is fast-forward only, never a merge or rebase, it is skipped
 for repos with no `origin` remote, and a failed pull does not block creation: the agent
 starts from the local branch state and the status message says so. That includes a pull
-dux refused because it would have deleted a folder it knows about (see the caution above).
+dux refused because it would have deleted a folder it knows about (see [Switching and pulling safely](#switching-and-pulling-safely)).
 
 ### Copying uncommitted changes
 
@@ -217,8 +246,10 @@ copy_uncommitted_changes_by_default = true
 
 Changes are copied only when the project checkout and the new worktree are on the same
 commit. When they are not, creation still proceeds and the status message notes that
-nothing was copied. Files matched by `.gitignore`, submodule and embedded-repository
-contents, and empty directories never travel.
+nothing was copied.
+
+Never copied: files matched by `.gitignore`, submodule and embedded-repository contents,
+and empty directories.
 
 ## Cloning a repository
 
@@ -241,22 +272,26 @@ Both open the same short form:
 Then dux runs a full clone, checks out the remote's default branch, adds the folder as a
 project with that branch as its base branch, and starts the agent on a fresh branch under
 the provider every new project gets by default. One progress message covers the lot and
-ends with one outcome: the agent is running, or what stopped it and how far it got. In
-the browser the dialog closes as soon as the clone starts and dux selects the new agent
-when it appears, however long that takes; in the terminal UI the status line carries the
-progress and the outcome. Either way, a problem dux spots straight away keeps the form open
-with the reason. In the terminal UI, a refusal or a failed clone that arrives after the
-form has closed hands your typed values back the next time you open it, so a typo in the
-address costs you one fix rather than the whole form.
+ends with one outcome: the agent is running, or what stopped it and how far it got.
+
+- **In the browser** the dialog closes as soon as the clone starts, and dux selects the
+  new agent when it appears, however long that takes.
+- **In the terminal UI** the status line carries the progress and the outcome.
+- **A problem dux spots straight away** keeps the form open with the reason. In the
+  terminal UI, a refusal or a failed clone that arrives after the form has closed hands
+  your typed values back the next time you open it, so a typo in the address costs you one
+  fix rather than the whole form.
 
 > [!IMPORTANT]
-> **dux never asks for anything while it clones.** It uses your own git setup: your ssh
-> agent and keys, URL rewrites, and credential helpers that answer without asking (a
-> stored token, a keychain) work exactly as in your shell. Nothing that would ask is ever
-> waited on, a password pop-up included: it fails straight away with git's or ssh's own
-> message instead. So a host you have never connected to must be trusted once from a
-> shell first (connect to it or clone anything from it), and an ssh key with a passphrase
-> must already be loaded in your agent.
+> **dux never asks for anything while it clones.** It uses your own git setup, and nothing
+> that would ask is ever waited on, a password pop-up included: it fails straight away with
+> git's or ssh's own message instead.
+>
+> - **Works as in your shell:** your ssh agent and keys, URL rewrites, and credential
+>   helpers that answer without asking (a stored token, a keychain).
+> - **Do first, once:** connect to a host you have never used from a shell (or clone
+>   anything from it) so it is trusted, and load an ssh key with a passphrase into your
+>   agent.
 
 A few more things worth knowing:
 
@@ -269,15 +304,20 @@ A few more things worth knowing:
 - **A user name and token in the address work, and dux keeps them out of sight.** Every
   message and log line dux writes shows the address without them. git itself still saves
   the address as you typed it in the clone's own `.git/config`, which is your call.
-- **There is no time limit, only a silence limit.** A big repository is slow, not stuck,
-  so dux lets a clone run as long as git keeps printing progress. One that goes quiet for
-  [`[git] clone_stall_seconds`](/docs/configuration#how-long-a-clone-may-go-quiet-git)
-  (5 minutes by default) is stopped, and the message says so. There is no cancel button;
-  quitting dux stops a running clone. A clone still going after 30 minutes swaps its
-  spinner for a warning while git carries on, and the outcome still arrives when it ends.
 - **Submodules are not initialized**, the same as everywhere else in dux.
 - **The `dux` command line has no clone command.** Clone from the browser or the terminal
   UI.
+
+### How long a clone runs
+
+There is no time limit, only a silence limit. A big repository is slow, not stuck.
+
+- **Quiet for too long:** a clone that goes quiet for
+  [`[git] clone_stall_seconds`](/docs/configuration#how-long-a-clone-may-go-quiet-git)
+  (5 minutes by default) is stopped, and the message says so.
+- **Still going after 30 minutes:** its spinner turns into a warning while git carries on,
+  and the outcome still arrives when it ends.
+- **No cancel button:** quitting dux stops a running clone.
 
 ### When a clone stops partway
 
@@ -289,13 +329,26 @@ these happened and what to do next.
 | What stopped it | What you have afterwards |
 |---|---|
 | A check before git ran (bad name, folder not empty, and so on) | Nothing changed. |
-| git failed (wrong address, no access, the host refused) | Nothing added. git clears out what it wrote, and the destination folder goes too if dux created it; an empty folder you made yourself stays. |
-| The clone went quiet for too long, or dux quit mid-clone | Nothing added, and the destination may hold part of a clone. dux leaves it there. Remove it before trying again: dux refuses a folder that is not empty, and says an earlier clone may have been interrupted there. |
-| The remote has no commits yet | The clone stays, no project is added. Use Add project on it, which offers to make a first commit. |
-| The remote's default branch could not be checked out | The clone stays, no project is added. Check a branch out in it, then use Add project. |
+| git failed (wrong address, no access, the host refused) | Nothing added. git clears out what it wrote. |
+| The clone went quiet for too long, or dux quit mid-clone | Nothing added. The destination may hold part of a clone, and dux leaves it there (see below). |
+| The remote has no commits yet | The clone stays, no project is added. |
+| The remote's default branch could not be checked out | The clone stays, no project is added. |
 | Adding the project failed | The clone stays, no agent is created, and the message gives the reason. |
-| A branch named like the agent already exists in the clone (the default branch included) | The project is added, no agent is created. Pick another name with New agent, which also offers to attach to that branch. |
+| A branch named like the agent already exists in the clone | The project is added, no agent is created. Use New agent with another name. |
 | The agent could not start | The project is added, and the message says why the agent is missing. |
+
+What to do next, for the cases that need more than the table says:
+
+- **git failed:** if dux created the destination folder, it goes too. An empty folder you
+  made yourself stays.
+- **Quiet too long, or dux quit:** remove the leftover destination before trying again.
+  dux refuses a folder that is not empty, and says an earlier clone may have been
+  interrupted there.
+- **No commits yet:** use Add project on the folder, which offers to make a first commit.
+- **Default branch not checked out:** check a branch out in the folder, then use Add
+  project.
+- **A branch named like the agent exists** (the default branch included): pick another name
+  with New agent, which also offers to attach to that branch.
 
 ## Creating an agent from a GitHub PR
 
@@ -319,7 +372,7 @@ keeps the GitHub features on.
 
 **A failed check is never final.** While GitHub features are unavailable, dux quietly
 asks `gh` again every few minutes and turns them back on the moment it works, so a
-GitHub rate limit or a short outage while dux was starting no longer means restarting it.
+GitHub rate limit or a short outage while dux was starting does not mean restarting it.
 The interval is yours:
 
 ```toml
@@ -333,16 +386,21 @@ warning once when it clamps one, so a mistyped `1` cannot have it launching `gh`
 second.
 
 You can also ask right away: **Re-check GitHub** in the browser's settings menu under
-**Configuration**, or the `recheck-github` palette command in the terminal UI. Either
-way dux tells you what it found, including why it still cannot use `gh`.
+**Configuration** (shown while GitHub integration is on), or the `recheck-github` palette
+command in the terminal UI. Either way dux tells you what it found, including why it
+still cannot use `gh`.
 
 **GitHub Enterprise works, on any hostname `gh` is logged in to.** A company server at
 `git.company.example` is treated exactly like `github.com` once
 `gh auth login --hostname git.company.example` succeeds, for the PR banner and for this
-path. An older `gh` that cannot report its hosts falls back to a single yes-or-no login
-check, which is stricter (any host in trouble switches the GitHub features off), and to
-recognising `github.com` and `github.*` only; if your enterprise host is spelled anything
-else, upgrade `gh`.
+path.
+
+An older `gh` that cannot report its hosts gets two stricter fallbacks:
+
+- **A single yes-or-no login check:** any host in trouble switches the GitHub features
+  off.
+- **Host recognition:** `github.com` and `github.*` only. If your enterprise host is
+  spelled anything else, upgrade `gh`.
 
 ### The reference comes first, and dux works out the project
 
@@ -354,18 +412,20 @@ every project you have.
   pull request and name the agent.
 - **Two or more are.** dux shows you just those and asks which one this agent belongs in.
 - **None is.** When the reference names a repository and a pull request number on a host
-  `gh` is signed in to, dux looks the pull request up and offers to set it up. The terminal
-  UI and the browser show the pull request's title and branch and ask before they clone the
-  repository, or, when the folder it would clone into already holds a checkout of it, before
-  adding that folder as a project. Either way the agent then starts on the pull request's
-  code. The folder and the agent's name are editable, and **Choose an existing project**
-  keeps the project picker one stop away. When dux can tell before cloning or adding that
-  the agent would need a [review copy](#naming-and-fetching), the offer says so and asks
-  first: the same warning and unticked **Create a review copy** box as below, and dux
-  won't clone or add until you tick it. A name you type that is spelled like a review
-  copy of the pull request's branch gets the same question. A reference with no number,
-  or a pull request dux could not look up, gets the project picker instead, with the
-  lookup's own sentence when that is what failed.
+  `gh` is signed in to, dux looks the pull request up and offers to set it up:
+
+  - The terminal UI and the browser show the pull request's title and branch and ask
+    before they clone the repository, or, when the folder it would clone into already
+    holds a checkout of it, before adding that folder as a project.
+  - The agent then starts on the pull request's code. The folder and the agent's name are
+    editable, and **Choose an existing project** keeps the project picker one stop away.
+  - When dux can tell beforehand that the agent would need a
+    [review copy](#naming-and-fetching), the offer says so and asks first: the same
+    warning and unticked **Create a review copy** box as below, and dux won't clone or add
+    until you tick it. A name you type that is spelled like a review copy of the pull
+    request's branch gets the same question.
+  - A reference with no number, or a pull request dux could not look up, gets the project
+    picker instead, with the lookup's own sentence when that is what failed.
 
 > [!IMPORTANT]
 > The clone is the same one [Cloning a repository](#cloning-a-repository) does. It uses
@@ -428,54 +488,76 @@ Each project's `origin` is read fresh every time, so editing a remote, changing 
 
 Once the pull request resolves, dux asks you to confirm or edit the branch name,
 pre-filled with the PR's head branch. In the terminal UI that is a second prompt; in the
-browser the reference and the name are two fields in one dialog. The name you confirm is
+browser the reference and the name are two fields in one dialog.
+
+The name you confirm is
 what the fetch targets: dux fetches the PR's head ref into that local branch, then
-creates a worktree on it.
+creates a worktree on it. If dux cannot fetch the pull request, nothing is created and
+the message says why.
 
-If the branch already exists locally, from a previous fetch say, dux first fetches the
-pull request's head and checks that your branch contains it. When it does, dux attaches
-to it, and the delete dialog later offers that branch unticked, the way it does for any
-branch you had first. When your branch is simply behind the pull request, with no commits
-of its own and not checked out anywhere, dux moves it forward to the pull request's latest
-commit and attaches to it, and the confirmation says it did. When it does not contain the
-pull request's code and cannot just be moved, dux leaves your branch alone and offers a
-review copy instead, as below. With no local branch of that name, dux fetches the
-pull request head into a new local branch, even when your project already has a branch of
-that name on the remote, because a pull request from a fork often shares its branch name
-with an unrelated branch there. That local branch is dux's own, and the box is ticked by
-default. Nothing dux does to it reaches the remote: the branch on GitHub, and the pull
-request itself, are untouched either way. If dux cannot fetch the pull request, nothing
-is created and the message says why.
+#### If a local branch of that name already exists
 
-If another agent already has the pull request's code, dux creates nothing, whatever name
-you typed. An agent has it when its branch is the pull request's own branch (or a review
-copy of it) and contains the pull request's latest commit, or when its branch sits exactly
-on that commit. An agent working on a pull request stacked on top of this one does not
-count. dux tells you which agent has it and
-where, and suggests opening a new tab in that agent, which works in the same folder on the
-same code. An agent on that branch that does not have the pull request's code yet gets the
-fresh copy below.
+From a previous fetch, say. dux first fetches the pull request's head and checks that your
+branch contains it.
 
-If the pull request's branch is already checked out somewhere, say by your project
-folder, or by a worktree in the middle of a rebase or a bisect, git will not check it out
-a second time, and a branch that has gone its own way from the pull request is not the
-pull request's code. In both cases dux can make a review copy instead: it
-fetches the pull request into a new branch named after it, `feat-x-review` for a branch
-called `feat-x` (then `feat-x-review-2` and so on, up to `-review-20`), in a clean
-worktree, which is handy when you want a second agent to review the work with none of the
-first one's leftovers. The copy is the pull request as GitHub shows it, and the message
-that confirms it says where the original branch is checked out. The new agent is linked
-to the pull request, so its status pill follows it, and a push from it goes to its own
-branch, never to the pull request's. If the link cannot be made, the confirmation says so
-as a warning, and you can attach the pull request to the agent yourself.
+- **It contains the pull request:** dux attaches to it, and the delete dialog later offers
+  that branch unticked, the way it does for any branch you had first.
+- **It is simply behind,** with no commits of its own and not checked out anywhere: dux
+  moves it forward to the pull request's latest commit and attaches to it, and the
+  confirmation says it did.
+- **It has gone its own way:** dux leaves your branch alone and offers a
+  [review copy](#review-copies) instead.
+
+With no local branch of that name, dux fetches the pull request head into a new local
+branch, even when your project already has a branch of that name on the remote, because a
+pull request from a fork often shares its branch name with an unrelated branch there.
+That local branch is dux's own, and the delete box is ticked by default.
+
+Nothing dux does
+to it reaches the remote: the branch on GitHub, and the pull request itself, are
+untouched either way.
+
+#### If another agent already has the code
+
+dux creates nothing, whatever name you typed. An agent has it when its branch is the pull
+request's own branch (or a review copy of it) and contains the pull request's latest
+commit, or when its branch sits exactly on that commit. An agent working on a pull request
+stacked on top of this one does not count.
+
+dux tells you which agent has it and where, and suggests opening a new tab in that agent,
+which works in the same folder on the same code. An agent on that branch that does not
+have the pull request's code yet gets the fresh copy below.
+
+#### Review copies
+
+If the pull request's branch is already checked out somewhere (by your project folder, or
+by a worktree in the middle of a rebase or a bisect), git will not check it out a second
+time. A branch that has gone its own way from the pull request is not the pull request's
+code either. In both cases dux can make a **review copy** instead:
+
+- **What it is:** the pull request fetched into a new branch named after it, in a clean
+  worktree. That is handy when you want a second agent to review the work with none of the
+  first one's leftovers.
+- **Its name:** `feat-x-review` for a branch called `feat-x`, then `feat-x-review-2` and so
+  on, up to `-review-20`.
+- **Its content:** the pull request as GitHub shows it. The message that confirms it says
+  where the original branch is checked out.
+- **Its link:** the new agent is linked to the pull request, so its status pill follows
+  it. If the link cannot be made, the confirmation says so as a warning, and you can attach
+  the pull request to the agent yourself.
+- **Its pushes:** a push from it goes to its own branch, never to the pull request's.
 
 dux never makes the copy on its own. It stops first, creates nothing, and tells you why
-the branch cannot be used and what name the copy would get. A push from the new agent lands
-on that copy's branch and not on the pull request, so you have to agree to that. In the
-browser the New agent dialog reopens with your reference and name still filled in, a
-warning, and an unticked **Create a review copy** box, and **Create** stays disabled until
-you tick it. The terminal UI reopens the name prompt the same way. On the command line the
-same refusal is printed, and running the command again with `--review-copy` agrees to it.
+the branch cannot be used and what name the copy would get. Because a push from the new
+agent lands on that copy's branch and not on the pull request, you have to agree to that:
+
+- **In the browser,** the New agent dialog reopens with your reference and name still
+  filled in, a warning, and an unticked **Create a review copy** box. **Create** stays
+  disabled until you tick it.
+- **In the terminal UI,** the name prompt reopens the same way.
+- **On the command line,** the same refusal is printed, and running the command again with
+  `--review-copy` agrees to it.
+
 If the branch changes between the warning and your answer so that the copy would be needed
 for a different reason or under a different name, dux asks again instead of going ahead.
 
@@ -485,27 +567,36 @@ for a different reason or under a different name, dux asks again instead of goin
 > the agent again instead.
 
 > [!WARNING]
-> Commits you have not pushed yet are not in the copy. When the copy is simply behind the
-> busy branch, the confirmation leads with how many commits it lacks, as a warning. Push
-> first if the reviewer should see them. When the two have gone separate ways instead (a
-> pull request that was rebased or force-pushed, or one from a fork whose branch happens to
-> share a name with yours, such as `main`), there is no count and no warning, because the
-> copy is not an older version of the busy branch and nothing in it is simply missing.
+> Commits you have not pushed yet are not in the copy.
+>
+> - **The copy is simply behind the busy branch:** the confirmation leads with how many
+>   commits it lacks, as a warning. Push first if the reviewer should see them.
+> - **The two have gone separate ways** (a pull request that was rebased or force-pushed,
+>   or one from a fork whose branch happens to share a name with yours, such as `main`):
+>   there is no count and no warning, because the copy is not an older version of the busy
+>   branch and nothing in it is simply missing.
 
-A name you type yourself in the form of a review copy of the pull request's branch, such
-as `feat-x-review`, makes a review copy all the same, so dux asks about it the same way. Any
-other new name needs no question.
+#### Names you type yourself
 
-A name you typed yourself that is checked out elsewhere, and is not the pull request's
-branch, is refused with the place it is checked out, so you can pick another. So is a
-name you typed that is already a local branch without the pull request's code.
+- **Spelled like a review copy** of the pull request's branch, such as `feat-x-review`:
+  that makes a review copy all the same, so dux asks about it the same way.
+- **Any other new name** needs no question.
+- **Checked out elsewhere, and not the pull request's branch:** refused, with the place it
+  is checked out, so you can pick another.
+- **Already a local branch without the pull request's code:** refused too.
 
 ### How PR status stays fresh
 
-With `github_integration` on, dux shows a PR status pill on each agent branch. Bringing an
-agent to the foreground refreshes its PR, and so do creating an agent, renaming its branch
-and the agent exiting. A background poll notices the rest, a push included, along with
-changes made on GitHub itself:
+With `github_integration` on, dux shows a PR status pill on each agent branch. These
+refresh it right away:
+
+- bringing the agent to the foreground,
+- creating the agent,
+- renaming its branch, and
+- the agent exiting.
+
+A background poll notices the rest, a push included, along with changes made on GitHub
+itself:
 
 ```toml
 [ui]
@@ -520,44 +611,64 @@ pr_poll_interval_seconds = 180
 pr_poll_inactive_interval_seconds = 43200
 ```
 
-The slow clock rides the cycles of the poll above rather than running a timer of its
-own, so its real period rounds up to the next of those cycles, and a value below
-`pr_poll_interval_seconds` behaves as that interval. Setting `pr_poll_interval_seconds`
-to `0` therefore turns the inactive poll off as well: with no cycles, there is nothing
-for it to ride.
+How the two settings behave:
 
-An agent that comes back from Inactive, because you reconnected to it or started it
-again, is checked right away rather than waiting out that slow clock, and the
-event-driven refreshes above ignore which section an agent is in.
+- **Ranges:** any non-zero `pr_poll_interval_seconds` is held to 30 to 21600 seconds, and
+  any non-zero `pr_poll_inactive_interval_seconds` to 30 to 604800 seconds (7 days).
+- **Inactive rounding:** the inactive period rounds up to the next active poll, and a value
+  below `pr_poll_interval_seconds` behaves as that interval.
+- **Turning the active poll off** (`0`) turns the inactive poll off as well.
+- **Coming back from Inactive,** because you reconnected to it or started it again, checks
+  the agent right away rather than waiting out the slow clock. The event-driven refreshes
+  above ignore which section an agent is in.
 
 When a branch name is reused, dux follows the most recent pull request on it, preferring
 one that is open.
 
 A pull request that was merged, and its branch deleted, before dux ever saw it is still
-found, by the branch's name, and so is a newer one that replaced a pull request dux
-already knew. Because branch names get reused, dux takes such a match only
-when the pull request came from the agent's own repository rather than a fork, its last
-commit is in the agent's local branch, and, for a branch dux created, it was opened after
-the agent was. Anything else is left alone, and you can attach the pull request by hand.
+found by the branch's name, and so is a newer one that replaced a pull request dux already
+knew. Because branch names get reused, dux takes such a match only when:
+
+- the pull request came from the agent's own repository rather than a fork,
+- its last commit is in the agent's local branch, and
+- for a branch dux created, it was opened after the agent was.
+
+Anything else is left alone, and you can attach the pull request by hand.
 
 If your GitHub API quota runs low, or GitHub starts erroring, dux pauses PR checks until
 it recovers and tells you: a status line in the terminal UI, a toast in the browser.
 
+#### The PR banner
+
 Above or below the agent's terminal, a one-line banner carries the pull request's number,
-its state and its title, on both surfaces. Clicking the banner opens that pull request in
-your browser, wherever you click it. In the terminal UI the `open-current-pr` command does
-the same from the keyboard, and it is the way in while an agent pane is maximized, since
-the maximized surface covers the banner (it also steps aside while you are typing into the
-pane, where the same command is the way in). Which side of the terminal the banner sits
-on is the `pr_banner_position` setting under `[ui]`.
+its state and its title, on both surfaces.
+
+- **Click it:** clicking the banner opens that pull request in your browser, wherever you
+  click it.
+- **From the keyboard:** in the terminal UI the `open-current-pr` command does the same. It
+  is the way in while an agent pane is maximized, since the maximized surface covers the
+  banner (the banner also steps aside while you are typing into the pane).
+- **Which side:** `pr_banner_position` under `[ui]` is `"top"` or `"bottom"`, and the
+  default is `"bottom"`. Anything else falls back to the default.
+
+```toml
+[ui]
+pr_banner_position = "bottom"
+```
+
+The terminal UI's `toggle-pr-banner-position` palette command and the web's Preferences
+flip it too.
 
 ## Creating an agent from an existing worktree
 
-In the browser, **Worktrees…** in a project's `⋯` menu, or **New agent from existing
-worktree…** in the app menu, which asks for the project first and offers **Back** to
-return to that list. In the terminal UI, the
-`new-agent-from-worktree` palette command. Either opens a picker of every git worktree
-for that project's repository, in two groups:
+Either surface opens a picker of every git worktree for the project's repository:
+
+- **In the browser:** **Worktrees…** in a project's `⋯` menu, or **New agent from existing
+  worktree…** in the app menu, which asks for the project first and offers **Back** to
+  return to that list.
+- **In the terminal UI:** the `new-agent-from-worktree` palette command.
+
+The picker has two groups:
 
 - **Managed worktrees**, already under dux's `worktrees/` directory. One with no agent
   yet gets a new session attached without touching the branch or files. An adopted
@@ -569,8 +680,9 @@ for that project's repository, in two groups:
   `HEAD`, with dirty and untracked files copied across. Gitignored files do not travel.
 
 The main checkout is never selectable; dux keeps that for you. Worktrees that already
-have an agent are shown but disabled, with a tooltip explaining why; in the terminal UI,
-selecting one reports "That worktree already has an agent."
+have an agent are shown but disabled, with a tooltip explaining why (in the browser they
+sit under **Already has an agent**); in the terminal UI, selecting one reports "That
+worktree already has an agent."
 
 ### Deleting a worktree, and its branch
 
@@ -594,14 +706,22 @@ uncommitted work in it.
 
 ![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
-Worktrees an agent is holding are listed under **Held By An Agent** but unselectable:
-removing one from under a session leaves it broken. Delete the agent instead. A worktree
-something else is still using (an agent being created in it, a terminal open in it, the CLI
-of an agent you just deleted still stopping, a standalone agent working inside it) sits
-with them too, and its row says `in use:` and what is using it. An agent's own row reads
-**held by an agent**, and adds `in use:` only when something besides that agent is using
-the folder as well, such as a terminal open in it. A worktree whose agent was just deleted
-is listed under **Being removed** until it is gone, and cannot be removed a second time.
+Worktrees that cannot be removed are listed but unselectable, because removing one from
+under a session leaves it broken. The groups differ a little per surface.
+
+In the terminal UI:
+
+- **Held By An Agent:** a worktree an agent holds. Delete the agent instead. The row reads
+  **held by an agent**, and adds `in use:` and what is using it only when something
+  besides that agent is using the folder as well, such as a terminal open in it.
+- **Also in that group:** a worktree something else is still using (an agent being created
+  in it, a terminal open in it, the CLI of an agent you just deleted still stopping, a
+  standalone agent working inside it). Its row says `in use:` and what is using it.
+- **Being Removed:** a worktree whose agent was just deleted, until it is gone. It cannot
+  be removed a second time.
+
+In the browser the same cases are three groups: **Already has an agent**, **In use** (each
+row says what is using it) and **Being removed**.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the
@@ -625,22 +745,31 @@ project's name, its folder, its base branch and the branch the folder is on righ
 - **Startup command logs for all agents…**
 - **Delete project…** and **Remove project…**
 
-**Delete project…** removes the project and every agent's record at once, then each agent's
-worktree in the background, the same way deleting one agent with its worktree does: each one
-waits for its agent to stop and for anything still running in it. One status follows the
-whole delete and, when it ends, names any worktree that could not be removed and why. If an
-agent is still being created in the project when you confirm, the delete waits for it to
-finish (up to `removal_wait_seconds`, 120 seconds by default) and takes it along; no new
-agent can be created in a project while it is being deleted. **Remove project…** forgets the
-project and its agents and leaves every worktree on disk.
+**Delete project…** and **Remove project…** differ in what happens to the worktrees:
 
-Anything you open from the list comes back to it when it closes, whether you cancel it,
-close it or save it: the questions, Project info, the settings editors, the worktree
-manager and the startup command logs. Escape on the list goes back to the project list,
-and a second Escape closes it. An orphaned group offers **Remove project…** and nothing
-else, which clears those agents' records and leaves their worktrees on disk. When a
-project's folder is missing, the rows that need it (a new agent, the project terminal and
-changing the base branch) are shown as unavailable and say why.
+- **Delete project…** removes the project and every agent's record at once, then each
+  agent's worktree in the background, the same way deleting one agent with its worktree
+  does: each one waits for its agent to stop and for anything still running in it. One
+  status follows the whole delete and, when it ends, names any worktree that could not be
+  removed and why.
+- **Remove project…** forgets the project and its agents and leaves every worktree on
+  disk.
+
+If an agent is still being created in the project when you confirm a delete, it waits for
+the creation to finish (up to the top-level `removal_wait_seconds`, 120 seconds by
+default) and takes the new agent along. No new agent can be created in a project while it
+is being deleted.
+
+Moving around the list:
+
+- **Coming back:** anything you open from the list comes back to it when it closes,
+  whether you cancel it, close it or save it: the questions, Project info, the settings
+  editors, the worktree manager and the startup command logs.
+- **Escape** on the list goes back to the project list, and a second Escape closes it.
+- **An orphaned group** offers **Remove project…** and nothing else, which clears those
+  agents' records and leaves their worktrees on disk.
+- **A missing project folder:** the rows that need it (a new agent, the project terminal
+  and changing the base branch) are shown as unavailable and say why.
 
 The browser has the same actions in each project's `⋯` menu.
 
@@ -678,28 +807,34 @@ agent would name, and the changes panel says why it has nothing to show.
 
 ![The terminal UI with a standalone agent selected: its row carries a star over the folder path, and the changes panel says the folder has no git repository.](/screens/tui-standalone-star.png)
 
-In the browser there are two ways in: the launcher's `⋯` menu and **New standalone
-agent…**, and **Add standalone agent…** at the bottom of the New agent project list, for
-when you went looking for a project and none fits. In the terminal
-UI there are three ways in: a key anywhere in the agents pane, a key inside the "New
-agent in project" chooser too (so you can change your mind once you are already there and
-no project fits), and the `new-standalone-agent` palette command. The `?` help overlay
-names the keys, and you can rebind them under `[keys]` in `config.toml`. Every way in
-opens the same folder browser. Any folder is accepted: it does not have to be a git
-repository, and dux initializes nothing in it.
+Every way in opens the same folder browser. Any folder is accepted: it does not have to
+be a git repository, and dux initializes nothing in it.
 
-Both surfaces then ask what to call the agent. The name is optional: leave it empty and
-the agent is named after the folder, turned into a valid agent name (`My Notes! (2026)`
-becomes `My-Notes-2026`). A name you type follows the same rules as any agent's name, even
-though no branch is created: letters, digits, `-`, `_` and `/`, with spaces becoming dashes
-as you type. Backing out of that question creates nothing and leaves the folder
-untouched.
+- **In the browser:** **New standalone agent…** from any creation menu (the launcher's `⋯`,
+  the app menu's New submenu), and **Add standalone agent…** at the bottom of the New agent
+  project list, for when you went looking for a project and none fits.
+- **In the terminal UI:** a key anywhere in the agents pane, a key inside the "New agent in
+  project" chooser too (so you can change your mind once you are already there and no
+  project fits), and the `new-standalone-agent` palette command. The `?` help overlay names
+  the keys, and you can rebind them under `[keys]` in `config.toml`.
 
 > [!NOTE]
 > Once you start filtering inside the chooser, the key that still works is a modifier
 > chord, because plain letters go into the search box. GNU Screen's flow control can
 > swallow that chord before dux ever sees it; the palette command still works there, and
 > so does rebinding the key to something your terminal passes through.
+
+### Naming a standalone agent
+
+Both surfaces then ask what to call the agent. The name is optional, and backing out of
+that question creates nothing and leaves the folder untouched.
+
+- **Empty:** the agent is named after the folder, turned into a valid agent name (`My
+  Notes! (2026)` becomes `My-Notes-2026`). A folder with nothing usable in its name gives
+  `standalone-agent`. The same happens when you clear the name later when renaming.
+- **Typed:** it follows the same rules as any agent's name, even though no branch is
+  created: letters, digits, `-`, `_` and `/`, with spaces becoming dashes as you type. See
+  [Naming an agent](#naming-an-agent).
 
 What a standalone agent does NOT have:
 
@@ -719,9 +854,11 @@ in-browser editor, file drops, renaming, the resource monitor and auto-reopen.
 
 > [!IMPORTANT]
 > The folder's existence and location are yours alone. dux does not create it, move it or
-> remove it, ever. Deleting the agent removes dux's own record and nothing else, and the
-> delete dialog says so: there is no "also remove the worktree" checkbox, because there
-> is no worktree. A factory reset skips it too.
+> remove it, ever.
+>
+> - Deleting the agent removes dux's own record and nothing else. The delete dialog says
+>   so: there is no "also remove the worktree" checkbox, because there is no worktree.
+> - A factory reset skips the folder too.
 
 Things do get written *inside* it: the agent works in it, a dropped file lands in it, a
 commit writes to its repository.

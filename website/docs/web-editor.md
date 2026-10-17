@@ -19,33 +19,27 @@ The editor opens as a full-screen overlay from a few places:
   in (see below).
 - A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its diff.
 
-For a separate browser tab, the agent's `⋯` menu also has **Open editor in new tab**, and
-the editor's header carries a matching icon that opens the current file there
-(middle-click works, it is a real link). That tab is nothing but the editor,
-full-viewport, and its header reads **Editor for** followed by whatever it is rooted at. On
-a computer there is no in-app link back to the workspace: your browser's Back button or
-closing the tab is the way out. On a phone the header starts with a **‹** Back button,
-which takes you to the agent's Changes screen (or, for an editor rooted at a project or
-standalone terminal, to that terminal).
-
-The standalone tab is deliberately quiet: workspace messages and the "needs you" count in
-the tab title belong to the workspace tab. What the editor itself does still tells you
-there, so saves, renames, deletes and uploads confirm in the tab you did them in.
+For a separate browser tab, the agent's `⋯` menu also has **Open editor in new tab**, and the editor's header carries a matching icon that opens the current file there (middle-click works, it is a real link).
 
 > [!IMPORTANT]
-> The editor overlay is **desktop-only**. Monaco is a poor experience on a touch screen,
-> so on a phone the overlay does not open. The standalone tab is the deliberate exception.
-> On a phone, tapping a changed file or picking its **Edit** opens that file in the
-> standalone editor in the same browser tab, and Back takes you to the Changes screen.
+> The editor overlay is **desktop-only**. Monaco is a poor experience on a touch screen, so on a phone the overlay does not open. The standalone tab is the deliberate exception.
+>
+> On a phone, tapping a changed file or picking its **Edit** opens that file in the standalone editor in the same browser tab, and Back takes you to the Changes screen.
 
-The standalone tab works on phones, best-effort. The file explorer starts collapsed so the
-file gets the width (the header's toggle reopens it at a phone-sized width), and the
-editor stays above the soft keyboard. The header keeps the **‹** Back button, the explorer
-toggle, the name of what the editor is rooted at and **Save**; the File/Diff switch (on
-changed files), the preview toggle, the syntax language and **Open local editor** fold into
-one `⋯` menu at the end of the row. The status bar at the bottom keeps the file's path, the unsaved-changes
-dot, the read-only badge where it applies, the cursor position, and an image's pixel
-dimensions.
+### The standalone tab
+
+That tab is nothing but the editor, full-viewport, and its header reads **Editor for** followed by whatever it is rooted at.
+
+- **Leaving on a computer.** There is no in-app link back to the workspace: your browser's Back button or closing the tab is the way out.
+- **Leaving on a phone.** The header starts with a **‹** Back button, which takes you to the agent's Changes screen (or, for an editor rooted at a project or standalone terminal, to that terminal).
+- **Quiet by design.** Workspace messages and the "needs you" count in the tab title belong to the workspace tab. What the editor itself does still tells you there, so saves, renames, deletes and uploads confirm in the tab you did them in.
+
+The standalone tab works on phones, best-effort:
+
+- The file explorer starts collapsed so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard.
+- The header keeps the **‹** Back button, the explorer toggle, the name of what the editor is rooted at and **Save**.
+- The File/Diff switch (on changed files), the preview toggle, the syntax language and **Open local editor** fold into one `⋯` menu at the end of the row.
+- The status bar keeps the file's path, the unsaved-changes dot, the read-only badge where it applies, the cursor position, and an image's pixel dimensions.
 
 ## Editing next to a terminal
 
@@ -83,49 +77,44 @@ returns you to whatever was behind it. Closing it that way loses nothing (see be
 
 ## The layout
 
-The overlay is two panes. On the left, a search box, a shortcut to create a file at the
-worktree root, and a file tree. On the right, the file itself: the editor, a diff view, or
-a rendered preview, depending on the header toggles. The header names what the editor is
-rooted at (**Editor for** the agent, or the terminal and where it lives) and carries the
-view toggles, **Save** and **Close**.
+The overlay is two panes.
+
+- **On the left:** a search box, a shortcut to create a file at the worktree root, and a file tree.
+- **On the right:** the file itself, as the editor, a diff view, or a rendered preview, depending on the header toggles.
+
+The header names what the editor is rooted at (**Editor for** the agent, or the terminal and where it lives) and carries the view toggles, **Save** and **Close**.
+
+Drag the divider to resize the explorer pane, or collapse it with the toggle at the left end of the header. Your width (in pixels) and collapsed state are remembered in the browser, so the editor reopens the way you left it in the overlay and in its own tab alike.
+
+Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and creating, renaming, moving and deleting each confirm with a toast naming what happened, or say plainly when something went wrong.
+
+### The status bar
 
 A thin status bar runs along the bottom, under both panes, and describes the open file:
 
-- its path, with a dot when it has unsaved edits and a read-only badge where that applies.
-  A long path is cut at the start, so the file name always shows. Click or tap the path to
-  copy it
-- the cursor position (`Ln 12, Col 5`, plus how many characters are selected when you have
-  a selection)
+- its path, with a dot when it has unsaved edits and a read-only badge where that applies. A long path is cut at the start, so the file name always shows. Click or tap the path to copy it
+- the cursor position (`Ln 12, Col 5`, plus how many characters are selected when you have a selection)
 - how many lines the file has
 - its indentation (`Spaces: 2` or `Tabs: 4`), as Monaco detected it from the file
-- its line endings, `LF` or `CRLF`, which is the style a save writes, or `Mixed` for a file
-  that has both or a lone CR (see [File encodings](#file-encodings))
-- its size on disk, as of the last time the editor read or saved it (unsaved edits do not
-  count until you save)
-- its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM`
-  and so on), which opens the encoding menu
+- its line endings, `LF` or `CRLF`, which is the style a save writes, or `Mixed` for a file that has both or a lone CR (see [File encodings](#file-encodings))
+- its size on disk, as of the last time the editor read or saved it (unsaved edits do not count until you save)
+- its [encoding](#file-encodings) (`UTF-8`, `Windows-1252`, `UTF-16 LE`, `UTF-8 with BOM` and so on), which opens the encoding menu
 - the syntax language picker
 
-Only what applies is shown. The cursor, line count, indentation and line endings appear
-while the text editor itself is on screen, so a preview or a diff leaves them out; a
-binary file shows its path and size; an image shows its path and pixel dimensions. On a
-phone the bar keeps just the path, the unsaved dot, the read-only badge, an image's
-dimensions and the encoding.
+Only what applies is shown:
 
-Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
-end of the header. Your width (in pixels) and collapsed state are remembered in the
-browser, so the editor reopens the way you left it in the overlay and in its own tab
-alike.
+- **A preview or a diff** leaves out the cursor, line count, indentation and line endings, which appear only while the text editor itself is on screen.
+- **A binary file** shows its path and size.
+- **An image** shows its path and pixel dimensions.
+- **On a phone** the bar keeps just the path, the unsaved dot, the read-only badge, an image's dimensions and the encoding.
 
-Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and creating,
-renaming, moving and deleting each confirm with a toast naming what happened, or say
-plainly when something went wrong.
+### Syntax language
 
-The status bar also shows the file's syntax language as a dropdown. dux lets Monaco guess from
-the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config
-file with no extension) you can pick the right one from the full list. The choice applies
-to the open file including its diff view, follows a rename or move, and lasts until you
-close the file. **Auto** at the top of the list hands the decision back to Monaco.
+The status bar shows the file's syntax language as a dropdown. dux guesses from the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config file with no extension) you can pick the right one from the full list.
+
+- The choice applies to the open file, including its diff view, and follows a rename or move.
+- It lasts until you close the file.
+- **Auto** at the top of the list hands the decision back to automatic detection.
 
 ## Tabs
 
@@ -143,34 +132,31 @@ unsaved changes, dux asks before discarding them.
 
 ## Finding a file
 
-The file tree is a lazy filesystem browser: it loads one directory at a time as you expand
-it, so it is effectively uncapped no matter how large the repo is. Directories list before
-files, alphabetically within each level, and the tree is virtualized so scrolling stays
-smooth. The ancestors of the file you have open expand automatically. Changed files carry
-the same status icon as the [Changes pane](/docs/web-git).
+The file tree loads one directory at a time as you expand it, so it has no cap on repo size. Directories list before files, alphabetically within each level. The ancestors of the file you have open expand automatically. Changed files carry the same status icon as the [Changes pane](/docs/web-git).
 
 > [!NOTE]
 > The tree is a plain filesystem listing, not a git-aware one. Gitignored files are
 > included, and so is `.git/` itself, browsable like any other folder. Anything inside
 > `.git/` opens read-only.
 
-The tree keeps up with files you did not create yourself, which is most of them when an
-agent is working in the worktree. It picks them up whenever the changed-file list moves,
-whenever you come back to the window or to dux's browser tab, and whenever you switch
-editor tabs. **Search files…** is refreshed on the same occasions, so anything the tree
-has just shown you can also be found by name. For anything else, and for a file git never
-mentions, **Refresh files** in the explorer's `⋯` menu fetches the listing again on the
-spot.
+The tree keeps up with files you did not create yourself, which is most of them when an agent is working in the worktree. It picks them up:
+
+- whenever the changed-file list moves
+- whenever you come back to the window or to dux's browser tab
+- whenever you switch editor tabs
+
+**Search files…** is refreshed on the same occasions, so anything the tree has just shown you can also be found by name. For anything else, and for a file git never mentions, **Refresh files** in the explorer's `⋯` menu fetches the listing again on the spot.
 
 Each row carries a monochrome file-type icon on the left, so it never competes with the
 git-status marker on the right: folders differ open, closed and empty, and files get an
 icon for their kind (code, image, config, Markdown, lockfile, binary, and a generic
 fallback).
 
-The **Search files…** box does a fast, case-insensitive match on file **paths**, not
-contents. It is capped at 50,000 files by default, configurable via
-`[server] search_index_max_files`, with `0` disabling the cap. The tree itself has no such
-cap.
+The **Search files…** box does a fast, case-insensitive match on file **paths**, not contents.
+
+- It is capped at 50,000 files by default, configurable via `[server] search_index_max_files`. A new value applies when the config is reloaded.
+- `0` disables the cap.
+- The tree itself has no such cap.
 
 ## Editing and saving
 
@@ -202,92 +188,74 @@ Two size limits, both generous:
 
 ## File encodings
 
-dux does not guess a file's encoding. It goes by what the file itself says, and otherwise
-by one fixed rule:
+### How dux picks one
 
-- A file that starts with a byte-order mark opens in the encoding the mark names: UTF-8,
-  UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
+dux does not guess a file's encoding. It goes by what the file itself says, and otherwise by one fixed rule:
+
+- A file that starts with a byte-order mark opens in the encoding the mark names: UTF-8, UTF-16 LE or UTF-16 BE. The mark is kept, and written back when you save.
 - A file that is valid UTF-8 opens as UTF-8.
-- Anything else opens as Windows-1252 (the superset of ISO-8859-1, or Latin-1). Every byte
-  has a character there, so nothing is lost.
+- Anything else opens as Windows-1252 (the superset of ISO-8859-1, or Latin-1). Every byte has a character there, so nothing is lost.
 
-Binary means real binary content, like a picture: a file with NUL bytes or a known binary
-signature. It is the one thing that does not open as text in any encoding.
+Binary means real binary content, like a picture: a file with NUL bytes or a known binary signature. It is the one thing that does not open as text in any encoding.
 
-When a file lands in that last case, an amber notice above the text says it isn't valid
-UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that is really
-Shift_JIS or Windows-1251 will look wrong. Dismiss the notice with its `×`, and it stays
-away for that file until you reload the page.
+When a file lands in that last case, an amber notice above the text says it isn't valid UTF-8 and opened as Windows-1252. That is a fallback, not a finding: a file that is really Shift_JIS or Windows-1251 will look wrong. Dismiss the notice with its `×`, and it stays away for that file until you reload the page.
 
-The status bar always names the open file's encoding, on a phone too. Click it for two
-menus:
+### Reopening and converting
 
-- **Reopen with encoding** reads the file again in the encoding you pick: UTF-8, UTF-16,
-  the Windows and ISO-8859 code pages, Mac Roman, KOI8, Shift_JIS, EUC-JP, GBK, GB18030,
-  Big5, EUC-KR and more. Any file can be reopened in any of them, plain UTF-8 included; if
-  the text comes out garbled, reopen it in the right one. If the bytes are not valid in the
-  encoding you picked, the file stays open as it was and a toast says why: you never get
-  replacement characters that a save would write back over the real bytes.
-  With unsaved edits, dux asks first, because reopening replaces them. The diff view of the
-  file follows the encoding you picked.
-- **Save with encoding** saves the file right now in the encoding you pick, which is how
-  you convert it, most usefully to UTF-8. UTF-16 is always saved with a byte-order mark, so
-  it is recognised the next time it opens. A file that is read-only for any reason other
-  than its encoding has no save, so it has no such menu either. The encoding the file is
-  already in is shown as current there, not offered: saving in it is just **Save**.
+The status bar always names the open file's encoding, on a phone too. Click it for two menus.
 
-One thing happens to a file at a time. While a save, a conversion, a reopen or a reload
-of it is under way, the others wait: their menu rows and buttons are unavailable until it
-finishes, and the text cannot be typed into while a reopen or **Reload from disk** is
-reading the file, since what it reads replaces the text. If the server has not answered
-after a minute, the editor stops waiting, says so, and frees the file; a save that timed
-out may or may not have been written, so reload the file to see what it holds. The editor
-only opens regular files: a named pipe, socket or device at a file's path is refused.
+**Reopen with encoding** reads the file again in the encoding you pick: UTF-8, UTF-16, the Windows and ISO-8859 code pages, Mac Roman, KOI8, Shift_JIS, EUC-JP, GBK, GB18030, Big5, EUC-KR and more.
 
-A save writes back exactly the bytes it read for everything you did not touch, with one
-exception, line endings, below. Where an encoding cannot keep that promise, the file opens
-read-only in it and an amber notice says why, rather than letting a save quietly change
-bytes you never edited. That happens when:
+- Any file can be reopened in any of them, plain UTF-8 included. If the text comes out garbled, reopen it in the right one.
+- If the bytes are not valid in the encoding you picked, the file stays open as it was and a toast says why. You never get replacement characters that a save would write back over the real bytes.
+- With unsaved edits, dux asks first, because reopening replaces them.
+- The diff view of the file follows the encoding you picked.
 
-- the encoding spells some of the file's characters two ways and would write them back the
-  other way, or has no way back for them at all (some Shift_JIS, Big5, GBK and GB18030
-  files, and ISO-2022-JP files with half-width katakana, are like this), or
-- the file starts with two byte-order marks, or (in an encoding with no mark of its own,
-  like GB18030) with the byte-order mark character, because the editor drops it.
+**Save with encoding** saves the file right now in the encoding you pick, which is how you convert it, most usefully to UTF-8.
 
-It is still text: reopen it in another encoding from the status bar to edit it, or convert
-it with **Save with encoding** (any encoding except the one that cannot write it back). A
-file whose text starts with the byte-order mark character cannot be converted to UTF-8 or
-UTF-16 either (see below); edit it outside dux instead.
+- UTF-16 is always saved with a byte-order mark, so it is recognised the next time it opens.
+- A file that is read-only for any reason other than its encoding has no save, so it has no such menu either.
+- The encoding the file is already in is shown as current there, not offered: saving in it is just **Save**.
 
-The byte-order mark is a property of the file, chosen with **Save with encoding**, never a
-character in the text. A save in UTF-8 or UTF-16 is refused when the text itself starts
-with the character U+FEFF, because those encodings would write it as a mark and the file
-would read back without it. Nothing is written; delete that character and save again.
+If you reopened a file in a code page and it is later rewritten as UTF-8 (by an agent, say), it is not silently shown as garbled text. An amber notice says it is open in the encoding you chose but now looks like valid UTF-8, so you can pick UTF-8 from the status bar before you save. A chosen encoding stays with the file when you rename or move it, and ends when you close it.
 
-The editor keeps one line ending style per file, the one the status bar names, and a save
-writes every line ending in it, whatever you typed or pasted. A file whose line endings are
-mixed, or that has a lone carriage return (as old Mac files do), gets an amber notice
-saying that saving writes every line ending as the style named there, and the status bar
-says `Mixed`. Nothing changes until you save. When the file is rewritten with the other
-style and reloads, the style changes with it, and undoing past that reload brings back
-your earlier text but not the earlier style: the status bar always names what a save
-writes.
+### One operation at a time
 
-If you reopened a file in a code page and it is later rewritten as UTF-8 (by an agent,
-say), it is not silently shown as garbled text: an amber notice says it is open in the
-encoding you chose but now looks like valid UTF-8, so you can pick UTF-8 from the status
-bar before you save. A chosen encoding stays with the file when you rename or move it, and
-ends when you close it.
+One thing happens to a file at a time. While a save, a conversion, a reopen or a reload of it is under way:
+
+- The others wait: their menu rows and buttons are unavailable until it finishes.
+- The text cannot be typed into while a reopen or **Reload from disk** is reading the file, since what it reads replaces the text.
+- If the server has not answered after a minute, the editor stops waiting, says so, and frees the file. A save that timed out may or may not have been written, so reload the file to see what it holds.
+
+The editor only opens regular files: a named pipe, socket or device at a file's path is refused.
+
+### When a file opens read-only
+
+A save writes back exactly the bytes it read for everything you did not touch, with one exception, line endings, below. Where an encoding cannot keep that promise, the file opens read-only in it and an amber notice says why, rather than letting a save quietly change bytes you never edited. That happens when:
+
+- the encoding spells some of the file's characters two ways and would write them back the other way, or has no way back for them at all (some Shift_JIS, Big5, GBK and GB18030 files, and ISO-2022-JP files with half-width katakana, are like this), or
+- the file starts with two byte-order marks, or (in an encoding with no mark of its own, like GB18030) with the byte-order mark character, because the editor drops it.
+
+It is still text. Reopen it in another encoding from the status bar to edit it, or convert it with **Save with encoding** (any encoding except the one that cannot write it back). A file whose text starts with the byte-order mark character cannot be converted to UTF-8 or UTF-16 either (see below); edit it outside dux instead.
+
+### Line endings
+
+The editor keeps one line ending style per file, the one the status bar names, and a save writes every line ending in it, whatever you typed or pasted.
+
+- A file whose line endings are mixed, or that has a lone carriage return (as old Mac files do), gets an amber notice saying that saving writes every line ending as the style named there, and the status bar says `Mixed`. Nothing changes until you save.
+- When the file is rewritten with the other style and reloads, the style changes with it. Undoing past that reload brings back your earlier text but not the earlier style: the status bar always names what a save writes.
+
+### The byte-order mark
+
+The byte-order mark is a property of the file, chosen with **Save with encoding**, never a character in the text. A save in UTF-8 or UTF-16 is refused when the text itself starts with the character U+FEFF, because those encodings would write it as a mark and the file would read back without it. Nothing is written; delete that character and save again.
 
 > [!IMPORTANT]
-> A save is refused when the text holds a character the file's encoding cannot represent,
-> such as an emoji or a Chinese character typed into a Windows-1252 file, or one it would
-> only write as a look-alike that reads back differently (Shift_JIS writes `¥` as a
-> backslash). Nothing is
-> written, your text stays in the tab, and the toast names the first such character and
-> its line and column as the editor shows them. Remove it, or use **Save with encoding**
-> to convert the file to UTF-8.
+> A save is refused when the text holds a character the file's encoding cannot represent. That includes one it would only write as a look-alike that reads back differently.
+>
+> - An emoji or a Chinese character typed into a Windows-1252 file is refused.
+> - Shift_JIS writes `¥` as a backslash, so that is refused too.
+>
+> Nothing is written and your text stays in the tab. The toast names the first such character and its line and column as the editor shows them. Remove it, or use **Save with encoding** to convert the file to UTF-8.
 
 ## When the agent edits a file you have open
 
@@ -313,34 +281,30 @@ disk version, or cancel. Cancelling keeps your text exactly as typed.
 
 Right-click anywhere in the file tree:
 
-- **New File…** and **New Folder…** are always on the menu. Right-click a file row and the
-  new entry lands in that file's folder; right-click a folder row and it lands inside it;
-  right-click the empty area below the tree and it lands at the worktree root. A brand-new
-  file opens immediately.
-- **Upload here…** takes a file off the computer you are sitting at and puts it in the
-  folder you right-clicked, resolved exactly as New File would. It pastes nothing into any
-  terminal (see [Dropping and pasting files](/docs/dropping-files)) and is absent when the
-  server has uploads switched off.
-- **Rename…** works on files and folders alike. If the file has unsaved changes, dux blocks
-  the rename until you save or discard them.
-- **Move…** puts the entry in a different folder, name unchanged. You get a folder browser
-  opening on the folder the entry is already in, and the line above it always spells out
-  exactly where the thing will land. Same unsaved-changes rule as Rename, and the same tab
-  bookkeeping.
+- **New File…** and **New Folder…** are always on the menu. A brand-new file opens immediately. Where the new entry lands depends on where you right-click:
+  - on a file row, in that file's folder
+  - on a folder row, inside it
+  - on the empty area below the tree, at the worktree root
+- **Upload here…** takes a file off the computer you are sitting at and puts it in the folder you right-clicked, resolved exactly as New File would. It pastes nothing into any terminal (see [Dropping and pasting files](/docs/dropping-files)) and is absent when the server has uploads switched off.
+- **Rename…** works on files and folders alike. If the file has unsaved changes, dux blocks the rename until you save or discard them.
+- **Move…** puts the entry in a different folder, name unchanged. You get a folder browser opening on the folder the entry is already in, and the line above it always spells out exactly where the thing will land. Same unsaved-changes rule as Rename, and the same tab bookkeeping.
 - **Delete…** is permanent.
-- **File info…** (**Folder info…** on a folder) is read-only: full path; whether it is a
-  file, a folder or a symlink (and for a symlink, what it points at); size in human units
-  and exact bytes; last modified in your own timezone; the permission bits both as
-  `rw-r--r--` and as `644`; and what git makes of it. Git gets its own answer rather than a
-  guess: unmodified, the exact change and which side it is on, ignored, inside a different
-  repository (a nested clone or a submodule), or no repository at all. Ignored and nested
-  are named explicitly because `git status` says nothing about either.
+- **File info…** (**Folder info…** on a folder) is read-only. See below.
 
-  The panel reads the file when it opens and again whenever you come back to the browser
-  tab, and that is all: there is no polling. Delete the file elsewhere and switch back and
-  the panel closes itself rather than describing something that is not there. If it
-  vanishes while you sit on the focused tab, the panel will not know until the tab regains
-  focus.
+### File info
+
+The panel shows:
+
+- the full path
+- whether it is a file, a folder or a symlink (and for a symlink, what it points at)
+- size in human units and exact bytes
+- last modified, in your own timezone
+- the permission bits, both as `rw-r--r--` and as `644`
+- what git makes of it: unmodified, the exact change and which side it is on, ignored, inside a different repository (a nested clone or a submodule), or no repository at all
+
+Git gets its own answer rather than a guess. Ignored and nested are named explicitly because `git status` says nothing about either.
+
+The panel reads the file when it opens and again whenever you come back to the browser tab, and that is all: there is no polling. Delete the file elsewhere and switch back and the panel closes itself rather than describing something that is not there. If it vanishes while you sit on the focused tab, the panel will not know until the tab regains focus.
 
 > [!CAUTION]
 > **There is no trash on the server.** Confirming a delete removes the file, or the folder
@@ -349,13 +313,19 @@ Right-click anywhere in the file tree:
 > For the same reason, a **Move…** onto a name that is already taken is **refused
 > outright**, not offered as an "are you sure?". Rename one of the two first, then move.
 
-Deleting or moving a folder is refused while something lives in it: an agent's worktree or
-a standalone agent's folder, a dux project's repository, an operation dux is running there,
-something dux started that is still running there, or a terminal whose shell is standing in
-it. The refusal names which. While the delete or move runs, nothing new can start inside
-that folder. A symbolic link is judged at its own path: deleting or moving one leaves what
-it points at alone, but it is refused when an agent's folder or a project's repository is
-the link itself.
+### When a folder is busy
+
+Deleting or moving a folder is refused while something lives in it. The refusal names which:
+
+- an agent's worktree or a standalone agent's folder
+- a dux project's repository
+- an operation dux is running there
+- something dux started that is still running there
+- a terminal whose shell is standing in it
+
+While the delete or move runs, nothing new can start inside that folder.
+
+A symbolic link is judged at its own path. Deleting or moving one leaves what it points at alone, but it is refused when an agent's folder or a project's repository is the link itself.
 
 Renaming, moving, or deleting a file that has other open editor tabs pointed at it (or, for
 a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename or move
@@ -363,75 +333,56 @@ retargets those tabs, and a delete closes them.
 
 ## Dragging files in from your desktop
 
-Drag files from your own machine onto the file tree and let go, and they are saved into the
-worktree on the server. This is how you get a logo, a fixture, a CSV or a screenshot **into
-the project** from a laptop that is not the machine dux runs on.
+Drag files from your own machine onto the file tree and let go, and they are saved into the worktree on the server. This is how you get a logo, a fixture, a CSV or a screenshot **into the project** from a laptop that is not the machine dux runs on.
 
 Where they land is where you point:
 
 - **A folder row** takes the files into that folder.
-- **A file row** takes them into the folder that file is in, the same rule New File…
-  follows.
+- **A file row** takes them into the folder that file is in, the same rule New File… follows.
 - **The empty space** below the tree takes them to the worktree root.
 
-The receiving row is highlighted while you are still holding the files, and a toast
-afterwards names the folder.
+The receiving row is highlighted while you are still holding the files, and a toast afterwards names the folder. The tree and the file search pick the files up as soon as they land.
 
-These are **ordinary files**: `git status` shows them, they appear in the agent's Changes
-pane straight away, and you can commit them. That is the difference between this and
-dropping a file onto an agent's pane, which is scratch that dies with the agent. See
-[Dropping and pasting files](/docs/dropping-files).
+### What you get
 
-A drop here pastes nothing into any terminal and needs no input ownership: it saves files
-and stops.
+These are **ordinary files**: `git status` shows them, they appear in the agent's Changes pane straight away, and you can commit them. That is the difference between this and dropping a file onto an agent's pane, which is scratch that dies with the agent. See [Dropping and pasting files](/docs/dropping-files).
 
-Nothing on disk is overwritten. If a name is taken the file is saved under a new one, with
-a timestamp and a counter, and the toast tells you what it is called now. (**Move…** above
-instead refuses an occupied destination outright, because a move names one exact
-destination while a drop names only a folder. Neither overwrites.) Your filenames are kept
-exactly as you had them, accents and all, and a name dux cannot use is refused with the
-reason rather than rewritten.
+A drop here pastes nothing into any terminal and needs no input ownership: it saves files and stops.
 
-Dropping outside the worktree or into `.git` is refused, exactly as creating, renaming or
-moving into either is.
+- **Nothing on disk is overwritten.** If a name is taken the file is saved under a new one, with a timestamp and a counter, and the toast tells you what it is called now. (**Move…** instead refuses an occupied destination outright, because a move names one exact destination while a drop names only a folder. Neither overwrites.)
+- **Your filenames are kept exactly as you had them**, accents and all. A name dux cannot use is refused with the reason rather than rewritten.
+
+### What is refused
+
+- **Outside the worktree, or into `.git`**, exactly as creating, renaming or moving into either is.
+- **Folders.** dux takes *files*, not folders. Dropping a folder is refused by name, with the files dropped alongside it still saved, and one toast says which was which.
+- **Folders reached through a symlink** (see below).
+
+A drop that misses the tree entirely, landing on the editor or the tab strip, does nothing at all, rather than the browser navigating the tab away and taking everything unsaved with it.
 
 > [!IMPORTANT]
-> A drop is **stricter than New File…, Rename… and Move… in one way**: those three follow a
-> symlinked directory that stays inside the worktree, so `New File…` inside a
-> `libs -> packages/libs` link works, while a drop refuses any folder reached through a link
-> and says so. To drop into a linked folder, navigate to the real one.
+> A drop is **stricter than New File…, Rename… and Move… in one way**: those three follow a symlinked directory that stays inside the worktree, so `New File…` inside a `libs -> packages/libs` link works, while a drop refuses any folder reached through a link and says so. To drop into a linked folder, navigate to the real one.
 
-The tree and the file search pick them up as soon as they land.
+### Switching it off
 
-dux takes **files**, not folders. Dropping a folder is refused by name, with the files
-dropped alongside it still saved, and one toast says which was which. A drop that misses the
-tree entirely, landing on the editor or the tab strip, does nothing at all, rather than the
-browser navigating the tab away and taking everything unsaved with it.
-
-The whole feature is off when `[server] file_drop_max_bytes` is `0` (the tree simply does not
-react to a drag), and the same size limit applies here as anywhere else.
+The whole feature is off when `[server] file_drop_max_bytes` is `0` (the tree simply does not react to a drag), and the same size limit applies here as anywhere else. This setting is read at startup, so changing it needs a server restart.
 
 ## Syntax highlighting and language niceties
 
-Around eighty languages get proper syntax highlighting out of the box: Rust, Go, Python,
-JavaScript and TypeScript, C and C++, Java, shell, SQL, YAML, HCL, Dockerfile, Markdown and
-many more, including bare-filename matches like `Makefile` and `Dockerfile`. Two file types
-get extra help:
+Around eighty languages get proper syntax highlighting out of the box: Rust, Go, Python, JavaScript and TypeScript, C and C++, Java, shell, SQL, YAML, HCL, Dockerfile, Markdown and many more, including bare-filename matches like `Makefile` and `Dockerfile`. Two file types get extra help:
 
-- **JSON** and **TOML** get dedicated highlighting, which is what you want when editing a
-  `config.toml`. This is the same editor behind the app menu's **Edit config file…** entry.
+- **JSON** gets dedicated highlighting.
+- **TOML** gets dedicated highlighting, which is what you want when editing a `config.toml`. This is the same editor behind the app menu's **Edit config file…** entry.
 
-This is a deliberately trimmed Monaco: highlighting only, with no validation, no
-IntelliSense and no cross-file diagnostics.
+What you do not get is validation, IntelliSense or cross-file diagnostics: this editor does highlighting only.
 
 ## Markdown and SVG preview
 
-For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle renders the
-current buffer, unsaved edits included. It handles GitHub-flavored Markdown and rewrites
-relative image paths so they load from the worktree. A leading YAML frontmatter block is
-rendered the way GitHub renders it, as a key/value table above the page, with lists joined
-inline and a nested key shown as `parent.child`. Nothing you wrote is dropped: a value dux
-cannot read is shown as your raw text, and so is a whole block it cannot make a table of.
+For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle renders the current buffer, unsaved edits included.
+
+- It handles GitHub-flavored Markdown and rewrites relative image paths so they load from the worktree.
+- A leading YAML frontmatter block is rendered the way GitHub renders it, as a key/value table above the page, with lists joined inline and a nested key shown as `parent.child`.
+- Nothing you wrote is dropped: a value dux cannot read is shown as your raw text, and so is a whole block it cannot make a table of.
 
 SVG files get the same treatment: they open as text and the toggle renders the drawing from
 whatever is in the buffer right now.
@@ -454,23 +405,21 @@ This one is for agent worktrees; a terminal-rooted editor has no Diff button.
 
 ![A file's diff against its last committed version, added lines in green and a replaced line in red.](/screens/editor-diff-head.png)
 
-Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
-syntax-highlighted comparison of the file's working copy against its last committed version,
-shown inline. Added files render as all-insert, deleted files as all-delete. If the file
-changes on disk while you are looking, an amber **Reload** button appears so you refresh on
-your own terms.
+Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only, syntax-highlighted comparison of the file's working copy against its last committed version, shown inline.
+
+- Added files render as all-insert, deleted files as all-delete.
+- If the file changes on disk while you are looking, an amber **Reload** button appears so you refresh on your own terms.
 
 The File/Diff switch only appears on a file that has changes, so an unchanged file never
 offers an empty diff. A file you are already looking at in Diff keeps the switch even if its
 changes disappear (say, you revert them), until you flip back to File.
 
-Both sides of the diff are read by the same [encoding](#file-encodings) rules as the
-editor, so a change to a Windows-1252 file is a readable diff. A file too large for the
-editor to open is shown as the start of git's own patch, read by the same rule: UTF-8 when
-it is, Windows-1252 otherwise. The status bar names that encoding there too, and **Reopen
-with encoding** rereads the patch in the one you pick; if the patch is not valid in it, the
-diff stays as it was and a toast says why. Only real binary content, which includes
-UTF-16 for git, is shown as a binary file.
+**Encodings in a diff.**
+
+- Both sides of the diff are read by the same [encoding](#file-encodings) rules as the editor, so a change to a Windows-1252 file is a readable diff.
+- A file too large for the editor to open is shown as the start of git's own patch, read by the same rule: UTF-8 when it is, Windows-1252 otherwise. That start is cut at 4,000 lines or about 2 MiB of patch text, whichever comes first (see [Git without leaving the browser](/docs/web-git#opening-a-diff)).
+- The status bar names that encoding there too, and **Reopen with encoding** rereads the patch in the one you pick. If the patch is not valid in it, the diff stays as it was and a toast says why.
+- Only real binary content, which includes UTF-16 for git, is shown as a binary file.
 
 ## Open in your local editor
 

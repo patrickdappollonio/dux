@@ -47,10 +47,10 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 |---|---|
 | `dux projects ls`, `show <project>` | Projects, with their branch and how many agents each has. |
 | `dux projects add <path>` | Adds a project. `--name` names it, `--checkout-default` checks the repository's default branch out first, and `--init` makes a plain folder a git repository with a first commit. |
-| `dux projects rm <project>` | Removes a project. Its agents' worktrees stay on disk unless you add `--delete-worktrees`. |
+| `dux projects rm <project>` | Removes a project and its agents from dux. Their worktrees stay on disk unless you add `--delete-worktrees`. |
 | `dux projects worktrees ls <project>` | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
-| `dux agents ls`, `show <agent>` | Agents, with their project or folder, provider, state, running tabs and how many browsers count as connected to it. `--project` keeps one project's; `--worktrees` prints just each agent's id and the folder it works in. |
-| `dux agents add` | Creates an agent. `--project` on a new branch, plus `--existing-branch`, `--from-pr <number or URL>` (with `--review-copy` to agree to a separate review copy when the pull request's own branch cannot be used) or `--from-worktree <path>`; `--fork <agent>`; or `--standalone <folder>` with an optional `--provider`. `--name` names it and `--copy-uncommitted` brings the project's uncommitted changes along. `--from-pr <URL or owner/repo#123>` with no `--project` finds the project that has the repository, or clones the repository (or adds an existing checkout of it) when none does, into the folder `--path <folder>` names or, by default, the server's project start folder plus the repository's name, behind a confirmation `--yes` answers. When the agent would need a review copy, the command says so and refuses before it clones or adds anything, and running it again with `--review-copy` agrees to it. When that only turns out after the clone or the add, the project stays, and running the command again with `--review-copy` (and `--path` naming that project's folder, or `--project`) agrees to it. |
+| `dux agents ls`, `show <agent>` | Agents and their state. `--project` keeps one project's; `--worktrees` prints just each agent's id and folder. |
+| `dux agents add` | Creates an agent: in a project, from a pull request, as a fork, or in a folder of your own. See [Creating an agent](#creating-an-agent). |
 | `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too, and `--delete-branch` or `--keep-branch` decides the branch; with neither, a branch dux created goes and one it found is kept, as in the delete dialogs. `--delete-branch` needs `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
 | `dux agents stop <agent>`, `start <agent>` | Stops everything an agent runs, or starts it again. |
 | `dux agents tabs ls <agent>` | The agent's provider tabs and whether each is running. |
@@ -64,7 +64,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | `dux keys ls` | The terminal UI's keybindings. |
 | `dux themes ls` | The themes dux can load, and which one is in use. |
 | `dux env ls`, `set <name>`, `rm <name>` | The global environment. |
-| `dux server logs`, `dux server connections ls` | The server's log and who is connected; see [Server mode](/docs/server-mode#the-servers-own-log). |
+| `dux server logs`, `dux server connections ls` | The server's log (`-f` follows it, `--lines <N>` picks how many lines to start from) and who is connected; see [Server mode](/docs/server-mode#the-servers-own-log). |
 | `dux remote …` | Other machines' duxes; see [below](#another-machines-dux). |
 | `dux operations show <id>` | Where a change started earlier stands. |
 
@@ -79,6 +79,40 @@ agent=$(dux agents add --project web --name fix-login --yes | tail -n 1)
 Paths you give are made absolute for the dux on this machine. A remote dux is another
 machine, so it refuses a relative path; give the whole thing.
 
+### Creating an agent
+
+`dux agents add` needs to know where the agent comes from. `--name` names it, and
+`--copy-uncommitted` brings the project's uncommitted changes along (new-branch agents
+only).
+
+- `--project <project>` creates it on a **new branch** of that project.
+- `--project <project> --existing-branch` uses a branch that already exists.
+- `--project <project> --from-pr <number or URL>` creates it from a **pull request**.
+- `--project <project> --from-worktree <path>` takes over a worktree the project already has.
+- `--fork <agent>` forks another agent into a new worktree from its branch.
+- `--standalone <folder>` runs it in a folder of your own with no project, with an optional
+  `--provider`.
+
+#### A pull request with no project named
+
+Give `--from-pr` an address or `owner/repo#123` and leave out `--project`, and dux finds
+the project that has the repository. When none does:
+
+1. It clones the repository (or adds an existing checkout of it) into the folder
+   `--path <folder>` names or, by default, the server's project start folder plus the
+   repository's name.
+2. It asks first, and `--yes` answers.
+
+#### Review copies
+
+When the pull request's own branch cannot be used, the agent needs a separate review copy,
+and **`--review-copy`** is how you agree to one.
+
+- If dux knows up front, it says so and refuses before it clones or adds anything. Run it
+  again with `--review-copy`.
+- If it only turns out after the clone or the add, the project stays. Run the command again
+  with `--review-copy` (and `--path` naming that project's folder, or `--project`).
+
 ## Output
 
 Every `ls` prints an aligned table with a header row. Two flags change that:
@@ -88,14 +122,16 @@ Every `ls` prints an aligned table with a header row. Two flags change that:
 - `-q` prints only the ids, one per line, ready for `xargs`.
 
 `dux agents ls`, for example, has the columns `ID`, `NAME`, `PROJECT`, `WORKTREE`,
-`PROVIDER`, `STATE`, `TABS` (running of total) and `BROWSERS`. An agent's state is `active`, `detached` or `exited`, or `removing` while its deletion is
-still running. `show` prints one field per line.
+`PROVIDER`, `STATE`, `TABS` (running of total) and `BROWSERS`. An agent's state is
+`active`, `detached` or `exited`, or `removing` while its deletion is still running.
+`show` prints one field per line.
 
-`BROWSERS` counts the browsers that would stop a change to the agent: every one with it
-open now, plus every one whose connection to it was lost within the last
-`[server] presence_grace_seconds` (see below), each browser counted once however many of
-its tabs or terminals are open. So it can be higher than the count on the agent's row in
-the terminal UI, which shows only the browsers that have it open right now.
+> [!NOTE]
+> `BROWSERS` counts the browsers that would stop a change to the agent: every one with it
+> open now, plus every one whose connection to it was lost within the last
+> `[server] presence_grace_seconds` (see below). Each browser counts once however many tabs
+> or terminals it has open. So it can be higher than the count on the agent's row in the
+> terminal UI, which shows only the browsers that have it open right now.
 
 ## Changes ask first, and wait until they are done
 
@@ -113,12 +149,6 @@ Then it waits until the change has really finished, not just started, and prints
 went: a deleted agent's worktree is gone and its branch is deleted or kept before the
 command returns. If part of a change failed, the command says which part and exits 1.
 
-A second `dux agents add` that runs while another agent is still being created waits for
-that creation to finish (within the same wait time), then creates its own and says it
-waited. If the wait time runs out before the other creation finishes, it never starts its
-own: it is refused and exits 3. With `--no-wait` it is refused at once, as the browser and
-the terminal UI refuse it.
-
 - `--no-wait` prints the change's id and returns at once.
 - `--wait-timeout <seconds>` waits a different time than usual. The usual time is
   `[cli] wait_timeout_seconds` (10 minutes). No wait lasts more than a day; see
@@ -126,6 +156,12 @@ the terminal UI refuse it.
 - A wait that runs out says the outcome is unknown, prints the id, and exits 6. The change
   has not been stopped: it carries on, and `dux operations show <id>` tells you how it
   ends.
+
+> [!NOTE]
+> A second `dux agents add` that runs while another agent is still being created waits for
+> that creation to finish (within the same wait time), then creates its own and says it
+> waited. If the wait runs out first, it never starts its own: it is refused and exits 3.
+> With `--no-wait` it is refused at once, as the browser and the terminal UI refuse it.
 
 dux keeps a finished change's outcome for `[server] operation_retention_seconds` (30
 minutes by default), in memory, so a restart forgets them all.
@@ -163,7 +199,9 @@ this machine their listings read the file itself, whether dux is running or not.
 Changes (`dux macros add` and `rm`, `dux env set` and `rm`) go through the running dux
 when there is one, so they apply at once, in the terminal UI and in every browser. With
 no dux running they edit the file, keeping its comments, and apply the next time dux
-starts. Providers, keys and themes are read-only here: change a provider's fields with
+starts.
+
+Providers, keys and themes are read-only here: change a provider's fields with
 `dux config set`, and keys and themes in the terminal UI or the file.
 
 The environment's values are usually secrets, so they are treated like it:
@@ -174,10 +212,14 @@ The environment's values are usually secrets, so they are treated like it:
   Reading from a pipe leaves no terminal to confirm on, so `--stdin` always needs `--yes`.
 
 A macro whose name is anything other than letters, digits, `_` and `-` keeps its text
-hidden, the same rule `dux config get` follows: `ls` lists it under a placeholder name, and
-`dux macros show '<name>'` finds it by its real name but prints only that placeholder and
-its surface. `ls -q` leaves it out, since a placeholder is no id another command takes,
-and says on stderr how many it left out. The macro editor in the browser shows it in full.
+hidden, the same rule `dux config get` follows:
+
+- `ls` lists it under a placeholder name.
+- `dux macros show '<name>'` finds it by its real name but prints only that placeholder and
+  its surface.
+- `ls -q` leaves it out, since a placeholder is no id another command takes, and says on
+  stderr how many it left out.
+- The macro editor in the browser shows it in full.
 
 ## Another machine's dux
 
@@ -204,11 +246,17 @@ neither:
 - `--remote <name>` talks to that saved remote.
 - `--local` talks to this machine's dux, whatever else says otherwise.
 
-Which dux a command talks to is decided in this order: `--local`, then `--remote`, then the
-`DUX_REMOTE` environment variable, then the default remote, then this machine. A
-`DUX_REMOTE` set in your shell profile works as set-and-forget. Whatever is chosen is
-used: a remote that does not answer stops the command, and it never quietly tries this
-machine instead.
+Which dux a command talks to is decided in this order:
+
+1. `--local`
+2. `--remote`
+3. the `DUX_REMOTE` environment variable (set in your shell profile, it works as
+   set-and-forget)
+4. the default remote
+5. this machine
+
+Whatever is chosen is used: a remote that does not answer stops the command, and it never
+quietly tries this machine instead.
 
 > [!WARNING]
 > `dux config` always edits this machine's `config.toml`. With a remote selected, through
@@ -236,18 +284,23 @@ box asks for its password; run "dux remote login box"
 
 `dux remote login` asks for the password without echoing it, or reads it from a pipe with
 `--stdin`. Wrong guesses count exactly like wrong guesses on the sign-in page, slow-downs
-and bans included. A sign-in stays good until it goes unused for
-`[server.auth] cli_token_idle_days` on that dux (30 by default), until you run
-`dux remote logout`, or until the password changes, which signs every command line out at
-once. Signing in again where you already were ends the earlier sign-in on that dux; if
-it cannot be ended, `dux remote login` says so, keeps the new one, and the earlier one
-ends on its own once it goes unused.
+and bans included.
 
-Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder, readable
-only by you, never in `config.toml`. Neither file is safe to paste into a bug report:
-`config.toml` holds your environment's secrets and the password hash. Paste the plain
-`dux config diff` summary instead.
-`dux config reset` removes it.
+A sign-in stays good until:
+
+- it goes unused for `[server.auth] cli_token_idle_days` on that dux (30 by default);
+- you run `dux remote logout`;
+- the password changes, which signs every command line out at once.
+
+Signing in again where you already were ends the earlier sign-in on that dux. If it cannot
+be ended, `dux remote login` says so, keeps the new one, and the earlier one ends on its
+own once it goes unused.
+
+> [!WARNING]
+> Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder,
+> readable only by you, never in `config.toml`. Neither file is safe to paste into a bug
+> report: `config.toml` holds your environment's secrets and the password hash. Paste the
+> plain `dux config diff` summary instead. `dux config reset` removes `remotes.toml`.
 
 ### Plain HTTP
 

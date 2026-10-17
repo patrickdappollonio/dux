@@ -15,52 +15,46 @@ On a desktop-width screen it is three panes.
 
 ![The dux web workspace on a desktop screen: the sidebar of agents and terminals on the left, the running agent's terminal in the middle, and the list of changed files on the right.](/screens/web-workspace-layout.png#full)
 
-**The collapsible left sidebar** lists your agents in a single flat list, with the
-dormant ones tucked into a collapsible Inactive tail. Toggle it with `Ctrl-b`. It
-carries:
+**The collapsible left sidebar** lists your agents in a single flat list, with the dormant ones tucked into a collapsible Inactive tail. Toggle it with `Ctrl-b` (`Cmd-b` on a Mac). It carries:
 
-- A sort control (Active first by default, or by recently updated, recently created,
-  name, or a manual drag order). Drag rows to arrange them by hand.
+- A sort control (Active first by default, or by recently updated, recently created, name, or a manual drag order). Drag rows to arrange them by hand.
 - A search box that filters the list.
-- A launcher at the bottom: one button for the next agent, and one `⋯` beside it holding
-  every other way in, grouped into agents, terminals and projects. On an empty dux the
-  button reads **Add project** instead.
-- A **+** on the Agents header, and one on the Terminals divider that opens a standalone
-  shell.
+- A launcher at the bottom: one button for the next agent, and one `⋯` beside it holding every other way in, grouped into agents, terminals and projects. On an empty dux the button reads **Add project** instead.
+- A **+** on the Agents header, and one on the Terminals divider that opens a standalone shell.
 
-**The center pane** is the focused agent's live terminal, or a welcome screen when
-nothing is selected.
+**The center pane** is the focused agent's live terminal, or a welcome screen when nothing is selected.
 
-**The right Changes pane** shows what the focused agent has changed. Resize the split,
-or hide the pane entirely; dragging the split shut and letting go also hides it, and the
-header grows a button to bring it back. See
-[Git without leaving the browser](/docs/web-git).
+**The right Changes pane** shows what the focused agent has changed. Resize the split, or hide the pane entirely; dragging the split shut and letting go also hides it, and the header grows a button to bring it back. See [Git without leaving the browser](/docs/web-git).
 
-**Both splits are yours to move, with the same gesture.** Drag the sidebar's right edge
-or the Changes divider, with a mouse or a finger; double-click either one to put it back
-where it was when the page loaded. Both remember where you left them. Tab to a divider
-and the arrow keys nudge it, `Home` and `End` run it to its ends, and `Enter` puts that
-side away. The sidebar's arrows move it one step of `1rem` at a time, small enough that a
-single press cannot fold the whole thing away. Drag the sidebar narrow enough and it
-snaps to its icon rail, which you reopen by clicking the same edge. The rail is for
-what is alive: your active agents, then your terminals, one icon each, while agents in
-the Inactive tail sit it out until you wake them. Rest your mouse on a rail icon and the
-whole sidebar slides out over the page for a peek, Inactive tail and all, without
-nudging your terminal an inch; pick something and it tucks itself away again. On a
-touchscreen a tap still just picks the icon. Drag the Changes split shut and the pane
-hides.
+### Moving the splits
 
-Either divider lights up while you hold it, so a finger can tell it has the split and not
-the pane beside it. Only a real drag counts: tapping near a divider, or starting a drag
-the browser decides was a scroll, leaves both splits exactly where they were.
+**Both splits are yours to move, with the same gesture.**
 
-A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button
-that opens the app menu. The cog menu holds your preferences, the configuration dialogs,
-the actions that apply to the whole workspace, and **Projects…**, the list of every
-project (see [Managing projects](#managing-projects)). Anything that acts on a *specific*
-agent, project, or file lives in the `⋯` menu on that row instead. The cog menu has no
-keyboard shortcut: Tab reaches it, Enter opens it, the arrow keys move through it, and
-Escape closes it.
+- **Drag** the sidebar's right edge or the Changes divider, with a mouse or a finger. Either divider lights up while you hold it, so a finger can tell it has the split and not the pane beside it.
+- **Double-click** either one to put it back where it was when the page loaded. Both remember where you left them.
+- **Keyboard:** Tab to a divider and the arrow keys nudge it, `Home` and `End` run it to its ends, and `Enter` puts that side away. The sidebar's arrows move it one step of `1rem` at a time, small enough that a single press cannot fold the whole thing away.
+- **Changes split:** drag it shut and the pane hides.
+
+Only a real drag counts: tapping near a divider, or starting a drag the browser decides was a scroll, leaves both splits exactly where they were.
+
+### The icon rail
+
+Drag the sidebar narrow enough and it snaps to its icon rail, which you reopen by clicking the same edge.
+
+- **What it shows.** The rail is for what is alive: your active agents, then your terminals, one icon each. Agents in the Inactive tail sit it out until you wake them.
+- **Peek.** Rest your mouse on a rail icon and the whole sidebar slides out over the page, Inactive tail and all, without nudging your terminal an inch. Pick something and it tucks itself away again.
+- **Touch.** On a touchscreen a tap still just picks the icon.
+
+### The header and the cog
+
+A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button that opens the app menu. The cog menu holds:
+
+- your preferences
+- the configuration dialogs
+- the actions that apply to the whole workspace
+- **Projects…**, the list of every project (see [Managing projects](#managing-projects))
+
+Anything that acts on a *specific* agent, project, or file lives in the `⋯` menu on that row instead. The cog menu has no keyboard shortcut: Tab reaches it, Enter opens it, the arrow keys move through it, and Escape closes it.
 
 > [!NOTE]
 > The web UI is dark-only. Themes are a terminal UI feature. The browser ships one tuned
@@ -68,8 +62,7 @@ Escape closes it.
 
 ## Deep links
 
-The URL tracks what you are looking at, so you can bookmark a session or send a link to
-someone on the same instance:
+The URL tracks what you are looking at, so you can bookmark a session or send a link to someone on the same instance:
 
 - An agent is `#/agent/<sessionId>`.
 - An extra provider tab is `#/agent/<sessionId>/tab/<tabId>`.
@@ -78,25 +71,28 @@ someone on the same instance:
 - A standalone terminal is `#/terminal/<terminalId>`, with no owner in the address.
 - The phone's Changes screen is the same link with `/changes` on the end.
 
-Every move to a different place adds one history entry, so Back always returns you to
-where you were: select three agents in turn and Back walks them in reverse. Moves that
-stay where you already are rewrite the one entry instead: switching between an agent's
-own tabs, reconnecting after the wifi drops, and following a link back to where you
-already were.
+### Back and Forward
 
-An open dialog, sheet or menu is one step of its own, with no change to the address. Back
-(or your phone's back gesture) closes it exactly as Cancel or `Escape` would: nothing it
-offered is saved, confirmed or sent, and the page underneath stays where it is. Press Back
-again to move the page. Closing a dialog any other way takes its step away too, so Back is
-never spent on something already closed, and Forward never brings a closed dialog's step
-back. A dialog opened from another one stacks, and each Back closes the top one. A dialog
-that is in the middle of saving when you press Back closes as soon as the save finishes. Two cases keep the plain behavior, where Back moves the page
-and leaves the dialog alone: a browser without the Navigation API, and a dialog dux raises
-by itself rather than in answer to a click or a tap, such as the welcome screen.
+Every move to a different place adds one history entry, so Back always returns you to where you were: select three agents in turn and Back walks them in reverse.
 
-dux never presses Back for you. The phone's back chevron is an **up** control: it takes
-you one level up (Changes to its agent, an agent to the home screen), adds its own
-history entry, and can never step out of dux.
+Moves that stay where you already are rewrite the one entry instead:
+
+- switching between an agent's own tabs
+- reconnecting after the wifi drops
+- following a link back to where you already were
+
+dux never presses Back for you. The phone's back chevron is an **up** control: it takes you one level up (Changes to its agent, an agent to the home screen), adds its own history entry, and can never step out of dux.
+
+### Dialogs and Back
+
+An open dialog, sheet or menu is one step of its own, with no change to the address. Back (or your phone's back gesture) closes it exactly as Cancel or `Escape` would: nothing it offered is saved, confirmed or sent, and the page underneath stays where it is. Press Back again to move the page.
+
+- Closing a dialog any other way takes its step away too, so Back is never spent on something already closed, and Forward never brings a closed dialog's step back.
+- A dialog opened from another one stacks, and each Back closes the top one.
+- A dialog that is in the middle of saving when you press Back closes as soon as the save finishes.
+- Two cases keep the plain behavior, where Back moves the page and leaves the dialog alone: some older browsers, and a dialog dux raises by itself rather than in answer to a click or a tap, such as the welcome screen.
+
+### When a link goes wrong
 
 Three things can go wrong with a link:
 
@@ -120,53 +116,44 @@ browses the server's filesystem. Pick a git repository and it joins the workspac
 > The folder does not have to be a repository yet, which is what makes this work from a
 > phone with no terminal in reach.
 
-- Point it at a plain folder (via the pinned **Use this folder** row at the top of the
-  list) and dux offers to **initialize a repository**: it runs `git init`, seeds a
-  commented starter `.gitignore` for dependency and build folders it actually finds
-  (`node_modules`, `target`, and friends), makes an empty initial commit, and adds the
-  project. Your existing files are left untracked and untouched. If git on that
-  machine cannot work out an identity for that commit, dux fills in
-  `dux@localhost` as the address (keeping your `user.name` if git knows one, and
-  signing as `dux` if it does not) so adding the folder still succeeds. That
-  applies to dux's own empty first commit and nothing else: your later commits
-  still need an identity you have configured.
-- The picker's **New folder** button creates a directory from the browser.
-- Pick a folder *inside* an existing repository and dux refuses, pointing you at the
-  repository root instead.
+- **Point it at a plain folder** (via the pinned **Use this folder** row at the top of the list) and dux offers to **initialize a repository**. It:
+  - runs `git init`
+  - seeds a commented starter `.gitignore` for dependency and build folders it actually finds (`node_modules`, `target`, and friends)
+  - makes an empty initial commit
+  - adds the project
 
-The launcher's `⋯` holds both flavors under **Projects** ("Add project…" and "Initialize
-a repository…"); either way the picker inspects your selection and offers the right
-action. The TUI's project browser makes the same offer.
+  Your existing files are left untracked and untouched.
+- The picker's **New folder** button creates a directory from the browser.
+- Pick a folder *inside* an existing repository and dux refuses, pointing you at the repository root instead.
+
+> [!NOTE]
+> If git on that machine cannot work out an identity for that first commit, dux fills in `dux@localhost` as the address (keeping your `user.name` if git knows one, and signing as `dux` if it does not) so adding the folder still succeeds. That applies to dux's own empty first commit and nothing else: your later commits still need an identity you have configured.
+
+The launcher's `⋯` holds both flavors under **Projects** ("Add project…" and "Initialize a repository…"); either way the picker inspects your selection and offers the right action. The TUI's project browser makes the same offer.
 
 ### Cloning a repository
 
-Not on the server yet? **Clone a repository…** sits right beside them, under **Projects**
-in the launcher's `⋯` and in the app menu's **Add project** submenu. Paste the remote's
-address and dux clones it, adds it as a project and starts its first agent, all in one go.
-The destination folder fills itself in from the address (your start directory plus the
-repository's name) until you type over it, and the agent gets the name you give it or a
-random one, exactly like **New agent**. When the agent appears, dux selects it for you,
-however long the clone took. The full story, including what happens when something goes
-wrong halfway, is in [Creating agents](/docs/creating-agents#cloning-a-repository).
+Not on the server yet? **Clone a repository…** sits right beside them, under **Projects** in the launcher's `⋯` and in the app menu's **Add project** submenu. Paste the remote's address and dux clones it, adds it as a project and starts its first agent, all in one go.
+
+- The destination folder fills itself in from the address (your start directory plus the repository's name) until you type over it.
+- The agent gets the name you give it or a random one, exactly like **New agent**.
+- When the agent appears, dux selects it for you, however long the clone took.
+
+The full story, including what happens when something goes wrong halfway, is in [Creating agents](/docs/creating-agents#cloning-a-repository).
 
 ## Managing projects
 
-**Projects…** in the app menu (the cog), right under **Add project**, lists every project
-dux knows about, with a search box on top. Projects are ordered by whichever happened last,
-adding the project or creating its newest agent, latest first. Each row shows the project's
-folder, how many agents it has, and its base branch (the branch new agents start from),
-plus a warning when the folder is missing. It is the place to manage a project that has no
-agents yet.
+**Projects…** in the app menu (the cog), right under **Add project**, lists every project dux knows about, with a search box on top. It is the place to manage a project that has no agents yet.
 
-Click a row, or its `⋯`, for that project's menu. Dialogs you open from it (delete,
-remove, project info, project settings, worktrees, checking out the default branch,
-changing the base branch) open on top of the list, and closing them takes you back to it.
-Anything that ends with a new agent or a new terminal (including adopting a worktree from
-**Worktrees…**) closes the list and takes you there.
+- **Order:** whichever happened last, adding the project or creating its newest agent, latest first.
+- **Each row** shows the project's folder, how many agents it has, and its base branch (the branch new agents start from), plus a warning when the folder is missing.
 
-If agents are left over from a project whose record is gone, they show up in the list
-under their group's name, and the only thing on offer is **Remove project…**, which clears
-them out.
+Click a row, or its `⋯`, for that project's menu.
+
+- Dialogs you open from it (delete, remove, project info, project settings, worktrees, checking out the default branch, changing the base branch) open on top of the list, and closing them takes you back to it.
+- Anything that ends with a new agent or a new terminal (including adopting a worktree from **Worktrees…**) closes the list and takes you there.
+
+If agents are left over from a project whose record is gone, they show up in the list under their group's name, and the only thing on offer is **Remove project…**, which clears them out.
 
 ### Changing the base branch
 
@@ -175,28 +162,21 @@ start from: a local branch, or one that so far exists only on `origin` (dux crea
 local branch, tracking origin's, when you pick it). Handy when a project was added from a
 clone that sat on the wrong branch.
 
-- Opening it fetches `origin` first. If that fails or times out, the list shows the
-  branches as they were last fetched and says why.
-- The current base is marked. A branch that another worktree has checked out (usually an
-  agent's) is shown but cannot be picked, because git will not check a branch out twice;
-  the row names the agent, or the folder when no agent owns it.
-- After you confirm, dux switches the project folder to that branch and then saves it as
-  the base. If git refuses the switch (say, uncommitted changes in the folder would be
-  overwritten), you get an error and the base stays where it was.
+- **Opening it** fetches `origin` first. If that fails or times out, the list shows the branches as they were last fetched and says why.
+- **The current base** is marked.
+- **A branch another worktree has checked out** (usually an agent's) is shown but cannot be picked, because git will not check a branch out twice. The row names the agent, or the folder when no agent owns it.
+- **After you confirm,** dux switches the project folder to that branch and then saves it as the base. If git refuses the switch (say, uncommitted changes in the folder would be overwritten), you get an error and the base stays where it was.
 
 > [!IMPORTANT]
 > This moves the project folder itself onto the branch. Uncommitted changes that do not
 > conflict come along with it, the same as with **Check out default branch…**.
 
 > [!CAUTION]
-> Switching the project folder, **Pull project** and an agent's **Pull** make git delete or
-> overwrite an ignored folder or file when the incoming branch tracks that same path: git
-> treats ignored files as disposable. dux refuses, and changes nothing, when that folder
-> holds, or that file sits inside, an agent's worktree, a standalone agent's folder, a
-> project's repository or a terminal working there, and says which. Any other ignored folder
-> or file git still replaces, so move it aside first if it matters. A folder the incoming
-> commit deletes every file of goes too, as does a link it deletes or replaces (tracked
-> or not), and dux refuses the same way when one of those lives or works there.
+> **Git treats ignored files as disposable.** Switching the project folder, **Pull project** and an agent's **Pull** make git delete or overwrite an ignored folder or file when the incoming branch tracks that same path.
+>
+> - dux **refuses, and changes nothing,** when that folder holds, or that file sits inside, an agent's worktree, a standalone agent's folder, a project's repository or a terminal working there, and says which.
+> - Any other ignored folder or file git still replaces, so move it aside first if it matters.
+> - A folder the incoming commit deletes every file of goes too, as does a link it deletes or replaces (tracked or not). dux refuses the same way when one of those lives or works there.
 
 > [!NOTE]
 > These pulls and switches never update submodules, even when your git config sets
@@ -217,127 +197,113 @@ running until you explicitly kill or delete it (see
 > Opening a terminal is what starts the agent: it **launches or resumes** the provider if
 > it is not already running.
 
-The full scrollback comes back when you open it, and the "Reconnecting…" cover stays up
-until that screen has actually been painted, not merely until the connection is back, so
-you never end up looking at an empty black pane wondering whether anything is happening.
+The full scrollback comes back when you open it, and the "Reconnecting…" cover stays up until that screen has actually been painted, not merely until the connection is back, so you never end up looking at an empty black pane wondering whether anything is happening.
 
-**dux keeps trying while the page is open, tells you how it is going, and reconnects the
-moment you come back.** A visible tab retries with a widening gap between attempts, up to
-`reconnect_backoff_cap_seconds` (10 seconds by default), and the cover says which attempt
-failed and counts down to the next one. It stops after `reconnect_attempts` of them
-(8 by default) rather than spinning forever in front of a server that is not there, and
-says so plainly with a **Reconnect** button that starts over; set `reconnect_attempts` to
-`0` to keep trying indefinitely. An attempt that never connects is abandoned after
-`reconnect_attempt_timeout_seconds` (10 by default) and counted as a failure, because a
-host you cannot reach does not refuse the connection, it just never answers. Anything that
-connects gives the whole budget back, and so does coming back to the tab, unlocking the
-phone or the network returning. The page's own connection keeps counting while the tab is
-in the background, so that it can still reach you with attention alerts, and it can run
-out of attempts back there; you will find it stopped when you return, and returning is
-itself what starts it over. Your terminals are the half that waits: a hidden tab stops
-retrying them altogether rather than burning your battery on a screen you are not looking
-at, and picks them straight back up when you switch back to it, unlock the phone, or the
-network returns. Your scrollback and anything half-typed in the compose box survive all of
-it.
+### Reconnecting
 
-Two things can still stop the wait, and both offer you a **Reconnect** button rather than
-leaving you stuck. If the terminal's screen has not arrived within
-`replay_wait_seconds` (8 seconds by default) of the connection coming up, the cover says
-so and offers to try again. And if the connection is really gone, the blocking
-**Connection lost** card takes over.
+**dux keeps trying while the page is open, tells you how it is going, and reconnects the moment you come back.** A visible tab retries with a widening gap between attempts, and the cover says which attempt failed and counts down to the next one.
+
+The knobs all live under `[server]` in your config file (see [Server mode](/docs/server-mode#the-server-config-keys)):
+
+- **`reconnect_backoff_cap_seconds`** (10 by default) is the longest the gap between attempts grows to.
+- **`reconnect_attempts`** (8 by default) is how many attempts dux makes before it stops. Set it to `0` to keep trying indefinitely.
+- **`reconnect_attempt_timeout_seconds`** (10 by default) abandons an attempt that never connects and counts it as a failure, because a host you cannot reach does not refuse the connection, it just never answers.
+- **`replay_wait_seconds`** (8 by default) is how long the cover waits for the terminal's screen to arrive once the connection is up.
+- **`heartbeat_seconds`** (15 by default) and **`heartbeat_deadline_seconds`** (30 by default) are the dead-connection check described below.
+
+When the attempts run out, dux stops rather than spinning forever in front of a server that is not there, says so plainly, and offers a **Reconnect** button that starts over.
+
+**The budget resets** when anything connects, and also when you come back to the tab, unlock the phone or the network returns.
+
+**In the background:**
+
+- The page's own connection keeps counting while the tab is hidden, so that it can still reach you with attention alerts, and it can run out of attempts back there. You will find it stopped when you return, and returning is itself what starts it over.
+- Your terminals are the half that waits: a hidden tab stops retrying them altogether rather than burning your battery on a screen you are not looking at, and picks them straight back up when you switch back to it, unlock the phone, or the network returns.
+
+Your scrollback and anything half-typed in the compose box survive all of it.
+
+Two things can still stop the wait, and both offer you a **Reconnect** button rather than leaving you stuck:
+
+- The terminal's screen has not arrived within `replay_wait_seconds` of the connection coming up. The cover says so and offers to try again.
+- The connection is really gone. The blocking **Connection lost** card takes over.
 
 > [!NOTE]
-> A phone that switches from Wi-Fi to cellular can leave a connection that looks alive
-> but answers nothing. dux checks, from the browser, every `heartbeat_seconds`
-> (15 by default), and if the answer has not come back within
-> `heartbeat_deadline_seconds` (30 by default) it reconnects rather than leaving you
-> typing into a dead terminal. All of these live under `[server]` in your config
-> file; see [Server mode](/docs/server-mode#the-server-config-keys).
+> A phone that switches from Wi-Fi to cellular can leave a connection that looks alive but answers nothing. dux checks, from the browser, every `heartbeat_seconds`, and if the answer has not come back within `heartbeat_deadline_seconds` it reconnects rather than leaving you typing into a dead terminal.
 
 ### Theater mode: one pane, no chrome
 
-The **Theater** button hands the whole screen to the terminal. On a computer it is in the
-terminal's header, beside **Macros…** and the pane's own `⋯`; on a phone it is the first
-button in the flap that hangs off the band above the terminal. That band is the tab strip when the agent has
-more than one tab and the header itself when it does not, and the flap takes the colour of
-whichever one it is hanging from, so it always reads as part of it. The header, the
-pull-request band and the tab strip slide away and the terminal grows into the space they
-were using; on a phone the app header goes with them, and the flap lifts off the band and
-flies to the floating pill, which is the same buttons in the same order.
-The compose box and the terminal keys stay exactly as you had them, and the pill's `⋯`
-keeps offering the way back to them, so theater is as bare or as equipped as
-you want it. Theater is the only thing that takes the top bar away, and it all comes
-back when you leave. On a computer both
-side panels leave too, the agent list and the changes list, and they come back as you had
-them: open, collapsed to the rail, hidden, and at the widths you dragged them to. Open a
-link that goes straight into theater and there was no layout on screen to remember, so
-leaving lands on your saved preferences instead.
+The **Theater** button hands the whole screen to the terminal. The header, the pull-request band and the tab strip slide away and the terminal grows into the space they were using.
 
-A small floating pill in the bottom-right corner is the only thing left over the
-terminal. On a computer it holds the way out, the macro picker, the changed-file count
-where there is one, and the pane's own `⋯`, so nothing you could reach before you went
-full screen has gone anywhere. The count leaves theater there and brings the changes list
-back, showing it even if you had hidden it.
-On a phone it is the flap that flew there: the theater button (now showing the way out),
-the macro picker, the changed-file count where there is one, and the same `⋯`, opening the
-same menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,
-and the way back to the typing bar when you have turned it off), then the pane's own
-actions, the way out of theater while the mode is on, and **Settings**, which drills into
-the app menu the cog carries, so nothing goes out of reach because you went full screen.
-That last one is there because theater took the cog off screen with the rest of the
-chrome: the pane's `⋯` in the terminal header, where the cog is still a couple of buttons
-away, does not repeat it.
-The changed-file count is the button beside it rather than a row in it.
+**Where the button is.**
+
+- **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`.
+- **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the tab strip when the agent has more than one tab and the header itself when it does not, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
+
+**What happens when you go in.**
+
+- On a phone the app header goes with the rest, and the flap lifts off the band and flies to the floating pill, which is the same buttons in the same order.
+- On a computer both side panels leave too, the agent list and the changes list. They come back as you had them: open, collapsed to the rail, hidden, and at the widths you dragged them to.
+- Open a link that goes straight into theater and there was no layout on screen to remember, so leaving lands on your saved preferences instead.
+- Theater is the only thing that takes the top bar away, and it all comes back when you leave.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
-Notice what did **not** leave: the terminal keys and the message box. Theater takes the
-chrome above the terminal, not the way you answer it. If you have asked to type straight
-into the terminal, the message box goes and the keys stay, with their `⋯` on them; hide the
-keys as well and there is nothing below the terminal at all, and the pill's `⋯` is the way
-back.
+**What stays.** Notice what did **not** leave: the terminal keys and the message box. Theater takes the chrome above the terminal, not the way you answer it. The compose box and the terminal keys stay exactly as you had them, and the pill's `⋯` keeps offering the way back to them, so theater is as bare or as equipped as you want it.
 
-One thing does bring the top bar back on either surface without asking you to leave the
-mode: a card over the whole terminal, because another device took the driving seat, because
-nobody is driving it yet (it is running in the background and this device has not claimed
-it), or because the connection is being put back together. The pill goes with the terminal
-underneath it, so the header returns with **Back** and the agent's name and you are never
-stuck staring at a card you cannot walk away from. On a computer the top bar comes back the
-same way, with the **Theater** button in it, since a tablet gets that layout on width alone
-and has no Escape key to leave with; the side panels stay away. The moment the card goes,
-theater picks up where it left off. A brief spinner during a quick reconnect is not a card
-and changes nothing.
+- If you have asked to type straight into the terminal, the message box goes and the keys stay, with their `⋯` on them.
+- Hide the keys as well and there is nothing below the terminal at all, and the pill's `⋯` is the way back.
 
-The pill carries no tab status. What the other tabs are doing is in the agents list and
-the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab
-you cannot see that needs you will be waiting when you come back out: that is the trade
-this mode makes for a screen with nothing on it but the terminal.
+#### The pill
 
-The pill does not have to stay in that corner. Its leading edge is a grip: drag the grip,
-with a finger or with the mouse, and the pill goes anywhere over the terminal, never
-further than its edges. There is nothing to hold first; it moves as soon as you do. A
-quick tap does nothing, so the buttons beside the grip
-keep working as buttons. If you would rather not drag, focus the grip and the arrow keys
-move it a step at a time. Where you leave it is remembered on that device, for every
-agent and every terminal, and it is nudged back inside if you rotate the phone or shrink
-the window, and back to where you put it once there is room for it again.
+A small floating pill in the bottom-right corner is the only thing left over the terminal.
 
-The button you came in by is not a way back, because the header it lives in is one of the
-things that left. On a computer there are three ways out: the pill, `Escape` whenever you
-are not typing into the message box or the terminal itself, and your browser's Back
-button. There is a fourth in the pill's own `⋯` menu, as **Leave theater mode**, and that
-one is on every surface: the pill is the menu the phone has too.
+- **On a computer** it holds the way out, the macro picker, the changed-file count where there is one, and the pane's own `⋯`, so nothing you could reach before you went full screen has gone anywhere. The count leaves theater there and brings the changes list back, showing it even if you had hidden it.
+- **On a phone** it is the flap that flew there: the theater button (now showing the way out), the macro picker, the changed-file count where there is one, and the same `⋯`, opening the same menu it opened on the band. The changed-file count is the button beside the menu rather than a row in it.
 
-Back works because theater is part of the address: a link copied in theater opens in
-theater on whatever device you send it to. Opening the file editor or the changes screen
-steps out of the mode, since neither of those is the terminal; closing them puts you back
-in it.
+The pill's `⋯` menu holds, in order:
+
+- the **Input** group (**Attach a file…**, and the way back to the typing bar when you have turned it off; see [On your phone](#on-your-phone) for what the group holds)
+- the pane's own actions
+- the way out of theater, while the mode is on
+- **Settings**, which drills into the app menu the cog carries
+
+**Settings** is there because theater took the cog off screen with the rest of the chrome. The pane's `⋯` in the terminal header, where the cog is still a couple of buttons away, does not repeat it.
+
+**The pill carries no tab status.** What the other tabs are doing is in the agents list and the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab you cannot see that needs you will be waiting when you come back out: that is the trade this mode makes for a screen with nothing on it but the terminal.
+
+**Moving the pill.** It does not have to stay in that corner. Its leading edge is a grip.
+
+- Drag the grip, with a finger or with the mouse, and the pill goes anywhere over the terminal, never further than its edges. There is nothing to hold first; it moves as soon as you do.
+- A quick tap does nothing, so the buttons beside the grip keep working as buttons.
+- If you would rather not drag, focus the grip and the arrow keys move it a step at a time.
+- Where you leave it is remembered on that device, for every agent and every terminal.
+- It is nudged back inside if you rotate the phone or shrink the window, and back to where you put it once there is room for it again.
+
+#### Getting out
+
+The button you came in by is not a way back, because the header it lives in is one of the things that left.
+
+- **The pill.**
+- **Leave theater mode** in the pill's own `⋯` menu, on every surface: the pill is the menu the phone has too.
+- **`Escape`** on a computer, whenever you are not typing into the message box or the terminal itself.
+- **Your browser's Back button**, on a computer. Back works because theater is part of the address: a link copied in theater opens in theater on whatever device you send it to.
+
+Opening the file editor or the changes screen steps out of the mode, since neither of those is the terminal; closing them puts you back in it.
+
+#### When a card covers the terminal
+
+One thing does bring the top bar back on either surface without asking you to leave the mode: a card over the whole terminal. That happens when:
+
+- another device took the driving seat,
+- nobody is driving it yet (it is running in the background and this device has not claimed it), or
+- the connection is being put back together.
+
+The pill goes with the terminal underneath it, so the header returns with **Back** and the agent's name and you are never stuck staring at a card you cannot walk away from.
+
+On a computer the top bar comes back the same way, with the **Theater** button in it, since a tablet gets that layout on width alone and has no Escape key to leave with; the side panels stay away. The moment the card goes, theater picks up where it left off. A brief spinner during a quick reconnect is not a card and changes nothing.
 
 > [!TIP]
-> Theater is remembered per tab, in that browser, so the agent you like watching
-> full-screen comes back full-screen and the others do not. If another device takes over
-> the terminal, theater ends and the memory goes with it, so you always come back to the
-> full layout to decide what to do next.
+> Theater is remembered per tab, in that browser, so the agent you like watching full-screen comes back full-screen and the others do not. If another device takes over the terminal, theater ends and the memory goes with it, so you always come back to the full layout to decide what to do next.
 
 ### One writer, many watchers
 
@@ -348,119 +314,82 @@ look at it picks it up.
 
 ![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 
-**The terminal UI is one of those devices.** When dux is
-[serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
-that terminal can hold a terminal or be a watcher like any browser, and the card names it
-as `the dux TUI`. It shows the same card, with the same words, when your browser is the
-one driving.
+**The terminal UI is one of those devices.** When dux is [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui), that terminal can hold a terminal or be a watcher like any browser, and the card names it as `the dux TUI`. It shows the same card, with the same words, when your browser is the one driving.
 
-**A watcher sees the take-over card**, a full-pane card naming who has the keyboard
-("Active on Chrome on macOS") with a **Take over** button. Hit it and dux resizes the PTY
-to your screen, repaints it fresh, and hands you the keyboard. Nothing is lost; the other
-device becomes the watcher.
+**A watcher sees the take-over card**, a full-pane card naming who has the keyboard ("Active on Chrome on macOS") with a **Take over** button. Hit it and dux resizes the PTY to your screen, repaints it fresh, and hands you the keyboard. Nothing is lost; the other device becomes the watcher.
 
-Taking over reattaches, so it takes a moment and you will see "Reconnecting…" until the
-screen is really there. Behind the card, a watcher's terminal renders at the driver's true
-size with the text shrunk to fit, so the screen you take over is clean from the first
-frame.
+Taking over reattaches, so it takes a moment and you will see "Reconnecting…" until the screen is really there. Behind the card, a watcher's terminal renders at the driver's true size with the text shrunk to fit, so the screen you take over is clean from the first frame.
 
 > [!IMPORTANT]
-> **A take-over interrupted by a network drop is not retried; press Take over again.** The
-> reconnect that follows a dropped signal is a plain attach, on purpose, so a request you
-> made minutes ago on a train cannot surface later and yank the terminal out from under
-> whoever is using it now. The button always responds: if the attempt did not land,
-> pressing it again starts a fresh one.
+> **A take-over interrupted by a network drop is not retried; press Take over again.** The reconnect that follows a dropped signal is a plain attach, on purpose, so a request you made minutes ago on a train cannot surface later and yank the terminal out from under whoever is using it now.
+>
+> The button always responds: if the attempt did not land, pressing it again starts a fresh one.
 
 > [!IMPORTANT]
-> **Losing the keyboard is sticky.** Nothing passive gives a terminal back, so a watcher
-> left on screen never grabs a terminal somebody's flaky wifi dropped. Press **Take
-> over**, reload, or navigate away and back, and it is yours. One tap is the whole cost of
-> switching devices.
+> **Losing the keyboard is sticky.** Nothing passive gives a terminal back, so a watcher left on screen never grabs a terminal somebody's flaky wifi dropped. Press **Take over**, reload, or navigate away and back, and it is yours. One tap is the whole cost of switching devices.
 
-If the driving device disconnects, every card switches to **Running in the background**
-rather than naming a browser that has gone: the session kept running without its driver. The card also keeps naming the device that had the
-keyboard even while your own connection is wobbling, so a flaky signal no longer turns
-"Active on Chrome on Linux" into a vague "Active on another device".
+**When the driver goes away.** If the driving device disconnects, every card switches to **Running in the background** rather than naming a browser that has gone: the session kept running without its driver.
 
-**Reconnecting never takes the terminal from anybody.** Every automatic reconnect joins as
-a watcher unless nobody is driving; taking a terminal away from a device that holds it is
-always something you press the button for. The one exception takes nothing from anyone:
-the device that lost the keyboard to a blip gets it back when it returns, provided the
-server is still holding its old, dead session and nobody else has claimed the terminal in
-the meantime. If somebody has, you come back as a watcher with the card up, and one tap
-puts you back in the driver's seat. The same goes if your page cannot confirm it is
-talking to the very same dux it started against, because dux was restarted while you were
-away or the check could not get through: coming back automatically is only safe when the
-old session is provably still the one you left, so you land as a watcher and press the
-button. A page in the background stays a watcher until it is
-in front again. If your own connection has given up entirely, the card steps aside for the
-**Connection lost** notice and its **Reconnect** button.
+The card also keeps naming the device that had the keyboard even while your own connection is wobbling, so a flaky signal does not turn it into a vague "Active on another device".
+
+#### Reconnecting never takes the terminal from anybody
+
+Every automatic reconnect joins as a watcher unless nobody is driving. Taking a terminal away from a device that holds it is always something you press the button for.
+
+- **The one exception** takes nothing from anyone. The device that lost the keyboard to a blip gets it back when it returns, provided the server is still holding its old, dead session and nobody else has claimed the terminal in the meantime.
+- **If somebody has claimed it,** you come back as a watcher with the card up, and one tap puts you back in the driver's seat.
+- **If your page cannot confirm it is talking to the very same dux** it started against, because dux was restarted while you were away or the check could not get through, you land as a watcher and press the button. Coming back automatically is only safe when the old session is provably still the one you left.
+- **A page in the background** stays a watcher until it is in front again.
+- **If your own connection has given up entirely,** the card steps aside for the **Connection lost** notice and its **Reconnect** button.
 
 ### Clipboard: the classic terminal model
 
 The web terminal copies and pastes the way a real terminal does, no menu required:
 
-- **Select to copy.** Highlight text and it lands on your clipboard immediately, with a
-  "Copied to clipboard" toast. Governed by the `ui.copy_on_select` preference (on by
-  default), which you can flip in **Preferences** (the cog menu).
-- **Right-click to paste** (mouse or pen). On plain HTTP, where the browser blocks
-  clipboard reads, dux nudges you toward `Ctrl+v` instead. On a touch screen the same
-  press-and-hold gesture belongs to selection, which is the next section.
-- A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+c`,
-  `Ctrl+Insert`, or `Cmd+c` to copy, and `Ctrl+v`, `Ctrl+Shift+v`, or `Cmd+v` to paste,
-  with `Ctrl+c` staying SIGINT.
-- **Paste an image with the keyboard and dux uploads it**, saving it on the server and
-  pasting its **path** into the prompt. Text paste is untouched, and `Ctrl+Shift+v`
-  (`Cmd+Shift+v`) forces the text when the clipboard carries both. Keyboard chords only:
-  right-click paste can never carry an image. See
-  [Dropping and pasting files onto an agent](/docs/dropping-files).
+- **Select to copy.** Highlight text and it lands on your clipboard immediately, with a "Copied to clipboard" toast. Governed by the `ui.copy_on_select` preference (on by default), which you can flip in **Preferences** (the cog menu).
+- **Right-click to paste** (mouse or pen). On plain HTTP, where the browser blocks clipboard reads, dux nudges you toward `Ctrl+v` instead. On a touch screen the same press-and-hold gesture belongs to selection, which is the next section.
+- A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+c`, `Ctrl+Insert`, or `Cmd+c` to copy, and `Ctrl+v`, `Ctrl+Shift+v`, or `Cmd+v` to paste, with `Ctrl+c` staying SIGINT.
+- **Paste an image with the keyboard and dux uploads it**, saving it on the server and pasting its **path** into the prompt. Text paste is untouched, and `Ctrl+Shift+v` (`Cmd+Shift+v`) forces the text when the clipboard carries both. Keyboard chords only: right-click paste can never carry an image. See [Dropping and pasting files onto an agent](/docs/dropping-files).
 
-There is deliberately no right-click context menu, because it would fight the paste
-gesture.
+There is deliberately no right-click context menu, because it would fight the paste gesture.
 
 > [!TIP]
-> When the app inside the terminal grabs the mouse, a plain drag goes to that app instead
-> of selecting text. Hold **Shift** (Linux and Windows) or **Option** (macOS) while
-> dragging to force a local selection. dux pops a one-time hint the first time this bites
-> you.
+> When the app inside the terminal grabs the mouse, a plain drag goes to that app instead of selecting text. Hold **Shift** (Linux and Windows) or **Option** (macOS) while dragging to force a local selection. dux pops a one-time hint the first time this bites you.
+
+### Programs that write your clipboard
+
+Your agent can also write your clipboard directly through an `OSC 52` escape sequence. That write lands on **your** browser's clipboard, not the server's, and is governed by the `clipboard_passthrough` capability (`"focused"` by default; see [Terminal capabilities](/docs/terminal-capabilities)).
+
+- **Time limit.** The browser accepts the write only within a few seconds (about 5 in Chrome) of your last key press or click in the page. That limit is the browser's rule, not a dux setting.
+- **A copy that arrives later** shows a message with the start of the text and a **Copy** button. Press it and the whole text lands on your clipboard.
+- **If the browser refuses even that,** the message offers **Show text**, which opens the text already selected so you can copy it yourself.
 
 ### Selecting text with a finger
 
-On a phone or tablet, **press and hold** on the terminal. The word under your finger
-highlights, and dragging extends the selection. Drag past the top or bottom edge and the
-terminal keeps scrolling for as long as you hold there. **Lift your finger and it is
-copied**, under the same `ui.copy_on_select` preference. The highlight stays up so you can
-see what you got; the next tap clears it. A press is not a tap, so the keyboard stays down
-and does not cover what you highlighted.
+On a phone or tablet, **press and hold** on the terminal. The word under your finger highlights, and dragging extends the selection.
 
-A long press **always** selects locally, even when a full-screen agent has taken the
-mouse, so this is the touch version of the Shift and Option hatch above.
+- Drag past the top or bottom edge and the terminal keeps scrolling for as long as you hold there.
+- **Lift your finger and it is copied**, under the same `ui.copy_on_select` preference.
+- The highlight stays up so you can see what you got; the next tap clears it.
+- A press is not a tap, so the keyboard stays down and does not cover what you highlighted.
 
-Two limits: there are no drag handles, so a selection cannot be adjusted once you lift
-(press again to redo it), and if the agent is writing fast enough to push lines out of the
-scrollback mid-drag the selection can slide onto the wrong text, which pressing again also
-fixes.
+A long press **always** selects locally, even when a full-screen agent has taken the mouse, so this is the touch version of the Shift and Option hatch above.
 
-Your agent can also write your clipboard directly through an `OSC 52` escape sequence, and
-that write lands on **your** browser's clipboard, not the server's, governed by the
-`clipboard_passthrough` capability. The browser accepts it only within about 5 seconds of
-your last key press or click in the page. A copy that arrives later shows a message with
-the start of the text and a **Copy** button; press it and the whole text lands on your
-clipboard. If the browser refuses even that, the message offers **Show text**, which opens
-the text already selected so you can copy it yourself. See
-[Terminal capabilities](/docs/terminal-capabilities).
+Two limits:
+
+- There are no drag handles, so a selection cannot be adjusted once you lift (press again to redo it).
+- If the agent is writing fast enough to push lines out of the scrollback mid-drag, the selection can slide onto the wrong text, which pressing again also fixes.
 
 ### Drag a file in, or paste one
 
-Drag a screenshot (or any file) from your desktop onto the terminal, or paste an image,
-and dux saves it on the server and pastes its path into the prompt. Dropped on an agent it
-goes to that agent's upload folder (`.dux/uploads` in its worktree), invisible to git and
-deleted along with the agent; dropped on a terminal it goes to the folder that terminal is
-in right now. Nothing is ever overwritten, a terminal keeps your filename as you had it
-(an agent's upload folder saves a cleaned-up version, like `report-q3-draft.pdf`, because
-agent CLIs misread quotes in a path), and only the device holding input can drop or paste. On a phone, pasting an image puts its path
-into your compose draft. See
-[Dropping and pasting files onto an agent](/docs/dropping-files).
+Drag a screenshot (or any file) from your desktop onto the terminal, or paste an image, and dux saves it on the server and pastes its path into the prompt.
+
+- **Dropped on an agent,** it goes to that agent's upload folder (`.dux/uploads` in its worktree), invisible to git and deleted along with the agent.
+- **Dropped on a terminal,** it goes to the folder that terminal is in right now.
+- **On a phone,** pasting an image puts its path into your compose draft.
+- Only the device holding input can drop or paste.
+
+How names are kept or cleaned, and how the pasted path is written for each provider, is in [Dropping and pasting files onto an agent](/docs/dropping-files).
 
 ### Shift-Enter for a soft newline
 
@@ -473,20 +402,14 @@ mid-composition, so it will not mangle a CJK input method's confirm keystroke.
 Three kinds of plain shell live in their own collapsible **Terminals** section in the
 sidebar:
 
-- A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log
-  while the agent works. Its row names the owning agent, and the title tracks whatever is
-  in the foreground ("vim", "htop").
-- A **project terminal** opens at the project's repo root with no agent attached. It is
-  the escape hatch when dux will not do something for you remotely, even over Tailscale
-  with no local terminal in sight. Spawn one from the project's ⋯ menu ("New terminal at
-  the project root"); it shows up in the Task Manager and is destroyed on close.
-- A **standalone terminal** opens in your home directory with no agent and no project, so
-  you can reach for one before you have added a single project. Open one from the
-  **Terminals** group of the launcher's `⋯` menu, from the **+** on the Terminals divider,
-  or from the cog menu's **New** submenu. Its row shows the directory it opened in,
-  shortened with `~` and marked with the `✷` standalone star, where the other two show the
-  `↳` arrow and their owner, so the sidebar search finds it by path. The star always means
-  the same thing: this one lives in your folder, not a working copy dux manages.
+- A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. Its row names the owning agent, and the title tracks whatever is in the foreground ("vim", "htop").
+- A **project terminal** opens at the project's repo root with no agent attached. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
+  - Spawn one from the project's `⋯` menu ("New terminal at the project root").
+  - It shows up in the Task Manager and is destroyed on close.
+- A **standalone terminal** opens in your home directory with no agent and no project, so you can reach for one before you have added a single project.
+  - Open one from the **Terminals** group of the launcher's `⋯` menu, from the **+** on the Terminals divider, or from the cog menu's **New** submenu.
+  - Its row shows the directory it opened in, shortened with `~` and marked with the `✷` standalone star, so the sidebar search finds it by path.
+  - The other two show the `↳` arrow and their owner. The star always means the same thing: this one lives in your folder, not a working copy dux manages.
 
 ![A standalone agent in the sidebar wearing the star over the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
 
@@ -504,34 +427,38 @@ ends when you close it, or when dux shuts down.
 
 ## Messages
 
-Progress and results arrive as small messages at the bottom of the screen, and **they
-clear themselves.** How long a finished one stays depends on how much it matters: a
-success or a note uses your `ui.status_clear_seconds` window (six seconds by default), a
-warning stays three times that, and an error four times. Setting `ui.status_clear_seconds = 0`
-turns auto-clearing off. Dismiss one early by swiping it away or with its close button.
+Progress and results arrive as small messages at the bottom of the screen, and **they clear themselves.** Dismiss one early by swiping it away or with its close button.
 
-A message that clears itself shows how long it has left as a thin bar along its bottom
-edge, in the message's own color, draining toward the left. Point at the stack and every
-countdown stops: the stack opens up, the bars dim, each one says **Paused while you read**,
-and they pick up where they left off once the pointer leaves. On a phone, tapping the stack
-does the same, and it stays paused until you tap somewhere else. Holding a finger or the
-mouse button down on a message also stops the clock for as long as you hold it. The
-countdown waits while the tab is in the background, too. If your system asks for reduced motion, the bar steps
-down once a second instead of gliding.
+How long a finished one stays depends on how much it matters:
 
-A message about work still in flight is a spinner: no close button and no swipe, replaced
-in place by its own result the moment there is one. If the connection drops mid-operation
-and no result arrives, the spinner gives up after a minute.
+- **A success or a note** uses your `ui.status_clear_seconds` window (six seconds by default).
+- **A warning** stays three times that.
+- **An error** stays four times that.
+- Setting `ui.status_clear_seconds = 0` turns auto-clearing off.
 
-A small number stay until you dismiss them, and only for two reasons: **you have to go and
-do something outside the message**, or something may have been lost or left half-finished.
-A file that was saved but never handed to the agent waits, because the message holds the
-only copy of where it went. A worktree that could not be removed waits, because it is
-still on disk. A failed pull does not wait.
+### Pausing to read
 
-If several arrive at once they stack, five deep on a desktop and three on a phone, and the
-rest queue behind them. They stack in the workspace tab: the standalone editor tab shows
-only what you do in it.
+A message that clears itself shows how long it has left as a thin bar along its bottom edge, in the message's own color, draining toward the left.
+
+- **Point at the stack** and every countdown stops: the stack opens up, the bars dim, each one says **Paused while you read**, and they pick up where they left off once the pointer leaves.
+- **On a phone,** tapping the stack does the same, and it stays paused until you tap somewhere else.
+- **Holding a finger or the mouse button down** on a message also stops the clock for as long as you hold it.
+- **The countdown waits** while the tab is in the background, too.
+- **Reduced motion:** if your system asks for it, the bar steps down once a second instead of gliding.
+
+### Spinners and messages that stay
+
+A message about work still in flight is a spinner: no close button and no swipe, replaced in place by its own result the moment there is one. If the connection drops mid-operation and no result arrives, the spinner gives up after a minute.
+
+A small number of messages stay until you dismiss them, and only for two reasons: **you have to go and do something outside the message**, or something may have been lost or left half-finished.
+
+- A file that was saved but never handed to the agent waits, because the message holds the only copy of where it went.
+- A worktree that could not be removed waits, because it is still on disk.
+- A failed pull does not wait.
+
+### Stacking
+
+If several arrive at once they stack, five deep on a desktop and three on a phone, and the rest queue behind them. They stack in the workspace tab: the standalone editor tab shows only what you do in it.
 
 > [!NOTE]
 > After a reconnect you still see work that is **still running**, plus any result from the
@@ -547,133 +474,103 @@ do not submit line by line. Full details in [Managing Macros](/docs/macros).
 
 ## On your phone
 
-Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb:
+Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb.
+
+### The screens
 
 ![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
-- The **home** screen is the hub: your projects and sessions with the same `⋯` menus as
-  desktop, the same launcher pair along the bottom, and a **cog** button that opens the
-  app menu as a bottom sheet (submenus drill down in place, with a back arrow). The
-  launcher's `⋯` opens as a bottom sheet too. Tap a session to jump into its terminal.
-- The **terminal** screen is a full-screen terminal with a slim bar on top (Back, the
-  agent's name over its assistant, branch and project, and an optional PR chip) and the
-  tab strip when the agent has more than one tab. The actions hang off the strip on the
-  right, in a small tab-shaped flap over the terminal: theater mode, the macro picker,
-  the changed-file count, and the session's `⋯` menu, which carries the **Input** group,
-  the agent's actions and a **Settings** drill into the app
-  menu. The flap takes no room from the terminal, so theater does not take it away: it
-  lifts off the band and flies to the floating pill instead.
-- One of that agent's own **terminals** keeps the agent's screen and the agent's menu,
-  because the header and the count around it are that agent's, and adds a **Terminal**
-  group for the terminal in front of you: **Open editor in new tab** and **Close…**.
-- A **project or standalone terminal** gets the same screen and the same flap, minus the
-  two things a terminal does not have: there is no changed-file count and no PR chip. Its
-  `⋯` opens the terminal's own menu, with the **Input** group,
-  **Open editor in new tab** and **Close…**, then the same **Settings** drill.
-- The **changes** screen is the full Changes pane. Tapping a file opens its diff in the
-  standalone editor in the same browser tab, and Back comes back to the Changes screen.
+- **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same launcher pair along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's `⋯` opens as a bottom sheet too. Tap a session to jump into its terminal.
+- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip) and the tab strip when the agent has more than one tab.
+- **An agent's own terminal** keeps the agent's screen and the agent's menu, because the header and the count around it are that agent's, and adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**.
+- **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, **Open editor in new tab** and **Close…**, then the same **Settings** drill.
+- **The changes screen** is the full Changes pane. Tapping a file opens its diff in the standalone editor in the same browser tab, and Back comes back to the Changes screen.
 
-The flap is the small tab shape hanging off the right of the band, and it is the whole
-reason the header can stay as quiet as it is:
+### The action flap
+
+The actions hang off the band on the right, in a small tab-shaped flap over the terminal. It is the whole reason the header can stay as quiet as it is.
 
 ![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count and the pane's menu.](/screens/phone-terminal-flap.png)
 
-An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:
-Esc, Tab, a sticky Ctrl and Alt latch, arrow keys, PgUp/PgDn, and a dedicated **⇧↵** key
-for the soft newline. Touch targets are sized generously. The soft keyboard is handled by
-the browser shrinking the layout, so the bar sits flush on top of it, and there is no
-fullscreen mode to fight with.
+It holds:
+
+- theater mode
+- the macro picker
+- the changed-file count (agents only)
+- the session's `⋯` menu, which carries the **Input** group, the agent's actions and a **Settings** drill into the app menu
+
+The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
+
+### Typing on a phone
+
+An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks: Esc, Tab, a sticky Ctrl and Alt latch, arrow keys, PgUp/PgDn, and a dedicated **⇧↵** key for the soft newline. Touch targets are sized generously. The soft keyboard is handled by the browser shrinking the layout, so the bar sits flush on top of it, and there is no fullscreen mode to fight with.
 
 ![The phone typing bar: two rows of terminal keys above a message box with a send button.](/screens/phone-compose-bar.png)
 
-Below it sits the **compose bar**: a real text box where you type the message and hit
-**Send**. This is where your keyboard's autocorrect, swipe typing, and voice input actually
-work. Enter adds a newline instead of submitting; Send delivers the whole message and
-presses Enter for you, and an empty Send is a plain Enter for confirming menus and prompts.
-Tapping the terminal drops you into the compose box, and a refused send keeps your draft
-and tells you why. The box holds the keyboard focus the whole time, so the terminal's caret
-stays a solid block rather than hollowing out.
+Below it sits the **compose bar**: a real text box where you type the message and hit **Send**. This is where your keyboard's autocorrect, swipe typing, and voice input actually work.
 
-A physical keyboard types into the compose box. The keys a text box has no use for, **Esc**
-and **F1** through **F12**, go straight to the terminal, so Esc on a tablet's keyboard case
-interrupts a running agent exactly like the accessory bar's Esc key. A few F-keys are
-grabbed by the browser itself before any page can see them, F12's developer tools being the
-classic, so those may trigger both. Modified presses stay with your browser (Ctrl+C keeps
-meaning copy, not SIGINT); for every keystroke on the wire, the Direct typing surface is one
-tap away.
+- **Enter** adds a newline instead of submitting.
+- **Send** delivers the whole message and presses Enter for you.
+- **An empty Send** is a plain Enter, for confirming menus and prompts.
+- **Tapping the terminal** drops you into the compose box.
+- **A refused send** keeps your draft and tells you why.
+- The box holds the keyboard focus the whole time, so the terminal's caret stays a solid block rather than hollowing out.
 
-Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences row with
-three values:
+**A physical keyboard** types into the compose box. The keys a text box has no use for, **Esc** and **F1** through **F12**, go straight to the terminal, so Esc on a tablet's keyboard case interrupts a running agent exactly like the accessory bar's Esc key.
 
-- **Automatic** (the default) asks your browser whether you point at the screen with a
-  finger, and uses the answer as the starting point. Your own choice from the typing-surface
-  switch wins from then on.
-- **Always** and **Never** are for the device dux guesses wrong on. Never restores typing
-  straight into the terminal. On a touch device it keeps the terminal keys, since a finger
-  still cannot produce Esc or a Ctrl chord and there is no switch under **Never** to bring
-  them back with; it is only the message box that goes.
+- A few F-keys are grabbed by the browser itself before any page can see them, F12's developer tools being the classic, so those may trigger both.
+- Modified presses stay with your browser (Ctrl+C keeps meaning copy, not SIGINT).
+- For every keystroke on the wire, the Direct typing surface is one tap away.
+
+### When the compose bar appears
+
+Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences row with three values:
+
+- **Automatic** (the default) asks your browser whether you point at the screen with a finger, and uses the answer as the starting point. Your own choice from the typing-surface switch wins from then on.
+- **Always** and **Never** are for the device dux guesses wrong on.
+- **Never** restores typing straight into the terminal. On a touch device it keeps the terminal keys, since a finger still cannot produce Esc or a Ctrl chord and there is no switch under **Never** to bring them back with. Only the message box goes.
 
 > [!IMPORTANT]
-> **Width decides the layout; your pointer decides which typing surface you start with.** A
-> tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A
-> mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing
-> surface out from under you.
+> **Width decides the layout; your pointer decides which typing surface you start with.**
+>
+> A tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing surface out from under you.
 
-What the browser cannot see is a keyboard case, so there is a **typing-surface switch**:
-**Type directly in the terminal**, and **Use virtual input** to come back. Both live in the
-input `⋯`, at the left edge of whichever input row you have, for as long as you have one.
-Once nothing is left under the terminal, **Use virtual input** moves up into the **Input**
-group at the top of the pane's own `⋯` menu (the flap's on a phone, the pane header's on a
-computer, the floating pill's in theater), which is on screen whatever the pane is doing.
+### The typing-surface switch
 
-**Your choice wins, on any device, in both directions.** The pointer only decides where you
-start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
-your keystrokes go into the box rather than straight to the terminal. Switching to Direct
-takes the **message box** away and leaves the terminal keys where they are, so a phone keeps
-Esc, Tab and the Ctrl latch while every keystroke goes straight to the terminal: tap the
-virtual **Ctrl**, then press the letter on your keyboard. Hide the terminal keys too and
-there is nothing under the terminal at all, which is when dux tells you once, on that
-device, where the way back went. Your choice sticks across reloads and survives folding a
-convertible or unplugging a mouse, until you change it. It is not a setting: it is
-remembered on that device and changes nothing in your config, and it appears only under
-**Automatic**, since **Always** and **Never** have already decided. Switching the
-preference to **Always** or **Never** does not erase it either: the choice stays remembered
-in that browser, and comes back the moment you put the preference on **Automatic** again.
+What the browser cannot see is a keyboard case, so there is a **typing-surface switch**: **Type directly in the terminal**, and **Use virtual input** to come back. Both live in the input `⋯`, at the left edge of whichever input row you have, for as long as you have one. Once nothing is left under the terminal, **Use virtual input** moves up into the **Input** group (see below).
 
-While the message box is up it really is the typing surface. Clicking into the terminal
-puts your cursor back in the box, right-clicking pastes the clipboard into your draft
-instead of sending it, and the terminal is skipped when you tab backwards out of the pane.
-Switch to Direct and all of that goes back to the way a plain terminal behaves.
+**Your choice wins, on any device, in both directions.** The pointer only decides where you start.
 
-The message box and the terminal keys are two separate switches, so all four combinations
-are yours to pick: both, the box alone, the keys alone, or neither.
+- Ask for the message box on a laptop and you get it, keys and all, and while it is up your keystrokes go into the box rather than straight to the terminal.
+- Switching to Direct takes the **message box** away and leaves the terminal keys where they are. A phone keeps Esc, Tab and the Ctrl latch while every keystroke goes straight to the terminal: tap the virtual **Ctrl**, then press the letter on your keyboard.
+- Hide the terminal keys too and there is nothing under the terminal at all, which is when dux tells you once, on that device, where the way back went.
+- Your choice sticks across reloads and survives folding a convertible or unplugging a mouse, until you change it.
+- It is not a setting: it is remembered on that device and changes nothing in your config.
+- It appears only under **Automatic**, since **Always** and **Never** have already decided. Switching the preference to **Always** or **Never** does not erase it either: the choice stays remembered in that browser, and comes back the moment you put the preference on **Automatic** again.
 
-Terminal rows are precious on a phone, so the terminal keys are hideable. **Hide terminal
-keys** sits in the input `⋯` for as long as any row is under the terminal, and in the
-**Input** group of the pane's own `⋯` (the flap's, on every phone pane screen) once none
-is, backed by a preference that is also a row in Preferences.
+While the message box is up it really is the typing surface. Clicking into the terminal puts your cursor back in the box, right-clicking pastes the clipboard into your draft instead of sending it, and the terminal is skipped when you tab backwards out of the pane. Switch to Direct and all of that goes back to the way a plain terminal behaves.
 
-For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes
-the header and the tab strip together, and it hands you the way back at the same time: the
-floating pill, and **Leave theater mode** in the menu it opens. A preference that hid the same
-chrome would be a second way to reach the same place, with no way back of its own.
+### Terminal keys
 
-The input `⋯` sits at the left edge of whatever input row you have: beside the message box,
-or in the key row when the box is off. It belongs to those rows and it goes when the last of
-them does, so what is inside it is only what they are about: the typing-surface switch, both
-ways, and **Hide terminal keys**.
+The message box and the terminal keys are two separate switches, so all four combinations are yours to pick: both, the box alone, the keys alone, or neither.
 
-Everything you must be able to reach when there is no input row at all is one level up, in
-the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the pane
-header's on a computer, the floating pill's in theater.
-That group carries **Attach a file…** (see
-[Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**, which appears
-only once nothing is left under the terminal, since until then the input `⋯` is offering it
-already. **Show terminal keys** joins the group the same way.
+Terminal rows are precious on a phone, so the terminal keys are hideable. **Hide terminal keys** sits in the input `⋯` for as long as any row is under the terminal, and in the **Input** group of the pane's own `⋯` (the flap's, on every phone pane screen) once none is. It is backed by a preference that is also a row in Preferences.
 
-The terminal-keys preference lives on the server, so it follows you to every device, and
-the keys travel with your pointer, so hiding them from your phone also hides them on the
-tablet you pick up next.
+The terminal-keys preference lives on the server, so it follows you to every device, and the keys travel with your pointer: hiding them from your phone also hides them on the tablet you pick up next.
+
+For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes the header and the tab strip together, and it hands you the way back at the same time: the floating pill, and **Leave theater mode** in the menu it opens. A preference that hid the same chrome would be a second way to reach the same place, with no way back of its own.
+
+### The input menus
+
+There are two places these controls live, and each control is in exactly one of them at a time.
+
+**The input `⋯`** sits at the left edge of whatever input row you have: beside the message box, or in the key row when the box is off. It belongs to those rows and it goes when the last of them does. Inside it is only what they are about: the typing-surface switch, both ways, and **Hide terminal keys**.
+
+**The Input group** is one level up, at the top of the pane's own `⋯` menu: the flap's on a phone, the pane header's on a computer, the floating pill's in theater. It is on screen whatever the pane is doing, so it carries everything you must be able to reach when there is no input row at all:
+
+- **Attach a file…** (see [Dropping and pasting files](/docs/dropping-files)).
+- **Use virtual input**, which appears only once nothing is left under the terminal, since until then the input `⋯` is offering it already.
+- **Show terminal keys**, which joins the group the same way.
 
 ## Install it like an app
 

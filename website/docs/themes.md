@@ -20,12 +20,16 @@ authored, and labels where each one came from.
 
 ![The terminal UI theme picker open over the workspace, listing dux_dark as the current theme with the bundled themes below it.](/screens/tui-theme-picker.png)
 
-To set it by hand instead, edit the `[ui]` section of `config.toml` and restart:
+To set it by hand instead, edit the `[ui]` section of `config.toml` and reload the config
+(or restart):
 
 ```toml
 [ui]
 theme = "dux_dark"   # the default
 ```
+
+With a dux running, `dux config set ui.theme "nord"` does the edit and the reload in one
+step. `dux themes ls` lists every theme dux can load and which one is in use.
 
 Built-in names use underscores:
 
@@ -138,15 +142,14 @@ You have two ways to define colors:
   complete, standard Opaline theme works in dux as-is, even if it was never written
   with dux in mind.
 
-Names inside dialogs (branches, paths, agent and project names) are drawn as small
-chips in your dialog's own colors, swapped: the dialog background (`dux.overlay_bg`)
-on the dialog text color (`dux.text_fg`). A chip is therefore exactly as readable as
-the sentence around it, and there is nothing extra to set.
+Names inside dialogs (branches, paths, agent and project names) are drawn as small chips:
+the dialog background (`dux.overlay_bg`) on the dialog text color (`dux.text_fg`). There is
+nothing extra to set.
 
-The cards that show up inside a pane, like the note in the changes pane when a
-folder has no repository or a tab that isn't running, are not dialogs, so they sit on
-the pane's own background (`dux.app_bg`) with just their border to frame them. Want
-them to stand out? Set `dux.pane_card_bg` and they get a fill of their own.
+> [!TIP]
+> The cards inside a pane, like the note in the changes pane when a folder has no
+> repository, sit on the pane's own background (`dux.app_bg`) with just a border. Want them
+> to stand out? Set `dux.pane_card_bg` and they get a fill of their own.
 
 Save the file and open the theme picker: your theme is listed alongside the built-ins,
 labeled as user-authored, with the same live preview. Tweak, save, re-pick, repeat.
