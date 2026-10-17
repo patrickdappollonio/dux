@@ -236,6 +236,10 @@ function ProjectRow({
   const triggerRef = useRef<HTMLButtonElement>(null)
   // Whether the menu's last close came from pressing one of its items.
   const closedByItem = useRef(false)
+  // Whether this row's menu was open when the name button was last pressed. The
+  // press is an outside press to the menu, which closes it before the click
+  // runs, so the click cannot tell "open, close it" from "closed, open it".
+  const openAtPress = useRef(false)
   const opensMenu = onPick === undefined
   const describedBy = [row.label ? labelId : null, row.detail ? detailId : null]
     .filter((id): id is string => id !== null)
@@ -262,7 +266,20 @@ function ProjectRow({
         aria-expanded={opensMenu ? menuOpen : undefined}
         // A second press while the menu is open closes it rather than closing
         // and reopening it.
-        onClick={() => (onPick ? onPick(row.id) : setMenuOpen(!menuOpen))}
+        // Captured so it reads the state before the menu's outside-press
+        // handler closes it.
+        onPointerDownCapture={() => {
+          openAtPress.current = menuOpen
+        }}
+        onKeyDown={() => {
+          openAtPress.current = false
+        }}
+        onClick={() => {
+          if (onPick) return onPick(row.id)
+          const wasOpen = openAtPress.current || menuOpen
+          openAtPress.current = false
+          setMenuOpen(!wasOpen)
+        }}
         // The shared Button's focus ring, so a keyboard user can see which
         // project Enter would pick. The row's own px-2 and the list's p-2 leave
         // the ring room on every side.
@@ -335,9 +352,10 @@ function ProjectRow({
           // usual hand-back to its trigger can land AFTER that dialog took
           // focus, leaving Escape closing the list behind the dialog instead
           // of the dialog. So an item press hands focus back only if nothing
-          // took it; Escape and an outside press keep the usual behaviour.
+          // took it. Escape returns focus to the trigger; an outside press that
+          // landed on something focusable leaves focus there.
           finalFocus={() => {
-            if (!closedByItem.current) return true
+            if (!closedByItem.current) return focusBelongsToMenuOrNothing()
             refocusTriggerIfUnclaimed(triggerRef.current)
             return false
           }}
@@ -347,6 +365,15 @@ function ProjectRow({
       </DropdownMenu>
     </div>
   )
+}
+
+// True when focus is still on the menu or on nothing (Escape, or a click on bare
+// page), so it goes back to the trigger; false when a click moved it to another
+// control, which keeps it.
+function focusBelongsToMenuOrNothing(): boolean {
+  const active = document.activeElement
+  if (!active || active === document.body) return true
+  return active.closest('[data-slot="dropdown-menu-content"]') !== null
 }
 
 // After an item press, hand focus back to the row's trigger only if nothing took
