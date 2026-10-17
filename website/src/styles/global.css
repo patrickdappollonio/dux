@@ -511,6 +511,18 @@
     padding: 0.5rem 0.75rem;
     text-align: left;
   }
+  /* A key or command in the first column stays on one line and the
+     description beside it takes the width that is left and wraps; a wide
+     first column scrolls inside the table (it is overflow-x: auto) rather
+     than widening the page. Prose first cells keep wrapping, and code in any
+     cell never breaks mid-token, so a value like "network" stays whole. */
+  .prose-docs :where(td:first-child:has(> code:only-child), th:first-child):not(:where(.not-prose *)) {
+    white-space: nowrap;
+  }
+  .prose-docs td > code {
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
   .prose-docs :where(th):not(:where(.not-prose *)) {
     background: var(--color-panel-2);
     color: var(--color-text);
