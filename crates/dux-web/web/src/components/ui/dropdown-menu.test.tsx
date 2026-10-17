@@ -118,6 +118,26 @@ describe("DropdownMenuContent on desktop (innerWidth 1280)", () => {
     expect(positioner.style.bottom).not.toBe("0px")
   })
 
+  it("leaves the page behind an open menu live, so a click aimed past it lands", async () => {
+    render(
+      <>
+        <button type="button">outside</button>
+        <DropdownMenu>
+          <DropdownMenuTrigger>open</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem>Alpha</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </>,
+    )
+    await openRoot()
+    // A modal menu lays an invisible full-page layer over the page, which is
+    // what swallows the click.
+    expect(
+      document.querySelector("div[role='presentation'][data-base-ui-inert]"),
+    ).toBeNull()
+  })
+
   it("renders submenus as nested popups without a Back row", async () => {
     renderMenu()
     await openRoot()

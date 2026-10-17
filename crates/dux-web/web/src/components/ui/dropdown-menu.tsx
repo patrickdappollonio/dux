@@ -22,9 +22,24 @@ import { ChevronRightIcon, ChevronLeftIcon, CheckIcon } from "lucide-react"
 
 // An open menu closes on the browser's Back, the way Escape closes it
 // (`useBackDismiss`). Its submenus are part of it and close with it.
+//
+// On a computer the menu is non-modal: a modal menu puts an invisible backdrop
+// over the page, so the click that closes it never reaches what it was aimed at
+// (the terminal) and focus snaps back to the trigger, where Enter reopens the
+// menu instead of reaching the agent. The phone sheet keeps the modal default,
+// since its own backdrop is what a tap outside lands on. A caller's explicit
+// `modal` wins.
 function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
   const back = useBackDismiss(props)
-  return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} {...back} />
+  const isMobile = useIsMobile()
+  return (
+    <MenuPrimitive.Root
+      data-slot="dropdown-menu"
+      modal={isMobile ? undefined : false}
+      {...props}
+      {...back}
+    />
+  )
 }
 
 function DropdownMenuPortal({ ...props }: MenuPrimitive.Portal.Props) {
