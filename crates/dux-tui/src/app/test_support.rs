@@ -297,6 +297,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         .with_live_keys(app_live_status_keys),
         missing_project_warning_gen: None,
         palette_hint_gen: None,
+        palette_opened_over: None,
         prompt: PromptState::None,
         input_target: InputTarget::None,
         session_surface: crate::model::SessionSurface::Agent,

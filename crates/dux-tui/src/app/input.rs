@@ -2726,6 +2726,7 @@ impl App {
             input: TextInput::new(),
             selected: 0,
         };
+        self.palette_opened_over = Some(self.status.showing());
         self.palette_hint_gen = Some(self.status.set(
             Instant::now(),
             Some(UI_HINT_KEY.to_string()),
@@ -27868,6 +27869,33 @@ cyan = "#00ffff"
         app.execute_command("clear-status-line".to_string())
             .expect("the command runs");
         assert_eq!(app.status.message(), "The status line is already clear.");
+    }
+
+    /// Only what was on screen when the palette opened is cleared: a message
+    /// that arrived behind the palette's own hint was never seen.
+    #[test]
+    fn clearing_from_the_palette_keeps_a_message_that_arrived_while_it_was_open() {
+        let mut app = test_app(default_bindings());
+        app.open_command_palette();
+        app.set_info("arrived while the palette was open");
+        app.prompt = PromptState::None;
+        app.execute_command("clear-status-line".to_string())
+            .expect("the command runs");
+        assert_eq!(app.status.message(), "arrived while the palette was open");
+    }
+
+    /// The palette's hint replaces a hint on the same key in place, so retiring
+    /// it is the whole clear, and the confirmation queued behind takes the line.
+    #[test]
+    fn clearing_from_the_palette_over_a_hint_keeps_the_confirmation_behind_it() {
+        let mut app = test_app(default_bindings());
+        app.set_ui_hint("A hint about the interface.");
+        app.set_info("a confirmation waiting its turn");
+        app.open_command_palette();
+        app.prompt = PromptState::None;
+        app.execute_command("clear-status-line".to_string())
+            .expect("the command runs");
+        assert_eq!(app.status.message(), "a confirmation waiting its turn");
     }
 
     /// Every entry point ends in the same prompt: the palette command, both

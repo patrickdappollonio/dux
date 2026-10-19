@@ -282,6 +282,29 @@ pub fn spinner_frame_for(since: Instant) -> &'static str {
 // Keyed multi-status controller
 // ---------------------------------------------------------------------------
 
+/// The TUI status line's countdown; see
+/// [`KeyedStatusController::showing_countdown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusCountdown {
+    /// Whole seconds left, never zero.
+    pub left: u64,
+    /// The most this message's countdown can show, so a surface can reserve a
+    /// width that does not change as the number shrinks.
+    pub longest: u64,
+}
+
+/// One message as it stood on the TUI's line; see
+/// [`KeyedStatusController::showing`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownStatus {
+    storage: String,
+    generation: Generation,
+}
+
+fn ceil_secs(duration: Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
+}
+
 /// A monotonic per-key generation token. A producer that re-emits on the same
 /// key bumps the token; a clear/success only removes the entry when the token it
 /// carries MATCHES the stored one, so a stale success can never dismiss a newer
@@ -1118,12 +1141,14 @@ impl KeyedStatusController {
         }
     }
 
-    /// Whole seconds until the message on the TUI's line clears itself, rounded
-    /// up, or `None` when it will not clear on a timer or has no time left.
+    /// The countdown for the message on the TUI's line: whole seconds until it
+    /// clears itself, rounded up, and the most it can ever show, which is its
+    /// whole retention. `None` when it will not clear on a timer or has no time
+    /// left.
     ///
     /// Read from the same deadline [`Self::advance`] retires the entry on, so a
     /// countdown can never disagree with the moment the message actually goes.
-    pub fn showing_seconds_left(&self, now: Instant) -> Option<u64> {
+    pub fn showing_countdown(&self, now: Instant) -> Option<StatusCountdown> {
         if self.retention != StatusRetention::Retain || self.clear_after.is_zero() {
             return None;
         }
@@ -1135,41 +1160,57 @@ impl KeyedStatusController {
         if shown_key != front || self.waits_for_a_person(front, entry) {
             return None;
         }
-        let left = self
-            .dwell_deadline(entry, *shown_at)?
-            .saturating_duration_since(now);
-        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-        (secs > 0).then_some(secs)
+        let left = ceil_secs(
+            self.dwell_deadline(entry, *shown_at)?
+                .saturating_duration_since(now),
+        );
+        let longest = ceil_secs(self.clear_after.checked_mul(entry.tone.clear_windows()?)?);
+        (left > 0).then_some(StatusCountdown { left, longest })
     }
 
-    /// Take the message on the TUI's line down at the user's request, so the
-    /// next one waiting gets the line and a full window of its own from now.
+    /// [`Self::showing_countdown`]'s seconds left alone.
+    pub fn showing_seconds_left(&self, now: Instant) -> Option<u64> {
+        self.showing_countdown(now).map(|countdown| countdown.left)
+    }
+
+    /// Which message is on the TUI's line right now, so a later
+    /// [`Self::clear_shown`] can take down exactly that one and nothing that
+    /// arrived after it.
+    pub fn showing(&self) -> Option<ShownStatus> {
+        if self.retention != StatusRetention::Retain {
+            return None;
+        }
+        let front = self.queue.iter().find(|k| self.entries.contains_key(*k))?;
+        Some(ShownStatus {
+            storage: front.clone(),
+            generation: self.entries[front].generation,
+        })
+    }
+
+    /// Take down the message [`Self::showing`] named, at the user's request,
+    /// wherever it now sits; the next one on the line gets a full window from
+    /// now. Nothing happens when that message has already gone or been
+    /// replaced, because what replaced it is something the user has not read.
     ///
     /// The user is the person a sticky or pinned message waits for, so neither
     /// survives this. A `Busy` loses only its spinner: liveness is left alone
     /// because the operation is still running, and its final lands on a key no
     /// longer in the queue, so it takes the line like any new message.
     ///
-    /// Returns `false` when the line was already empty.
-    pub fn clear_showing(&mut self, now: Instant) -> bool {
-        if self.retention != StatusRetention::Retain {
-            return false;
-        }
-        while self
-            .queue
-            .front()
-            .is_some_and(|k| !self.entries.contains_key(k))
+    /// Returns `true` when something was taken down.
+    pub fn clear_shown(&mut self, shown: &ShownStatus, now: Instant) -> bool {
+        if self.retention != StatusRetention::Retain
+            || self
+                .entries
+                .get(&shown.storage)
+                .is_none_or(|entry| entry.generation != shown.generation)
         {
-            self.queue.pop_front();
-        }
-        let Some(front) = self.queue.front().cloned() else {
             return false;
-        };
-        if self.anon_key.as_deref() == Some(front.as_str()) {
+        }
+        if self.anon_key.as_deref() == Some(shown.storage.as_str()) {
             self.anon_pinned = false;
         }
-        self.remove_queued(&front);
-        self.shown = None;
+        self.remove_queued(&shown.storage);
         self.advance(now, &mut StatusTickChanges::default());
         true
     }
@@ -3206,7 +3247,10 @@ mod tests {
         let back = t0 + WINDOW * 2;
         assert_eq!(run(&mut c, back).as_deref(), Some("warning"));
         let left = WINDOW * WARNING_CLEAR_FACTOR - WINDOW * 2;
-        assert_eq!(c.showing_seconds_left(back), Some(left.as_secs()));
+        let countdown = c.showing_countdown(back).expect("a warning counts down");
+        assert_eq!(countdown.left, left.as_secs());
+        // The widest it can read is the whole retention, however late it is shown.
+        assert_eq!(countdown.longest, (WINDOW * WARNING_CLEAR_FACTOR).as_secs());
         assert_eq!(
             run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
             Some("warning")
@@ -3259,15 +3303,28 @@ mod tests {
         c.set(t0, None, StatusTone::Info, "showing");
         c.set(t0, None, StatusTone::Info, "waiting");
         let at = t0 + Duration::from_secs(4);
-        assert!(c.clear_showing(at));
+        let shown = c.showing().expect("a message is on the line");
+        assert!(c.clear_shown(&shown, at));
         assert_eq!(line(&c).as_deref(), Some("waiting"));
         assert_eq!(c.showing_seconds_left(at), Some(6));
         assert_eq!(run(&mut c, at + WINDOW - TICK).as_deref(), Some("waiting"));
         assert_eq!(run(&mut c, at + WINDOW), None);
+        assert_eq!(c.showing(), None, "an empty line has nothing to clear");
         assert!(
-            !c.clear_showing(at + WINDOW),
-            "an empty line has nothing to clear"
+            !c.clear_shown(&shown, at + WINDOW),
+            "a message that already went is not cleared twice"
         );
+    }
+
+    #[test]
+    fn clearing_what_was_shown_leaves_a_replacement_on_the_same_key_alone() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, Some("hint".into()), StatusTone::Info, "seen");
+        let shown = c.showing().expect("a message is on the line");
+        c.set(t0, Some("hint".into()), StatusTone::Info, "never seen");
+        assert!(!c.clear_shown(&shown, t0));
+        assert_eq!(line(&c).as_deref(), Some("never seen"));
     }
 
     #[test]
@@ -3277,7 +3334,8 @@ mod tests {
         let mut c = tui().with_live_keys(live.clone());
         live.register("op");
         c.set(t0, Some("op".into()), StatusTone::Busy, "working");
-        assert!(c.clear_showing(t0));
+        let shown = c.showing().expect("the spinner is on the line");
+        assert!(c.clear_shown(&shown, t0));
         assert_eq!(line(&c), None);
         assert!(live.is_live("op"), "the operation is still running");
         // Nothing left behind times out into a warning while it runs.

@@ -5161,6 +5161,7 @@ mod tests {
             bindings,
             missing_project_warning_gen: None,
             palette_hint_gen: None,
+            palette_opened_over: None,
             selected_left: 0,
             left_section: crate::app::LeftSection::Projects,
             selected_terminal_index: 0,

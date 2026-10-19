@@ -1607,7 +1607,8 @@ impl App {
         let status_lines = status_footer_lines(
             &status_text,
             frame_area.width,
-            self.status_countdown(frame_area.width).as_deref(),
+            self.status_countdown(frame_area.width)
+                .map_or(0, |countdown| countdown.columns),
         );
         let footer_h = 1 + status_lines; // 1 for hints + status lines
         let [header, body, footer] = Layout::default()
@@ -5311,7 +5312,7 @@ impl App {
         // The countdown keeps its columns on every row, so the message wraps and
         // is cut in what is left and never runs underneath the number.
         let text_width =
-            usize::from(status_area.width) - countdown.as_deref().map_or(0, countdown_columns);
+            usize::from(status_area.width) - countdown.as_ref().map_or(0, |c| c.columns);
         let mut wrapped = wrap_styled_lines(&[status_line], text_width);
         if wrapped.len() > rows {
             wrapped.truncate(rows);
@@ -5321,14 +5322,24 @@ impl App {
                 wrapped.push(Line::from(marked).style(style));
             }
         }
-        if let Some(label) = countdown
+        if let Some(countdown) = countdown
             && let Some(first) = wrapped.first_mut()
         {
-            let gap = text_width.saturating_sub(first.width()) + 1;
+            // Measured per grapheme, as the wrapper and the buffer measure it;
+            // the whole-string width disagrees on some scripts and would push
+            // the number past the edge.
+            let used: usize = first
+                .spans
+                .iter()
+                .map(|span| display_width(&span.content))
+                .sum();
             let bg = Style::default().bg(status_bg);
-            first.spans.push(Span::styled(" ".repeat(gap), bg));
             first.spans.push(Span::styled(
-                label,
+                " ".repeat(text_width.saturating_sub(used)),
+                bg,
+            ));
+            first.spans.push(Span::styled(
+                format!("{:>width$}", countdown.label, width = countdown.columns - 1),
                 Style::default().fg(self.theme.status_info_fg).bg(status_bg),
             ));
             first.spans.push(Span::styled(" ", bg));
@@ -5338,12 +5349,19 @@ impl App {
 
     /// The seconds left on a status line message that clears itself (`5s`),
     /// when the line is wide enough to give it room beside the message.
-    fn status_countdown(&self, width: u16) -> Option<String> {
-        let label = format!("{}s", self.status.showing_seconds_left(Instant::now())?);
+    fn status_countdown(&self, width: u16) -> Option<StatusCountdownLabel> {
+        let countdown = self.status.showing_countdown(Instant::now())?;
+        // Sized for the message's longest count rather than the current one, so
+        // the number losing a digit never moves the text or changes how many
+        // rows the footer takes, which would resize the pane above it.
+        let columns = countdown_columns(&format!("{}s", countdown.longest));
         // Below this the message would be squeezed into nothing to make room for
         // a number that only says when it goes away.
         let min_message_columns = 8;
-        (usize::from(width) >= countdown_columns(&label) + min_message_columns).then_some(label)
+        (usize::from(width) >= columns + min_message_columns).then(|| StatusCountdownLabel {
+            label: format!("{}s", countdown.left),
+            columns,
+        })
     }
 
     pub(crate) fn footer_hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
@@ -12885,7 +12903,8 @@ impl App {
         let status_lines = status_footer_lines(
             &status_text,
             full.width,
-            self.status_countdown(full.width).as_deref(),
+            self.status_countdown(full.width)
+                .map_or(0, |countdown| countdown.columns),
         );
         let footer_h = 1 + status_lines; // hints bar + status line(s)
         let dim_h = full.height.saturating_sub(footer_h);
@@ -13776,17 +13795,25 @@ fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, sty
     buf[(x, y)].set_symbol(symbol).set_style(style);
 }
 
+/// The status line countdown's label and the columns kept for it.
+struct StatusCountdownLabel {
+    label: String,
+    columns: usize,
+}
+
 /// The columns a status line countdown takes: the label, a gap before it and a
 /// margin after it.
 fn countdown_columns(label: &str) -> usize {
     display_width(label) + 2
 }
 
-fn status_footer_lines(status_text: &str, width: u16, countdown: Option<&str>) -> u16 {
+/// `countdown_columns` is what the status line keeps clear for its countdown,
+/// zero without one.
+fn status_footer_lines(status_text: &str, width: u16, countdown_columns: usize) -> u16 {
     if width == 0 {
         return 1;
     }
-    let status_text_len = display_width(status_text) + 3 + countdown.map_or(0, countdown_columns); // " ● " prefix
+    let status_text_len = display_width(status_text) + 3 + countdown_columns; // " ● " prefix
     if status_text_len > width as usize {
         2
     } else {
@@ -20720,6 +20747,47 @@ mod tests {
         assert_eq!(message_cell.fg, app.theme.warning_fg);
     }
 
+    /// Text the whole-string measure and the per-cluster renderer disagree
+    /// about (a lam-alef pair reads as one column whole, two drawn) must not
+    /// push the countdown off the row.
+    #[test]
+    fn the_countdown_survives_text_whose_width_depends_on_how_it_is_measured() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.status.set_clear_after(Duration::from_secs(6));
+        app.status
+            .set(Instant::now(), None, StatusTone::Info, "لا لا لا لا");
+        let mut terminal = Terminal::new(TestBackend::new(30, 3)).expect("terminal");
+        terminal
+            .draw(|frame| app.render_footer(frame, frame.area()))
+            .expect("render footer");
+        let buf = terminal.backend().buffer();
+        let tail: String = (26..30).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(tail, " 6s ");
+    }
+
+    /// The footer's height is decided once per message: a counter going from
+    /// two digits to one must not take a row away mid-display and resize the
+    /// pane above it.
+    #[test]
+    fn the_footer_keeps_its_height_while_the_countdown_loses_a_digit() {
+        let full = Rect::new(0, 0, 40, 20);
+        let text = "abcdefghij abcdefghij abcdefghijk";
+        let height_at = |elapsed: Duration| {
+            let mut app = test_app(default_bindings());
+            app.status.set_clear_after(Duration::from_secs(10));
+            app.status
+                .set(Instant::now() - elapsed, None, StatusTone::Info, text);
+            app.dim_overlay_area(full).height
+        };
+        assert_eq!(
+            height_at(Duration::ZERO),
+            height_at(Duration::from_millis(1500))
+        );
+    }
+
     #[test]
     fn a_timed_message_counts_down_beside_the_text_and_an_untimed_one_does_not() {
         use ratatui::Terminal;
@@ -21512,13 +21580,13 @@ mod tests {
 
     #[test]
     fn status_footer_lines_allows_at_most_two_status_rows() {
-        assert_eq!(status_footer_lines("short", 40, None), 1);
-        assert_eq!(status_footer_lines("this message is too wide", 10, None), 2);
-        assert_eq!(status_footer_lines("anything", 0, None), 1);
+        assert_eq!(status_footer_lines("short", 40, 0), 1);
+        assert_eq!(status_footer_lines("this message is too wide", 10, 0), 2);
+        assert_eq!(status_footer_lines("anything", 0, 0), 1);
         // A message that fits on its own takes a second row once the countdown
         // needs its columns beside it.
-        assert_eq!(status_footer_lines("exactly fits", 15, None), 1);
-        assert_eq!(status_footer_lines("exactly fits", 15, Some("5s")), 2);
+        assert_eq!(status_footer_lines("exactly fits", 15, 0), 1);
+        assert_eq!(status_footer_lines("exactly fits", 15, 4), 2);
     }
 
     // --- resource_monitor_columns (pure column-budget helper) ---

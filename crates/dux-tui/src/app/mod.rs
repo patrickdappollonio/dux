@@ -347,6 +347,9 @@ pub struct App {
     /// the status line from the palette clears what was on screen before it
     /// opened rather than the palette's own hint about itself.
     pub(crate) palette_hint_gen: Option<dux_core::statusline::Generation>,
+    /// What was on the status line when the palette last opened (`Some(None)`
+    /// for an empty line), which is what clearing the line from it clears.
+    pub(crate) palette_opened_over: Option<Option<dux_core::statusline::ShownStatus>>,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -4680,6 +4683,7 @@ impl App {
             status,
             missing_project_warning_gen: None,
             palette_hint_gen: None,
+            palette_opened_over: None,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -5467,15 +5471,26 @@ impl App {
         );
     }
 
-    /// Take the message on the status line down so the next one waiting, if
-    /// any, gets its turn. A spinner goes from the line while its operation
+    /// Take down the message the user was looking at when they opened the
+    /// palette, and the palette's own hint with it, so the next one waiting, if
+    /// any, gets its turn. Nothing that arrived after the palette opened goes:
+    /// nobody has read it yet. A spinner goes from the line while its operation
     /// keeps running, and the operation's outcome still shows when it lands.
     pub(crate) fn clear_status_line(&mut self) {
+        let target = match self.palette_opened_over.take() {
+            Some(before_palette) => before_palette,
+            None => self.status.showing(),
+        };
         if let Some(generation) = self.palette_hint_gen.take() {
             self.status.clear(UI_HINT_KEY, Some(generation));
         }
-        if !self.status.clear_showing(Instant::now()) {
-            self.set_info("The status line is already clear.");
+        match target {
+            // Gone already, or replaced in place by the palette's hint, which
+            // has just been retired: either way that was the clear.
+            Some(shown) => {
+                self.status.clear_shown(&shown, Instant::now());
+            }
+            None => self.set_info("The status line is already clear."),
         }
     }
 
