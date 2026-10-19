@@ -2726,7 +2726,12 @@ impl App {
             input: TextInput::new(),
             selected: 0,
         };
-        self.set_ui_hint("Command palette opened.");
+        self.palette_hint_gen = Some(self.status.set(
+            Instant::now(),
+            Some(UI_HINT_KEY.to_string()),
+            StatusTone::Info,
+            "Command palette opened.",
+        ));
     }
 
     fn open_macro_bar(&mut self) {
@@ -27846,6 +27851,23 @@ cyan = "#00ffff"
             .filter_map(|e| e.ok().map(|e| e.file_name()))
             .collect();
         assert_eq!(before, after, "escape must not touch the folder");
+    }
+
+    /// The palette's own "opened" hint must not be what the command clears: the
+    /// user opened the palette to clear the message they were looking at.
+    #[test]
+    fn clearing_the_status_line_from_the_palette_clears_what_was_showing_before_it() {
+        let mut app = test_app(default_bindings());
+        app.set_info("something happened");
+        app.open_command_palette();
+        app.prompt = PromptState::None;
+        app.execute_command("clear-status-line".to_string())
+            .expect("the command runs");
+        assert_eq!(app.status.message(), "", "the line is empty");
+
+        app.execute_command("clear-status-line".to_string())
+            .expect("the command runs");
+        assert_eq!(app.status.message(), "The status line is already clear.");
     }
 
     /// Every entry point ends in the same prompt: the palette command, both

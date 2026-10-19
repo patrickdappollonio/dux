@@ -1087,10 +1087,7 @@ impl KeyedStatusController {
         let Some(entry) = self.entries.get(key) else {
             return true;
         };
-        if entry.sticky {
-            return false;
-        }
-        if self.anon_pinned && self.anon_key.as_deref() == Some(key) {
+        if self.waits_for_a_person(key, entry) {
             return false;
         }
         if self.clear_after.is_zero() {
@@ -1099,11 +1096,82 @@ impl KeyedStatusController {
             // covers what queued behind a `Busy`, which an arrival never touches.
             return entry.tone != StatusTone::Busy && self.queue.len() > 1;
         }
+        self.dwell_deadline(entry, shown_at)
+            .is_some_and(|deadline| now >= deadline)
+    }
+
+    /// A `sticky` entry and the pinned one leave only when somebody acts.
+    fn waits_for_a_person(&self, key: &str, entry: &KeyedStatus) -> bool {
+        entry.sticky || (self.anon_pinned && self.anon_key.as_deref() == Some(key))
+    }
+
+    /// The instant a timed entry on the line has had its time, for a nonzero
+    /// window. `None` for a tone with no dwell clock, and for a deadline too far
+    /// out to represent, which no clock can reach either.
+    fn dwell_deadline(&self, entry: &KeyedStatus, shown_at: Instant) -> Option<Instant> {
         match (entry.tone, entry.tone.clear_windows()) {
-            (_, None) => false,
-            (StatusTone::Info, Some(_)) => now.duration_since(shown_at) >= self.clear_after,
-            (_, Some(windows)) => now.duration_since(entry.since) >= self.clear_after * windows,
+            (_, None) => None,
+            (StatusTone::Info, Some(_)) => shown_at.checked_add(self.clear_after),
+            (_, Some(windows)) => entry
+                .since
+                .checked_add(self.clear_after.checked_mul(windows)?),
         }
+    }
+
+    /// Whole seconds until the message on the TUI's line clears itself, rounded
+    /// up, or `None` when it will not clear on a timer or has no time left.
+    ///
+    /// Read from the same deadline [`Self::advance`] retires the entry on, so a
+    /// countdown can never disagree with the moment the message actually goes.
+    pub fn showing_seconds_left(&self, now: Instant) -> Option<u64> {
+        if self.retention != StatusRetention::Retain || self.clear_after.is_zero() {
+            return None;
+        }
+        let front = self.queue.front()?;
+        let entry = self.entries.get(front)?;
+        // Not yet stamped means the next tick shows it from then; there is no
+        // deadline to count down to until it does.
+        let (shown_key, shown_at) = self.shown.as_ref()?;
+        if shown_key != front || self.waits_for_a_person(front, entry) {
+            return None;
+        }
+        let left = self
+            .dwell_deadline(entry, *shown_at)?
+            .saturating_duration_since(now);
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        (secs > 0).then_some(secs)
+    }
+
+    /// Take the message on the TUI's line down at the user's request, so the
+    /// next one waiting gets the line and a full window of its own from now.
+    ///
+    /// The user is the person a sticky or pinned message waits for, so neither
+    /// survives this. A `Busy` loses only its spinner: liveness is left alone
+    /// because the operation is still running, and its final lands on a key no
+    /// longer in the queue, so it takes the line like any new message.
+    ///
+    /// Returns `false` when the line was already empty.
+    pub fn clear_showing(&mut self, now: Instant) -> bool {
+        if self.retention != StatusRetention::Retain {
+            return false;
+        }
+        while self
+            .queue
+            .front()
+            .is_some_and(|k| !self.entries.contains_key(k))
+        {
+            self.queue.pop_front();
+        }
+        let Some(front) = self.queue.front().cloned() else {
+            return false;
+        };
+        if self.anon_key.as_deref() == Some(front.as_str()) {
+            self.anon_pinned = false;
+        }
+        self.remove_queued(&front);
+        self.shown = None;
+        self.advance(now, &mut StatusTickChanges::default());
+        true
     }
 
     /// Remove a keyed entry only if the carried generation matches the stored one
@@ -3107,6 +3175,120 @@ mod tests {
         c.set(t0, None, StatusTone::Info, "behind");
         assert!(c.clear("k", None));
         assert_eq!(line(&c).as_deref(), Some("behind"));
+    }
+
+    #[test]
+    fn the_countdown_reaches_zero_exactly_when_the_line_moves_on() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "first");
+        c.set(t0, None, StatusTone::Info, "second");
+        assert_eq!(c.showing_seconds_left(t0), Some(6));
+        // Rounded up, so the last second on screen reads 1s and never 0s.
+        assert_eq!(c.showing_seconds_left(t0 + WINDOW - TICK), Some(1));
+        assert_eq!(run(&mut c, t0 + WINDOW - TICK).as_deref(), Some("first"));
+        // The info that waited counts its full window from when it is shown.
+        assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("second"));
+        assert_eq!(c.showing_seconds_left(t0 + WINDOW), Some(6));
+        assert_eq!(c.showing_seconds_left(t0 + WINDOW * 2 - TICK), Some(1));
+        assert_eq!(run(&mut c, t0 + WINDOW * 2), None);
+        assert_eq!(c.showing_seconds_left(t0 + WINDOW * 2), None);
+    }
+
+    #[test]
+    fn a_warning_counts_down_from_when_it_was_posted() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, Some("w".into()), StatusTone::Warning, "warning");
+        c.set(t0 + WINDOW, Some("b".into()), StatusTone::Busy, "working");
+        assert_eq!(c.showing_seconds_left(t0 + WINDOW), None);
+        assert!(c.clear("b", None));
+        let back = t0 + WINDOW * 2;
+        assert_eq!(run(&mut c, back).as_deref(), Some("warning"));
+        let left = WINDOW * WARNING_CLEAR_FACTOR - WINDOW * 2;
+        assert_eq!(c.showing_seconds_left(back), Some(left.as_secs()));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            Some("warning")
+        );
+        assert_eq!(run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR), None);
+    }
+
+    #[test]
+    fn nothing_counts_down_that_does_not_clear_on_a_timer() {
+        let t0 = Instant::now();
+        type Post = fn(&mut KeyedStatusController, Instant);
+        let untimed: [(&str, Post); 5] = [
+            ("busy", |c, t| {
+                c.set(t, None, StatusTone::Busy, "busy");
+            }),
+            ("error", |c, t| {
+                c.set(t, None, StatusTone::Error, "error");
+            }),
+            ("sticky", |c, t| {
+                c.set_scoped(
+                    t,
+                    None,
+                    StatusTone::Info,
+                    "sticky",
+                    super::StatusScope::All,
+                    true,
+                );
+            }),
+            ("pinned", |c, t| {
+                c.set(t, None, StatusTone::Info, "hint");
+                c.pin();
+            }),
+            ("zero window", |c, t| {
+                c.set_clear_after(Duration::ZERO);
+                c.set(t, None, StatusTone::Info, "forever");
+            }),
+        ];
+        for (case, post) in untimed {
+            let mut c = tui();
+            post(&mut c, t0);
+            assert!(line(&c).is_some(), "{case}: something is on the line");
+            assert_eq!(c.showing_seconds_left(t0), None, "{case}");
+        }
+    }
+
+    #[test]
+    fn clearing_the_line_gives_the_next_message_a_full_window_from_then() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        c.set(t0, None, StatusTone::Info, "waiting");
+        let at = t0 + Duration::from_secs(4);
+        assert!(c.clear_showing(at));
+        assert_eq!(line(&c).as_deref(), Some("waiting"));
+        assert_eq!(c.showing_seconds_left(at), Some(6));
+        assert_eq!(run(&mut c, at + WINDOW - TICK).as_deref(), Some("waiting"));
+        assert_eq!(run(&mut c, at + WINDOW), None);
+        assert!(
+            !c.clear_showing(at + WINDOW),
+            "an empty line has nothing to clear"
+        );
+    }
+
+    #[test]
+    fn clearing_a_spinner_leaves_its_operation_running_and_shows_its_final() {
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        let mut c = tui().with_live_keys(live.clone());
+        live.register("op");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        assert!(c.clear_showing(t0));
+        assert_eq!(line(&c), None);
+        assert!(live.is_live("op"), "the operation is still running");
+        // Nothing left behind times out into a warning while it runs.
+        assert_eq!(run(&mut c, t0 + BUSY_TIMEOUT * 2), None);
+        c.set(
+            t0 + BUSY_TIMEOUT * 2,
+            Some("op".into()),
+            StatusTone::Info,
+            "done",
+        );
+        assert_eq!(line(&c).as_deref(), Some("done"));
     }
 
     #[test]

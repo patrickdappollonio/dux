@@ -420,6 +420,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // the detach-agent palette command below.
     },
     PaletteCommand {
+        action: Action::ClearStatusLine,
+        name: "clear-status-line",
+        description: "Clears the last message.",
+        // TUI-only: the web shows statuses as toasts, each with its own close
+        // button and swipe to dismiss.
+    },
+    PaletteCommand {
         action: Action::DetachAgent,
         name: "detach-agent",
         description: "Ask the selected agent to shut down and wait the configured \

@@ -524,6 +524,34 @@ instead is git's progress. A clone that prints nothing for `clone_stall_seconds`
 is stopped, and the message says so. Raise it for a remote that takes a long time
 to start sending. Values below 1 count as 1. It takes effect for the next clone.
 
+## How long messages stay (`[ui]`)
+
+```toml
+[ui]
+status_clear_seconds = 6
+```
+
+Messages about what dux just did clear themselves, and `status_clear_seconds` is the
+window they are timed by:
+
+- **A success or a note** stays for one window.
+- **A warning** stays three times as long.
+- **An error** stays until the next message in the terminal UI, and four times the window
+  on the web.
+- **A spinner** stays until its work finishes.
+- **`0`** turns auto-clearing off.
+
+In the terminal UI, messages take turns on the status line, and each one gets its full
+window once it is actually on screen. While a message is clearing itself, the right end of
+the line counts down the seconds it has left (`5s`, `4s`, …).
+
+Done reading early? Run **`clear-status-line`** from the command palette to take the message
+on screen down, and the next one waiting gets its turn. On a spinner it only hides the
+spinner: the work keeps going, and its result still shows up when it lands.
+
+The web shows the same messages as toasts with their own close button; see
+[Messages](/docs/web-workspace#messages).
+
 ## Environment variables and portable paths
 
 Project paths understand `$HOME`, `${HOME}`, and `~`, and environment values expand

@@ -1204,6 +1204,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ClearStatusLine,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::DetachAgent,
         default_keys: &[],
         scopes: &[],
@@ -3356,6 +3363,7 @@ mod tests {
             "change-project-default-provider",
             "change-theme",
             "checkout-project-default-branch",
+            "clear-status-line",
             "clone-project",
             "close-tab",
             "configure-global-env",

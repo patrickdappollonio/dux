@@ -343,6 +343,10 @@ pub struct App {
     /// warnings to it, so "the line holds a warning" is true of the pinned
     /// restart and theme warnings too.
     pub(crate) missing_project_warning_gen: Option<dux_core::statusline::Generation>,
+    /// The "Command palette opened." hint the palette last wrote, so clearing
+    /// the status line from the palette clears what was on screen before it
+    /// opened rather than the palette's own hint about itself.
+    pub(crate) palette_hint_gen: Option<dux_core::statusline::Generation>,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -4675,6 +4679,7 @@ impl App {
             server_log_viewer: None,
             status,
             missing_project_warning_gen: None,
+            palette_hint_gen: None,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -5462,6 +5467,18 @@ impl App {
         );
     }
 
+    /// Take the message on the status line down so the next one waiting, if
+    /// any, gets its turn. A spinner goes from the line while its operation
+    /// keeps running, and the operation's outcome still shows when it lands.
+    pub(crate) fn clear_status_line(&mut self) {
+        if let Some(generation) = self.palette_hint_gen.take() {
+            self.status.clear(UI_HINT_KEY, Some(generation));
+        }
+        if !self.status.clear_showing(Instant::now()) {
+            self.set_info("The status line is already clear.");
+        }
+    }
+
     /// The same slot, for a hint that has to warn: the toggle worked but left
     /// the user somewhere they need to know about.
     pub(crate) fn set_ui_hint_warning(&mut self, message: impl Into<String>) {
@@ -5850,6 +5867,10 @@ impl App {
             "rename-agent" => self.open_rename_session(),
             "agent-info" => self.open_agent_info(),
             "kill-running" => self.open_kill_running(),
+            "clear-status-line" => {
+                self.clear_status_line();
+                Ok(())
+            }
             "detach-agent" => self.confirm_detach_selected_session(),
             "recreate-working-copy" => self.confirm_recreate_selected_working_copy(),
             "reconnect-agent" => self.reconnect_selected_session(false),

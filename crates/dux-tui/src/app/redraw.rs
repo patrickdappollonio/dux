@@ -31,6 +31,8 @@ pub(crate) struct AnimationPhase {
     attention_on: Option<bool>,
     /// The modal refusal cue's own phase, false whenever the cue is not running.
     refusal_on: bool,
+    /// The status line's countdown, in the whole seconds it shows.
+    status_countdown: Option<u64>,
 }
 
 /// The per-row live state the sidebar reflects. Packed into one byte so a tick
@@ -217,11 +219,13 @@ impl App {
                 .attention_cue_visible()
                 .then(|| attention_blink_phase(elapsed)),
             refusal_on: self.refusal_blink_highlight(),
+            status_countdown: self.status.showing_seconds_left(now),
         };
         let resting = phase.spinner.is_none()
             && phase.cue.is_none()
             && phase.attention_on.is_none()
-            && !phase.refusal_on;
+            && !phase.refusal_on
+            && phase.status_countdown.is_none();
         (!resting).then_some(phase)
     }
 
@@ -558,6 +562,26 @@ mod tests {
         assert_eq!(app.redraw.renders, 2, "a new status takes the line");
         tick(&mut app, &mut terminal, start + Duration::from_millis(66));
         assert_eq!(app.redraw.renders, 2);
+    }
+
+    #[test]
+    fn a_countdown_draws_when_its_second_changes_and_not_between() {
+        let (mut app, mut terminal, start) = app_at_rest();
+        app.status.set_clear_after(Duration::from_secs(6));
+        app.status.set(
+            start,
+            None,
+            dux_core::statusline::StatusTone::Info,
+            "counting down",
+        );
+        tick(&mut app, &mut terminal, start + Duration::from_millis(33));
+        assert_eq!(app.redraw.renders, 2, "the message takes the line");
+        tick(&mut app, &mut terminal, start + Duration::from_millis(600));
+        assert_eq!(app.redraw.renders, 2, "still 6s");
+        tick(&mut app, &mut terminal, start + Duration::from_millis(1000));
+        assert_eq!(app.redraw.renders, 3, "5s");
+        tick(&mut app, &mut terminal, start + Duration::from_millis(1500));
+        assert_eq!(app.redraw.renders, 3, "still 5s");
     }
 
     #[test]

@@ -107,6 +107,7 @@ pub enum Action {
     ToggleMarked,
     // Palette-only (no direct keybinding)
     KillRunning,
+    ClearStatusLine,
     DetachAgent,
     RecreateWorkingCopy,
     /// Web-only: open the Monaco config.toml editor, reached from the web app
@@ -311,6 +312,7 @@ impl Action {
             Action::ToggleSelection => "toggle_selection",
             Action::ToggleMarked => "toggle_marked",
             Action::KillRunning => "kill_running",
+            Action::ClearStatusLine => "clear_status_line",
             Action::DetachAgent => "detach_agent",
             Action::RecreateWorkingCopy => "recreate_working_copy",
             Action::EditConfig => "edit_config",
@@ -523,6 +525,7 @@ impl Action {
             Action::KillRunning => {
                 "Open the kill-running modal for agents and companion terminals."
             }
+            Action::ClearStatusLine => "Clear the message on the status line.",
             Action::DetachAgent => {
                 "Ask the selected agent to shut down and wait the configured shutdown \
                  timeout before forcing it; it stays listed as Detached and can be resumed."
@@ -729,6 +732,7 @@ impl Action {
             | Action::DeleteMacro
             | Action::ClearTextField => Some("Overlays"),
             Action::KillRunning
+            | Action::ClearStatusLine
             | Action::DetachAgent
             | Action::RecreateWorkingCopy
             | Action::EditConfig
