@@ -1000,8 +1000,9 @@ fn config_schema() -> Vec<ConfigEntry> {
              # Three settings below decide where dux listens and who it answers.\n\
              # They do NOT override each other; they stack, and they are checked in\n\
              # this order:\n\
-             #   1. host + port:      the one address dux binds. `dux server --bind\n\
-             #                        IP:port` overrides both for that run.\n\
+             #   1. host + port:      the address dux binds (127.0.0.1 brings [::1]\n\
+             #                        along). `dux server --bind IP:port`\n\
+             #                        overrides both for that run.\n\
              #   2. tailscale:        binds an ADDITIONAL address (this machine's\n\
              #                        Tailscale IP, same port). Never replaces host;\n\
              #                        best-effort, so a failure only warns. On \"auto\"\n\
@@ -1017,6 +1018,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Bind host for `dux server`. Must be an IP literal, not a hostname:\n\
                  #   \"127.0.0.1\": loopback only (the safe default; only this machine).\n\
+                 #                dux also binds [::1] on the same port, because\n\
+                 #                `localhost` can mean either; a machine without\n\
+                 #                IPv6 just uses 127.0.0.1.\n\
                  #   \"0.0.0.0\":   every interface (reachable from the network).\n\
                  # Serving from inside the TUI ignores this and always binds loopback\n\
                  # (+ Tailscale), both the flip and `serve_while_tui`.\n\

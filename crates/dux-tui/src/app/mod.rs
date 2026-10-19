@@ -8022,8 +8022,8 @@ pub(crate) fn sync_config_projects_with_store(
 }
 
 /// Pre-flight for the in-process flip from the TUI to the web server: resolve
-/// local-mode addresses (loopback:port plus the machine's Tailscale
-/// address:port when one was detected) and actually bind a std `TcpListener`
+/// local-mode addresses (loopback:port on IPv4 and IPv6, plus the machine's
+/// Tailscale address:port when one was detected) and actually bind a std `TcpListener`
 /// for each before the TUI tears anything down. Returning the bound listeners
 /// rather than addresses means there is no rebind race when the web server
 /// adopts them.
@@ -8033,29 +8033,49 @@ pub(crate) fn sync_config_projects_with_store(
 /// detection (`tailscale ip`) is a subprocess call the caller runs on a worker
 /// thread; nothing here blocks beyond the local `TcpListener::bind`.
 ///
-/// Loopback is required, so a bind failure there fails the whole pre-flight (the
-/// TUI stays up, the failing address is logged, and already-bound listeners
-/// drop); the Tailscale leg is best-effort, so a failure there is dropped with a
-/// warning in the returned `warnings` and the flip proceeds loopback-only.
+/// Loopback is required on both families, so a bind failure there fails the
+/// whole pre-flight (the TUI stays up, the failing address is logged, and
+/// already-bound listeners drop), except that a machine without IPv6 skips the
+/// IPv6 loopback silently; the Tailscale leg is best-effort, so a failure there
+/// is dropped with a warning in the returned `warnings` and the flip proceeds
+/// loopback-only.
 ///
 /// Each display URL reflects the listener's `local_addr`, so an ephemeral `:0`
-/// port resolves to the real port the user can open. Returns `(listeners, urls,
-/// warnings)`.
+/// port resolves to the real port the user can open, and every later leg binds
+/// that same port. Returns `(listeners, urls, warnings)`.
 fn preflight_server_listeners(
     port: u16,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
-    let addrs = dux_core::config::local_addrs(port, tailscale_ip);
+    bind_preflight_addrs(dux_core::config::local_addrs(port, tailscale_ip))
+}
+
+/// The binding half of [`preflight_server_listeners`], over a given plan.
+fn bind_preflight_addrs(
+    addrs: Vec<dux_core::config::PlanAddr>,
+) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
     let mut listeners = Vec::with_capacity(addrs.len());
     let mut urls = Vec::with_capacity(addrs.len());
     let mut warnings = Vec::new();
+    let mut picked_port = None;
     for plan_addr in addrs {
-        let addr = plan_addr.addr();
+        let mut addr = plan_addr.addr();
+        if addr.port() == 0
+            && let Some(port) = picked_port
+        {
+            addr.set_port(port);
+        }
         match std::net::TcpListener::bind(addr) {
             Ok(listener) => {
                 let bound = listener.local_addr().unwrap_or(addr);
+                picked_port.get_or_insert(bound.port());
                 urls.push(format!("http://{bound}"));
                 listeners.push(listener);
+            }
+            Err(err) if plan_addr.skips_bind_failure(&err) => {
+                dux_core::logger::debug(&format!(
+                    "[server] not serving on {addr}: this machine has no IPv6 ({err})"
+                ));
             }
             Err(err) if plan_addr.is_required() => {
                 // Loopback (required): the flip cannot serve without it. Log the
@@ -8609,20 +8629,28 @@ mod tests {
         // Tailscale address, LOCAL MODE binds loopback only.
         let (listeners, urls, warnings) =
             preflight_server_listeners(0, None).expect("loopback bind should succeed");
-        assert_eq!(listeners.len(), 1, "no tailscale → loopback only");
-        assert_eq!(urls.len(), 1);
         assert!(warnings.is_empty(), "no tailscale leg → no warnings");
+        assert_eq!(urls.len(), listeners.len());
 
         let bound = listeners[0]
             .local_addr()
             .expect("listener has a local addr");
-        assert!(bound.ip().is_loopback());
+        assert_eq!(bound.ip(), std::net::Ipv4Addr::LOCALHOST, "IPv4 first");
         assert_ne!(bound.port(), 0, "OS must have assigned a real port");
         assert_eq!(urls[0], format!("http://{bound}"));
         assert!(
             !urls[0].ends_with(":0"),
             "URL must not show the placeholder port"
         );
+        // The IPv6 loopback, where this machine has IPv6, on the port the
+        // kernel picked for the first leg.
+        if let Some(v6) = listeners.get(1) {
+            let v6 = v6.local_addr().expect("listener has a local addr");
+            assert_eq!(v6.ip(), std::net::Ipv6Addr::LOCALHOST);
+            assert_eq!(v6.port(), bound.port());
+            assert_eq!(urls[1], format!("http://[::1]:{}", bound.port()));
+        }
+        assert!(listeners.len() <= 2, "no tailscale → loopback only");
     }
 
     #[test]
@@ -8660,6 +8688,25 @@ mod tests {
     }
 
     #[test]
+    fn preflight_refuses_a_taken_ipv6_loopback_and_names_it() {
+        let held = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(held) => held,
+            Err(err) if dux_core::config::ipv6_unavailable(&err) => return,
+            Err(err) => panic!("hold [::1]: {err}"),
+        };
+        let port = held.local_addr().expect("held addr").port();
+
+        let err = bind_preflight_addrs(vec![dux_core::config::PlanAddr::ipv6_loopback(port)])
+            .expect_err("a program on [::1] must stop the start");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("could not start the web server")
+                && text.contains(&format!("listening on [::1]:{port}?")),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn preflight_best_effort_tailscale_bind_failure_degrades_to_loopback() {
         // Reproduce the real-world bug: a third-party process already holds the
         // Tailscale ip:port while loopback:port is free. The "Tailscale" leg is
@@ -8669,10 +8716,8 @@ mod tests {
         // A SECOND loopback address stands in for the Tailscale IP: 127.0.0.2
         // on Linux, where the whole 127.0.0.0/8 range is loopback, and IPv6
         // loopback on macOS, which configures only 127.0.0.1 of that range.
-        // Hold it on port P and leave 127.0.0.1:P free. local_addrs builds
-        // required(127.0.0.1:P) + best_effort(second:P): distinct addresses
-        // (no dedupe), so the bind path is exercised exactly as production
-        // would hit it.
+        // Hold it on port P and leave 127.0.0.1:P free. The plan is built by
+        // hand because on macOS the stand-in is the IPv6 loopback leg itself.
         let ts_ip: std::net::IpAddr = if cfg!(target_os = "macos") {
             "::1".parse().unwrap()
         } else {
@@ -8682,8 +8727,11 @@ mod tests {
         let held_addr = held.local_addr().expect("held addr");
         let port = held_addr.port();
 
-        let (listeners, urls, warnings) = preflight_server_listeners(port, Some(ts_ip))
-            .expect("a busy Tailscale leg must NOT fail the pre-flight");
+        let (listeners, urls, warnings) = bind_preflight_addrs(vec![
+            dux_core::config::PlanAddr::required((std::net::Ipv4Addr::LOCALHOST, port).into()),
+            dux_core::config::PlanAddr::best_effort(held_addr),
+        ])
+        .expect("a busy Tailscale leg must NOT fail the pre-flight");
 
         // Only the required loopback leg bound; the best-effort Tailscale leg was
         // dropped. Every bound listener is genuine loopback → host-only.

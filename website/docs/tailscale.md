@@ -48,7 +48,7 @@ Tailscale's `100.64.0.0/10` range, falling back to the first IPv6 in Tailscale's
 That address becomes an extra listener:
 
 - **Same port as your primary address**, and it never replaces your `host`. So the default
-  is two listeners, loopback and tailnet, one URL each.
+  is loopback (`127.0.0.1` and `[::1]`) plus the tailnet, one URL each.
 - **Both URLs are printed in the startup banner,** the tailnet row labelled `Tailscale`
   with a note that other tailnet devices can reach it and whether they are asked for a
   password.

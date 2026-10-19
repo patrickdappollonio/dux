@@ -225,6 +225,8 @@ struct BoundListener {
 /// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
 ///   naming the address, the cause, and both remedies, collects the SAME text in
 ///   the returned warnings vec, and CONTINUES without that listener.
+/// - The IPv6 loopback leg is REQUIRED, except that a machine without IPv6
+///   skips it silently ([`PlanAddr::skips_bind_failure`]).
 ///
 /// If NOTHING binds (every address failed) the whole serve is fatal: there is
 /// nothing left to serve. Returns the bound listeners (with their addresses) and
@@ -242,6 +244,11 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
                 required: plan_addr.is_required(),
                 listener,
             }),
+            Err(err) if plan_addr.skips_bind_failure(&err) => {
+                dux_core::logger::debug(&format!(
+                    "[server] not serving on {addr}: this machine has no IPv6 ({err})"
+                ));
+            }
             Err(err) if plan_addr.is_required() => {
                 // The operator named this address; refuse to serve silently
                 // without it. Log with address context, then propagate the error.
@@ -3841,6 +3848,22 @@ mod tests {
                 && text.contains(&held_addr.to_string()),
             "the fatal error must name the busy required address: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn bind_plan_addrs_a_taken_ipv6_loopback_is_fatal_and_names_it() {
+        let held = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(held) => held,
+            Err(err) if dux_core::config::ipv6_unavailable(&err) => return,
+            Err(err) => panic!("hold [::1]: {err}"),
+        };
+        let port = held.local_addr().expect("held addr").port();
+
+        let err = bind_plan_addrs(&[PlanAddr::ipv6_loopback(port)])
+            .await
+            .expect_err("a program on [::1] must stop the serve");
+        let text = format!("{err:#}");
+        assert!(text.contains(&format!("[::1]:{port}")), "{text}");
     }
 
     // ── One log, two surfaces ──────────────────────────────────────────────

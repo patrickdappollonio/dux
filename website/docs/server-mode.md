@@ -38,8 +38,18 @@ Run the web UI with no TUI in front of it:
 dux server
 ```
 
-It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
-banner. The port is 3890 because that is how you spell "dux" on a phone keypad.
+It binds `127.0.0.1:3890` and `[::1]:3890` (loopback only, IPv4 and IPv6) by default and
+prints a small vite-style banner. The port is 3890 because that is how you spell "dux" on a
+phone keypad.
+
+> [!IMPORTANT]
+> `localhost` can mean either loopback address, and browsers try `[::1]` first, so dux
+> takes both. If another program already listens on either one (a Vite or Node dev server
+> on the same port, say), dux refuses to start and names the address, rather than leaving
+> `http://localhost:3890` to open somebody else's page. On a machine without IPv6, dux
+> serves `127.0.0.1` alone and says nothing about it. This applies to every way of serving,
+> the two in the terminal UI included, whenever dux is on `127.0.0.1`; any other `host` or
+> `--bind` address is bound exactly as given.
 
 **The banner** has one row per bound address with its `http://…` URL, plus a reachability
 note. On a tailnet it also lists this machine's MagicDNS URL and, when `tailscale serve`
@@ -350,8 +360,8 @@ it can and says loudly when a setup is risky, but it serves the setup you chose.
 
 Three things decide who gets in:
 
-- **Where dux listens.** Loopback by default: `127.0.0.1:3890` is reachable only from
-  the machine dux runs on. Unless `tailscale = "no"`, dux also listens on your Tailscale
+- **Where dux listens.** Loopback by default: `127.0.0.1:3890` and `[::1]:3890` are
+  reachable only from the machine dux runs on. Unless `tailscale = "no"`, dux also listens on your Tailscale
   address, so your tailnet devices reach it over WireGuard; on the default `"auto"` that
   listener comes and goes with the interface, with no restart (see
   [Reaching dux over Tailscale](/docs/tailscale)). `serve_while_tui = true` means a
@@ -423,7 +433,8 @@ excerpt of the first few:
 ```toml
 [server]
 # Bind host for `dux server`. An IP literal only (hostnames are not resolved):
-# 127.0.0.1 is the loopback default, 0.0.0.0 is all interfaces. Serving from
+# 127.0.0.1 is the loopback default (dux binds [::1] beside it), 0.0.0.0 is all
+# interfaces. Serving from
 # inside the TUI ignores this either way and always binds loopback (+ Tailscale).
 host = "127.0.0.1"
 

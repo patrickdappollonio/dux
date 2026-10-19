@@ -5873,10 +5873,14 @@ fn is_executable_file(path: &Path) -> bool {
 ///   detected, mirroring how tailscale-NOT-detected already degrades to loopback
 ///   with a warning. A bind failure here must NOT block the server: it warns
 ///   loudly and serves on the remaining (bound) addresses.
+///
+/// The IPv6 loopback leg ([`PlanAddr::ipv6_loopback`]) is required too, with one
+/// exception: a machine with no IPv6 at all skips it silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAddr {
     addr: std::net::SocketAddr,
     required: bool,
+    needs_ipv6: bool,
 }
 
 impl PlanAddr {
@@ -5885,6 +5889,7 @@ impl PlanAddr {
         Self {
             addr,
             required: true,
+            needs_ipv6: false,
         }
     }
 
@@ -5894,7 +5899,28 @@ impl PlanAddr {
         Self {
             addr,
             required: false,
+            needs_ipv6: false,
         }
+    }
+
+    /// `[::1]:port`, served beside `127.0.0.1:port` because `localhost` resolves
+    /// to both and browsers try `::1` first: without it, another program on
+    /// `[::1]:port` answers `http://localhost:port` while dux says it serves
+    /// there. Required, so that program stops the start, except on a machine
+    /// without IPv6, where it is skipped (see [`Self::skips_bind_failure`]).
+    pub fn ipv6_loopback(port: u16) -> Self {
+        Self {
+            addr: std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+            required: true,
+            needs_ipv6: true,
+        }
+    }
+
+    /// Whether `err`, from binding this address, means the leg is skipped
+    /// silently rather than handled by [`Self::is_required`]: only the IPv6
+    /// loopback leg, and only when the machine has no IPv6 to bind it on.
+    pub fn skips_bind_failure(&self, err: &std::io::Error) -> bool {
+        self.needs_ipv6 && ipv6_unavailable(err)
     }
 
     /// The socket address this listener targets.
@@ -5908,6 +5934,17 @@ impl PlanAddr {
     pub fn is_required(&self) -> bool {
         self.required
     }
+}
+
+/// Whether a bind error says this machine has no IPv6 to bind on: the address
+/// family is not supported (IPv6 compiled out or disabled at boot) or the address
+/// is not configured (IPv6 disabled by sysctl, which takes `::1` off loopback).
+/// Every other error, a taken port above all, is a real failure.
+pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EAFNOSUPPORT | libc::EADDRNOTAVAIL)
+    )
 }
 
 /// The fully-resolved listening plan for `dux server`, the single source of
@@ -6110,15 +6147,20 @@ pub fn resolve_server_plan(
     })
 }
 
-/// Primary address (REQUIRED) plus the Tailscale leg (BEST-EFFORT) when detected and
-/// not already covered. A wildcard primary (0.0.0.0 / ::) already binds the Tailscale
-/// interface, and an explicit bind to the Tailscale address is already in the list, so
-/// both cases skip the extra leg.
+/// Primary address (REQUIRED), the IPv6 loopback beside a `127.0.0.1` primary,
+/// plus the Tailscale leg (BEST-EFFORT) when detected and not already covered. A
+/// wildcard primary (0.0.0.0 / ::) already binds the Tailscale interface, and an
+/// explicit bind to the Tailscale address is already in the list, so both cases
+/// skip the extra leg. Any other primary is the operator's own address and gets
+/// no IPv6 loopback beside it.
 pub(crate) fn plan_addrs(
     bind: std::net::SocketAddr,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Vec<PlanAddr> {
     let mut addrs = vec![PlanAddr::required(bind)];
+    if bind.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+        addrs.push(PlanAddr::ipv6_loopback(bind.port()));
+    }
     if let Some(ip) = tailscale_ip {
         let ts = std::net::SocketAddr::new(ip, bind.port());
         let subsumed = bind.ip().is_unspecified() || bind.ip() == ip;
@@ -6129,8 +6171,8 @@ pub(crate) fn plan_addrs(
     addrs
 }
 
-/// LOCAL MODE bind addresses for the TUI palette flip: loopback (REQUIRED) plus the
-/// Tailscale leg. A thin wrapper over `plan_addrs` so the flip can never open a
+/// LOCAL MODE bind addresses for the TUI palette flip: loopback on both families
+/// (REQUIRED) plus the Tailscale leg. A thin wrapper over `plan_addrs` so the flip can never open a
 /// non-loopback primary listener.
 pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<PlanAddr> {
     plan_addrs(
@@ -6148,7 +6190,10 @@ mod local_addrs_tests {
         let addrs = local_addrs(3890, None);
         assert_eq!(
             addrs,
-            vec![PlanAddr::required("127.0.0.1:3890".parse().unwrap())]
+            vec![
+                PlanAddr::required("127.0.0.1:3890".parse().unwrap()),
+                PlanAddr::ipv6_loopback(3890),
+            ]
         );
     }
 
@@ -6162,12 +6207,14 @@ mod local_addrs_tests {
             addrs,
             vec![
                 PlanAddr::required("127.0.0.1:9090".parse().unwrap()),
+                PlanAddr::ipv6_loopback(9090),
                 PlanAddr::best_effort("100.101.102.103:9090".parse().unwrap()),
             ]
         );
         assert!(addrs[0].is_required(), "loopback must be required");
+        assert!(addrs[1].is_required(), "so must the IPv6 loopback");
         assert!(
-            !addrs[1].is_required(),
+            !addrs[2].is_required(),
             "the Tailscale leg must be best-effort"
         );
     }
@@ -6180,6 +6227,7 @@ mod local_addrs_tests {
             addrs,
             vec![
                 PlanAddr::required("127.0.0.1:3890".parse().unwrap()),
+                PlanAddr::ipv6_loopback(3890),
                 PlanAddr::best_effort("[fd7a:115c:a1e0::1]:3890".parse().unwrap()),
             ]
         );
@@ -6202,14 +6250,41 @@ mod resolve_plan_tests {
         let p = resolve_server_plan(&ServerConfig::default(), &cli(), None).unwrap();
         assert_eq!(
             p.addrs,
-            vec![PlanAddr::required("127.0.0.1:3890".parse().unwrap())]
+            vec![
+                PlanAddr::required("127.0.0.1:3890".parse().unwrap()),
+                PlanAddr::ipv6_loopback(3890),
+            ]
         );
     }
     #[test]
     fn default_adds_best_effort_tailscale_leg() {
         let p = resolve_server_plan(&ServerConfig::default(), &cli(), Some(ts())).unwrap();
-        assert_eq!(p.addrs.len(), 2);
-        assert!(!p.addrs[1].is_required());
+        assert_eq!(p.addrs.len(), 3);
+        assert!(!p.addrs[2].is_required());
+    }
+    #[test]
+    fn a_host_of_its_own_gets_no_ipv6_loopback_beside_it() {
+        for host in ["::1", "127.0.0.2", "192.168.1.5"] {
+            let server = ServerConfig {
+                host: host.to_string(),
+                ..ServerConfig::default()
+            };
+            let p = resolve_server_plan(&server, &cli(), None).unwrap();
+            assert_eq!(p.addrs.len(), 1, "{host}: {:?}", p.addrs);
+            assert!(
+                !p.addrs[0]
+                    .skips_bind_failure(&std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL))
+            );
+        }
+    }
+    #[test]
+    fn only_a_machine_without_ipv6_skips_the_ipv6_loopback() {
+        let leg = PlanAddr::ipv6_loopback(3890);
+        let err = std::io::Error::from_raw_os_error;
+        assert!(leg.skips_bind_failure(&err(libc::EADDRNOTAVAIL)));
+        assert!(leg.skips_bind_failure(&err(libc::EAFNOSUPPORT)));
+        assert!(!leg.skips_bind_failure(&err(libc::EADDRINUSE)));
+        assert!(!leg.skips_bind_failure(&err(libc::EACCES)));
     }
     #[test]
     fn no_tailscale_suppresses_leg() {
@@ -6222,7 +6297,7 @@ mod resolve_plan_tests {
                 .unwrap()
                 .addrs
                 .len(),
-            1
+            2
         );
     }
     #[test]
@@ -6271,7 +6346,10 @@ mod resolve_plan_tests {
         let p = resolve_server_plan(&ServerConfig::default(), &c, None).unwrap();
         assert_eq!(
             p.addrs,
-            vec![PlanAddr::required("127.0.0.1:7000".parse().unwrap())]
+            vec![
+                PlanAddr::required("127.0.0.1:7000".parse().unwrap()),
+                PlanAddr::ipv6_loopback(7000),
+            ]
         );
     }
     #[test]
@@ -6284,7 +6362,10 @@ mod resolve_plan_tests {
         let p = resolve_server_plan(&ServerConfig::default(), &c, None).unwrap();
         assert_eq!(
             p.addrs,
-            vec![PlanAddr::required("127.0.0.1:1234".parse().unwrap())]
+            vec![
+                PlanAddr::required("127.0.0.1:1234".parse().unwrap()),
+                PlanAddr::ipv6_loopback(1234),
+            ]
         );
     }
     #[test]

@@ -131,8 +131,8 @@ require = "network"   # or "tailnet", or "everywhere"
 
 What each column means:
 
-- **This machine** is a browser on the machine dux runs on, opening `localhost` or
-  `127.0.0.1`, with nothing relaying the request. Opening dux on one of this machine's other
+- **This machine** is a browser on the machine dux runs on, opening `localhost`,
+  `127.0.0.1` or `[::1]`, with nothing relaying the request. Opening dux on one of this machine's other
   addresses (its LAN address, or its own Tailscale address or MagicDNS name) is not this
   machine: a relay running on the machine arrives from those same addresses, so dux counts
   it as everyone else.
