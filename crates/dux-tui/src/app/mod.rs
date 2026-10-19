@@ -8050,22 +8050,69 @@ fn preflight_server_listeners(
     bind_preflight_addrs(dux_core::config::local_addrs(port, tailscale_ip))
 }
 
+/// How many times a pre-flight on port 0 picks a port before a clash on the
+/// one it picked is reported like any other. Every attempt is a fresh port from
+/// the kernel, so a second clash in a row is already unusual.
+const PREFLIGHT_PORT_PICKS: usize = 5;
+
+type Preflight = (Vec<std::net::TcpListener>, Vec<String>, Vec<String>);
+
 /// The binding half of [`preflight_server_listeners`], over a given plan.
-fn bind_preflight_addrs(
+fn bind_preflight_addrs(addrs: Vec<dux_core::config::PlanAddr>) -> Result<Preflight> {
+    bind_preflight_addrs_with(addrs, std::net::TcpListener::bind)
+}
+
+/// [`bind_preflight_addrs`] over a given bind, so a test can make the kernel's
+/// pick land where it wants.
+///
+/// On port 0 the first listener's port is one the kernel picked, and every later
+/// leg binds that same port. Something else holding it on another address (a
+/// dev server on `[::1]`, say) is a clash on a port nobody chose, so it means
+/// "pick again" rather than a refusal: everything bound so far is dropped and the
+/// whole pick starts over, up to [`PREFLIGHT_PORT_PICKS`] times. A configured
+/// port is never re-picked.
+fn bind_preflight_addrs_with(
     addrs: Vec<dux_core::config::PlanAddr>,
-) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
+    mut bind: impl FnMut(std::net::SocketAddr) -> std::io::Result<std::net::TcpListener>,
+) -> Result<Preflight> {
+    let mut attempt = 1;
+    loop {
+        match bind_preflight_once(&addrs, &mut bind) {
+            Err(PreflightFailure::PickedPortTaken(_)) if attempt < PREFLIGHT_PORT_PICKS => {
+                attempt += 1;
+            }
+            Err(PreflightFailure::PickedPortTaken(err) | PreflightFailure::Refused(err)) => {
+                return Err(err);
+            }
+            Ok(bound) => return Ok(bound),
+        }
+    }
+}
+
+enum PreflightFailure {
+    /// A required leg clashed on a port the kernel picked for this attempt.
+    PickedPortTaken(anyhow::Error),
+    Refused(anyhow::Error),
+}
+
+fn bind_preflight_once(
+    addrs: &[dux_core::config::PlanAddr],
+    bind: &mut impl FnMut(std::net::SocketAddr) -> std::io::Result<std::net::TcpListener>,
+) -> std::result::Result<Preflight, PreflightFailure> {
     let mut listeners = Vec::with_capacity(addrs.len());
     let mut urls = Vec::with_capacity(addrs.len());
     let mut warnings = Vec::new();
     let mut picked_port = None;
     for plan_addr in addrs {
         let mut addr = plan_addr.addr();
+        let mut on_picked_port = false;
         if addr.port() == 0
             && let Some(port) = picked_port
         {
             addr.set_port(port);
+            on_picked_port = true;
         }
-        match std::net::TcpListener::bind(addr) {
+        match bind(addr) {
             Ok(listener) => {
                 let bound = listener.local_addr().unwrap_or(addr);
                 picked_port.get_or_insert(bound.port());
@@ -8078,17 +8125,21 @@ fn bind_preflight_addrs(
                 ));
             }
             Err(err) if plan_addr.is_required() => {
+                let error = anyhow::anyhow!(
+                    "could not start the web server: {err} \
+                     (is something already listening on {addr}?)"
+                );
+                if on_picked_port && err.kind() == std::io::ErrorKind::AddrInUse {
+                    dux_core::logger::debug(&format!(
+                        "[server] {addr} is taken on the port the system picked; picking again"
+                    ));
+                    return Err(PreflightFailure::PickedPortTaken(error));
+                }
                 // Loopback (required): the flip cannot serve without it. Log the
                 // failing address to dux.log, then fail the pre-flight so the TUI
                 // surfaces the error and stays up.
-                dux_core::logger::error(&format!(
-                    "[server] could not start the web server: {err} \
-                     (is something already listening on {addr}?)"
-                ));
-                return Err(anyhow::anyhow!(
-                    "could not start the web server: {err} \
-                     (is something already listening on {addr}?)"
-                ));
+                dux_core::logger::error(&format!("[server] {error}"));
+                return Err(PreflightFailure::Refused(error));
             }
             Err(err) => {
                 // Tailscale leg (best-effort): drop it, warn, serve loopback-only.
@@ -8684,6 +8735,71 @@ mod tests {
         assert!(
             text.contains("could not start the web server") && text.contains(&addr.to_string()),
             "collision error should name the address: {text}"
+        );
+    }
+
+    /// Hold `[::1]` on some port P and make the kernel's first IPv4 pick land
+    /// on P, so the IPv6 loopback clashes on a port dux picked. `None` when this
+    /// machine has no IPv6 or 127.0.0.1:P is not free to stage it.
+    fn a_pick_that_clashes_on_ipv6() -> Option<(std::net::TcpListener, u16)> {
+        let held = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(held) => held,
+            Err(err) if dux_core::config::ipv6_unavailable(&err) => return None,
+            Err(err) => panic!("hold [::1]: {err}"),
+        };
+        let port = held.local_addr().expect("held addr").port();
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).ok()?;
+        Some((held, port))
+    }
+
+    #[test]
+    fn preflight_on_port_zero_picks_again_when_its_pick_is_taken_on_ipv6() {
+        let Some((_held, clash)) = a_pick_that_clashes_on_ipv6() else {
+            return;
+        };
+        let mut picks = 0;
+        let (listeners, urls, _) =
+            bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+                if addr.port() == 0 {
+                    picks += 1;
+                    if picks == 1 {
+                        return std::net::TcpListener::bind((addr.ip(), clash));
+                    }
+                }
+                std::net::TcpListener::bind(addr)
+            })
+            .expect("a clash on a picked port must pick again, not refuse");
+
+        assert_eq!(picks, 2, "the whole pick starts over once");
+        let ports: Vec<u16> = listeners
+            .iter()
+            .map(|l| l.local_addr().expect("addr").port())
+            .collect();
+        assert_eq!(listeners.len(), 2, "{urls:?}");
+        assert_ne!(ports[0], clash);
+        assert_eq!(ports[0], ports[1], "both loopbacks on the new pick");
+    }
+
+    #[test]
+    fn preflight_on_port_zero_stops_picking_after_a_bounded_number_of_clashes() {
+        let Some((_held, clash)) = a_pick_that_clashes_on_ipv6() else {
+            return;
+        };
+        let mut picks = 0;
+        let err = bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+            if addr.port() == 0 {
+                picks += 1;
+                return std::net::TcpListener::bind((addr.ip(), clash));
+            }
+            std::net::TcpListener::bind(addr)
+        })
+        .expect_err("a clash on every pick ends in the ordinary refusal");
+
+        assert_eq!(picks, PREFLIGHT_PORT_PICKS);
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&format!("listening on [::1]:{clash}?")),
+            "{text}"
         );
     }
 

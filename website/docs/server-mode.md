@@ -432,10 +432,15 @@ excerpt of the first few:
 
 ```toml
 [server]
-# Bind host for `dux server`. An IP literal only (hostnames are not resolved):
-# 127.0.0.1 is the loopback default (dux binds [::1] beside it), 0.0.0.0 is all
-# interfaces. Serving from
-# inside the TUI ignores this either way and always binds loopback (+ Tailscale).
+# Bind host for `dux server`. Must be an IP literal, not a hostname:
+#   "127.0.0.1": loopback only (the safe default; only this machine).
+#                dux also binds [::1] on the same port, because
+#                `localhost` can mean either; a machine without
+#                IPv6 just uses 127.0.0.1.
+#   "0.0.0.0":   every interface (reachable from the network).
+# Serving from inside the TUI ignores this and always binds loopback
+# (+ Tailscale), both the flip and `serve_while_tui`.
+# Override per run with `dux server --bind IP:port`.
 host = "127.0.0.1"
 
 # Bind port. Every way of serving uses it. The default is 3890, which is how
