@@ -3265,8 +3265,12 @@ async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
             let reached_tx = reached_tx.clone();
             let release = Arc::clone(&release);
             Box::pin(async move {
+                // Registered before `reached`, so an early release is not lost.
+                let notified = release.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let _ = reached_tx.send(());
-                release.notified().await;
+                notified.await;
             })
         })
     };
@@ -3536,8 +3540,12 @@ async fn an_events_socket_signed_out_while_opening_gets_nothing() {
             let reached_tx = reached_tx.clone();
             let release = Arc::clone(&release);
             Box::pin(async move {
+                // Registered before `reached`, so an early release is not lost.
+                let notified = release.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let _ = reached_tx.send(());
-                release.notified().await;
+                notified.await;
             })
         })
     };
@@ -3590,8 +3598,12 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
             let reached_tx = reached_tx.clone();
             let release = Arc::clone(&release);
             Box::pin(async move {
+                // Registered before `reached`, so an early release is not lost.
+                let notified = release.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let _ = reached_tx.send(());
-                release.notified().await;
+                notified.await;
             })
         })
     };
