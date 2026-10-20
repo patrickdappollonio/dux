@@ -944,12 +944,22 @@ impl CreatePlanContext<'_> {
     }
 
     /// Refuse the create, before any branch is made or fetched, when the
-    /// folder a new worktree named `name` would get is already there. Two
-    /// names can flatten to one folder ([`git::agent_folder_name`]), and that
-    /// folder belongs to whoever has it. A folder dux cannot stat is left to
-    /// the add itself, which refuses an occupied path on its own.
+    /// folder a new worktree named `name` would get is being removed or is
+    /// already there. The hold comes first, so a folder dux is still removing
+    /// is refused as that rather than as somebody's folder. Two names can
+    /// flatten to one folder ([`git::agent_folder_name`]), and that folder
+    /// belongs to whoever has it. A folder dux cannot stat is left to the add
+    /// itself, which refuses an occupied path on its own.
     fn refuse_occupied_folder(&self, project_name: &str, name: &str) -> bool {
         let folder = git::managed_worktree_path(&self.paths.worktrees_root, project_name, name);
+        if let Err(refused) = self.worktrees.hold_as(
+            crate::worktree_ops::HoldOwner::CreateOp(self.create_key.to_string()),
+            &folder,
+            crate::worktree_ops::WorktreeOpKind::CreateAgent,
+        ) {
+            self.send_failure(refused.sentence("create an agent there"));
+            return true;
+        }
         if git::directory_presence(&folder) != git::DirectoryPresence::Present {
             return false;
         }
@@ -3289,6 +3299,38 @@ mod tests {
             run.progress
         );
         assert!(!crate::git::local_branch_exists(repo.path(), clash));
+
+        // A folder dux is still removing is refused as that, not as somebody's.
+        let worktrees = crate::worktree_ops::WorktreeOps::new();
+        let removal = std::cell::RefCell::new(None);
+        let run = drive_create_job_run_with(
+            repo.path(),
+            CreateAgentRequest::NewProject {
+                project: test_project(repo.path()),
+                custom_name: Some(clash.to_string()),
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+                cloned: None,
+            },
+            |paths| {
+                let folder = paths
+                    .worktrees_root
+                    .join("repo")
+                    .join("dependabot-cargo-tray-icon-0-26-1");
+                std::fs::create_dir_all(&folder).unwrap();
+                *removal.borrow_mut() = Some(worktrees.announce_removal(&folder));
+            },
+            CreateJobRegistries {
+                worktrees: worktrees.clone(),
+                ..Default::default()
+            },
+        );
+        let failure = run.failure.expect("the create is refused");
+        assert!(
+            failure.contains("dux is removing the worktree at"),
+            "{failure}"
+        );
     }
 
     /// Drive `run_create_agent_job` for a `NewProject` request and return the

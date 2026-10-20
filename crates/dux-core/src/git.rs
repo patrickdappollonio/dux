@@ -125,9 +125,11 @@ fn symbolic_head(repo_path: &Path) -> Result<std::process::Output> {
 
 /// The branch name in the full ref `symbolic-ref` printed: `refs/heads/`
 /// stripped. A HEAD pointing anywhere else is returned whole, so it can never
-/// pass for a branch.
+/// pass for a branch. Only the newline git ends the line with comes off: a
+/// branch name may end in Unicode whitespace, and trimming it would name a
+/// different branch.
 fn branch_name_from_head_ref(stdout: &[u8]) -> String {
-    let full = String::from_utf8_lossy(stdout).trim().to_string();
+    let full = stdout_without_line_ends(stdout);
     match full.strip_prefix("refs/heads/") {
         Some(name) => name.to_string(),
         None => full,
@@ -187,7 +189,7 @@ pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let full_ref = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let full_ref = stdout_without_line_ends(&output.stdout);
     // e.g. "refs/remotes/origin/main" → "main"
     full_ref
         .strip_prefix("refs/remotes/origin/")
@@ -878,8 +880,18 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
     Ok(short)
 }
 
-/// Run a git command that produces a single trimmed line of stdout (a SHA, a
-/// ref, …). Returns `Err` with the stderr on non-zero exit. Stdin is detached.
+/// `stdout` with only the line ends git printed taken off. Never a whole
+/// trim: a branch name may end in Unicode whitespace, and trimming it would
+/// name a different branch.
+fn stdout_without_line_ends(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .trim_end_matches(['\n', '\r'])
+        .to_string()
+}
+
+/// Run a git command that produces a single line of stdout (a SHA, a ref, …),
+/// with its line end taken off. Returns `Err` with the stderr on non-zero
+/// exit. Stdin is detached.
 fn run_git_capture(path: &Path, args: &[&str], what: &str) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -895,7 +907,7 @@ fn run_git_capture(path: &Path, args: &[&str], what: &str) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(stdout_without_line_ends(&out.stdout))
 }
 
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
@@ -1455,7 +1467,7 @@ fn run_git_capture_bounded(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(stdout_without_line_ends(&output.stdout))
 }
 
 /// Whether origin has branch `name` right now, asked of origin itself with
@@ -6701,7 +6713,7 @@ fn never_in_an_agent_name(ch: char) -> bool {
 }
 
 /// The folder a NEW agent's worktree is named from its name: every character
-/// other than ASCII letters, digits, `-` and `_` becomes `-`, so
+/// other than a letter, a digit (in any script), `-` and `_` becomes `-`, so
 /// `dependabot/cargo/tray-icon-0.26.1` lands in
 /// `dependabot-cargo-tray-icon-0-26-1`. The branch keeps its real name.
 ///
@@ -6710,17 +6722,38 @@ fn never_in_an_agent_name(ch: char) -> bool {
 /// Two names that flatten alike want the same folder, and the second create is
 /// refused because the folder is already there. An existing agent's folder is
 /// the one its record holds, never derived from its name again.
+///
+/// A folder name longer than [`AGENT_FOLDER_MAX_BYTES`] is cut there, on a
+/// character boundary, and ends in a short hash of the WHOLE name instead, so
+/// it stays under the filesystem's 255-byte limit on one name and two long
+/// names that share their start still get folders of their own.
 pub fn agent_folder_name(name: &str) -> String {
-    name.chars()
+    let flat: String = name
+        .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' {
                 ch
             } else {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    if flat.len() <= AGENT_FOLDER_MAX_BYTES {
+        return flat;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(name.as_bytes());
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let mut keep = AGENT_FOLDER_MAX_BYTES - hash.len() - 1;
+    while !flat.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    format!("{}-{hash}", &flat[..keep])
 }
+
+/// The longest folder name [`agent_folder_name`] gives, in bytes: well under
+/// the 255 bytes Linux and macOS allow in one file name.
+const AGENT_FOLDER_MAX_BYTES: usize = 200;
 
 /// Input mapper for agent name text fields, for
 /// [`TextInput::with_char_map`]. A space becomes a dash, and a character no
@@ -12705,6 +12738,26 @@ mod tests {
         assert_eq!(branch, name);
         assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
         assert!(path.ends_with("proj/dependabot-cargo-tray-icon-0-26-1"));
+
+        // Letters outside English stay, so two such names do not collide.
+        assert_eq!(agent_folder_name("日本語/テスト"), "日本語-テスト");
+        assert_ne!(agent_folder_name("日本語"), agent_folder_name("中文字"));
+
+        // A long name is cut below the file-name limit and keeps a hash of the
+        // whole name, so two long names that share their start stay apart.
+        let long = |tail: &str| format!("{}{tail}", "deps/".repeat(80));
+        let (branch, path) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            None,
+            Some(&long("a")),
+        )
+        .unwrap();
+        assert_eq!(branch, long("a"));
+        let folder = path.file_name().unwrap().len();
+        assert!(folder < 255, "{folder} bytes");
+        assert_ne!(agent_folder_name(&long("a")), agent_folder_name(&long("b")));
     }
 
     #[test]
@@ -15053,6 +15106,14 @@ mod tests {
         assert_eq!(
             current_branch_opt(tmp.path()).unwrap(),
             Some("main".to_string())
+        );
+        // Git allows a branch name to end in Unicode whitespace, so only the
+        // newline git prints may come off.
+        let name = "release\u{a0}";
+        run_git(tmp.path(), &["switch", "-q", "-c", name]);
+        assert_eq!(
+            current_branch_opt(tmp.path()).unwrap(),
+            Some(name.to_string())
         );
     }
 
