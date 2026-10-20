@@ -39,9 +39,10 @@ Worktrees live under a `worktrees/` subdirectory of dux's data directory:
 The folder is the agent's name flattened into one plain folder name: every character other
 than letters, digits (in any language), `-` and `_` becomes `-`. An agent named
 `dependabot/cargo/tray-icon-0.26.1` gets the folder `dependabot-cargo-tray-icon-0-26-1`,
-while its branch keeps the real name. A very long name gets a shortened folder name that
-ends in a short code made from the full name, so it fits on disk and two long names still
-get folders of their own. Two names that flatten to the same folder can't both
+while its branch keeps the real name. A name with letters outside English gets a short code
+made from the full name on the end of its folder, so two names that look alike never share
+one. A very long name gets a shortened folder name ending in the same kind of code, so it
+fits on disk and two long names still get folders of their own. Two names that flatten to the same folder can't both
 have one, so the second create is refused and the first agent's folder is left alone.
 Agents created before dux flattened folder names keep the folders they already have.
 

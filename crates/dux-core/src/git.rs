@@ -6723,10 +6723,13 @@ fn never_in_an_agent_name(ch: char) -> bool {
 /// refused because the folder is already there. An existing agent's folder is
 /// the one its record holds, never derived from its name again.
 ///
-/// A folder name longer than [`AGENT_FOLDER_MAX_BYTES`] is cut there, on a
-/// character boundary, and ends in a short hash of the WHOLE name instead, so
-/// it stays under the filesystem's 255-byte limit on one name and two long
-/// names that share their start still get folders of their own.
+/// A name with any non-ASCII character always ends in `-` and a short hash of
+/// the WHOLE raw name: macOS treats canonically equivalent spellings of a
+/// name as one folder, and dux has no normalizer to see that, so two
+/// different names must never even look alike. A folder name past
+/// [`AGENT_FOLDER_MAX_UNITS`] is cut, on a character boundary, and gets the
+/// same hash, so it fits the filesystem's limit on one name and two long names
+/// that share their start still get folders of their own.
 pub fn agent_folder_name(name: &str) -> String {
     let flat: String = name
         .chars()
@@ -6738,22 +6741,34 @@ pub fn agent_folder_name(name: &str) -> String {
             }
         })
         .collect();
-    if flat.len() <= AGENT_FOLDER_MAX_BYTES {
+    let units = |text: &str| -> usize {
+        text.chars()
+            .map(|ch| if ch.is_ascii() { 1 } else { 4 })
+            .sum()
+    };
+    if name.is_ascii() && flat.len() <= AGENT_FOLDER_MAX_UNITS {
         return flat;
     }
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(name.as_bytes());
     let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    let mut keep = AGENT_FOLDER_MAX_BYTES - hash.len() - 1;
-    while !flat.is_char_boundary(keep) {
-        keep -= 1;
-    }
-    format!("{}-{hash}", &flat[..keep])
+    let budget = AGENT_FOLDER_MAX_UNITS - hash.len() - 1;
+    let mut used = 0;
+    let kept: String = flat
+        .chars()
+        .take_while(|ch| {
+            used += units(ch.encode_utf8(&mut [0; 4]));
+            used <= budget
+        })
+        .collect();
+    format!("{kept}-{hash}")
 }
 
-/// The longest folder name [`agent_folder_name`] gives, in bytes: well under
-/// the 255 bytes Linux and macOS allow in one file name.
-const AGENT_FOLDER_MAX_BYTES: usize = 200;
+/// The most a folder name from [`agent_folder_name`] may measure, counting an
+/// ASCII character as 1 and any other as 4. Linux allows 255 bytes in one
+/// file name and HFS+ 255 UTF-16 units of the DECOMPOSED name, where one
+/// character can grow to several; 4 covers both with room to spare.
+const AGENT_FOLDER_MAX_UNITS: usize = 200;
 
 /// Input mapper for agent name text fields, for
 /// [`TextInput::with_char_map`]. A space becomes a dash, and a character no
@@ -12739,9 +12754,26 @@ mod tests {
         assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
         assert!(path.ends_with("proj/dependabot-cargo-tray-icon-0-26-1"));
 
-        // Letters outside English stay, so two such names do not collide.
-        assert_eq!(agent_folder_name("日本語/テスト"), "日本語-テスト");
+        // Letters outside English stay, and such a name always ends in a hash
+        // of the raw name, so spellings macOS treats as one folder (here a
+        // precomposed and a decomposed Hangul syllable) get different ones.
+        let folder = agent_folder_name("日本語/テスト");
+        assert!(folder.starts_with("日本語-テスト-"), "{folder}");
         assert_ne!(agent_folder_name("日本語"), agent_folder_name("中文字"));
+        assert_ne!(
+            agent_folder_name("\u{ac01}-x"),
+            agent_folder_name("\u{1100}\u{1161}\u{11a8}/x")
+        );
+        // Each non-ASCII character counts as 4 toward the limit, because a
+        // macOS file name is measured decomposed: this one is 199 bytes but
+        // must still be cut.
+        let greek = format!("{}/{}", "\u{390}".repeat(50), "\u{390}".repeat(49));
+        let folder = agent_folder_name(&greek);
+        let units: usize = folder
+            .chars()
+            .map(|ch| if ch.is_ascii() { 1 } else { 4 })
+            .sum();
+        assert!(units <= 200, "{units}: {folder}");
 
         // A long name is cut below the file-name limit and keeps a hash of the
         // whole name, so two long names that share their start stay apart.
