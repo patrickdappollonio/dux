@@ -200,6 +200,41 @@ describe("reportUnauthorized", () => {
     expect(seen).toEqual(["other_dux"])
   })
 
+  it("never acts on a session that began after its refusal was checked", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    let release!: () => void
+    let first = true
+    let current: unknown = { ...SIGNED_IN, instance: "dux-a" }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const url = String(input)
+        if (url.endsWith("/auth/status") && first) {
+          first = false
+          return new Promise<Response>((resolve) => {
+            release = () => resolve(json(200, { ...SIGNED_IN, instance: "dux-a" }))
+          })
+        }
+        if (url.endsWith("/auth/status")) return Promise.resolve(json(200, current))
+        return Promise.resolve(json(204, undefined))
+      }),
+    )
+    g.reportUnauthorized()
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"))
+    // Signed out and back in while that check was out.
+    current = { ...SIGNED_OUT, instance: "dux-a" }
+    await g.signOut()
+    expect(g.getAuthPhase().kind).toBe("signed_out")
+    current = { ...SIGNED_IN, instance: "dux-a" }
+    await g.signIn("pw")
+    expect(g.getAuthPhase().kind).toBe("open")
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+
   it("signs out as before once the dux it opened on, or an unknown one, answers", async () => {
     statusBody = { ...SIGNED_IN, instance: "dux-a" }
     const g = await load()

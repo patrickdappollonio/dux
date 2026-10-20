@@ -258,7 +258,13 @@ export abstract class ReconnectingSocket {
       return
     }
     if (this.preflighting) return
-    const verdict = preflight()
+    let verdict: boolean | Promise<boolean>
+    try {
+      verdict = preflight()
+    } catch {
+      // A check that cannot run is no answer: attempt as before.
+      verdict = true
+    }
     if (verdict === true) {
       this.openNow()
       return
@@ -266,8 +272,10 @@ export abstract class ReconnectingSocket {
     this.preflighting = true
     void Promise.resolve(verdict)
       .catch(() => true)
-      .then((go) => {
+      .finally(() => {
         this.preflighting = false
+      })
+      .then((go) => {
         if (this.closedByUser || this.stopped || this.disposed || this.ws !== null) return
         if (!go || !this.policy.canRetry()) {
           if (this.reconnectTimer === null) this.armHeldRetry()

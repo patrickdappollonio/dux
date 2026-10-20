@@ -39,6 +39,9 @@ let passwordSet = true
 // Which dux answers, and whether its status route answers at all.
 let instance: string | undefined
 let statusDown = false
+// While set, every build read waits here until the test answers it.
+let holdBuilds = false
+let heldBuilds: Array<(answer: Response) => void> = []
 let spineBody: Spine = makeSpine(["s1"])
 let workspaceGets = 0
 let bootstrapGets = 0
@@ -92,6 +95,7 @@ const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
     return answer
   }
   if (url.includes("/api/v1/build")) {
+    if (holdBuilds) return new Promise<Response>((resolve) => heldBuilds.push(resolve))
     return protectedAnswer({ version: "development", process: "run-1", instance })
   }
   if (url.includes("/api/v1/bootstrap")) {
@@ -135,6 +139,8 @@ beforeEach(() => {
   passwordSet = true
   instance = undefined
   statusDown = false
+  holdBuilds = false
+  heldBuilds = []
   spineBody = makeSpine(["s1"])
   workspaceGets = 0
   bootstrapGets = 0
@@ -291,6 +297,70 @@ describe("a different dux answering a reopened socket", () => {
     expect(workspaceGets).toBe(gets)
     expect(bootstrapGets).toBe(boots)
     expect(store.getSnapshot().spine).toBe(spine)
+  })
+})
+
+describe("an app socket reopened twice before its dux is confirmed", () => {
+  // Drop the live app socket and let it reopen, once the check before the
+  // reconnect has let it through.
+  async function reopen(store: typeof import("./store")) {
+    const count = FakeWebSocket.instances.length
+    FakeWebSocket.instances[count - 1].drop(1006)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(count + 1), {
+      timeout: 3000,
+    })
+    FakeWebSocket.instances[count].open()
+    void store
+  }
+
+  const pushed = (ids: string[], rev: number) => ({
+    event: "workspace" as const,
+    rev,
+    workspace: makeSpine(ids),
+  })
+
+  it("lets only the newest open's check settle what it holds", async () => {
+    instance = "dux-a"
+    const { store, gate } = await loadSignedIn("")
+    FakeWebSocket.instances[0].open()
+    await settle()
+    holdBuilds = true
+    await reopen(store)
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(1))
+    await reopen(store)
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(2))
+    // B, answering the newer socket, pushes its workspace.
+    store.eventsSocket.onEvent(pushed(["only-on-b"], 50))
+    instance = "dux-b"
+    // A refetch would hide a frame applied too early, so it hangs.
+    holdWorkspace = () => {}
+    // The older open's check fails (B refuses this browser's session).
+    heldBuilds[0](json(401, { error: "auth_required" }))
+    await settle()
+    expect(store.getSnapshot().spine?.sessions.map((s) => s.id)).not.toContain("only-on-b")
+    await vi.waitFor(() => expect(gate.getAuthPhase()).toEqual({ kind: "other_dux" }))
+    heldBuilds[1](json(200, { version: "development", process: "run-9", instance: "dux-b" }))
+    await settle()
+    expect(store.getSnapshot().spine?.sessions.map((s) => s.id)).not.toContain("only-on-b")
+  })
+
+  it("keeps what the replaced open held, and applies it once the newest open is confirmed", async () => {
+    instance = "dux-a"
+    const { store } = await loadSignedIn("")
+    FakeWebSocket.instances[0].open()
+    await settle()
+    holdBuilds = true
+    await reopen(store)
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(1))
+    store.eventsSocket.onEvent(pushed(["from-first-open"], 60))
+    await reopen(store)
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(2))
+    // The recovery's own refetch hangs, so only the held frame can paint.
+    holdWorkspace = () => {}
+    heldBuilds[1](json(200, { version: "development", process: "run-1", instance: "dux-a" }))
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().spine?.sessions.map((s) => s.id)).toContain("from-first-open"),
+    )
   })
 })
 

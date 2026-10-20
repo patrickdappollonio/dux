@@ -364,10 +364,13 @@ export function reportUnauthorized(): void {
   // this page's own (a sign-out, a password change) is answered by its own dux.
   if (openedInstance() !== null && !actInFlight()) {
     if (unauthorizedCheck !== null) return
-    // Judged on the phase alone: a page that moved on meanwhile has its
-    // answer, and one still open still owes this refusal its outcome.
+    // The refusal belongs to the session it arrived in: a page that moved on
+    // meanwhile, or opened a newer session, has its answer already.
+    const atEpoch = epoch
+    const atOpens = opens
     unauthorizedCheck = fetchAuthStatus()
       .then((answer) => {
+        if (epoch !== atEpoch || opens !== atOpens) return
         if (phase.kind !== "open" && phase.kind !== "checking") return
         if (coveredBy(answer)) return
         signOutForRefusal()

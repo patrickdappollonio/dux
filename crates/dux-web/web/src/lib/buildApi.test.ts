@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { fetchServerIdentity, serverChanged } from "./buildApi"
+import { DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS } from "./connectionTiming"
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -60,6 +61,17 @@ describe("fetchServerIdentity", () => {
       process: "run-7",
       instance: "dux-a",
     })
+  })
+
+  it("answers null when the build read never finishes, after the request deadline", async () => {
+    vi.useFakeTimers()
+    stubFetch(
+      () => new Response(new ReadableStream({ start() {} }), { status: 200 }) as unknown as Response,
+    )
+    const pending = fetchServerIdentity()
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS * 1000)
+    await expect(pending).resolves.toBeNull()
+    vi.useRealTimers()
   })
 
   it("answers null rather than throwing when the server is unreachable", async () => {

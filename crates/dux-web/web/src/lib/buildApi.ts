@@ -11,6 +11,8 @@
 // weighs separately (`duxInstance.ts`): a different dux is not a restart.
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
+import { reconnectAttemptTimeoutMs } from "./connectionTiming"
+import { withDeadline } from "./deadline"
 
 export interface ServerIdentity {
   /** The binary's display version ("vX.Y.Z", or "development"). */
@@ -26,16 +28,21 @@ export interface ServerIdentity {
 // Throws the auth interruption when the sign-in gate stopped the read.
 export async function fetchServerIdentity(): Promise<ServerIdentity | null> {
   try {
-    const resp = await apiFetch("/api/v1/build", {
-      credentials: "same-origin",
-      cache: "no-store",
+    // One deadline over the whole read, body included: a reopened app socket
+    // waits on this answer, so a stalled one must end as unknown.
+    return await withDeadline(reconnectAttemptTimeoutMs(), async (signal) => {
+      const resp = await apiFetch("/api/v1/build", {
+        credentials: "same-origin",
+        cache: "no-store",
+        signal,
+      })
+      if (!resp.ok) return null
+      const body: unknown = await resp.json()
+      if (typeof body !== "object" || body === null) return null
+      const { version, process, instance } = body as Partial<ServerIdentity>
+      if (typeof version !== "string" || typeof process !== "string") return null
+      return { version, process, instance: typeof instance === "string" ? instance : null }
     })
-    if (!resp.ok) return null
-    const body: unknown = await resp.json()
-    if (typeof body !== "object" || body === null) return null
-    const { version, process, instance } = body as Partial<ServerIdentity>
-    if (typeof version !== "string" || typeof process !== "string") return null
-    return { version, process, instance: typeof instance === "string" ? instance : null }
   } catch (e) {
     // A read the sign-in gate stopped was never answered by anyone, so it is
     // neither "unknown" nor a completed check: the caller must not treat it as

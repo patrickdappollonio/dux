@@ -142,6 +142,28 @@ describe("ReconnectingSocket", () => {
     expect(opened).toBe(1)
   })
 
+  it("reconnects as before when the check before an attempt throws or fails", async () => {
+    vi.useFakeTimers()
+    for (const preflight of [
+      () => {
+        throw new Error("boom")
+      },
+      () => Promise.reject(new Error("boom")),
+    ]) {
+      const sock = new TestSocket("ws://x", { ...UNLIMITED, preflight })
+      sock.connect()
+      last().open()
+      const before = FakeWS.instances.length
+      last().triggerClose()
+      await vi.advanceTimersByTimeAsync(RECONNECT_MIN_MS)
+      expect(FakeWS.instances.length).toBe(before + 1)
+      // And again: nothing was left half-way that would hold the next one.
+      last().triggerClose()
+      await vi.advanceTimersByTimeAsync(RECONNECT_MIN_MS * 2)
+      expect(FakeWS.instances.length).toBe(before + 2)
+    }
+  })
+
   it("forwards messages to the subclass handler", () => {
     const sock = new TestSocket("ws://x")
     sock.connect()

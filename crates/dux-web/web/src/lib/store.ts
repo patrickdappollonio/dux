@@ -1379,8 +1379,14 @@ function routeEvent(event: EventsServerMessage): void {
 // While a reopened app socket's dux is not yet known to be this page's, what it
 // pushes is held here rather than applied, with the refetch the open owes; the
 // identity answer then applies both, or drops both for a different dux.
+//
+// The hold belongs to the newest open: only that open's check settles it. A
+// reopen before it settles keeps what the replaced open held, in order, ahead of
+// what the new one brings, so a one-shot frame is never lost on the same dux.
 let heldFrames: EventsServerMessage[] | null = null
 let heldRecovery: (() => void) | null = null
+let heldOwner = 0
+let openSeq = 0
 
 eventsSocket.onEvent = (event) => {
   if (heldFrames !== null) {
@@ -1390,17 +1396,27 @@ eventsSocket.onEvent = (event) => {
   routeEvent(event)
 }
 
-// End the hold: `apply` runs the held refetch and then the held frames in the
-// order they arrived; otherwise both are dropped.
-function settleHeldOpen(apply: boolean): void {
-  if (heldFrames === null) return
+// End the hold for the open `owner`: `apply` applies the held frames in the
+// order they arrived and then runs the held refetch; otherwise both are
+// dropped. A check that belongs to no open, or to a replaced one, settles
+// nothing.
+function settleHeldOpen(owner: number | null, apply: boolean): void {
+  if (heldFrames === null || owner === null || owner !== heldOwner) return
   const frames = heldFrames
   const recovery = heldRecovery
   heldFrames = null
   heldRecovery = null
   if (!apply) return
-  recovery?.()
   for (const frame of frames) routeEvent(frame)
+  recovery?.()
+}
+
+// Whether what an open held may be applied, on its own check's answer: an
+// unknown answer is today's behaviour; a different dux or a new run is not.
+function heldMayApply(current: ServerIdentity | null): boolean {
+  if (current === null) return true
+  if (noteReportedInstance(current.instance) === "different") return false
+  return !serverChanged(serverIdentityBaseline, current)
 }
 
 function gateCovered(): boolean {
@@ -1478,7 +1494,7 @@ async function loadServerIdentityBaseline(): Promise<void> {
 // discards whatever the early refetch produced.
 let identityProbeSeq = 0
 
-async function reloadIfServerChanged(): Promise<void> {
+async function reloadIfServerChanged(owner: number | null = null): Promise<void> {
   const seq = ++identityProbeSeq
   const epoch = authEpoch()
   let current: ServerIdentity | null
@@ -1487,22 +1503,26 @@ async function reloadIfServerChanged(): Promise<void> {
   } catch (e) {
     // As above: no answer is no check, and the gate stays shut. What a held
     // open was waiting for is today's unchecked recovery.
-    settleHeldOpen(!gateCovered())
+    settleHeldOpen(owner, !gateCovered())
     if (isAuthInterruption(e)) return
     throw e
   }
-  // A newer check was asked since: that one settles whatever is held.
-  if (seq !== identityProbeSeq) return
+  // A newer check was asked since: it decides the page; this one only settles
+  // what its own open held.
+  if (seq !== identityProbeSeq) {
+    settleHeldOpen(owner, !gateCovered() && heldMayApply(current))
+    return
+  }
   // A late answer decides nothing: the page left its session, or it is
   // already covered by the gate.
   if (authEpoch() !== epoch || authPaused()) {
-    settleHeldOpen(!gateCovered())
+    settleHeldOpen(owner, !gateCovered())
     return
   }
   // A different dux is not a restart of this one: the page is covered and asks,
   // rather than reloading itself into somebody else's dux.
   if (current !== null && noteReportedInstance(current.instance) === "different") {
-    settleHeldOpen(false)
+    settleHeldOpen(owner, false)
     reportOtherDux()
     return
   }
@@ -1512,11 +1532,11 @@ async function reloadIfServerChanged(): Promise<void> {
     // ids, the applied replay generation) can be read in the meantime. See
     // `serverRun.ts`.
     noteServerRunProbe("changed")
-    settleHeldOpen(false)
+    settleHeldOpen(owner, false)
     reloadLeavingNoModalEntry()
     return
   }
-  settleHeldOpen(true)
+  settleHeldOpen(owner, true)
   noteServerRunProbe(current === null ? "unknown" : "same")
   // The check has RESOLVED and the run has not moved, which is the moment a PTY
   // socket may attach again. `conn === "open"` is true a whole round trip before
@@ -1567,9 +1587,11 @@ eventsSocket.onOpen = () => {
     if (openedInstance() !== null) {
       // A page that knows its dux applies nothing from this socket until the
       // answer to this open's check says it is that dux.
-      heldFrames = []
+      const owner = ++openSeq
+      if (heldFrames === null) heldFrames = []
+      heldOwner = owner
       heldRecovery = recover
-      void reloadIfServerChanged().catch(() => settleHeldOpen(!gateCovered()))
+      void reloadIfServerChanged(owner).catch(() => settleHeldOpen(owner, !gateCovered()))
     } else {
       void reloadIfServerChanged()
       recover()

@@ -117,18 +117,21 @@ export type StatusAnswer =
   | { kind: "unreachable"; timedOut: boolean }
 
 export async function fetchAuthStatus(): Promise<StatusAnswer> {
-  let resp: Response
+  // One deadline over the whole read, body included: a server that sends its
+  // headers and then stalls must not hold whoever is waiting on the answer.
   try {
-    resp = await withDeadline(reconnectAttemptTimeoutMs(), (signal) =>
-      fetch(apiUrl("/api/v1/auth/status"), {
-        credentials: "same-origin",
-        cache: "no-store",
-        signal,
-      }),
-    )
+    return await withDeadline(reconnectAttemptTimeoutMs(), readAuthStatus)
   } catch (e) {
     return { kind: "unreachable", timedOut: isDeadline(e) }
   }
+}
+
+async function readAuthStatus(signal: AbortSignal): Promise<StatusAnswer> {
+  const resp = await fetch(apiUrl("/api/v1/auth/status"), {
+    credentials: "same-origin",
+    cache: "no-store",
+    signal,
+  })
   if (!resp.ok) {
     const body = await readErrorBody(resp)
     if (isBlocked(resp.status, body)) return { kind: "blocked" }

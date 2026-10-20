@@ -184,6 +184,18 @@ describe("fetchAuthStatus", () => {
     expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })
   })
 
+  it("gives up on a status answer whose body never finishes, after the request deadline", async () => {
+    for (const status of [200, 404]) {
+      vi.useFakeTimers()
+      const endless = new ReadableStream({ start() {} })
+      stubFetch(new Response(endless, { status }))
+      const pending = fetchAuthStatus()
+      await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS * 1000)
+      expect(await pending).toEqual({ kind: "unreachable", timedOut: true })
+      vi.useRealTimers()
+    }
+  })
+
   it("answers unknown for a gateway's page while dux restarts behind it", async () => {
     stubFetch(new Response("<html>Bad Gateway</html>", { status: 502 }))
     expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })
