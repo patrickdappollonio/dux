@@ -7,6 +7,8 @@
 // run, moves after a rebuild and restart.
 //
 // Deliberately narrow: this identifies the run, never a schema or data shape.
+// The read also names which dux the run belongs to (`instance`), which the page
+// weighs separately (`duxInstance.ts`): a different dux is not a restart.
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 
@@ -15,6 +17,8 @@ export interface ServerIdentity {
   version: string
   /** The server RUN, minted once per process. */
   process: string
+  /** Which dux this is, kept across its restarts; null when it did not say. */
+  instance: string | null
 }
 
 // Reads the server's identity, answering `null` for anything that is not the
@@ -29,9 +33,9 @@ export async function fetchServerIdentity(): Promise<ServerIdentity | null> {
     if (!resp.ok) return null
     const body: unknown = await resp.json()
     if (typeof body !== "object" || body === null) return null
-    const { version, process } = body as Partial<ServerIdentity>
+    const { version, process, instance } = body as Partial<ServerIdentity>
     if (typeof version !== "string" || typeof process !== "string") return null
-    return { version, process }
+    return { version, process, instance: typeof instance === "string" ? instance : null }
   } catch (e) {
     // A read the sign-in gate stopped was never answered by anyone, so it is
     // neither "unknown" nor a completed check: the caller must not treat it as

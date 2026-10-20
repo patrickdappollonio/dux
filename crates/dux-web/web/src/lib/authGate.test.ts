@@ -135,11 +135,18 @@ describe("initAuthGate", () => {
     vi.useRealTimers()
   })
 
-  it("opens for a server that answers without the document, an older dux", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })))
+  it("opens when a gateway answers in dux's place, since that is no evidence", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 502 })))
     const g = await load()
     await g.initAuthGate()
     expect(g.getAuthPhase()).toEqual({ kind: "open", status: null })
+  })
+
+  it("covers the page, not with the login, when something that is not dux answers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Unauthorized", { status: 401 })))
+    const g = await load()
+    await g.initAuthGate()
+    expect(g.getAuthPhase()).toEqual({ kind: "not_dux" })
   })
 
   it("shows the blocked page for a blocked address", async () => {
@@ -317,6 +324,31 @@ describe("probeAfterDrop", () => {
     await g.initAuthGate()
     await g.probeAfterDrop()
     expect(g.getAuthPhase().kind).toBe("open")
+  })
+
+  it("covers the page instead of asking for the password of a different dux at this address", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = { ...SIGNED_OUT, instance: "dux-b" }
+    await g.probeAfterDrop()
+    expect(g.getAuthPhase()).toEqual({ kind: "other_dux" })
+    // Nothing that dux says afterwards moves the page; only a reload leaves.
+    g.reportSocketAuthClose(g.AUTH_REQUIRED_CLOSE)
+    await g.retryAuthGate()
+    expect(g.getAuthPhase()).toEqual({ kind: "other_dux" })
+  })
+
+  it("asks for the password again when the same dux answers, and an answer naming no dux changes nothing", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = SIGNED_IN
+    await g.probeAfterDrop()
+    expect(g.getAuthPhase().kind).toBe("open")
+    statusBody = { ...SIGNED_OUT, instance: "dux-a" }
+    await g.probeAfterDrop()
+    expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "expired" })
   })
 
   it("keeps one probe in flight", async () => {

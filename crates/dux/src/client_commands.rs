@@ -194,7 +194,18 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             let saved = Remotes::load(root)?;
             let name = named_or_selected(name, selection, &saved, "login")?;
             let remote = saved.get(&name)?.clone();
-            if !sign_in::password_set(&name, &remote)? {
+            let found = sign_in::look(&name, &remote)?;
+            if !found.password_set {
+                // Nothing to sign in to, but this is the dux the remote means
+                // from now on.
+                Remotes::update(root, |saved| {
+                    if let Some(entry) = saved.remotes.get_mut(&name)
+                        && entry.url == remote.url
+                    {
+                        entry.instance = found.instance.clone();
+                    }
+                    Ok(())
+                })?;
                 return Ok(line(format!(
                     "{name} has no password, so there is nothing to sign in to: commands reach it \
                      as they are."
@@ -211,7 +222,13 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             }
             // The prompt may have waited while another command changed the
             // remote; the token is kept only for the URL that issued it.
-            Remotes::keep_token(root, &name, &remote.url, &signed_in.token)?;
+            Remotes::keep_token(
+                root,
+                &name,
+                &remote.url,
+                &signed_in.token,
+                found.instance.as_deref(),
+            )?;
             Ok(line(format!("Signed in to {name}.")))
         }
         RemoteSub::Logout { name } => {

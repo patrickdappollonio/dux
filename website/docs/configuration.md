@@ -57,6 +57,7 @@ A handful of subcommands handle the file without you hunting for it:
   - `dux config reset --all` is the full factory reset: all of that, plus the session
     database and every worktree dux made. It keeps one thing, the note that you have
     already seen the welcome screen, so the next start does not greet you as a stranger.
+    Browser tabs and saved remotes that knew it treat the reset dux as a different one.
     See the warning below.
 
 Hand-edits are preserved across saves: your comments and ordering survive.

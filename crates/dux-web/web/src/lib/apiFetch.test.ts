@@ -56,6 +56,15 @@ describe("apiFetch", () => {
     expect(gate.getAuthPhase().kind).toBe("signed_out")
   })
 
+  it("never reads a 401 without dux's code as this browser's session ending", async () => {
+    const { api, gate } = await load()
+    await gate.initAuthGate()
+    routes = async () => new Response("Unauthorized", { status: 401 })
+    const err = await api.apiFetch("/api/v1/workspace").catch((e: unknown) => e)
+    expect(api.isAuthInterruption(err)).toBe(true)
+    expect(gate.getAuthPhase()).toEqual({ kind: "not_dux" })
+  })
+
   it("leaves a 401 that is about something else to its caller", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()

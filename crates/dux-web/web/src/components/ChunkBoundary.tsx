@@ -1,6 +1,7 @@
 import { Component, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import { confirmedSameDux } from "@/lib/authGate"
 
 // dux embeds a content-hashed JS bundle in its Rust binary, so a tab left open
 // across a server rebuild still references the old hashed chunk URLs: a lazy
@@ -10,6 +11,9 @@ import { Button } from "@/components/ui/button"
 // The first error attempts one automatic reload to pick up the new bundle,
 // guarded so a genuinely broken page cannot loop: an auto-reload only happens
 // when none did in the last RELOAD_WINDOW_MS. Otherwise the card asks the user.
+// The chunk may also be missing because something other than this dux answers
+// at the address now, so the reload waits until the status route confirms it
+// is this dux: a reload must never load somebody else's page into the tab.
 const RELOAD_KEY = "dux-chunk-reload"
 const RELOAD_WINDOW_MS = 30_000
 
@@ -43,7 +47,9 @@ export class ChunkBoundary extends Component<
     // Any caught error here is almost certainly a failed dynamic import after a
     // redeploy. Auto-reload once; if we already did recently, fall through to
     // the manual card rendered below.
-    if (tryClaimReload()) location.reload()
+    void confirmedSameDux().then((same) => {
+      if (same && tryClaimReload()) location.reload()
+    })
   }
 
   render() {

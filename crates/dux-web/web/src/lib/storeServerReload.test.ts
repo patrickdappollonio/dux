@@ -14,7 +14,7 @@ const reloadPage = vi.fn()
 vi.mock("./reloadPage", () => ({ reloadPage }))
 
 // What `GET /api/v1/build` answers next. Mutated per test.
-let identity: { version: string; process: string } | null = {
+let identity: { version: string; process: string; instance?: string } | null = {
   version: "development",
   process: "run-1",
 }
@@ -121,5 +121,28 @@ describe("reconnect against a possibly-restarted server", () => {
     store.eventsSocket.onOpen()
     await settle()
     expect(reloadPage).not.toHaveBeenCalled()
+  })
+})
+
+// Last in the file: the different-dux cover is the one state nothing leaves.
+describe("reconnect against a dux at the same address", () => {
+  it("still hard reloads by itself when the same dux restarted", async () => {
+    identity = { version: "development", process: "run-1", instance: "dux-a" }
+    store.eventsSocket.onOpen()
+    await settle()
+    expect(reloadPage).not.toHaveBeenCalled()
+    identity = { version: "development", process: "run-2", instance: "dux-a" }
+    store.eventsSocket.onOpen()
+    await settle()
+    expect(reloadPage).toHaveBeenCalledTimes(1)
+  })
+
+  it("covers the page and does not reload when a different dux answers", async () => {
+    const gate = await import("./authGate")
+    identity = { version: "development", process: "run-3", instance: "dux-b" }
+    store.eventsSocket.onOpen()
+    await settle()
+    expect(reloadPage).not.toHaveBeenCalled()
+    expect(gate.getAuthPhase()).toEqual({ kind: "other_dux" })
   })
 })

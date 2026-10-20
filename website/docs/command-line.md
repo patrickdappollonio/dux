@@ -296,6 +296,21 @@ Signing in again where you already were ends the earlier sign-in on that dux. If
 be ended, `dux remote login` says so, keeps the new one, and the earlier one ends on its
 own once it goes unused.
 
+### When the remote's address changes hands
+
+A remote remembers which dux it signed in to (or, saved before it knew, the first dux it
+reaches). If a different dux answers at that URL later, say because yours moved to another
+port, the command stops before anything else, password included:
+
+```text
+box (https://box.tailnet-name.ts.net) is now a different dux than the one this remote signed in to
+Run "dux remote login box" to use it.
+```
+
+`dux remote login box` makes the dux there the one `box` means from now on. If a program
+that isn't dux answers instead, the command says `box (https://…) answers, but not as dux`
+rather than printing whatever page it sent back.
+
 > [!WARNING]
 > Saved remotes and their sign-ins are kept in `remotes.toml` in the config folder,
 > readable only by you, never in `config.toml`. Neither file is safe to paste into a bug

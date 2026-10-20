@@ -3,12 +3,15 @@ import { wsUrl } from "./apiBase"
 import { isAuthInterruption } from "./apiFetch"
 import {
   authPaused,
+  getAuthPhase,
   initAuthGate,
   onAuthOpen,
   probeAfterDrop,
   refreshAuthStatus,
+  reportOtherDux,
   subscribeAuth,
 } from "./authGate"
+import { noteReportedInstance } from "./duxInstance"
 import {
   draftAfterRandomizeOff,
   generatedNameAfterEdit,
@@ -1419,6 +1422,10 @@ async function loadServerIdentityBaseline(): Promise<void> {
     if (isAuthInterruption(e)) return
     throw e
   }
+  if (answer !== null && noteReportedInstance(answer.instance) === "different") {
+    reportOtherDux()
+    return
+  }
   serverIdentityBaseline = answer
   noteServerValidated()
   if (serverIdentityBaseline === null) {
@@ -1443,6 +1450,12 @@ async function reloadIfServerChanged(): Promise<void> {
     // As above: no answer is no check, and the gate stays shut.
     if (isAuthInterruption(e)) return
     throw e
+  }
+  // A different dux is not a restart of this one: the page is covered and asks,
+  // rather than reloading itself into somebody else's dux.
+  if (current !== null && noteReportedInstance(current.instance) === "different") {
+    reportOtherDux()
+    return
   }
   if (serverChanged(serverIdentityBaseline, current)) {
     // Published BEFORE the reload, because the reload is not instantaneous and
@@ -2550,6 +2563,9 @@ function boot(): void {
 // socket attaches (attaching launches a provider).
 subscribeAuth(() => {
   if (authPaused()) clearServerValidated()
+  // A different dux at this address: the app socket stops talking to it, so
+  // the tab neither listens to it nor counts among its browsers.
+  if (getAuthPhase().kind === "other_dux") eventsSocket.close()
 })
 
 if (hasBrowser) {
@@ -3536,7 +3552,7 @@ function dropModalEntries(pending: PendingTraversal, onFail: () => void): boolea
 // Reload the page, the one place the app does (`reloadPage`), with the modal
 // entries taken away first: a reload starts with no modals open, so an entry
 // left current would be a stop Back spends on nothing.
-function reloadLeavingNoModalEntry(): void {
+export function reloadLeavingNoModalEntry(): void {
   if (!dropModalEntriesBeforeMove(reloadPage)) reloadPage()
 }
 

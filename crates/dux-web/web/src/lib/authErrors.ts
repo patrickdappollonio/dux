@@ -44,12 +44,10 @@ export async function readErrorBody(resp: Response): Promise<ErrorBody> {
 }
 
 /// Whether a refusal is the contract's "this browser has no valid session".
-/// A 401 with no readable reason counts: no other dux route answers 401
-/// without one.
+/// Only with its code: every dux route that answers 401 says why, so a bare
+/// 401 is something other than dux answering.
 export function isAuthRequired(status: number, body: ErrorBody): boolean {
-  if (status !== 401) return false
-  const error = str(body.json.error)
-  return error === null || error === "auth_required"
+  return status === 401 && body.json.error === "auth_required"
 }
 
 /// Whether a refusal is the contract's "this address is blocked". The answer

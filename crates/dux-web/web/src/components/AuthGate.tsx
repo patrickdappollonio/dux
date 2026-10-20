@@ -7,6 +7,8 @@ import {
   BrokenPage,
   CheckingPage,
   LoginPage,
+  NotDuxPage,
+  OtherDuxPage,
   StuckPage,
   UnreachablePage,
 } from "@/components/LoginPage"
@@ -17,7 +19,8 @@ import { useAuthPhase, type AuthPhase } from "@/lib/authGate"
 import { GATE_LAYER_ATTR } from "@/lib/gateLayer"
 
 // The root of the page: the app, and over it whatever page the sign-in gate
-// needs (the login, blocked, broken, unreachable or stuck page).
+// needs (the login, blocked, broken, unreachable or stuck page, or the cover
+// for a different dux, or something that is not dux, at this address).
 //
 // The app mounts the first time the gate opens and then STAYS mounted. A
 // session that ends mid-use hides it (`visibility: hidden`, so its layout is
@@ -75,6 +78,10 @@ function gatePage(phase: Exclude<AuthPhase, { kind: "open" }>): ReactNode {
       return <UnreachablePage timedOut={phase.timedOut} />
     case "stuck":
       return <StuckPage />
+    case "other_dux":
+      return <OtherDuxPage />
+    case "not_dux":
+      return <NotDuxPage />
     default:
       return assertNever(phase)
   }

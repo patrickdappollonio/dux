@@ -31,6 +31,12 @@ pub struct Remote {
     /// The CLI sign-in token, while signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The instance id of the dux this remote signed in to, so a different
+    /// dux answering at the same URL is noticed. Learned at sign-in, or on
+    /// the first connection for a remote saved without one. A consistency
+    /// check only, never an auth or trust input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// The file every change to [`REMOTES_FILE`] holds an exclusive lock on.
@@ -143,10 +149,17 @@ impl Remotes {
     /// # Errors
     ///
     /// [`Exit::Failed`], keeping nothing, when `name` was removed or now names another URL.
-    pub fn keep_token(root: &Path, name: &str, url: &str, token: &str) -> Result<(), CliError> {
+    pub fn keep_token(
+        root: &Path,
+        name: &str,
+        url: &str,
+        token: &str,
+        instance: Option<&str>,
+    ) -> Result<(), CliError> {
         Self::update(root, |saved| match saved.remotes.get_mut(name) {
             Some(remote) if remote.url == url => {
                 remote.token = Some(token.to_string());
+                remote.instance = instance.map(str::to_string);
                 Ok(())
             }
             _ => Err(CliError::new(
@@ -188,6 +201,7 @@ impl Remotes {
                 url,
                 insecure,
                 token: None,
+                instance: None,
             },
         );
         Ok(())
@@ -410,15 +424,15 @@ mod tests {
             saved.add("work", "https://other.example.com", false)
         })
         .unwrap();
-        let refused =
-            Remotes::keep_token(&root, "work", "https://work.example.com", "new").unwrap_err();
+        let refused = Remotes::keep_token(&root, "work", "https://work.example.com", "new", None)
+            .unwrap_err();
         assert_eq!(refused.exit, Exit::Failed);
         assert!(refused.message.contains("work"), "{}", refused.message);
         assert_eq!(
             Remotes::load(&root).unwrap().get("work").unwrap().token,
             None
         );
-        Remotes::keep_token(&root, "work", "https://other.example.com", "new").unwrap();
+        Remotes::keep_token(&root, "work", "https://other.example.com", "new", None).unwrap();
         assert_eq!(
             Remotes::load(&root)
                 .unwrap()

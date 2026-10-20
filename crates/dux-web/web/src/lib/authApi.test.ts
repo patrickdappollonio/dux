@@ -48,6 +48,7 @@ const FULL = {
   weak_password: false,
   can_set_first_password: false,
   auth_broken: false,
+  instance: "dux-a",
 }
 
 describe("normalizeAuthStatus", () => {
@@ -152,8 +153,22 @@ describe("fetchAuthStatus", () => {
     vi.useRealTimers()
   })
 
-  it("answers unknown for a route this server does not have", async () => {
-    stubFetch(new Response("not found", { status: 404 }))
+  it("answers not dux for what no dux sends from its public status route", async () => {
+    for (const resp of [
+      new Response("not found", { status: 404 }),
+      new Response("Unauthorized", { status: 401 }),
+      new Response("<html><body>hello</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    ]) {
+      stubFetch(resp)
+      expect(await fetchAuthStatus()).toEqual({ kind: "not_dux" })
+    }
+  })
+
+  it("answers unknown for a gateway's page while dux restarts behind it", async () => {
+    stubFetch(new Response("<html>Bad Gateway</html>", { status: 502 }))
     expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })
   })
 })

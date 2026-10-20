@@ -124,6 +124,22 @@ everything it had open, for as long as you leave the page open. See
 [the browser terminals](/docs/web-workspace#the-browser-terminals) for exactly how long
 it keeps trying and what it does when your phone falls asleep.
 
+#### When something else answers at the address
+
+Every dux remembers who it is across restarts, so a tab can tell its own dux coming back
+from a stranger moving in on the same port:
+
+- **A different dux** (you moved yours to another port, and another dux now listens on the
+  old one): the tab covers itself with "A different dux is answering at this address now."
+  It does not reload, does not ask for that dux's password and sends it nothing until you
+  press **Open the dux at this address**, which loads that dux fresh.
+- **Something that isn't dux** (any other program on the port): the tab says "Something
+  that isn't dux is answering at this address." instead of a sign-in page, and never
+  reloads into that program. **Reconnect** asks again once dux is back.
+
+A dux whose session database is deleted, by `dux config reset --all` for one, counts as a
+different dux afterwards.
+
 ### Flip a running TUI into the browser
 
 Already in the TUI and want a browser instead? Open the command palette and run

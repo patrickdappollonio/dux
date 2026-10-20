@@ -31,6 +31,13 @@
 // nothing (the reopen's own refetches succeed every time), so only quiet
 // forgets the count.
 //
+// WHICH DUX. Every status answer names the dux that gave it (`duxInstance.ts`).
+// One that names a different dux from the one this page opened on puts up its
+// own cover instead of the login page: signing in there would be signing in to
+// somebody else's dux. That cover is the one phase nothing leaves but the
+// reload its button asks for. An answer from something that is not dux at all
+// covers the page too, and its Reconnect asks again.
+//
 // What signing out does NOT do: reload the page or touch `location.hash`. The
 // store, the editor's drafts and the URL all live in page memory and survive a
 // sign-out, so signing back in returns to exactly where the user was.
@@ -51,6 +58,7 @@ import {
   type LogoutAnswer,
   type PasswordAnswer,
 } from "./authActions"
+import { noteReportedInstance } from "./duxInstance"
 
 export { normalizeAuthStatus }
 export type { AuthStatus }
@@ -89,6 +97,11 @@ export type AuthPhase =
   /** The circuit breaker tripped: the server keeps refusing a session its
    * own status route calls valid. */
   | { kind: "stuck" }
+  /** A different dux answers at this address than the one the page opened
+   * on. Left only by reloading. */
+  | { kind: "other_dux" }
+  /** Something that is not dux answers at this address. */
+  | { kind: "not_dux" }
 
 /// What a status answer means for the page. Broken auth wins over everything:
 /// a password the server cannot check is not a password the page can ask for.
@@ -113,6 +126,8 @@ const listeners = new Set<() => void>()
 const openListeners = new Set<() => void>()
 
 function setPhase(next: AuthPhase, fromProbe = false): void {
+  // Nothing more from this address reaches the page: only a reload leaves.
+  if (phase.kind === "other_dux") return
   const wasOpen = phase.kind === "open"
   const isOpen = next.kind === "open"
   if (wasOpen && !isOpen) epoch++
@@ -192,6 +207,10 @@ function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin
   const fromProbe = origin === "probe" || origin === "after_refusal"
   switch (answer.kind) {
     case "status": {
+      if (noteReportedInstance(answer.status.instance) === "different") {
+        setPhase({ kind: "other_dux" }, fromProbe)
+        return
+      }
       const next = phaseForStatus(answer.status)
       if (next.kind === "signed_out") {
         setPhase({ ...next, reason }, fromProbe)
@@ -209,6 +228,9 @@ function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin
       return
     case "broken":
       setPhase({ kind: "broken", detail: answer.detail }, fromProbe)
+      return
+    case "not_dux":
+      setPhase({ kind: "not_dux" }, fromProbe)
       return
     case "unknown":
       // The server answered without the document (an older dux): no password
@@ -341,6 +363,35 @@ export function reportUnauthorized(): void {
   // password rule). During a sign-out the answer is only a refresh; otherwise
   // a "signed in" answer is a disagreement for the breaker.
   void probeAuth(reason, { origin: actInFlight() ? "probe" : "after_refusal" })
+}
+
+/// A protected request was answered 401 without dux's error code, which no dux
+/// route sends: something else is answering.
+export function reportNotDux(): void {
+  if (phase.kind !== "open" && phase.kind !== "checking") return
+  setPhase({ kind: "not_dux" })
+}
+
+/// The build read named a different dux from the one this page opened on.
+export function reportOtherDux(): void {
+  setPhase({ kind: "other_dux" })
+}
+
+/// Whether the page may reload itself onto what answers at this address now:
+/// only when that is dux, and not a different dux from the one the page opened
+/// on. Asks the status route; an answer that shows otherwise puts up its cover.
+export async function confirmedSameDux(): Promise<boolean> {
+  const answer = await fetchAuthStatus()
+  if (answer.kind === "not_dux") {
+    reportNotDux()
+    return false
+  }
+  if (answer.kind !== "status") return false
+  if (noteReportedInstance(answer.status.instance) === "different") {
+    reportOtherDux()
+    return false
+  }
+  return true
 }
 
 export function reportBlocked(): void {

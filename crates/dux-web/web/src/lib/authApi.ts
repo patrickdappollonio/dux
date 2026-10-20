@@ -49,6 +49,9 @@ export interface AuthStatus {
    * network (so it signs in, and cannot set the first password). One line,
    * setting names in backticks for the chip renderer. Null when it is not. */
   required_reason: string | null
+  /** Which dux this is, kept across its restarts (`duxInstance.ts`). Null
+   * from a dux too old to say. */
+  instance: string | null
 }
 
 function flag(v: unknown): boolean {
@@ -77,7 +80,18 @@ export function normalizeAuthStatus(raw: unknown): AuthStatus {
     minimum_password_length: count(r.minimum_password_length),
     minimum_password_score: count(r.minimum_password_score),
     required_reason: str(r.required_reason),
+    instance: str(r.instance),
   }
+}
+
+// Whether an answer from the status route shows that something other than dux
+// is listening. The route is public on every dux, so a page in its place, a
+// bare 401 or a 404 is somebody else's. Only answers that a working dux never
+// gives count: a gateway's 5xx while dux restarts behind it, a 408, a 429 or a
+// 403 in words (dux's own Host check) stay unknown, because a flaky path to a
+// real dux must never be called "not dux".
+function foreignRefusal(status: number): boolean {
+  return status === 401 || status === 404 || status === 405
 }
 
 export type StatusAnswer =
@@ -86,6 +100,8 @@ export type StatusAnswer =
   | { kind: "broken"; detail: string }
   /** The server answered, but not with the document (an older server). */
   | { kind: "unknown" }
+  /** Something that is not dux answered (see `foreignRefusal`). */
+  | { kind: "not_dux" }
   /** No answer at all: the network failed, or the deadline passed. */
   | { kind: "unreachable"; timedOut: boolean }
 
@@ -107,13 +123,21 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
     if (isBlocked(resp.status, body)) return { kind: "blocked" }
     const detail = brokenDetail(resp.status, body)
     if (detail !== undefined) return { kind: "broken", detail }
+    // A JSON refusal with a code is dux's own, whatever its status.
+    if (foreignRefusal(resp.status) && str(body.json.error) === null) return { kind: "not_dux" }
     return { kind: "unknown" }
   }
+  // Only a full answer whose body arrived and is not JSON counts as foreign (a
+  // parse error); a connection cut mid-read, or another 2xx, stays unknown.
+  if (resp.status !== 200) return { kind: "unknown" }
+  let raw: unknown
   try {
-    return { kind: "status", status: normalizeAuthStatus(await resp.json()) }
-  } catch {
-    return { kind: "unknown" }
+    raw = await resp.json()
+  } catch (e) {
+    return e instanceof SyntaxError ? { kind: "not_dux" } : { kind: "unknown" }
   }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { kind: "not_dux" }
+  return { kind: "status", status: normalizeAuthStatus(raw) }
 }
 
 export type LoginAnswer =

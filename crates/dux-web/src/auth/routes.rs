@@ -65,13 +65,20 @@ pub(crate) struct StatusDoc {
     /// not rule out that the request was relayed from elsewhere. One line, with
     /// setting names in backticks. `null` otherwise. Shown, never decided on.
     pub(crate) required_reason: Option<String>,
+    /// This dux's instance id, which a restart keeps, so a page or the command
+    /// line can tell a different dux at the same address from a restart of
+    /// its own. Public on purpose: it is random and says nothing. A
+    /// consistency check only, never an auth, trust, ownership or ban input.
+    pub(crate) instance: Option<String>,
 }
 
 async fn status(
     State(state): State<AppState>,
     Extension(auth): Extension<RequestAuth>,
 ) -> Response {
-    let mut response = Json(state.auth.status(&auth.0)).into_response();
+    let mut doc = state.auth.status(&auth.0);
+    doc.instance = state.engine.instance_id().map(str::to_string);
+    let mut response = Json(doc).into_response();
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

@@ -888,6 +888,15 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     (
         EngineHandle {
             req_tx,
+            instance_id: match engine.session_store.instance_id() {
+                Ok(id) => Some(Arc::from(id)),
+                Err(error) => {
+                    dux_core::logger::warn(&format!(
+                        "could not read this dux's instance id from its database: {error:#}"
+                    ));
+                    None
+                }
+            },
             status_tx: status_tx.clone(),
             status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
@@ -972,6 +981,12 @@ struct PendingSubscribe {
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
+    /// This dux's instance id, read from its database when the handle is made
+    /// (see [`dux_core::storage::SessionStore::instance_id`]). `None` when it
+    /// could not be read, which clients take as unknown. A consistency check
+    /// only: public and repeatable, so it never feeds an auth, trust,
+    /// ownership or ban decision.
+    instance_id: Option<Arc<str>>,
     /// The engine's operation registry, shared by handle: a client polls a
     /// record by id here, off the engine thread, while the engine and the
     /// status emitter finish it.
@@ -1958,6 +1973,11 @@ impl EngineHandle {
 
     pub fn live_limits(&self) -> Arc<LiveServerLimits> {
         Arc::clone(&self.live_limits)
+    }
+
+    /// This dux's instance id, `None` when it could not be read.
+    pub fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
     }
 
     /// Where this engine's config and session database live.

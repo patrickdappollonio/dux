@@ -49,15 +49,16 @@ describe("serverChanged", () => {
 })
 
 describe("fetchServerIdentity", () => {
-  it("reads the two documented fields", async () => {
+  it("reads the documented fields", async () => {
     stubFetch(() => ({
       ok: true,
       status: 200,
-      json: async () => ({ version: "development", process: "run-7" }),
+      json: async () => ({ version: "development", process: "run-7", instance: "dux-a" }),
     }))
     await expect(fetchServerIdentity()).resolves.toEqual({
       version: "development",
       process: "run-7",
+      instance: "dux-a",
     })
   })
 

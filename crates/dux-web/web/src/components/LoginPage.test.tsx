@@ -30,6 +30,7 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
     minimum_password_length: null,
     minimum_password_score: null,
     required_reason: null,
+    instance: null,
     ...overrides,
   }
 }

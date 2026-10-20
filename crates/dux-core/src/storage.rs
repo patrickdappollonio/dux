@@ -24,6 +24,10 @@ pub struct StoredPr {
 /// shown. One key, one meaning; see [`SessionStore::last_seen_version`].
 const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
 
+/// The `app_state` key holding this dux's instance id; see
+/// [`SessionStore::instance_id`].
+const INSTANCE_ID_KEY: &str = "instance_id";
+
 pub struct SessionStore {
     conn: Connection,
 }
@@ -791,6 +795,24 @@ impl SessionStore {
     /// Record `version` as seen, so its what's-new screen does not reappear.
     pub fn set_last_seen_version(&self, version: &str) -> Result<()> {
         self.set_app_state(LAST_SEEN_VERSION_KEY, version)
+    }
+
+    /// This dux's instance id: random, minted the first time it is asked for
+    /// and kept for as long as this database is. A client that remembers it
+    /// can tell a restart of the same dux from a different dux answering at
+    /// the same address.
+    ///
+    /// A consistency check only: it is public and anyone can repeat it, so no
+    /// auth, trust, ownership or ban decision may ever read it.
+    pub fn instance_id(&self) -> Result<String> {
+        // Insert-if-absent then read, so two connections minting at once both
+        // read the one that won.
+        self.conn.execute(
+            "insert into app_state(key, value) values(?1, ?2) on conflict(key) do nothing",
+            params![INSTANCE_ID_KEY, uuid::Uuid::new_v4().to_string()],
+        )?;
+        self.app_state(INSTANCE_ID_KEY)?
+            .context("the instance id was not stored")
     }
 
     /// Insert a new extra tab row.
@@ -3768,6 +3790,18 @@ mod tests {
                 Some("v0.7.0".to_string())
             );
         }
+    }
+
+    #[test]
+    fn the_instance_id_is_kept_by_its_database_and_differs_between_databases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let first = SessionStore::open(&db).unwrap().instance_id().unwrap();
+        let reopened = SessionStore::open(&db).unwrap().instance_id().unwrap();
+        assert_eq!(first, reopened, "a restart must report the same dux");
+        let other = tmp.path().join("other.sqlite3");
+        let elsewhere = SessionStore::open(&other).unwrap().instance_id().unwrap();
+        assert_ne!(first, elsewhere, "another database is another dux");
     }
 
     #[test]

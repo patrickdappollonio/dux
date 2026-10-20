@@ -489,6 +489,20 @@ async fn under_everywhere_every_protected_route_needs_a_session_and_the_public_o
 }
 
 #[tokio::test]
+async fn the_status_names_this_dux_to_a_client_with_no_session() {
+    let dux = Dux::with_password("require = \"everywhere\"");
+    let status = dux.status(NETWORK, None).await;
+    assert_eq!(status["signed_in"], false);
+    let instance = status["instance"].as_str().expect("an instance id");
+    // It is the database's: what the store reports for the same file.
+    let stored = dux_core::storage::SessionStore::open(&dux.tmp.path().join("sessions.sqlite3"))
+        .unwrap()
+        .instance_id()
+        .unwrap();
+    assert_eq!(instance, stored);
+}
+
+#[tokio::test]
 async fn with_no_password_nothing_needs_a_session_from_anywhere() {
     let dux = Dux::start("");
     let status = dux.status(NETWORK, None).await;

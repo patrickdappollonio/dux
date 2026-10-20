@@ -93,12 +93,64 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
                 target: format!("{name} ({})", remote.url),
                 remote: Some(name.clone()),
             };
-            client.check_sign_in()?;
-            client
+            let status = client.check_sign_in(remote)?;
+            client.check_api()?;
+            if remote.instance.is_none()
+                && let Some(instance) = status.instance
+                && let Some(root) = lock_path.parent()
+            {
+                // remotes.toml sits beside dux.lock in the config folder. Best
+                // effort: the command it rides on has already reached its dux.
+                let _ = Remotes::update(root, |saved| {
+                    if let Some(entry) = saved.remotes.get_mut(name)
+                        && entry.url == remote.url
+                        && entry.instance.is_none()
+                    {
+                        entry.instance = Some(instance);
+                    }
+                    Ok(())
+                });
+            }
+            return Ok(client);
         }
     };
     client.check_api()?;
     Ok(client)
+}
+
+/// What a remote's `/api/v1/auth/status` says, as far as the command line
+/// reads it.
+#[derive(serde::Deserialize)]
+pub(crate) struct AuthStatus {
+    pub(crate) password_set: bool,
+    #[serde(default)]
+    pub(crate) required_here: bool,
+    /// The remote's instance id; absent from a dux too old to have one.
+    #[serde(default)]
+    pub(crate) instance: Option<String>,
+}
+
+/// Read a reply to `/api/v1/auth/status` from `target` ("NAME (url)"). The
+/// route is public on every dux, so an answer that is neither its document
+/// nor one of its JSON refusals is something else listening at the address,
+/// and is named as such rather than printed.
+pub(crate) fn read_auth_status(target: &str, reply: &Response) -> Result<AuthStatus, CliError> {
+    let not_dux = || CliError::new(Exit::Failed, format!("{target} answers, but not as dux"));
+    if reply.status != 200 {
+        let dux_refusal = serde_json::from_slice::<serde_json::Value>(&reply.body)
+            .ok()
+            .is_some_and(|json| json.get("error").is_some_and(|e| e.is_string()));
+        // A refusal in words (the Host check's) is dux's own too; a page is not.
+        let plain_words = !matches!(reply.status, 401 | 404 | 405)
+            && !String::from_utf8_lossy(&reply.body)
+                .trim_start()
+                .starts_with('<');
+        if dux_refusal || plain_words {
+            return Err(CliError::new(Exit::Failed, reply_sentence(reply)));
+        }
+        return Err(not_dux());
+    }
+    serde_json::from_slice(&reply.body).map_err(|_| not_dux())
 }
 
 /// The dux on this machine, ready for requests; `None` when the lock is free. A dux that
@@ -290,17 +342,28 @@ impl Client {
         CliError::new(exit, reply_sentence(reply))
     }
 
-    /// A remote that asks this client for its password needs a sign-in;
-    /// one that does not is used with none.
-    fn check_sign_in(&self) -> Result<(), CliError> {
-        #[derive(serde::Deserialize)]
-        struct AuthStatus {
-            required_here: bool,
+    /// The remote must be dux, and the one `remote` signed in to when it
+    /// knows which; then one that asks this client for its password needs a
+    /// sign-in, and one that does not is used with none.
+    fn check_sign_in(&self, remote: &Remote) -> Result<AuthStatus, CliError> {
+        let reply = self.send(Request::get("/api/v1/auth/status"))?;
+        let status = read_auth_status(&self.target, &reply)?;
+        if let (Some(name), Some(known), Some(now)) =
+            (&self.remote, &remote.instance, &status.instance)
+            && known != now
+        {
+            return Err(CliError::new(
+                Exit::Failed,
+                format!(
+                    "{} is now a different dux than the one this remote signed in to\nRun \
+                     \"dux remote login {name}\" to use it.",
+                    self.target
+                ),
+            ));
         }
-        let status: AuthStatus = self.get_json("/api/v1/auth/status")?;
         match (&self.remote, status.required_here, &self.token) {
             (Some(name), true, None) => Err(login_needed(name)),
-            _ => Ok(()),
+            _ => Ok(status),
         }
     }
 
@@ -584,6 +647,7 @@ mod tests {
                 url: format!("http://{addr}"),
                 insecure: false,
                 token: token.map(str::to_string),
+                instance: None,
             },
         };
 
@@ -604,6 +668,74 @@ mod tests {
             guarded.seen().last().unwrap().header("authorization"),
             Some("Bearer t0k")
         );
+    }
+
+    #[test]
+    fn a_different_dux_or_something_that_is_not_dux_is_named_and_an_old_remote_adopts_its_dux() {
+        let serve = |status: u16, content_type: &'static str, body: String| {
+            FakeDux::tcp(move |seen| match seen.path.as_str() {
+                "/api/v1/auth/status" => Reply::Raw(format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )),
+                "/api/v1/build" => Reply::json(200, BUILD),
+                _ => Reply::json(404, "{}"),
+            })
+        };
+        let dux_status = |instance: &str| {
+            format!(r#"{{"password_set":true,"required_here":true,"instance":"{instance}"}}"#)
+        };
+        let dir = private_dir();
+        let lock = dir.path().join("dux.lock");
+        let remote = |addr: std::net::SocketAddr, instance: Option<&str>| Target::Remote {
+            name: "work".into(),
+            remote: Remote {
+                url: format!("http://{addr}"),
+                insecure: false,
+                token: Some("t0k".into()),
+                instance: instance.map(str::to_string),
+            },
+        };
+
+        // Another dux, with a password, where the signed-in one was: said
+        // before the password is asked about.
+        let (_other, other_addr) = serve(200, "application/json", dux_status("b"));
+        let error = connect(&remote(other_addr, Some("a")), &lock).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "work (http://{other_addr}) is now a different dux than the one this remote \
+                 signed in to\nRun \"dux remote login work\" to use it."
+            )
+        );
+
+        // Something that is not dux: its page is never printed.
+        for (status, content_type, body) in [
+            (200, "text/html", "<html><body>hello</body></html>"),
+            (404, "text/html", "<html><body>Not Found</body></html>"),
+            (401, "text/plain", "Unauthorized"),
+        ] {
+            let (_foreign, addr) = serve(status, content_type, body.to_string());
+            let error = connect(&remote(addr, Some("a")), &lock).unwrap_err();
+            assert_eq!(
+                error.message,
+                format!("work (http://{addr}) answers, but not as dux"),
+                "{status} {body}"
+            );
+        }
+
+        // An old remote, saved before dux had an id, adopts the one it reaches.
+        let (_same, same_addr) = serve(200, "application/json", dux_status("a"));
+        let url = format!("http://{same_addr}");
+        Remotes::update(dir.path(), |saved| {
+            saved.add("work", &url, false)?;
+            Ok(())
+        })
+        .unwrap();
+        connect(&remote(same_addr, None), &lock).expect("the same dux answers");
+        let saved = Remotes::load(dir.path()).unwrap();
+        assert_eq!(saved.get("work").unwrap().instance.as_deref(), Some("a"));
     }
 
     #[test]

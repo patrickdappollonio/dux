@@ -22,24 +22,23 @@ fn send(name: &str, remote: &Remote, request: Request) -> Result<Response, CliEr
         })
 }
 
-/// Whether the remote has a password at all.
-pub fn password_set(name: &str, remote: &Remote) -> Result<bool, CliError> {
-    #[derive(serde::Deserialize)]
-    struct AuthStatus {
-        password_set: bool,
-    }
+/// What a remote says about itself before a sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteDux {
+    /// Whether it has a password at all.
+    pub password_set: bool,
+    /// Its instance id, which a sign-in pins the remote to.
+    pub instance: Option<String>,
+}
+
+/// Whether the remote has a password at all, and which dux it is.
+pub fn look(name: &str, remote: &Remote) -> Result<RemoteDux, CliError> {
     let reply = send(name, remote, Request::get("/api/v1/auth/status"))?;
-    if reply.status != 200 {
-        return Err(CliError::new(Exit::Failed, reply_sentence(&reply)));
-    }
-    serde_json::from_slice::<AuthStatus>(&reply.body)
-        .map(|status| status.password_set)
-        .map_err(|error| {
-            CliError::new(
-                Exit::Failed,
-                format!("{name} answered something this client cannot read: {error}"),
-            )
-        })
+    let status = super::connect::read_auth_status(&format!("{name} ({})", remote.url), &reply)?;
+    Ok(RemoteDux {
+        password_set: status.password_set,
+        instance: status.instance,
+    })
 }
 
 /// A sign-in the remote issued.
@@ -162,8 +161,9 @@ mod tests {
             url: format!("http://{addr}"),
             insecure: false,
             token: None,
+            instance: None,
         };
-        assert!(password_set("work", &remote).unwrap());
+        assert!(look("work", &remote).unwrap().password_set);
 
         let wrong = login("work", &remote, "nope").unwrap_err();
         assert_eq!(wrong.exit, Exit::Failed);
@@ -236,6 +236,7 @@ mod tests {
             url: format!("http://{closed}"),
             insecure: false,
             token: None,
+            instance: None,
         };
         let error = login("work", &remote, "x").unwrap_err();
         assert_eq!(error.exit, Exit::NotRunning);

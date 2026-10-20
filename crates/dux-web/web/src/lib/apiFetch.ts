@@ -16,12 +16,13 @@
 // work while signed out, and their 401 means a wrong password.
 
 import { apiUrl } from "./apiBase"
-import { brokenDetail, isAuthRequired, isBlocked, readErrorBody } from "./authErrors"
+import { brokenDetail, isAuthRequired, isBlocked, readErrorBody, str } from "./authErrors"
 import {
   authEpoch,
   authPaused,
   reportBlocked,
   reportBroken,
+  reportNotDux,
   reportUnauthorized,
 } from "./authGate"
 
@@ -36,10 +37,10 @@ export class AuthInterruptedError extends Error {
   readonly reason: "not_sent" | "refused"
   /// What the server said, for a refusal: the session is gone, the address is
   /// blocked, or the auth config is broken. Null for a request never sent.
-  readonly refusal: "signed_out" | "blocked" | "broken" | null
+  readonly refusal: "signed_out" | "blocked" | "broken" | "not_dux" | null
   constructor(
     reason: "not_sent" | "refused",
-    refusal: "signed_out" | "blocked" | "broken" | null = null,
+    refusal: "signed_out" | "blocked" | "broken" | "not_dux" | null = null,
   ) {
     super(
       reason === "not_sent"
@@ -75,6 +76,12 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   if (isAuthRequired(resp.status, body)) {
     if (current) reportUnauthorized()
     throw new AuthInterruptedError("refused", "signed_out")
+  }
+  if (resp.status === 401 && str(body.json.error) === null) {
+    // Every dux 401 carries its code, so one without is somebody else's: it
+    // is not this browser's session ending.
+    if (current) reportNotDux()
+    throw new AuthInterruptedError("refused", "not_dux")
   }
   if (isBlocked(resp.status, body)) {
     // About the address, not the session, so it holds whichever session asked.

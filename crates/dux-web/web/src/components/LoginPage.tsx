@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
 import { rateLimitLead } from "@/lib/authErrors"
 import { retryAuthGate, signIn, type SignOutReason } from "@/lib/authGate"
+import { reloadLeavingNoModalEntry } from "@/lib/store"
 import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
 // The same duck, carried in the bundle as a data URI, for the one page that
 // cannot fetch it.
@@ -336,6 +337,32 @@ export function StuckPage() {
         <InlineCode>dux.log</InlineCode>.
       </p>
       <RetryButton label="Try again" />
+    </Shell>
+  )
+}
+
+// A different dux answers where this tab's dux was. Nothing from here reaches it
+// until the reload this button asks for, which opens it as any fresh page would.
+export function OtherDuxPage() {
+  return (
+    // The bundle's own logo, so the cover asks the other dux for nothing.
+    <Shell title="A different dux is answering at this address now." logo={inlineLogo}>
+      <p className="text-sm text-muted-foreground">
+        The one this tab was using may have moved to another port.
+      </p>
+      <Button variant="outline" className="h-10" onClick={() => reloadLeavingNoModalEntry()}>
+        Open the dux at this address
+      </Button>
+    </Shell>
+  )
+}
+
+// Something that is not dux answers at this address. Reconnect asks again, the
+// way the app's own Reconnect does once it has stopped trying.
+export function NotDuxPage() {
+  return (
+    <Shell title="Something that isn't dux is answering at this address." logo={inlineLogo}>
+      <RetryButton label="Reconnect" />
     </Shell>
   )
 }

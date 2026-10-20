@@ -4,14 +4,15 @@
 //! reconnecting a tab into a build that may disagree about the wire shape.
 //!
 //! It identifies the server run and is not a schema version: the body is exactly
-//! `version`, `process` and `api`, the REST API version the separately shipped
-//! command line checks.
+//! `version`, `process`, `instance` (which dux this is, across its restarts)
+//! and `api`, the REST API version the separately shipped command line checks.
 //!
 //! Always 200: it answers from process-local data with no engine round-trip, so
 //! it is available while the engine is still coming up.
 
 use axum::{
     Json, Router,
+    extract::State,
     http::header,
     response::{IntoResponse, Response},
     routing::get,
@@ -57,13 +58,26 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/build", get(get_build))
 }
 
-async fn get_build() -> Response {
+/// The route's body: the run, and which dux it is a run of.
+#[derive(Serialize)]
+struct BuildDoc<'a> {
+    #[serde(flatten)]
+    identity: &'a BuildIdentity,
+    /// This dux's instance id, which a restart keeps; `null` when it could not
+    /// be read. A consistency check only, never an auth or trust input.
+    instance: Option<&'a str>,
+}
+
+async fn get_build(State(state): State<AppState>) -> Response {
     // `no-store`, not `no-cache`: this is the probe a reconnecting client uses to
     // decide whether its own code is stale, so a cached answer would report what
     // the tab already believes and defeat the check entirely.
     (
         [(header::CACHE_CONTROL, "no-store")],
-        Json(build_identity()),
+        Json(BuildDoc {
+            identity: build_identity(),
+            instance: state.engine.instance_id(),
+        }),
     )
         .into_response()
 }
@@ -98,12 +112,16 @@ mod tests {
         assert_eq!(build_identity().version, dux_core::display_version());
     }
 
-    /// The wire shape is exactly these three keys, and no more. The browser
-    /// compares the version and the run, and the command line refuses a dux
-    /// whose `api` differs from its own.
+    /// The wire shape is exactly these keys, and no more. The browser compares
+    /// the instance, the version and the run, and the command line refuses a
+    /// dux whose `api` differs from its own.
     #[test]
-    fn the_body_carries_exactly_version_process_and_api_one() {
-        let json = serde_json::to_value(build_identity()).unwrap();
+    fn the_body_carries_exactly_version_process_instance_and_api_one() {
+        let json = serde_json::to_value(BuildDoc {
+            identity: build_identity(),
+            instance: Some("i"),
+        })
+        .unwrap();
         let mut keys: Vec<&str> = json
             .as_object()
             .expect("a JSON object")
@@ -111,7 +129,7 @@ mod tests {
             .map(|k| k.as_str())
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["api", "process", "version"]);
+        assert_eq!(keys, vec!["api", "instance", "process", "version"]);
         assert_eq!(json["api"], 1);
     }
 }

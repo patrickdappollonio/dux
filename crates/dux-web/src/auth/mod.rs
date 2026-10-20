@@ -697,6 +697,8 @@ impl AuthState {
                     capitalize(cause)
                 )
             }),
+            // Filled in by the route, which holds the engine.
+            instance: None,
         }
     }
 
