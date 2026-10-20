@@ -58,7 +58,7 @@ import {
   type LogoutAnswer,
   type PasswordAnswer,
 } from "./authActions"
-import { noteReportedInstance, openedInstance } from "./duxInstance"
+import { noteBootInstance, noteReportedInstance, openedInstance } from "./duxInstance"
 
 export { normalizeAuthStatus }
 export type { AuthStatus }
@@ -207,7 +207,11 @@ function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin
   const fromProbe = origin === "probe" || origin === "after_refusal"
   switch (answer.kind) {
     case "status": {
-      if (noteReportedInstance(answer.status.instance) === "different") {
+      const verdict =
+        origin === "init"
+          ? noteBootInstance(answer.status.instance)
+          : noteReportedInstance(answer.status.instance)
+      if (verdict === "different") {
         setPhase({ kind: "other_dux" }, fromProbe)
         return
       }
@@ -365,10 +369,7 @@ export function reportUnauthorized(): void {
     unauthorizedCheck = fetchAuthStatus()
       .then((answer) => {
         if (phase.kind !== "open" && phase.kind !== "checking") return
-        if (answer.kind === "status" && noteReportedInstance(answer.status.instance) === "different") {
-          setPhase({ kind: "other_dux" })
-          return
-        }
+        if (coveredBy(answer)) return
         signOutForRefusal()
       })
       .finally(() => {
@@ -397,10 +398,38 @@ function signOutForRefusal(): void {
 }
 
 /// A protected request was answered 401 without dux's error code, which no dux
-/// route sends: something else is answering.
-export function reportNotDux(): void {
+/// route sends. Something in front of dux (an auth proxy) or something else
+/// entirely may have said it, so the public status route decides.
+export function reportUnrecognizedRefusal(): void {
   if (phase.kind !== "open" && phase.kind !== "checking") return
-  setPhase({ kind: "not_dux" })
+  void probeAuth("expired", { fresh: true })
+}
+
+/// Whether a status answer shows that the address is no longer this page's
+/// dux: something that is not dux, or a different dux. Either puts its cover up.
+function coveredBy(answer: StatusAnswer): boolean {
+  if (answer.kind === "not_dux") {
+    setPhase({ kind: "not_dux" })
+    return true
+  }
+  if (answer.kind === "status" && noteReportedInstance(answer.status.instance) === "different") {
+    setPhase({ kind: "other_dux" })
+    return true
+  }
+  return false
+}
+
+function covered(): boolean {
+  return phase.kind === "other_dux" || phase.kind === "not_dux"
+}
+
+/// Asked before the app socket reconnects, so it never connects to a different
+/// dux, or to something that is not dux, even for a moment. A page that does not
+/// know which dux it opened on reconnects as it always has.
+export function sameDuxBeforeReconnect(): boolean | Promise<boolean> {
+  if (openedInstance() === null) return true
+  if (covered()) return false
+  return fetchAuthStatus().then((answer) => !coveredBy(answer))
 }
 
 /// The build read named a different dux from the one this page opened on.
@@ -412,17 +441,12 @@ export function reportOtherDux(): void {
 /// only when that is dux, and not a different dux from the one the page opened
 /// on. Asks the status route; an answer that shows otherwise puts up its cover.
 export async function confirmedSameDux(): Promise<boolean> {
+  const at = generation
   const answer = await fetchAuthStatus()
-  if (answer.kind === "not_dux") {
-    reportNotDux()
-    return false
-  }
-  if (answer.kind !== "status") return false
-  if (noteReportedInstance(answer.status.instance) === "different") {
-    reportOtherDux()
-    return false
-  }
-  return true
+  // A late answer: the page moved, or is already covered, since this asked.
+  if (covered() || generation !== at) return false
+  if (coveredBy(answer)) return false
+  return answer.kind === "status"
 }
 
 export function reportBlocked(): void {
@@ -447,12 +471,19 @@ export const COOKIE_NOT_KEPT =
 
 /// Sign in with the password. Success opens the page even when the follow-up
 /// status read fails, because the login itself said yes.
-export async function signIn(password: string): Promise<LoginAnswer> {
+/// A sign-in's answer, or `gate` when the page was covered instead because a
+/// different dux, or something that is not dux, answers at the address.
+export type SignInAnswer = LoginAnswer | { kind: "gate" }
+
+export async function signIn(password: string): Promise<SignInAnswer> {
+  // The password goes only to the dux this page opened on.
+  if (coveredBy(await fetchAuthStatus())) return { kind: "gate" }
   const answer = await postLogin(password)
   switch (answer.kind) {
     case "ok": {
       disagreements = 0
       const after = await fetchAuthStatus()
+      if (coveredBy(after)) return { kind: "gate" }
       if (after.kind === "unknown" || after.kind === "unreachable") {
         setPhase({ kind: "open", status: null })
         return answer
@@ -498,12 +529,14 @@ export type SignOutAnswer =
 export async function signOut(): Promise<SignOutAnswer> {
   signingOut = true
   try {
+    if (coveredBy(await fetchAuthStatus())) return { kind: "gate" }
     const answer = await postLogout()
     if (answer.kind !== "ok") return answer
     const at = opens
     const after = await fetchAuthStatus()
     // Signed in again meanwhile: that session is newer than this read.
     if (opens !== at) return { kind: "ok" }
+    if (coveredBy(after)) return { kind: "gate" }
     if (after.kind === "blocked" || after.kind === "broken") {
       applyAnswer(after, "signed_out", "direct")
       return { kind: "gate" }
@@ -540,6 +573,8 @@ export async function changePassword(write: {
   const reason = write.current === undefined ? "password_set" : "password_changed"
   changingPassword = reason
   try {
+    // A covered page sent nothing; the cover already says why.
+    if (coveredBy(await fetchAuthStatus())) return { kind: "signed_out" }
     const answer = await postPassword(write)
     if (answer.kind !== "ok") return answer
     const at = opens
@@ -547,6 +582,7 @@ export async function changePassword(write: {
     // Signed in again meanwhile (with the new password): that session is
     // newer than this read.
     if (opens !== at) return answer
+    if (coveredBy(after)) return answer
     if (after.kind === "status" && after.status.required_here && !after.status.signed_in) {
       setPhase({ kind: "signed_out", status: after.status, reason })
     } else if (after.kind === "status" || after.kind === "blocked" || after.kind === "broken") {

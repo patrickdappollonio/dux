@@ -71,6 +71,12 @@ export type ReconnectPolicy = {
   /// passes `0` and leans on `canRetry`, which already holds it shut for as long
   /// as the events socket is down.
   attemptBudget: () => number
+  /// Asked before every attempt after the first open; false holds the retry as
+  /// a shut gate does. The events socket asks whether the dux at the address is
+  /// still the one this page opened on, so a different dux is never connected
+  /// to, not even for the moment it would take to notice.
+  /// A plain `true` opens at once, with no extra turn of the event loop.
+  preflight?: () => boolean | Promise<boolean>
 }
 
 // The shared reconnecting WebSocket base. Subclasses supply the socket-specific
@@ -106,6 +112,10 @@ export abstract class ReconnectingSocket {
   // owned this socket is gone.
   private disposed = false
   private readonly policy: ReconnectPolicy
+  // Whether any attempt has opened yet: the first connect is the page's own
+  // boot, which has nothing to compare against.
+  private everOpened = false
+  private preflighting = false
   private wakeAttached = false
   private authUnsubscribe: (() => void) | null = null
 
@@ -134,6 +144,7 @@ export abstract class ReconnectingSocket {
       canRetry: () => !authPaused() && (policy.canRetry ?? (() => true))(),
       backoffCapMs: policy.backoffCapMs ?? reconnectBackoffCapMs,
       attemptBudget: policy.attemptBudget ?? reconnectAttemptBudget,
+      preflight: policy.preflight,
     }
   }
 
@@ -241,6 +252,32 @@ export abstract class ReconnectingSocket {
   }
 
   private open(): void {
+    const preflight = this.policy.preflight
+    if (preflight === undefined || !this.everOpened) {
+      this.openNow()
+      return
+    }
+    if (this.preflighting) return
+    const verdict = preflight()
+    if (verdict === true) {
+      this.openNow()
+      return
+    }
+    this.preflighting = true
+    void Promise.resolve(verdict)
+      .catch(() => true)
+      .then((go) => {
+        this.preflighting = false
+        if (this.closedByUser || this.stopped || this.disposed || this.ws !== null) return
+        if (!go || !this.policy.canRetry()) {
+          if (this.reconnectTimer === null) this.armHeldRetry()
+          return
+        }
+        this.openNow()
+      })
+  }
+
+  private openNow(): void {
     // A socket may already be live here (a double `connect()`, from Reconnect
     // pressed twice mid-reconnect). Detach the orphan's handlers and close it
     // before assigning the new socket: otherwise its later `onclose` nulls the
@@ -259,6 +296,7 @@ export abstract class ReconnectingSocket {
       // mutate shared connection state. A late callback from a socket a newer
       // open() already replaced must be inert.
       if (this.ws !== ws) return
+      this.everOpened = true
       this.clearConnectTimer()
       // An open that lasts means the connection is usable again, so the next drop
       // starts a fresh retry schedule from the floor. One that does not is no

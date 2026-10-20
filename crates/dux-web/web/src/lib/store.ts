@@ -8,10 +8,12 @@ import {
   onAuthOpen,
   probeAfterDrop,
   refreshAuthStatus,
+  authEpoch,
   reportOtherDux,
+  sameDuxBeforeReconnect,
   subscribeAuth,
 } from "./authGate"
-import { noteReportedInstance } from "./duxInstance"
+import { noteBootInstance, noteReportedInstance } from "./duxInstance"
 import {
   draftAfterRandomizeOff,
   generatedNameAfterEdit,
@@ -1272,7 +1274,9 @@ const eventsSocketUrl = hasBrowser ? wsUrl("/ws/events") : "ws://localhost/ws/ev
 // `status`/`status_cleared` toasts), and owns the connection-state UX (the
 // status-bar indicator). Exported so tests can drive
 // its callbacks / inspect its interest set; connected on boot.
-export const eventsSocket = new EventsSocket(eventsSocketUrl)
+export const eventsSocket = new EventsSocket(eventsSocketUrl, {
+  preflight: sameDuxBeforeReconnect,
+})
 
 // App-wide coarse topics, subscribed once at module load: added to the interest
 // set immediately (sent on the first open, re-sent on every reconnect), so the
@@ -1422,7 +1426,7 @@ async function loadServerIdentityBaseline(): Promise<void> {
     if (isAuthInterruption(e)) return
     throw e
   }
-  if (answer !== null && noteReportedInstance(answer.instance) === "different") {
+  if (answer !== null && noteBootInstance(answer.instance) === "different") {
     reportOtherDux()
     return
   }
@@ -1442,7 +1446,11 @@ async function loadServerIdentityBaseline(): Promise<void> {
 // It runs alongside that refetch rather than gating it: blocking recovery on a
 // network round-trip would strand the app whenever the probe hung, and a reload
 // discards whatever the early refetch produced.
+let identityProbeSeq = 0
+
 async function reloadIfServerChanged(): Promise<void> {
+  const seq = ++identityProbeSeq
+  const epoch = authEpoch()
   let current: ServerIdentity | null
   try {
     current = await fetchServerIdentity()
@@ -1451,6 +1459,9 @@ async function reloadIfServerChanged(): Promise<void> {
     if (isAuthInterruption(e)) return
     throw e
   }
+  // A late answer decides nothing: a newer check was asked since, the page left
+  // its session, or it is already covered by the gate.
+  if (seq !== identityProbeSeq || authEpoch() !== epoch || authPaused()) return
   // A different dux is not a restart of this one: the page is covered and asks,
   // rather than reloading itself into somebody else's dux.
   if (current !== null && noteReportedInstance(current.instance) === "different") {

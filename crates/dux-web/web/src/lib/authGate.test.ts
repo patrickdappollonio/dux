@@ -260,6 +260,70 @@ describe("socket close codes", () => {
   })
 })
 
+describe("acting on a dux that may have changed", () => {
+  it("never sends the password to a different dux or to something that is not dux", async () => {
+    statusBody = { ...SIGNED_OUT, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = { ...SIGNED_OUT, instance: "dux-b" }
+    expect(await g.signIn("pw")).toEqual({ kind: "gate" })
+    expect(g.getAuthPhase()).toEqual({ kind: "other_dux" })
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/auth/login"))).toBe(false)
+
+    vi.resetModules()
+    statusBody = { ...SIGNED_OUT, instance: "dux-a" }
+    const h = await load()
+    await h.initAuthGate()
+    fetchMock.mockClear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>not here</html>", { status: 404 })),
+    )
+    expect(await h.signIn("pw")).toEqual({ kind: "gate" })
+    expect(h.getAuthPhase()).toEqual({ kind: "not_dux" })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("covers the page when the read after a sign-in names a different dux", async () => {
+    statusBody = { ...SIGNED_OUT, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    let reads = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input)
+        if (url.endsWith("/auth/login")) return json(204, undefined)
+        reads++
+        return json(200, { ...SIGNED_IN, instance: reads === 1 ? "dux-a" : "dux-b" })
+      }),
+    )
+    expect(await g.signIn("pw")).toEqual({ kind: "gate" })
+    expect(g.getAuthPhase()).toEqual({ kind: "other_dux" })
+  })
+
+  it("does not confirm a reload on an answer that lands after the page was covered", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    let release!: () => void
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            release = () => resolve(json(200, { ...SIGNED_IN, instance: "dux-a" }))
+          }),
+      ),
+    )
+    const confirmed = g.confirmedSameDux()
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"))
+    g.reportOtherDux()
+    release()
+    expect(await confirmed).toBe(false)
+  })
+})
+
 describe("signIn", () => {
   it("opens the app on success and tells the open listeners again", async () => {
     statusBody = SIGNED_OUT
@@ -382,6 +446,16 @@ describe("probeAfterDrop", () => {
     statusBody = { ...SIGNED_OUT, instance: "dux-a" }
     await g.probeAfterDrop()
     expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "expired" })
+  })
+
+  it("never takes a later dux for the one a page opened on when its boot named none", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = { ...SIGNED_IN, instance: "dux-b" }
+    await g.probeAfterDrop()
+    statusBody = { ...SIGNED_IN, instance: "dux-c" }
+    await g.probeAfterDrop()
+    expect(g.getAuthPhase().kind).toBe("open")
   })
 
   it("keeps one probe in flight", async () => {
@@ -625,15 +699,18 @@ describe("refreshAuthStatus", () => {
 })
 
 describe("an act's own status read landing after a fresh sign-in", () => {
-  // A status read that hangs until released; everything else answers at once.
+  // The act's own status read, the first one after its request, hangs until
+  // released; everything else answers at once.
   function holdNextStatus(body: unknown) {
     let release!: () => void
     let held = false
+    let acted = false
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string) => {
         const url = String(input)
-        if (url.endsWith("/auth/status") && !held) {
+        if (!url.endsWith("/auth/status")) acted = true
+        if (url.endsWith("/auth/status") && acted && !held) {
           held = true
           return new Promise<Response>((resolve) => {
             release = () => resolve(json(200, body))

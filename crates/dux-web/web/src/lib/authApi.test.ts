@@ -167,6 +167,23 @@ describe("fetchAuthStatus", () => {
     }
   })
 
+  it("answers not dux for JSON that is not the status document", async () => {
+    for (const body of [{}, { ok: true }]) {
+      stubFetch(reply(200, body))
+      expect(await fetchAuthStatus()).toEqual({ kind: "not_dux" })
+    }
+  })
+
+  it("answers unknown for a 401 whose body was cut off mid-read", async () => {
+    const cut = new ReadableStream({
+      start(controller) {
+        controller.error(new Error("connection reset"))
+      },
+    })
+    stubFetch(new Response(cut, { status: 401 }))
+    expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })
+  })
+
   it("answers unknown for a gateway's page while dux restarts behind it", async () => {
     stubFetch(new Response("<html>Bad Gateway</html>", { status: 502 }))
     expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })

@@ -1,7 +1,7 @@
 // Which dux this page opened on, and whether the dux answering now is that one.
 //
 // Every dux keeps a random instance id across its restarts and reports it on
-// the status and build reads. The page remembers the first one it is told and
+// the status and build reads. The page takes the id its own boot was told and
 // compares every later report against it, so a restart of its own dux (same
 // id) is told apart from a different dux answering at the same address (another
 // id). The comparison is of what the dux REPORTS, never of the page's own
@@ -26,20 +26,27 @@ export function compareInstances(
 }
 
 let opened: string | null = null
+// Whether the boot has been answered. Its answer is the dux this page opened
+// on, an unknown one included: a page that booted without an id stays without
+// one, rather than taking whichever dux answers later for its own.
+let decided = false
 
-/// Weigh a report: the first id the page is told becomes the one it opened on,
-/// and every report after that is compared against it.
-export function noteReportedInstance(reported: string | null): InstanceVerdict {
-  if (opened === null) opened = reported
+/// Weigh a report from the page's own boot (its first status read, or its
+/// first build read): the first one decides which dux the page opened on.
+export function noteBootInstance(reported: string | null): InstanceVerdict {
+  if (!decided) {
+    decided = true
+    opened = reported
+  }
   return compareInstances(opened, reported)
 }
 
-/// The id this page opened on, or null while it has not been told one.
-export function openedInstance(): string | null {
-  return opened
+/// Weigh any later report against the dux the page opened on.
+export function noteReportedInstance(reported: string | null): InstanceVerdict {
+  return compareInstances(opened, reported)
 }
 
-/// For tests: forget the dux this page opened on.
-export function resetOpenedInstanceForTests(): void {
-  opened = null
+/// The id this page opened on, or null when it is not known.
+export function openedInstance(): string | null {
+  return opened
 }

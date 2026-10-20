@@ -161,6 +161,8 @@ export function LoginPage({
     setFailure(null)
     const answer = await signIn(password)
     setBusy(false)
+    // The gate has replaced this page with a cover; nothing to say here.
+    if (answer.kind === "gate") return
     if (answer.kind === "ok") {
       setPassword("")
       return

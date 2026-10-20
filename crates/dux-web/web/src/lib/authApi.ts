@@ -90,6 +90,17 @@ export function normalizeAuthStatus(raw: unknown): AuthStatus {
 // gives count: a gateway's 5xx while dux restarts behind it, a 408, a 429 or a
 // 403 in words (dux's own Host check) stay unknown, because a flaky path to a
 // real dux must never be called "not dux".
+// The status document as every dux sends it: its three sign-in flags. The
+// instance may be absent (a dux too old to have one); these never are.
+function isStatusDocument(raw: unknown): boolean {
+  const r = record(raw)
+  return (
+    typeof r.password_set === "boolean" &&
+    typeof r.required_here === "boolean" &&
+    typeof r.signed_in === "boolean"
+  )
+}
+
 function foreignRefusal(status: number): boolean {
   return status === 401 || status === 404 || status === 405
 }
@@ -124,8 +135,14 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
     const detail = brokenDetail(resp.status, body)
     if (detail !== undefined) return { kind: "broken", detail }
     // A JSON refusal with a code is dux's own, whatever its status.
-    if (foreignRefusal(resp.status) && str(body.json.error) === null) return { kind: "not_dux" }
-    return { kind: "unknown" }
+    if (!foreignRefusal(resp.status) || str(body.json.error) !== null) return { kind: "unknown" }
+    // Only an answer read whole is evidence; one cut mid-read stays unknown.
+    try {
+      await resp.text()
+    } catch {
+      return { kind: "unknown" }
+    }
+    return { kind: "not_dux" }
   }
   // Only a full answer whose body arrived and is not JSON counts as foreign (a
   // parse error); a connection cut mid-read, or another 2xx, stays unknown.
@@ -136,7 +153,7 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
   } catch (e) {
     return e instanceof SyntaxError ? { kind: "not_dux" } : { kind: "unknown" }
   }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { kind: "not_dux" }
+  if (!isStatusDocument(raw)) return { kind: "not_dux" }
   return { kind: "status", status: normalizeAuthStatus(raw) }
 }
 

@@ -46,6 +46,13 @@ let putCalls: { url: string; body: unknown }[] = []
 let replaceStateMock: ReturnType<typeof vi.fn>
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+  // The public status route answers as every dux does: no password here.
+  if (String(url).includes("/api/v1/auth/status")) {
+    return new Response(
+      JSON.stringify({ password_set: false, required_here: false, signed_in: false }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  }
   const u = String(url)
   if (u.includes("/api/v1/workspace")) {
     return {

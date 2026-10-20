@@ -36,6 +36,9 @@ function makeSpine(ids: string[]): Spine {
 // The server.
 let signedIn = false
 let passwordSet = true
+// Which dux answers, and whether its status route answers at all.
+let instance: string | undefined
+let statusDown = false
 let spineBody: Spine = makeSpine(["s1"])
 let workspaceGets = 0
 let bootstrapGets = 0
@@ -56,7 +59,9 @@ function protectedAnswer(body: unknown): Response {
 const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
   const url = String(input)
   if (url.endsWith("/api/v1/auth/status")) {
+    if (statusDown) throw new TypeError("network")
     return json(200, {
+      instance,
       password_set: passwordSet,
       required_here: passwordSet,
       signed_in: signedIn,
@@ -125,6 +130,8 @@ const hashRef = { value: "" }
 beforeEach(() => {
   signedIn = false
   passwordSet = true
+  instance = undefined
+  statusDown = false
   spineBody = makeSpine(["s1"])
   workspaceGets = 0
   bootstrapGets = 0
@@ -224,6 +231,33 @@ describe("booting with no password in the way", () => {
     await vi.waitFor(() => expect(store.getSnapshot().spine).not.toBeNull())
     expect(store.getSnapshot().booted).toBe(true)
     expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+})
+
+describe("a different dux taking the address", () => {
+  it("is never connected to, however soon it answers after the drop", async () => {
+    passwordSet = false
+    instance = "dux-a"
+    const store = await import("./store")
+    const gate = await import("./authGate")
+    await vi.waitFor(() => expect(store.getSnapshot().spine).not.toBeNull())
+    FakeWebSocket.instances[0].open()
+    await settle()
+    const gets = workspaceGets
+    // Gone, and nothing answers yet: the drop's own probe learns nothing.
+    statusDown = true
+    FakeWebSocket.instances[0].drop(1006)
+    await settle()
+    expect(gate.getAuthPhase().kind).toBe("open")
+    // Another dux, with no password, takes the address before the retry.
+    statusDown = false
+    instance = "dux-b"
+    await vi.waitFor(() => expect(gate.getAuthPhase()).toEqual({ kind: "other_dux" }), {
+      timeout: 3000,
+    })
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(workspaceGets).toBe(gets)
   })
 })
 

@@ -22,8 +22,8 @@ import {
   authPaused,
   reportBlocked,
   reportBroken,
-  reportNotDux,
   reportUnauthorized,
+  reportUnrecognizedRefusal,
 } from "./authGate"
 
 /// A request that did not get to finish because the page is not signed in.
@@ -37,10 +37,10 @@ export class AuthInterruptedError extends Error {
   readonly reason: "not_sent" | "refused"
   /// What the server said, for a refusal: the session is gone, the address is
   /// blocked, or the auth config is broken. Null for a request never sent.
-  readonly refusal: "signed_out" | "blocked" | "broken" | "not_dux" | null
+  readonly refusal: "signed_out" | "blocked" | "broken" | null
   constructor(
     reason: "not_sent" | "refused",
-    refusal: "signed_out" | "blocked" | "broken" | "not_dux" | null = null,
+    refusal: "signed_out" | "blocked" | "broken" | null = null,
   ) {
     super(
       reason === "not_sent"
@@ -78,10 +78,10 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
     throw new AuthInterruptedError("refused", "signed_out")
   }
   if (resp.status === 401 && str(body.json.error) === null) {
-    // Every dux 401 carries its code, so one without is somebody else's: it
-    // is not this browser's session ending.
-    if (current) reportNotDux()
-    throw new AuthInterruptedError("refused", "not_dux")
+    // Every dux 401 carries its code, so one without came from something else:
+    // not this browser's session ending. The status route says what it was.
+    if (current) reportUnrecognizedRefusal()
+    return resp
   }
   if (isBlocked(resp.status, body)) {
     // About the address, not the session, so it holds whichever session asked.

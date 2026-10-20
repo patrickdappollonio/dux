@@ -8,6 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const requestedUrls: string[] = []
 
 const fetchMock = vi.fn(async (url: string) => {
+  // The public status route answers as every dux does: no password here.
+  if (String(url).includes("/api/v1/auth/status")) {
+    return new Response(
+      JSON.stringify({ password_set: false, required_here: false, signed_in: false }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  }
   requestedUrls.push(String(url))
   return {
     ok: true,

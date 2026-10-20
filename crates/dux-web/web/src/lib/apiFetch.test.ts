@@ -56,13 +56,22 @@ describe("apiFetch", () => {
     expect(gate.getAuthPhase().kind).toBe("signed_out")
   })
 
-  it("never reads a 401 without dux's code as this browser's session ending", async () => {
+  it("never reads a 401 without dux's code as this browser's session ending, and lets the status route decide", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()
+    // An auth proxy in front of a dux that is still fine: the page stays.
+    routes = async (url) =>
+      url.endsWith("/auth/status")
+        ? json(200, { required_here: true, signed_in: true, password_set: true })
+        : new Response("Unauthorized", { status: 401 })
+    const resp = await api.apiFetch("/api/v1/workspace")
+    expect(resp.status).toBe(401)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(gate.getAuthPhase().kind).toBe("open")
+    // Something that answers everything that way is not dux.
     routes = async () => new Response("Unauthorized", { status: 401 })
-    const err = await api.apiFetch("/api/v1/workspace").catch((e: unknown) => e)
-    expect(api.isAuthInterruption(err)).toBe(true)
-    expect(gate.getAuthPhase()).toEqual({ kind: "not_dux" })
+    await api.apiFetch("/api/v1/workspace")
+    await vi.waitFor(() => expect(gate.getAuthPhase()).toEqual({ kind: "not_dux" }))
   })
 
   it("leaves a 401 that is about something else to its caller", async () => {
@@ -122,7 +131,7 @@ describe("apiFetch", () => {
     let release!: () => void
     routes = (url) =>
       url.endsWith("/auth/status")
-        ? Promise.resolve(json(200, { required_here: true, signed_in: true }))
+        ? Promise.resolve(json(200, { required_here: true, signed_in: true, password_set: true }))
         : url.endsWith("/auth/login")
           ? Promise.resolve(new Response(null, { status: 204 }))
           : new Promise((resolve) => {
@@ -135,7 +144,7 @@ describe("apiFetch", () => {
     await vi.waitFor(() => expect(release).toBeTypeOf("function"))
     routes = async (url) =>
       url.endsWith("/auth/status")
-        ? json(200, { required_here: true, signed_in: false })
+        ? json(200, { required_here: true, signed_in: false, password_set: true })
         : url.endsWith("/auth/login")
           ? new Response(null, { status: 204 })
           : json(200, {})
@@ -143,7 +152,7 @@ describe("apiFetch", () => {
     routes = async (url) =>
       url.endsWith("/auth/login")
         ? new Response(null, { status: 204 })
-        : json(200, { required_here: true, signed_in: true })
+        : json(200, { required_here: true, signed_in: true, password_set: true })
     await gate.signIn("again")
     expect(gate.getAuthPhase().kind).toBe("open")
     release()
