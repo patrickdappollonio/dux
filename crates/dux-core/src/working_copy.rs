@@ -32,6 +32,16 @@ pub enum RecreatedBranch {
     RecreatedFrom(String),
 }
 
+/// The refusal when something already occupies the folder dux was about to
+/// check a branch out into: whatever is there is somebody's, so dux leaves it
+/// alone. `then` says what the user can do about it.
+pub(crate) fn occupied_folder_refusal(folder: &Path, then: &str) -> crate::status_text::StatusText {
+    crate::status_text![
+        q(shorten_home(folder)),
+        format!(" already exists, so dux left it alone. {then}")
+    ]
+}
+
 /// Put a managed working copy back at the path it already had, from the branch
 /// it already names.
 ///
@@ -54,9 +64,11 @@ pub fn recreate_working_copy(
         crate::git::DirectoryPresence::Missing => {}
         crate::git::DirectoryPresence::Present => {
             return Err(anyhow!(
-                "{} already exists, so dux left it alone. Move or remove it if you want dux to \
-                 check the branch out there again.",
-                shorten_home(worktree_path)
+                "{}",
+                occupied_folder_refusal(
+                    worktree_path,
+                    "Move or remove it if you want dux to check the branch out there again."
+                )
             ));
         }
         // The same fail-closed rule the verdict uses: a stat that failed for a

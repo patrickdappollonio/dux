@@ -12690,7 +12690,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_agents_folder_is_its_name_flattened_and_a_clash_is_refused() {
+    fn a_new_agents_folder_is_its_name_flattened() {
         let repo = init_test_repo();
         let worktrees_root = repo.path().join("agents");
         let name = "dependabot/cargo/tray-icon-0.26.1";
@@ -12705,12 +12705,6 @@ mod tests {
         assert_eq!(branch, name);
         assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
         assert!(path.ends_with("proj/dependabot-cargo-tray-icon-0-26-1"));
-
-        let clash = "dependabot-cargo/tray-icon-0.26.1";
-        create_worktree_from_start_point(repo.path(), &worktrees_root, "proj", None, Some(clash))
-            .expect_err("a folder already there refuses the create");
-        assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
-        assert!(!local_branch_exists(repo.path(), clash));
     }
 
     #[test]

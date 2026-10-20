@@ -943,6 +943,27 @@ impl CreatePlanContext<'_> {
         });
     }
 
+    /// Refuse the create, before any branch is made or fetched, when the
+    /// folder a new worktree named `name` would get is already there. Two
+    /// names can flatten to one folder ([`git::agent_folder_name`]), and that
+    /// folder belongs to whoever has it. A folder dux cannot stat is left to
+    /// the add itself, which refuses an occupied path on its own.
+    fn refuse_occupied_folder(&self, project_name: &str, name: &str) -> bool {
+        let folder = git::managed_worktree_path(&self.paths.worktrees_root, project_name, name);
+        if git::directory_presence(&folder) != git::DirectoryPresence::Present {
+            return false;
+        }
+        logger::info(&format!(
+            "refused to create agent \"{name}\": {} is already there",
+            folder.display()
+        ));
+        self.send_failure(crate::working_copy::occupied_folder_refusal(
+            &folder,
+            "Move or remove it, or give the agent another name.",
+        ));
+        true
+    }
+
     fn send_progress(&self, message: impl Into<crate::status_text::StatusText>) {
         let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
             status_op_id: self.create_key.to_string(),
@@ -1082,11 +1103,14 @@ impl CreatePlanContext<'_> {
                 (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
             crate::project_browser::leading_branch_for_project(&repo_path, current)
         });
+        let title = custom_name.clone();
+        let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
+        if self.refuse_occupied_folder(&project.name, &resolved_name) {
+            return None;
+        }
         if pull_before_create {
             self.try_pre_create_pull(&project, &repo_path, &leading_branch);
         }
-        let title = custom_name.clone();
-        let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
         let existing = git::branch_exists(&repo_path, &resolved_name).is_some();
         // A clone's first agent starts a branch of its own; one that appeared
         // since the clone looked is refused, never attached to.
@@ -1751,6 +1775,9 @@ impl CreatePlanContext<'_> {
             // is never touched either way. A fresh copy's name was chosen
             // because no branch has it, so the copy always takes the fetch path
             // and its branch is always dux's.
+            if self.refuse_occupied_folder(&project.name, &resolved_name) {
+                return None;
+            }
             let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
             let attach_existing =
                 fresh_copy.is_none() && (use_existing_branch || local_branch_existed);
@@ -2007,6 +2034,9 @@ impl CreatePlanContext<'_> {
                     return None;
                 }
             };
+            if self.refuse_occupied_folder(&project.name, &custom_name) {
+                return None;
+            }
             let repo_path = PathBuf::from(&project.path);
             let claim = |path: &Path| self.claim_worktree_path(path);
             let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
@@ -2165,6 +2195,11 @@ impl CreatePlanContext<'_> {
                     return None;
                 }
             };
+            if let Some(name) = custom_name.as_deref()
+                && self.refuse_occupied_folder(&project.name, name)
+            {
+                return None;
+            }
             let repo_path = PathBuf::from(&project.path);
             let claim = |path: &Path| self.claim_worktree_path(path);
             let (branch_name, worktree_path) = match git::create_worktree_from_start_point_claimed(
@@ -3215,6 +3250,47 @@ mod tests {
             .expect("the job should emit an AgentLaunchReady with the session")
     }
 
+    /// A second name that flattens to a folder already there is refused with
+    /// the occupied-folder sentence before any branch is made, and the folder
+    /// is left as it was.
+    #[test]
+    fn a_name_whose_folder_is_already_there_is_refused_before_anything_is_made() {
+        let repo = init_test_repo();
+        let clash = "dependabot-cargo/tray-icon-0.26.1";
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            CreateAgentRequest::NewProject {
+                project: test_project(repo.path()),
+                custom_name: Some(clash.to_string()),
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+                cloned: None,
+            },
+            |paths| {
+                let folder = paths
+                    .worktrees_root
+                    .join("repo")
+                    .join("dependabot-cargo-tray-icon-0-26-1");
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("mine.txt"), "do not touch").unwrap();
+            },
+        );
+        let failure = run.failure.expect("the create is refused");
+        assert!(
+            failure.contains(
+                "dependabot-cargo-tray-icon-0-26-1\" already exists, so dux left it alone"
+            ),
+            "{failure}"
+        );
+        assert!(
+            run.progress.is_empty(),
+            "nothing started: {:?}",
+            run.progress
+        );
+        assert!(!crate::git::local_branch_exists(repo.path(), clash));
+    }
+
     /// Drive `run_create_agent_job` for a `NewProject` request and return the
     /// `AgentSession` the job constructed.
     fn create_session_for(custom_name: Option<String>) -> AgentSession {
@@ -4187,7 +4263,7 @@ mod tests {
         let run = drive_create_job_run_with_setup(
             repo.path(),
             pull_request_request(repo.path(), None, false),
-            |paths| block_worktree_path(paths, "pr-head"),
+            block_worktree_path,
         );
         assert!(run.failure.is_some(), "the worktree add must still fail");
         assert!(
@@ -4262,12 +4338,13 @@ mod tests {
         }
     }
 
-    /// Put a plain FILE where the worktree wants to go: `git worktree add`
-    /// then fails deterministically, with no network, no timing, and no load.
-    fn block_worktree_path(paths: &DuxPaths, branch: &str) {
-        let project_root = paths.worktrees_root.join("repo");
-        std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::write(project_root.join(branch), b"in the way").unwrap();
+    /// Put a plain FILE where the project's worktree folder wants to go: the
+    /// worktree's own folder then reads as absent, so the create gets past
+    /// the occupied-folder check and its branch work, and making the folder
+    /// fails deterministically, with no network, no timing, and no load.
+    fn block_worktree_path(paths: &DuxPaths) {
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        std::fs::write(paths.worktrees_root.join("repo"), b"in the way").unwrap();
     }
 
     #[test]
@@ -4280,7 +4357,7 @@ mod tests {
         let run = drive_create_job_run_with_setup(
             repo.path(),
             pull_request_request(repo.path(), None, false),
-            |paths| block_worktree_path(paths, "pr-head"),
+            block_worktree_path,
         );
         let failure = run
             .failure
@@ -4307,7 +4384,7 @@ mod tests {
         let run = drive_create_job_run_with_setup(
             repo.path(),
             pull_request_request(repo.path(), Some("pr-agent"), true),
-            |paths| block_worktree_path(paths, "pr-agent"),
+            block_worktree_path,
         );
         assert!(run.failure.is_some(), "the worktree add must still fail");
         assert!(
