@@ -58,7 +58,7 @@ import {
   type LogoutAnswer,
   type PasswordAnswer,
 } from "./authActions"
-import { noteReportedInstance } from "./duxInstance"
+import { noteReportedInstance, openedInstance } from "./duxInstance"
 
 export { normalizeAuthStatus }
 export type { AuthStatus }
@@ -353,6 +353,37 @@ export function refreshAuthStatus(): Promise<void> {
 /// A protected request was answered 401: the session is gone.
 export function reportUnauthorized(): void {
   if (phase.kind !== "open" && phase.kind !== "checking") return
+  // The refusal may come from a different dux that took this address, whose
+  // login page must never paint here. Once the page knows which dux it opened
+  // on, the public status route is asked first, and only an answer that is not
+  // a different dux (an unknown one included) brings the login page. An act of
+  // this page's own (a sign-out, a password change) is answered by its own dux.
+  if (openedInstance() !== null && !actInFlight()) {
+    if (unauthorizedCheck !== null) return
+    // Judged on the phase alone: a page that moved on meanwhile has its
+    // answer, and one still open still owes this refusal its outcome.
+    unauthorizedCheck = fetchAuthStatus()
+      .then((answer) => {
+        if (phase.kind !== "open" && phase.kind !== "checking") return
+        if (answer.kind === "status" && noteReportedInstance(answer.status.instance) === "different") {
+          setPhase({ kind: "other_dux" })
+          return
+        }
+        signOutForRefusal()
+      })
+      .finally(() => {
+        unauthorizedCheck = null
+      })
+    return
+  }
+  signOutForRefusal()
+}
+
+// The status read a refusal waits on before the login page may show; one at a
+// time, however many refusals arrive meanwhile.
+let unauthorizedCheck: Promise<void> | null = null
+
+function signOutForRefusal(): void {
   const reason: SignOutReason = signingOut
     ? "signed_out"
     : changingPassword !== null

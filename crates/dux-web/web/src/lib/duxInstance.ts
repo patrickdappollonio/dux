@@ -34,6 +34,11 @@ export function noteReportedInstance(reported: string | null): InstanceVerdict {
   return compareInstances(opened, reported)
 }
 
+/// The id this page opened on, or null while it has not been told one.
+export function openedInstance(): string | null {
+  return opened
+}
+
 /// For tests: forget the dux this page opened on.
 export function resetOpenedInstanceForTests(): void {
   opened = null

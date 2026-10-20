@@ -187,6 +187,39 @@ describe("reportUnauthorized", () => {
     })
   })
 
+  it("never paints the login page of a different dux that refused the session", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    const seen: string[] = []
+    g.subscribeAuth(() => seen.push(g.getAuthPhase().kind))
+    statusBody = { ...SIGNED_OUT, instance: "dux-b" }
+    g.reportSocketAuthClose(g.AUTH_REQUIRED_CLOSE)
+    g.reportUnauthorized()
+    await vi.waitFor(() => expect(g.getAuthPhase()).toEqual({ kind: "other_dux" }))
+    expect(seen).toEqual(["other_dux"])
+  })
+
+  it("signs out as before once the dux it opened on, or an unknown one, answers", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = { ...SIGNED_OUT, instance: "dux-a" }
+    g.reportUnauthorized()
+    await vi.waitFor(() =>
+      expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "expired" }),
+    )
+    vi.resetModules()
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const h = await load()
+    await h.initAuthGate()
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 502 })))
+    h.reportUnauthorized()
+    await vi.waitFor(() =>
+      expect(h.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "expired" }),
+    )
+  })
+
   it("moves the epoch once however many requests report it", async () => {
     const g = await load()
     await g.initAuthGate()
