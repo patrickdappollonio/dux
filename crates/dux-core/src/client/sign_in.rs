@@ -109,7 +109,8 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, Cl
     // never leaves a token alive that nothing here holds any more.
     // One the remote answers 401 for has ended already (a password change ends them all).
     let old_sign_in_kept = remote.token.as_deref().and_then(|old| {
-        let why = match end_sign_in(name, remote, old) {
+        let ended = token_may_go(name, remote).and_then(|()| end_sign_in(name, remote, old));
+        let why = match ended {
             Ok(reply) if (200..300).contains(&reply.status) || reply.status == 401 => {
                 return None;
             }
@@ -128,8 +129,31 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, Cl
     })
 }
 
-/// Ask the remote to end the sign-in `token`.
+/// Whether a saved sign-in may be sent to what answers at `remote` now: only
+/// to the dux it was issued by. The remote is asked without it; a remote saved
+/// before dux had an id was never pinned, and is sent it as before.
+fn token_may_go(name: &str, remote: &Remote) -> Result<(), CliError> {
+    let Some(pinned) = &remote.instance else {
+        return Ok(());
+    };
+    let now = look(name, remote)?;
+    let target = format!("{name} ({})", remote.url);
+    match now.instance {
+        Some(id) if &id == pinned => Ok(()),
+        Some(_) => Err(CliError::new(
+            Exit::Failed,
+            format!("{target} is now a different dux"),
+        )),
+        None => Err(CliError::new(
+            Exit::Failed,
+            format!("{target} does not say which dux it is"),
+        )),
+    }
+}
+
+/// Ask the remote to end the sign-in `token`, once it is the dux that issued it.
 pub fn logout(name: &str, remote: &Remote, token: &str) -> Result<(), CliError> {
+    token_may_go(name, remote)?;
     let reply = end_sign_in(name, remote, token)?;
     if (200..300).contains(&reply.status) {
         Ok(())
@@ -286,6 +310,59 @@ mod tests {
                 "work (http://{addr}) became a different dux during the sign-in, so the sign-in \
                  was not kept; run \"dux remote login work\" again"
             )
+        );
+    }
+
+    #[test]
+    fn a_saved_sign_in_is_sent_only_to_the_dux_that_issued_it() {
+        let (fake, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
+            "/api/v1/auth/status" => Reply::json(
+                200,
+                r#"{"password_set":true,"required_here":true,"signed_in":false,"instance":"b"}"#,
+            ),
+            "/api/v1/auth/cli-login" => Reply::json(200, r#"{"token":"NEW","expires_at":null}"#),
+            "/api/v1/auth/cli-logout" => Reply::Raw("HTTP/1.1 204 No Content\r\n\r\n".into()),
+            _ => Reply::json(404, "{}"),
+        });
+        let pinned_elsewhere = Remote {
+            url: format!("http://{addr}"),
+            insecure: false,
+            token: Some("OLD".to_string()),
+            instance: Some("a".to_string()),
+        };
+        let error = logout("work", &pinned_elsewhere, "OLD").unwrap_err();
+        assert_eq!(
+            error.message,
+            format!("work (http://{addr}) is now a different dux")
+        );
+        let signed_in = login("work", &pinned_elsewhere, "right").unwrap();
+        assert_eq!(
+            signed_in.old_sign_in_kept.as_deref(),
+            Some(
+                format!(
+                    "Signed in again, but could not tell work to end the previous sign-in: work \
+                     (http://{addr}) is now a different dux. It ends on its own once it goes \
+                     unused for [server.auth] cli_token_idle_days."
+                )
+                .as_str()
+            )
+        );
+        assert!(
+            fake.seen()
+                .iter()
+                .all(|seen| seen.header("authorization") != Some("Bearer OLD")),
+            "the old sign-in never went to the other dux"
+        );
+
+        // The dux that issued it is told, as before.
+        let same = Remote {
+            instance: Some("b".to_string()),
+            ..pinned_elsewhere
+        };
+        logout("work", &same, "OLD").unwrap();
+        assert_eq!(
+            fake.seen().last().unwrap().header("authorization"),
+            Some("Bearer OLD")
         );
     }
 
