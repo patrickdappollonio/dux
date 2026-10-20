@@ -91,6 +91,9 @@ const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
     }
     return answer
   }
+  if (url.includes("/api/v1/build")) {
+    return protectedAnswer({ version: "development", process: "run-1", instance })
+  }
   if (url.includes("/api/v1/bootstrap")) {
     bootstrapGets++
     return protectedAnswer({})
@@ -258,6 +261,36 @@ describe("a different dux taking the address", () => {
     await new Promise((r) => setTimeout(r, 1500))
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(workspaceGets).toBe(gets)
+  })
+})
+
+describe("a different dux answering a reopened socket", () => {
+  it("applies nothing from it, even when the check before the reconnect could not ask", async () => {
+    passwordSet = false
+    instance = "dux-a"
+    const store = await import("./store")
+    const gate = await import("./authGate")
+    await vi.waitFor(() => expect(store.getSnapshot().spine).not.toBeNull())
+    FakeWebSocket.instances[0].open()
+    await settle()
+    const gets = workspaceGets
+    const boots = bootstrapGets
+    const spine = store.getSnapshot().spine
+    // Nothing answers the status route around the reconnect, so the check
+    // before it learns nothing and the socket reopens; B answers it.
+    statusDown = true
+    instance = "dux-b"
+    spineBody = makeSpine(["only-on-b"])
+    FakeWebSocket.instances[0].drop(1006)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    FakeWebSocket.instances[1].open()
+    // B pushes before its build read has answered.
+    store.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => expect(gate.getAuthPhase()).toEqual({ kind: "other_dux" }))
+    await settle()
+    expect(workspaceGets).toBe(gets)
+    expect(bootstrapGets).toBe(boots)
+    expect(store.getSnapshot().spine).toBe(spine)
   })
 })
 

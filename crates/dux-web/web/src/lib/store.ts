@@ -13,7 +13,7 @@ import {
   sameDuxBeforeReconnect,
   subscribeAuth,
 } from "./authGate"
-import { noteBootInstance, noteReportedInstance } from "./duxInstance"
+import { noteBootInstance, noteReportedInstance, openedInstance } from "./duxInstance"
 import {
   draftAfterRandomizeOff,
   generatedNameAfterEdit,
@@ -1376,7 +1376,37 @@ function routeEvent(event: EventsServerMessage): void {
   }
 }
 
-eventsSocket.onEvent = routeEvent
+// While a reopened app socket's dux is not yet known to be this page's, what it
+// pushes is held here rather than applied, with the refetch the open owes; the
+// identity answer then applies both, or drops both for a different dux.
+let heldFrames: EventsServerMessage[] | null = null
+let heldRecovery: (() => void) | null = null
+
+eventsSocket.onEvent = (event) => {
+  if (heldFrames !== null) {
+    heldFrames.push(event)
+    return
+  }
+  routeEvent(event)
+}
+
+// End the hold: `apply` runs the held refetch and then the held frames in the
+// order they arrived; otherwise both are dropped.
+function settleHeldOpen(apply: boolean): void {
+  if (heldFrames === null) return
+  const frames = heldFrames
+  const recovery = heldRecovery
+  heldFrames = null
+  heldRecovery = null
+  if (!apply) return
+  recovery?.()
+  for (const frame of frames) routeEvent(frame)
+}
+
+function gateCovered(): boolean {
+  const kind = getAuthPhase().kind
+  return kind === "other_dux" || kind === "not_dux"
+}
 
 // `boot()` starts the first bootstrap and spine load alongside
 // `eventsSocket.connect()`, so the first `onOpen` consumes this flag rather
@@ -1455,16 +1485,24 @@ async function reloadIfServerChanged(): Promise<void> {
   try {
     current = await fetchServerIdentity()
   } catch (e) {
-    // As above: no answer is no check, and the gate stays shut.
+    // As above: no answer is no check, and the gate stays shut. What a held
+    // open was waiting for is today's unchecked recovery.
+    settleHeldOpen(!gateCovered())
     if (isAuthInterruption(e)) return
     throw e
   }
-  // A late answer decides nothing: a newer check was asked since, the page left
-  // its session, or it is already covered by the gate.
-  if (seq !== identityProbeSeq || authEpoch() !== epoch || authPaused()) return
+  // A newer check was asked since: that one settles whatever is held.
+  if (seq !== identityProbeSeq) return
+  // A late answer decides nothing: the page left its session, or it is
+  // already covered by the gate.
+  if (authEpoch() !== epoch || authPaused()) {
+    settleHeldOpen(!gateCovered())
+    return
+  }
   // A different dux is not a restart of this one: the page is covered and asks,
   // rather than reloading itself into somebody else's dux.
   if (current !== null && noteReportedInstance(current.instance) === "different") {
+    settleHeldOpen(false)
     reportOtherDux()
     return
   }
@@ -1474,9 +1512,11 @@ async function reloadIfServerChanged(): Promise<void> {
     // ids, the applied replay generation) can be read in the meantime. See
     // `serverRun.ts`.
     noteServerRunProbe("changed")
+    settleHeldOpen(false)
     reloadLeavingNoModalEntry()
     return
   }
+  settleHeldOpen(true)
   noteServerRunProbe(current === null ? "unknown" : "same")
   // The check has RESOLVED and the run has not moved, which is the moment a PTY
   // socket may attach again. `conn === "open"` is true a whole round trip before
@@ -1502,6 +1542,7 @@ async function reloadIfServerChanged(): Promise<void> {
 // outage would otherwise leave stale providers/macros/UI flags until the next
 // config edit. The selected session's changes are also recovered when one is set.
 eventsSocket.onOpen = () => {
+  const skippedBootLoad = skipNextEventsOnOpenLoad
   if (skipNextEventsOnOpenLoad) {
     // First open after a boot/login load: skip the duplicate fetch this once.
     skipNextEventsOnOpenLoad = false
@@ -1514,10 +1555,25 @@ eventsSocket.onOpen = () => {
     //
     // The identity probe comes first: dux may have been restarted during the
     // outage, and refetching state into old code is the wrong recovery.
-    void reloadIfServerChanged()
     armReconnectDeepLink()
-    loadBootstrap()
-    loadWorkspace()
+    const recover = () => {
+      loadBootstrap()
+      loadWorkspace()
+      const id = state.selectedSessionId
+      if (id === null) return
+      setState({ changes: loadingChanges(id) })
+      void restartChanges(id)
+    }
+    if (openedInstance() !== null) {
+      // A page that knows its dux applies nothing from this socket until the
+      // answer to this open's check says it is that dux.
+      heldFrames = []
+      heldRecovery = recover
+      void reloadIfServerChanged().catch(() => settleHeldOpen(!gateCovered()))
+    } else {
+      void reloadIfServerChanged()
+      recover()
+    }
     // The server's ownership epoch counter restarts at zero if the server itself
     // restarted during the outage; clear our per-pty high-water marks so a fresh
     // post-restart `pty.owner` is not wrongly ignored as stale. A reconnect is the
@@ -1531,6 +1587,8 @@ eventsSocket.onOpen = () => {
   // this generation lands. (On the boot open this only risks re-applying the
   // document the boot fetch just applied, which is idempotent.)
   resetAppliedWorkspaceRev()
+  // The reconnect's own recovery restarts the changes above.
+  if (!skippedBootLoad) return
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
