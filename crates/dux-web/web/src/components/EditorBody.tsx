@@ -37,6 +37,7 @@ import {
 import type { PanelImperativeHandle } from "react-resizable-panels"
 import { notify, notifyBusy, notifyError, notifySuccess } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
+import { matchCharRanges } from "@/lib/searchMatch"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
@@ -1956,6 +1957,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                             <StartTruncatedText
                               text={p}
                               className="flex-1 font-mono text-sm"
+                              matches={matchCharRanges(p, [
+                                search.trim().toLowerCase(),
+                              ])}
                             />
                           </button>
                         ))}

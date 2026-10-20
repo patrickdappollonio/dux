@@ -39,6 +39,7 @@ import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialo
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
+import { matchCharRanges } from "@/lib/searchMatch"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -353,6 +354,10 @@ interface FileRowProps {
   // two primitives so the memoized row skips a render that moved neither.
   rowIndex: number
   active: boolean
+  // The filter's normalized query. Only a row of the listing itself is lit:
+  // the filter reads the listing's paths, so a row inside an expanded folder
+  // is shown because its folder matched, not because of its own name.
+  needle: string
 }
 
 // What makes an element a row of the treegrid's keyboard: its place among the
@@ -411,6 +416,7 @@ const FileRow = memo(function FileRow({
   onRetryFolder,
   rowIndex,
   active,
+  needle,
 }: FileRowProps) {
   const grid: GridRowProps = { rowIndex, active }
   const inTabOrder = active
@@ -521,6 +527,7 @@ const FileRow = memo(function FileRow({
         <StartTruncatedText
           text={depth > 0 ? leafName(displayPath) : displayPath}
           className="flex-1 font-mono text-sm text-foreground"
+          matches={depth > 0 ? undefined : matchCharRanges(file.path, [needle])}
         />
 
         {folderCount !== null && (
@@ -1689,6 +1696,7 @@ function ChangesList({
         contentsId={item.expanded ? contentsId(item.key) : undefined}
         rowIndex={grid.rowIndex}
         active={grid.active}
+        needle={query.trim().toLowerCase()}
       />
     )
   }

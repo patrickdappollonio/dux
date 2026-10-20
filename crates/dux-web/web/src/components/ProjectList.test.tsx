@@ -64,6 +64,14 @@ describe("a project row's menu on a computer", () => {
     expect(screen.queryByRole("menu")).toBeNull()
   })
 
+  it("lights the part of a project's name the search matched", () => {
+    renderList()
+    fireEvent.change(screen.getByLabelText("Search projects"), {
+      target: { value: "API" },
+    })
+    expect(screen.getByText("api").tagName).toBe("MARK")
+  })
+
   it("leaves focus on the control an outside press landed on", async () => {
     renderList()
     fireEvent.click(nameButton())

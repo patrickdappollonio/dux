@@ -8,6 +8,7 @@ import {
 } from "react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -25,6 +26,7 @@ import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
 import { changeBaseBranchProse } from "@/lib/changeBaseBranch"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { renderProse } from "@/lib/prose"
+import { matchCharRanges } from "@/lib/searchMatch"
 import {
   changeBaseBranch,
   closeChangeBaseBranch,
@@ -230,6 +232,7 @@ function PickerBody({
                 isBase={branch.name === project.leading_branch}
                 heldBy={branch.held_by === null ? null : holder(branch.held_by)}
                 onPick={onPick}
+                needle={query.trim().toLowerCase()}
               />
             ))
           )}
@@ -250,6 +253,7 @@ function BranchRow({
   isBase,
   heldBy,
   onPick,
+  needle,
 }: {
   id: string
   // The row Enter in the search field would pick, ringed as if focused.
@@ -258,6 +262,8 @@ function BranchRow({
   isBase: boolean
   heldBy: ReactNode | null
   onPick: (branch: string) => void
+  // The filter's normalized query, lit in the name it matched.
+  needle: string
 }) {
   // What sits after the name, quietest last: why it cannot be picked, then
   // what is special about it.
@@ -281,7 +287,7 @@ function BranchRow({
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate font-mono text-sm">
-        {branch.name}
+        <MatchHighlight text={branch.name} ranges={matchCharRanges(branch.name, [needle])} />
       </span>
       {notes.length > 0 ? (
         <span className="min-w-0 shrink truncate text-xs text-muted-foreground">

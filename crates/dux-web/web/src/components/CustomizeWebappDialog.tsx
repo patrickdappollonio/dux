@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import { Check } from "lucide-react"
+import { Check, Search, ZoomOut } from "lucide-react"
 import {
   notifyError,
   notifyInfo,
@@ -7,6 +7,7 @@ import {
   notifyWarning,
 } from "@/lib/notify"
 
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
@@ -18,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -45,6 +47,7 @@ import {
   reportUnauthorized,
   useAuthPhase,
 } from "@/lib/authGate"
+import { EDIT_CONFIG_TITLE } from "@/lib/appMenu"
 import { configApi } from "@/lib/configApi"
 import {
   STRENGTH_LABELS,
@@ -55,7 +58,11 @@ import {
   type Strength,
 } from "@/lib/passwordStrength"
 import { firstPasswordUnavailable, storedNotInForceSentence } from "@/lib/authErrors"
-import { renderInlineCode } from "@/lib/inlineMarkdown"
+import { inlineCodeDisplayText, renderInlineCode } from "@/lib/inlineMarkdown"
+import { haystackHas, normalizeQuery } from "@/lib/agentSearch"
+import { matchCharRanges } from "@/lib/searchMatch"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
@@ -85,6 +92,14 @@ function rowId(d: SettingDescriptor): string {
 
 // Human copy for a descriptor's documented default, shown muted under the
 // label so the row is self-explanatory without leaving the modal.
+function defaultText(d: SettingDescriptor): string {
+  const zero =
+    d.control.kind === "number" && d.control.zeroMeaning
+      ? ` (0 = ${d.control.zeroMeaning})`
+      : ""
+  return defaultLabel(d) + zero
+}
+
 function defaultLabel(d: SettingDescriptor): string {
   switch (d.control.kind) {
     case "bool":
@@ -106,6 +121,50 @@ function defaultLabel(d: SettingDescriptor): string {
     case "password":
       return "Default: no password"
   }
+}
+
+// The Settings search splits its query into words, and a row is shown only
+// when EVERY word is somewhere in what the row shows: its label, its prose, its
+// default and its config key. The fields are the shown text, so a hit is
+// always something the user can see lit.
+function searchWords(query: string): string[] {
+  return normalizeQuery(query).split(/\s+/).filter((w) => w !== "")
+}
+
+function rowMatches(fields: string[], words: string[]): boolean {
+  return words.every((word) => haystackHas(word, ...fields))
+}
+
+// What a row shows, as searched. A locked row shows its lock sentence in place
+// of its description; the password row shows no default.
+function settingSearchFields(d: SettingDescriptor, lock: string | null): string[] {
+  const fields = [d.label, inlineCodeDisplayText(lock ?? d.description), d.key]
+  if (d.control.kind !== "password") fields.push(defaultText(d))
+  return fields
+}
+
+// The row's label, lit where the search matched it, and while a search is
+// running its config key on a line of its own, so a key typed from
+// `config.toml` finds the row and shows why.
+function RowHeading({
+  d,
+  words,
+  label,
+}: {
+  d: SettingDescriptor
+  words: string[]
+  label: React.ReactNode
+}) {
+  return (
+    <>
+      {label}
+      {words.length > 0 ? (
+        <span className="font-mono text-xs break-all text-muted-foreground">
+          <MatchHighlight text={d.key} ranges={matchCharRanges(d.key, words)} />
+        </span>
+      ) : null}
+    </>
+  )
 }
 
 function FaviconControl({
@@ -371,6 +430,7 @@ function SettingRow({
   disabled,
   lock,
   availableProviders,
+  words,
 }: {
   d: SettingDescriptor
   value: SettingValue
@@ -379,30 +439,31 @@ function SettingRow({
   /** The sentence saying why this run cannot change the row, or null. */
   lock: string | null
   availableProviders: string[]
+  /** The search's words, lit wherever they occur; empty when not searching. */
+  words: string[]
 }) {
   const id = rowId(d)
+  const labelText = <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
   const labelEl =
     d.control.kind === "text" || d.control.kind === "favicon" ? (
       <label htmlFor={id} className="text-sm font-medium">
-        {d.label}
+        {labelText}
       </label>
     ) : (
       <span id={`${id}-label`} className="text-sm font-medium">
-        {d.label}
+        {labelText}
       </span>
     )
+  const shownDefault = defaultText(d)
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
-        {labelEl}
+        <RowHeading d={d} words={words} label={labelEl} />
         <p className="text-xs text-muted-foreground">
-          {renderInlineCode(lock ?? d.description)}
+          {renderInlineCode(lock ?? d.description, words)}
         </p>
         <p className="text-xs text-muted-foreground">
-          {defaultLabel(d)}
-          {d.control.kind === "number" && d.control.zeroMeaning
-            ? ` (0 = ${d.control.zeroMeaning})`
-            : ""}
+          <MatchHighlight text={shownDefault} ranges={matchCharRanges(shownDefault, words)} />
         </p>
       </div>
       <div className="shrink-0 md:pt-0.5">
@@ -546,6 +607,7 @@ function PasswordSettingRow({
   reading,
   error,
   disabled,
+  words,
 }: {
   d: SettingDescriptor
   status: AuthStatus | null
@@ -554,6 +616,7 @@ function PasswordSettingRow({
   reading: StrengthReading
   error: string | null
   disabled: boolean
+  words: string[]
 }) {
   const id = rowId(d)
   const editable =
@@ -566,10 +629,18 @@ function PasswordSettingRow({
   return (
     <div className="flex flex-col gap-3 py-3 first:pt-0">
       <div className="flex flex-col gap-1">
-        <span id={`${id}-label`} className="text-sm font-medium">
-          {d.label}
-        </span>
-        <p className="text-xs text-muted-foreground">{renderInlineCode(d.description)}</p>
+        <RowHeading
+          d={d}
+          words={words}
+          label={
+            <span id={`${id}-label`} className="text-sm font-medium">
+              <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
+            </span>
+          }
+        />
+        <p className="text-xs text-muted-foreground">
+          {renderInlineCode(d.description, words)}
+        </p>
         {editable && mins ? (
           <p className="text-xs text-muted-foreground">
             {`At least ${mins.length} characters. The meter shows how hard it is to guess; dux asks for ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better and says so if it refuses. Leave these empty to keep the current password.`}
@@ -772,10 +843,14 @@ function CustomizeWebappForm({
   saving,
   setSaving,
   savingRef,
+  clearSearchRef,
 }: {
   saving: boolean
   setSaving: (v: boolean) => void
   savingRef: React.RefObject<boolean>
+  /** Filled in with "clear the search if there is one, saying whether there
+   * was", so the dialog's Escape clears a search before it closes anything. */
+  clearSearchRef: React.RefObject<(() => boolean) | null>
 }) {
   const dux = useDux()
   const { bootstrap } = dux
@@ -794,6 +869,27 @@ function CustomizeWebappForm({
   useEffect(() => {
     void refreshAuthStatus()
   }, [])
+
+  // The search. Rows it hides keep their edits in `overrides`, so Save still
+  // writes them: hiding a row is a view, never an abandon.
+  const [query, setQuery] = useState("")
+  const words = searchWords(query)
+  const searching = words.length > 0
+  useEffect(() => {
+    clearSearchRef.current = () => {
+      if (query === "") return false
+      setQuery("")
+      return true
+    }
+    return () => {
+      clearSearchRef.current = null
+    }
+  }, [query, clearSearchRef])
+  // Type-immediately on a computer; on a phone or a touch screen focusing the
+  // field would pop the soft keyboard over the dialog the moment it opens.
+  const isMobile = useIsMobile()
+  const coarsePointer = useIsCoarsePointer()
+  const searchAutoFocus = !isMobile && !coarsePointer
 
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
@@ -933,9 +1029,20 @@ function CustomizeWebappForm({
     }
   }
 
+  const shownGroups = SETTING_GROUPS.map((group) => ({
+    group,
+    settings: searching
+      ? group.settings.filter((d) => rowMatches(settingSearchFields(d, lockOn(d)), words))
+      : group.settings,
+  })).filter(({ settings }) => settings.length > 0)
+
   return (
-    <DialogContent className="max-h-[85vh] sm:max-w-2xl">
-      <DialogHeader>
+    // A flex column rather than the popup's grid, so the list is the one part
+    // that gives up height when the popup hits its cap (a phone, a short
+    // window): the header, the search and the footer stay put and only the
+    // rows scroll.
+    <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogHeader className="shrink-0">
         <DialogTitle>Settings</DialogTitle>
         <DialogDescription>
           {renderInlineCode(
@@ -944,71 +1051,105 @@ function CustomizeWebappForm({
         </DialogDescription>
       </DialogHeader>
 
-      <ScrollArea className="max-h-[60vh] pr-3">
-        <div className="flex flex-col gap-6">
-          {SETTING_GROUPS.map((group) => (
-            <div key={group.surface} className="flex flex-col gap-1">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium text-muted-foreground">
-                  {group.caption}
-                </p>
-                {/* A password has no default to reset to. */}
-                {group.settings.some((d) => d.writeTarget !== "password") ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={saving}
-                    className="max-md:min-h-10 shrink-0 text-xs"
-                    onClick={() => resetSection(group.settings)}
-                  >
-                    Reset section to defaults…
-                  </Button>
-                ) : null}
-              </div>
-              <div className="divide-y divide-border">
-                {group.settings.map((d) => (
-                  <Fragment key={d.key}>
-                    {d.control.kind === "password" ? (
-                      <PasswordSettingRow
-                        d={d}
-                        status={authStatus}
-                        draft={passwordDraft}
-                        onDraft={(next) => {
-                          setPasswordDraft(next)
-                          setPasswordError(null)
-                        }}
-                        reading={strengthReading}
-                        error={passwordError}
-                        disabled={saving}
-                      />
-                    ) : (
-                      <SettingRow
-                        d={d}
-                        value={effective(d)}
-                        onChange={(v) => setOverride(d.key, v)}
-                        disabled={saving}
-                        lock={lockOn(d)}
-                        availableProviders={bootstrap?.available_providers ?? []}
-                      />
-                    )}
-                    {/* Directly beneath the setting it is a precondition for. */}
-                    {d.key === "capabilities.web_notifications" ? (
-                      <NotificationPermissionRow
-                        enabledInConfig={effective(d) as boolean}
-                      />
-                    ) : null}
-                  </Fragment>
-                ))}
-              </div>
-            </div>
-          ))}
+      <div className="flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10">
+        <Search className="size-4 shrink-0 text-muted-foreground" />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search settings"
+          aria-label="Search settings"
+          autoFocus={searchAutoFocus}
+          className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
+        />
+      </div>
+
+      {/* A fixed height rather than a cap, so the dialog does not shrink as a
+          search narrows the list; it gives way only to the popup's own cap. */}
+      {shownGroups.length === 0 ? (
+        <div
+          role="status"
+          className="flex h-[60vh] min-h-0 shrink flex-col items-center justify-center gap-2 px-6 text-center"
+        >
+          <ZoomOut aria-hidden className="size-7 text-muted-foreground/70" />
+          <p className="text-sm font-medium">
+            No settings match <InlineCode>{query.trim()}</InlineCode>.
+          </p>
+          <p className="max-w-sm text-xs text-muted-foreground">
+            This dialog holds the everyday settings. Everything else in{" "}
+            <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
+            <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
+          </p>
         </div>
-      </ScrollArea>
+      ) : (
+        <ScrollArea className="h-[60vh] min-h-0 shrink pr-3">
+          <div className="flex flex-col gap-6">
+            {shownGroups.map(({ group, settings }) => (
+              <div key={group.surface} className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {group.caption}
+                  </p>
+                  {/* A password has no default to reset to. A search hides the
+                      button: the section on screen is not the whole section. */}
+                  {!searching && group.settings.some((d) => d.writeTarget !== "password") ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={saving}
+                      className="max-md:min-h-10 shrink-0 text-xs"
+                      onClick={() => resetSection(group.settings)}
+                    >
+                      Reset section to defaults…
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="divide-y divide-border">
+                  {settings.map((d) => (
+                    <Fragment key={d.key}>
+                      {d.control.kind === "password" ? (
+                        <PasswordSettingRow
+                          d={d}
+                          status={authStatus}
+                          draft={passwordDraft}
+                          onDraft={(next) => {
+                            setPasswordDraft(next)
+                            setPasswordError(null)
+                          }}
+                          reading={strengthReading}
+                          error={passwordError}
+                          disabled={saving}
+                          words={words}
+                        />
+                      ) : (
+                        <SettingRow
+                          d={d}
+                          value={effective(d)}
+                          onChange={(v) => setOverride(d.key, v)}
+                          disabled={saving}
+                          lock={lockOn(d)}
+                          availableProviders={bootstrap?.available_providers ?? []}
+                          words={words}
+                        />
+                      )}
+                      {/* Directly beneath the setting it is a precondition for. */}
+                      {d.key === "capabilities.web_notifications" ? (
+                        <NotificationPermissionRow
+                          enabledInConfig={effective(d) as boolean}
+                        />
+                      ) : null}
+                    </Fragment>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
 
       {/* Misclick-safe spacing between the last row and the footer buttons. */}
-      <div className="h-2" />
-      <DialogFooter>
+      <div className="h-2 shrink-0" />
+      <DialogFooter className="shrink-0">
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           {/* Cancel is disabled too while a write is in flight: closing the
               dialog mid-persist would let the pending success close a freshly
@@ -1016,7 +1157,7 @@ function CustomizeWebappForm({
               when the request still lands on the server. */}
           <Button
             variant="outline"
-            autoFocus
+            autoFocus={!searchAutoFocus}
             disabled={saving}
             onClick={closeCustomizeWebapp}
           >
@@ -1038,11 +1179,19 @@ export function CustomizeWebappDialog() {
   // the footer, and both gate `onOpenChange` too, so no dismissal orphans a write.
   const savingRef = useRef(false)
   const [saving, setSaving] = useState(false)
+  const clearSearchRef = useRef<(() => boolean) | null>(null)
 
   return (
     <Dialog
       open={customizeWebappOpen}
-      onOpenChange={(o) => {
+      onOpenChange={(o, details) => {
+        // Escape over a search clears the search and keeps the dialog open;
+        // the next Escape closes it. Back and every other dismissal close as
+        // they always have.
+        if (!o && details.reason === "escape-key" && clearSearchRef.current?.()) {
+          details.cancel()
+          return
+        }
         if (!o && !savingRef.current) closeCustomizeWebapp()
       }}
     >
@@ -1051,6 +1200,7 @@ export function CustomizeWebappDialog() {
           saving={saving}
           setSaving={setSaving}
           savingRef={savingRef}
+          clearSearchRef={clearSearchRef}
         />
       )}
     </Dialog>

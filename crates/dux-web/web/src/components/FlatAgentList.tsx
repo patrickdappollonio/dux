@@ -31,6 +31,7 @@ import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react"
 import { useRef, useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { useWorkingPulseAnchor } from "@/hooks/use-working-cue"
 import {
@@ -236,21 +237,11 @@ function TypingCaret() {
   )
 }
 
-// A row label with the matched range wrapped in a token-styled emphasis span.
-// The range is computed against the DISPLAYED string only; Array.from keeps CJK intact.
+// A row label with its first match lit, computed against the DISPLAYED string
+// only, the same first range the terminal UI lights.
 function HighlightedText({ text, query }: { text: string; query: string }) {
   const range = matchCharRange(text, query)
-  if (!range) return <>{text}</>
-  const chars = Array.from(text)
-  return (
-    <>
-      {chars.slice(0, range.start).join("")}
-      <span className="rounded-[2px] bg-primary/25">
-        {chars.slice(range.start, range.end).join("")}
-      </span>
-      {chars.slice(range.end).join("")}
-    </>
-  )
+  return <MatchHighlight text={text} ranges={range ? [range] : []} />
 }
 
 // One home for the row's name. It never animates: the working cue is the glyph

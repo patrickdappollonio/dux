@@ -753,6 +753,12 @@ surface they affect:
   new agents start with a random pet name.
 - **Terminal UI only**: whether Tab reaches the agent, and Nerd Font icons.
 
+Lost in there? Type in **Search settings** at the top and the list shrinks to the rows
+holding every word you typed, in a row's name, description, default or config key, so
+`server.tailscale` finds its row too, with each hit highlighted. Escape clears the search
+first and closes the dialog on the second press; anything you changed in a row the search
+hid is still saved.
+
 The Tailscale row does more than save a value: it also moves the listener that is
 serving right now and tells you what happened to it. Choosing **No** from a browser
 reached over your tailnet closes that tab's own connection, which the row says before

@@ -127,6 +127,12 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "A worktree row that is only its branch: a list row, out of the chip rule's scope.",
   },
   {
+    file: "components/CustomizeWebappDialog.tsx",
+    line: '<span className="font-mono text-xs break-all text-muted-foreground">',
+    reason:
+      "A setting row's config key, on a line of its own under the label while searching: part of the row, not a name in a sentence.",
+  },
+  {
     file: "components/ProjectsDialog.tsx",
     line: '<StartTruncatedText text={project.path} className="font-mono" tooltip />',
     reason: "A project row's folder on its second line: part of a list row, not a name in a sentence.",

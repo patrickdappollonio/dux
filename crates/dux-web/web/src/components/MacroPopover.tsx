@@ -16,16 +16,19 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { targetPtyId, targetTabDormant } from "@/components/terminalAreaModel"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
+import { subsequenceMatchRanges } from "@/lib/searchMatch"
 import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
 import { cn } from "@/lib/utils"
 import { openMacrosDialog, runMacro, useDux, useDuxSelector } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
+import type { MacroView } from "@/lib/types"
 
 // A quick-picker for sending a text macro to the pane it belongs to: a
 // filterable list restricted to that target's surface, run by Enter or click.
@@ -168,43 +171,7 @@ export function MacroPopover({
             No macros for this target kind. Add one via Edit macros below.
           </div>
         ) : (
-          // min-h-0 lets the Command column shrink when the popup hits its
-          // viewport cap, so the list below scrolls instead of pushing the
-          // Edit-macros footer off screen.
-          <Command className="min-h-0">
-            {/* No autofocus in the sheet: menus never pop the soft keyboard
-                on open, and this now presents as one of them; tapping the
-                field summons the keyboard. Desktop keeps type-immediately
-                (the filters-are-type-immediately convention). */}
-            <CommandInput placeholder="Search macros…" autoFocus={!isMobile} />
-            {/* CommandGroup's padding puts breathing room between the search
-                field and the first result, matching the gap above the Edit
-                macros footer below. */}
-            {/* max-h-[none]: the primitive's fixed cap would hold this list
-                at 288px with a whole screen free below it. Like every other
-                menu, the bound is the popup's max-h-(--available-height) (see
-                popover.tsx); min-h-0 makes the list the flex child that
-                shrinks, which is what engages its own overflow-y scroll. The
-                arbitrary-value form is deliberate: the installed
-                tailwind-merge does not recognize bare max-h-none as a max-h
-                conflict, so the primitive's max-h-72 would survive beside it
-                and which one wins would be stylesheet-order luck. */}
-            <CommandList className="max-h-[none] min-h-0">
-              <CommandEmpty>No matching macros.</CommandEmpty>
-              <CommandGroup>
-                {macros.map((macro) => (
-                  <CommandItem
-                    key={macro.name}
-                    value={macro.name}
-                    className="cursor-pointer"
-                    onSelect={() => handleRun(macro.name)}
-                  >
-                    {macro.name}
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            </CommandList>
-          </Command>
+          <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
         )}
         <button
           type="button"
@@ -221,6 +188,71 @@ export function MacroPopover({
         </button>
       </PopoverContent>
     </Popover>
+  )
+}
+
+// The macro list and its search. Mounted inside the popup, so the search starts
+// empty on every open. The search is held here rather than left to cmdk so a
+// row can light the letters cmdk's loose match found; cmdk still does the
+// filtering, against the row's value, which is the name it shows.
+function MacroCommand({
+  macros,
+  autoFocus,
+  onRun,
+}: {
+  macros: MacroView[]
+  autoFocus: boolean
+  onRun: (name: string) => void
+}) {
+  const [search, setSearch] = useState("")
+  return (
+    // min-h-0 lets the Command column shrink when the popup hits its
+    // viewport cap, so the list below scrolls instead of pushing the
+    // Edit-macros footer off screen.
+    <Command className="min-h-0">
+      {/* No autofocus in the sheet: menus never pop the soft keyboard
+          on open, and this now presents as one of them; tapping the
+          field summons the keyboard. Desktop keeps type-immediately
+          (the filters-are-type-immediately convention). */}
+      <CommandInput
+        placeholder="Search macros…"
+        autoFocus={autoFocus}
+        value={search}
+        onValueChange={setSearch}
+      />
+      {/* CommandGroup's padding puts breathing room between the search
+          field and the first result, matching the gap above the Edit
+          macros footer below. */}
+      {/* max-h-[none]: the primitive's fixed cap would hold this list
+          at 288px with a whole screen free below it. Like every other
+          menu, the bound is the popup's max-h-(--available-height) (see
+          popover.tsx); min-h-0 makes the list the flex child that
+          shrinks, which is what engages its own overflow-y scroll. The
+          arbitrary-value form is deliberate: the installed
+          tailwind-merge does not recognize bare max-h-none as a max-h
+          conflict, so the primitive's max-h-72 would survive beside it
+          and which one wins would be stylesheet-order luck. */}
+      <CommandList className="max-h-[none] min-h-0">
+        <CommandEmpty>No matching macros.</CommandEmpty>
+        <CommandGroup>
+          {macros.map((macro) => (
+            <CommandItem
+              key={macro.name}
+              value={macro.name}
+              className="cursor-pointer"
+              onSelect={() => onRun(macro.name)}
+            >
+              <span>
+                <MatchHighlight
+                  text={macro.name}
+                  ranges={subsequenceMatchRanges(macro.name, search)}
+                />
+              </span>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+      </CommandList>
+    </Command>
   )
 }
 

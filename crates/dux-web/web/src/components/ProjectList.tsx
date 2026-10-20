@@ -20,7 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { useSearchPick } from "@/hooks/use-search-pick"
+import { matchCharRanges } from "@/lib/searchMatch"
 import { openAddProject } from "@/lib/store"
 import { ACTIVE_ROW_RING, FOCUS_RING } from "@/lib/focusRing"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
@@ -139,6 +141,7 @@ export function ProjectList({
                 menuOpen={menuOpenId === row.id}
                 setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
                 menu={menu}
+                needle={query.trim().toLowerCase()}
               />
             ))
           )}
@@ -220,6 +223,7 @@ function ProjectRow({
   menuOpen,
   setMenuOpen,
   menu,
+  needle,
 }: {
   row: ProjectListRow
   onPick?: (id: string) => void
@@ -229,6 +233,8 @@ function ProjectRow({
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   menu: (id: string) => ReactNode
+  // The filter's normalized query, lit in the name it matched.
+  needle: string
 }) {
   const nameId = useId()
   const labelId = useId()
@@ -292,7 +298,7 @@ function ProjectRow({
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-2">
             <span id={nameId} className="min-w-0 flex-1 truncate text-sm">
-              {row.name}
+              <MatchHighlight text={row.name} ranges={matchCharRanges(row.name, [needle])} />
             </span>
             {row.label ? (
               <span

@@ -1112,6 +1112,8 @@ describe("the bulk bar's Select all toggle", () => {
     fireEvent.change(screen.getByLabelText("Filter changed files"), {
       target: { value: "a.ts" },
     })
+    // The part of the path the filter matched is lit.
+    expect(screen.getByText("a.ts").tagName).toBe("MARK")
 
     fireEvent.click(bar().getByRole("button", { name: "Select all" }))
 

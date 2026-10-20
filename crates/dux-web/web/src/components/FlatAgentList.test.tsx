@@ -578,8 +578,8 @@ describe("FlatAgentList search-match highlight", () => {
     mockState = withQuery("alph")
     render(<FlatAgentList handlers={handlers} />)
     const mark = screen.getByText("Alph")
-    // Token-derived emphasis only, never a hardcoded color.
-    expect(mark.className).toContain("bg-primary")
+    // The shared match highlight, the one every web search paints with.
+    expect(mark.tagName).toBe("MARK")
     // The full label survives around the mark.
     expect(shown(mark.parentElement)).toBe("Alpha")
   })
@@ -598,7 +598,7 @@ describe("FlatAgentList search-match highlight", () => {
     const marks = screen.getAllByText("Rep")
     expect(marks.length).toBeGreaterThan(0)
     for (const mark of marks) {
-      expect(mark.className).toContain("bg-primary")
+      expect(mark.tagName).toBe("MARK")
     }
     // At least one mark is the project tag itself.
     expect(marks.some((m) => m.parentElement?.textContent === "Repo")).toBe(true)
@@ -623,7 +623,7 @@ describe("FlatAgentList search-match highlight", () => {
     const marks = screen.getAllByText("Zeta@")
     expect(marks.length).toBeGreaterThan(0)
     for (const mark of marks) {
-      expect(mark.className).toContain("bg-primary")
+      expect(mark.tagName).toBe("MARK")
       expect(mark.parentElement?.textContent).toBe("Zeta@Repo")
     }
   })
@@ -634,7 +634,7 @@ describe("FlatAgentList search-match highlight", () => {
     mockState = withQuery("zs")
     render(<FlatAgentList handlers={handlers} />)
     const mark = screen.getByText("zs")
-    expect(mark.className).toContain("bg-primary")
+    expect(mark.tagName).toBe("MARK")
     expect(shown(mark.parentElement)).toBe("zsh")
   })
 })

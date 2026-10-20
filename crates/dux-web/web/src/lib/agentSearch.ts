@@ -4,12 +4,13 @@
 
 import type { SessionView, TerminalView } from "@/lib/types"
 import { workspaceBranchName, workspaceLocation } from "@/lib/agentWorkspace"
+import { loweredWithSource } from "@/lib/searchMatch"
 
 export function normalizeQuery(query: string): string {
   return query.trim().toLowerCase()
 }
 
-function haystackHas(query: string, ...fields: (string | null | undefined)[]): boolean {
+export function haystackHas(query: string, ...fields: (string | null | undefined)[]): boolean {
   if (query === "") return true
   return fields.some((field) => (field ?? "").toLowerCase().includes(query))
 }
@@ -59,14 +60,7 @@ export function matchCharRange(
 ): { start: number; end: number } | null {
   const q = Array.from(normalizeQuery(query))
   if (q.length === 0) return null
-  const lowered: string[] = []
-  const sourceIndex: number[] = []
-  Array.from(field).forEach((ch, index) => {
-    for (const lower of Array.from(ch.toLowerCase())) {
-      lowered.push(lower)
-      sourceIndex.push(index)
-    }
-  })
+  const { lowered, sourceIndex } = loweredWithSource(field)
   if (q.length > lowered.length) return null
   for (let start = 0; start <= lowered.length - q.length; start++) {
     let hit = true

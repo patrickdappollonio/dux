@@ -93,6 +93,10 @@ export interface AppMenuContext {
   canSignOut: boolean
 }
 
+/** The config editor's entry, which the Settings dialog names as the way to
+ * everything it does not hold, so the two always say the same words. */
+export const EDIT_CONFIG_TITLE = "Edit config file…"
+
 /**
  * The app menu, top level first. Resist gating entries on the context without a
  * real reason: an entry that appears and disappears is harder to learn than one
@@ -188,7 +192,7 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
         {
           kind: "item",
           id: "edit-config",
-          title: "Edit config file…",
+          title: EDIT_CONFIG_TITLE,
           icon: FileCode,
           run: () => openConfigEditor(),
         },

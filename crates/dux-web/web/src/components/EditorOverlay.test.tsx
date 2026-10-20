@@ -3080,7 +3080,9 @@ describe("the file tree follows what the agent writes", () => {
     fireEvent.change(screen.getByPlaceholderText("Search files…"), {
       target: { value: "one.txt" },
     })
-    expect(await screen.findByText("newdir/one.txt")).toBeTruthy()
+    // The result row, with the part of its path the search matched lit.
+    const mark = await screen.findByText("one.txt", { selector: "mark" })
+    expect(mark.parentElement?.textContent).toBe("newdir/one.txt")
   })
 
   // A revisit can arrive the moment the tree's listing is on screen: the user

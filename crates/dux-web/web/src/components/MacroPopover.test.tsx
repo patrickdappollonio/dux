@@ -480,3 +480,16 @@ describe("MacroPopover over a dormant tab", () => {
     expect((trigger as HTMLButtonElement).disabled).toBe(false)
   })
 })
+
+describe("MacroPopover search highlight", () => {
+  it("lights the letters the loose search matched", async () => {
+    render(<MacroPopover target={target} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    const input = document.querySelector('[data-slot="command-input"]')!
+    fireEvent.change(input, { target: { value: "gt" } })
+    await settle()
+    const marks = [...document.querySelectorAll('[data-slot="popover-content"] mark')]
+    expect(marks.map((m) => m.textContent)).toEqual(["G", "t"])
+  })
+})

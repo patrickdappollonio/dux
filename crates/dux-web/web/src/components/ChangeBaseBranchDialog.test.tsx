@@ -221,6 +221,8 @@ describe("ChangeBaseBranchDialog", () => {
     expect(
       screen.getAllByTestId("branch-row").map((r) => r.getAttribute("data-branch")),
     ).toEqual(["release"])
+    // The part of the name the search matched is lit.
+    expect(screen.getByText("rel").tagName).toBe("MARK")
   })
 
   // A held branch cannot be picked, so Enter skips it for the first branch that can.

@@ -895,3 +895,86 @@ describe("CustomizeWebappDialog", () => {
     })
   })
 })
+
+describe("CustomizeWebappDialog search", () => {
+  const search = () => screen.getByLabelText("Search settings") as HTMLInputElement
+  const type = (query: string) => fireEvent.change(search(), { target: { value: query } })
+
+  it("hides rows and whole sections that do not match, and the reset buttons with them", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(screen.getAllByRole("button", { name: "Reset section to defaults…" }).length).toBeGreaterThan(0)
+
+    type("attention")
+
+    expect(screen.getByLabelText("Show attention indicator")).toBeTruthy()
+    expect(screen.getByLabelText("Attention on terminal bell")).toBeTruthy()
+    expect(screen.queryByLabelText("Copy on select")).toBeNull()
+    expect(screen.getByText(/Both surfaces/)).toBeTruthy()
+    expect(screen.queryByText(/This browser \(Web\)/)).toBeNull()
+    expect(screen.queryByText(/Terminal UI\. These affect/)).toBeNull()
+    expect(screen.queryByRole("button", { name: "Reset section to defaults…" })).toBeNull()
+  })
+
+  it("shows only rows holding every word of the query", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    type("Attention BELL")
+
+    expect(screen.getByLabelText("Attention on terminal bell")).toBeTruthy()
+    expect(screen.queryByLabelText("Show attention indicator")).toBeNull()
+  })
+
+  it("finds a row by a word only its config key has, and lights it in the shown key", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    type("tab_reaches")
+
+    expect(screen.getByLabelText("Send Tab to the agent")).toBeTruthy()
+    expect(screen.queryByLabelText("Always show tab strip")).toBeNull()
+    const mark = screen.getByText("tab_reaches")
+    expect(mark.tagName).toBe("MARK")
+    expect(mark.parentElement?.textContent).toBe("ui.tab_reaches_agent")
+  })
+
+  it("says so when nothing matches", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    type("nothing-is-called-this")
+
+    const status = screen.getByRole("status")
+    expect(status.textContent).toContain("No settings match nothing-is-called-this.")
+    expect(status.textContent).toContain("Edit config file…")
+  })
+
+  it("Escape clears a search first and closes the dialog only after", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    type("bell")
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+    expect(search().value).toBe("")
+    expect(screen.getByLabelText("Copy on select")).toBeTruthy()
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
+  })
+
+  it("still saves an edit made to a row the search has since hidden", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByLabelText("Copy on select"))
+    type("attention")
+    expect(screen.queryByLabelText("Copy on select")).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ copy_on_select: false })
+  })
+})

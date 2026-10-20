@@ -154,6 +154,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        git just will not count its lines. Its value lives in :root/.dark
        below. */
     --color-dux-diff-excluded: var(--dux-diff-excluded);
+    /* The search-match highlight: the text a search matched, on every web
+       search (the agents list, Settings, projects, files, branches, changed
+       files, macros), drawn only by the shared `MatchHighlight`. A yellow
+       tint with a pale yellow text, so it reads as "found" and never as a
+       state color. Its values live in :root/.dark below. */
+    --color-dux-search-match: var(--dux-search-match);
+    --color-dux-search-match-foreground: var(--dux-search-match-foreground);
     /* The warning tone: something the user should know before acting (a pull
        request left on an old branch name, uncommitted changes, a file changed
        on disk), and the warning toast's icon. Paired with an icon wherever it
@@ -434,6 +441,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        muted grey (`#8c8c8c`). Constant across light/dark since the web app
        is dark-only. */
     --dux-diff-excluded: #8c8c8c;
+    /* Search-match highlight, Tailwind's yellow-400 at 38% under yellow-50
+       text. Constant across light/dark since the web app is dark-only. */
+    --dux-search-match: rgba(250, 204, 21, 0.38);
+    --dux-search-match-foreground: #fefce8;
     /* Warning tone, the amber the dialogs and banners have always shown
        (Tailwind's amber-500), which reads clearly on the dark background.
        Constant across light/dark since the web app is dark-only. */
@@ -515,6 +526,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-standalone: oklch(0.657 0.032 224);
     /* Diff-excluded marker color (see :root above). */
     --dux-diff-excluded: #8c8c8c;
+    /* Search-match highlight (see :root above). */
+    --dux-search-match: rgba(250, 204, 21, 0.38);
+    --dux-search-match-foreground: #fefce8;
     /* Warning tone (see :root above). */
     --dux-warning: oklch(0.769 0.188 70.08);
     /* The amber state colors (see :root above). */

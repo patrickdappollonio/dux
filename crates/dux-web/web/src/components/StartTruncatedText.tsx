@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react"
 
+import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { isTruncated } from "@/hooks/use-truncated"
+import type { CharRange } from "@/lib/searchMatch"
 import { cn } from "@/lib/utils"
+
+const NO_MATCHES: readonly CharRange[] = []
 
 /**
  * One line of text that ellipsizes at its START, so the end stays visible:
@@ -19,20 +23,24 @@ import { cn } from "@/lib/utils"
  *
  * `tooltip` puts the whole text in the shared tooltip, for a surface where the
  * row gives no other way to read what was clipped. See `ClippedHint`.
+ *
+ * `matches` lights what a search matched in the text (see `MatchHighlight`).
  */
 export function StartTruncatedText({
   text,
   className,
   tooltip = false,
+  matches = NO_MATCHES,
 }: {
   text: string
   className?: string
   tooltip?: boolean
+  matches?: readonly CharRange[]
 }) {
   return tooltip ? (
-    <ClippedHint text={text} className={className} />
+    <ClippedHint text={text} className={className} matches={matches} />
   ) : (
-    startTruncatedBox(text, className)
+    startTruncatedBox(text, matches, className)
   )
 }
 
@@ -40,6 +48,7 @@ export function StartTruncatedText({
 // it can hand the span its own props and ref directly.
 function startTruncatedBox(
   text: string,
+  matches: readonly CharRange[],
   className?: string,
   boxRef?: React.Ref<HTMLSpanElement>,
 ) {
@@ -49,7 +58,9 @@ function startTruncatedBox(
       data-truncate="start"
       className={cn("min-w-0 truncate text-left [direction:rtl]", className)}
     >
-      <bdi dir="ltr">{text}</bdi>
+      <bdi dir="ltr">
+        <MatchHighlight text={text} ranges={matches} />
+      </bdi>
     </span>
   )
 }
@@ -60,7 +71,15 @@ function startTruncatedBox(
 // keyboard user reaches the hint by focusing the control the text sits in (a
 // list row's button), whose focus opens it and whose blur closes it, so the
 // row's keyboard model is unchanged.
-function ClippedHint({ text, className }: { text: string; className?: string }) {
+function ClippedHint({
+  text,
+  className,
+  matches,
+}: {
+  text: string
+  className?: string
+  matches: readonly CharRange[]
+}) {
   const boxRef = useRef<HTMLSpanElement>(null)
   const [open, setOpen] = useState(false)
 
@@ -91,7 +110,7 @@ function ClippedHint({ text, className }: { text: string; className?: string }) 
         setOpen(next && box !== null && isTruncated(box))
       }}
     >
-      {startTruncatedBox(text, className, boxRef)}
+      {startTruncatedBox(text, matches, className, boxRef)}
     </SimpleTooltip>
   )
 }
